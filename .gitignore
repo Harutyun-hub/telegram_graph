@@ -1,0 +1,25 @@
+# Environment variables — DO NOT COMMIT THIS FILE
+.env
+
+# Telethon session file — contains your login credentials
+*.session
+*.session-journal
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
