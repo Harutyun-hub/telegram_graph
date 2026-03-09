@@ -42,6 +42,12 @@ Example:
 VITE_API_BASE_URL=http://127.0.0.1:8001/api
 ```
 
+Railway example (frontend and backend on different domains):
+
+```env
+VITE_API_BASE_URL=https://your-backend-service.up.railway.app/api
+```
+
 ## Important Paths
 
 - `src/app/contexts/DataContext.tsx` — main dashboard data bootstrap

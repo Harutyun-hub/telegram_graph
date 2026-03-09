@@ -81,7 +81,15 @@ function getApiBaseUrl(): string {
 function apiUrl(path: string): string {
   const base = getApiBaseUrl();
   const normalized = path.startsWith('/') ? path : `/${path}`;
-  return `${base}${normalized}`;
+  if (!base) return normalized;
+
+  const baseEndsWithApi = /\/api$/i.test(base);
+  const pathStartsWithApi = /^\/api(?:\/|$)/i.test(normalized);
+  const normalizedPath = baseEndsWithApi && pathStartsWithApi
+    ? normalized.replace(/^\/api/i, '') || '/'
+    : normalized;
+
+  return `${base}${normalizedPath}`;
 }
 
 async function readError(response: Response): Promise<string> {

@@ -24,6 +24,7 @@ import type { ReactNode } from 'react';
 import type { AppData } from '../types/data';
 import { mockAppData } from '../data/mockData';
 import { adaptDashboardPayload } from '../services/dashboardAdapter';
+import { apiFetch } from '../services/api';
 
 interface DataContextValue {
   data: AppData;
@@ -69,18 +70,12 @@ function saveSnapshot(data: AppData): void {
 // ── Data fetching logic ───────────────────────────────────────
 // Live backend mode: fetch dashboard payload and normalize with adapter.
 async function fetchData(signal?: AbortSignal): Promise<AppData> {
-  const response = await fetch('/api/dashboard', {
+  const payload = await apiFetch<any>('/dashboard', {
     method: 'GET',
     signal,
     headers: { Accept: 'application/json' },
     cache: 'no-store',
   });
-
-  if (!response.ok) {
-    throw new Error(`Dashboard API ${response.status}`);
-  }
-
-  const payload = await response.json();
   return adaptDashboardPayload(payload);
 }
 
