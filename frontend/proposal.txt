@@ -1,0 +1,988 @@
+================================================================================
+                     PROJECT DEVELOPMENT PROPOSAL v2.0
+================================================================================
+
+                           RADAR OBSHCHINY
+                     (Community Radar / Radar Obshchiny)
+
+          Armenian Telegram Community Intelligence Platform
+
+                       Document Date: February 2026
+                           Status: Confidential
+
+            Total Investment: $45,000 | Timeline: 18 weeks
+                         Team: 5 specialists
+
+================================================================================
+                         TABLE OF CONTENTS
+================================================================================
+
+  1.  Executive Summary
+  2.  Problem Statement
+  3.  Solution Overview
+  4.  System Architecture
+  5.  Telegram Ingestion Pipeline
+  6.  AI Extraction Engine (GPT-4o-mini)
+  7.  Graph Database (Neo4j)
+  8.  Admin Dashboard Platform
+  9.  Graph Visualization Module
+  10. AI Assistant
+  11. Authentication & Role-Based Access Control
+  12. Technology Stack
+  13. Team Structure
+  14. Development Timeline (18 Weeks)
+  15. Budget Breakdown ($45,000)
+  16. Risk Mitigation
+  17. Deliverables
+
+================================================================================
+  1. EXECUTIVE SUMMARY
+================================================================================
+
+Radar Obshchiny is a comprehensive intelligence platform designed to monitor,
+analyze, and extract actionable insights from Armenian Telegram communities.
+The platform processes thousands of Telegram messages daily through a GPT-4o-mini
+extraction pipeline, structures the output into a Neo4j knowledge graph with
+12 node types and 16 relationship types, and presents insights through a
+multi-page admin dashboard with 30+ analytical widgets.
+
+The platform serves three distinct user personas:
+
+  - EXECUTIVES who need 30-second community pulse summaries and AI-generated
+    briefings to inform strategic decisions without digging into raw data.
+
+  - INTELLIGENCE ANALYSTS who conduct deep-dive investigations into topics,
+    sentiment patterns, and network structures across channels and time periods.
+
+  - EXPERT RESEARCHERS who require granular access to raw data, graph
+    exploration, Cypher query capabilities, and AI-assisted querying.
+
+Key metrics at a glance:
+
+  - Daily messages processed:       14,000+
+  - Telegram channels monitored:    50+
+  - Dashboard analytical widgets:   30+
+  - Graph node types:               12
+  - Graph relationship types:       16
+  - Supported languages:            Russian, English, Armenian
+
+
+================================================================================
+  2. PROBLEM STATEMENT
+================================================================================
+
+Armenian communities in Telegram have grown into massive, fragmented ecosystems
+-- dozens of channels covering housing, employment, education, legal matters,
+social integration, and daily life. Community leaders and organizations face
+critical challenges:
+
+INFORMATION OVERLOAD
+  Thousands of messages per day across 50+ channels make manual monitoring
+  impossible. No single person or team can read and categorize everything.
+
+NO STRUCTURED INTELLIGENCE
+  Critical community needs, sentiment shifts, and emerging problems are buried
+  in unstructured chat data with no way to systematically extract or track them.
+
+DISCONNECTED INSIGHTS
+  Each channel operates in a silo -- cross-channel patterns (e.g., housing
+  complaints correlating with neighborhood discussions) are invisible without
+  graph-based analysis.
+
+DELAYED RESPONSE
+  By the time community leaders manually identify a trending problem (e.g., a
+  scam affecting members), the damage has already spread across multiple
+  channels.
+
+NO AUDIENCE UNDERSTANDING
+  Community organizations lack demographic insights, persona profiling, and
+  engagement funnel data needed for strategic planning and resource allocation.
+
+
+================================================================================
+  3. SOLUTION OVERVIEW
+================================================================================
+
+Radar Obshchiny solves these challenges through a four-layer intelligence
+architecture:
+
+LAYER 1: TELEGRAM LISTENER
+  Real-time ingestion from 50+ channels via Telegram Bot API / Telethon, with
+  deduplication, queue management (Redis), and automatic channel discovery.
+
+LAYER 2: AI EXTRACTION ENGINE
+  GPT-4o-mini processes each message batch, extracting entities, topics,
+  sentiment, problems, questions, and recommendations using optimized prompt
+  chains with structured JSON output.
+
+LAYER 3: KNOWLEDGE GRAPH (Neo4j)
+  All extracted intelligence is stored as an interconnected graph with 12 node
+  types and 16 relationship types, enabling relationship discovery, pattern
+  analysis, and graph algorithm execution.
+
+LAYER 4: INTELLIGENCE DASHBOARD
+  React-based admin dashboard with 30+ widgets across 8 analytical tiers,
+  force-directed graph visualization, and an AI-powered conversational
+  assistant for natural language querying.
+
+
+================================================================================
+  4. SYSTEM ARCHITECTURE
+================================================================================
+
+HIGH-LEVEL ARCHITECTURE DIAGRAM
+-------------------------------------------------------------------------------
+
++-----------------------------------------------------------------------------+
+|                    RADAR OBSHCHINY -- SYSTEM ARCHITECTURE                    |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  +----------------------+     +------------------------------------------+  |
+|  |  TELEGRAM CHANNELS   |     |         INGESTION LAYER                  |  |
+|  |                      |---->|  Telethon / Bot API                      |  |
+|  |  50+ Armenian groups |     |  +-- Rate Limiter                        |  |
+|  |  & channels          |     |  +-- Deduplication Engine                |  |
+|  +----------------------+     |  +-- Message Queue (Redis)               |  |
+|                               |  +-- Channel Auto-Discovery             |  |
+|                               +------------------+-----------------------+  |
+|                                                  |                          |
+|                                                  v                          |
+|                               +--------------------------------------+     |
+|                               |     AI EXTRACTION ENGINE             |     |
+|                               |     GPT-4o-mini Pipeline             |     |
+|                               |     +-- Entity Extraction (12 types) |     |
+|                               |     +-- Relationship Mapping (16)    |     |
+|                               |     +-- Sentiment Analysis           |     |
+|                               |     +-- Topic Classification         |     |
+|                               |     +-- Batch Processor              |     |
+|                               +------------------+-------------------+     |
+|                                                  |                          |
+|                          +-----------------------+-----------------------+  |
+|                          v                       v                       v  |
+|               +------------------+   +------------------+   +-----------+  |
+|               |     NEO4J        |   |    SUPABASE       |   |   REDIS   |  |
+|               |  Knowledge Graph |   |  Auth + Users     |   |   Cache   |  |
+|               |  12 Node Types   |   |  Row-Level Sec.   |   |   Queue   |  |
+|               |  16 Rel. Types   |   |  Settings Store   |   |           |  |
+|               +--------+---------+   +--------+----------+   +-----------+  |
+|                        |                      |                             |
+|                        +----------+-----------+                             |
+|                                   v                                         |
+|                    +--------------------------------------+                 |
+|                    |       REACT DASHBOARD (Vite)         |                 |
+|                    |  +-- Dashboard (30+ widgets, 8 tiers)|                 |
+|                    |  +-- Graph Explorer (force-directed) |                 |
+|                    |  +-- Topics Deep-Dive                |                 |
+|                    |  +-- Channels Analytics              |                 |
+|                    |  +-- Audience Intelligence           |                 |
+|                    |  +-- AI Assistant (RAG + Cypher)     |                 |
+|                    |  +-- Settings & Admin                |                 |
+|                    +--------------------------------------+                 |
+|                                   |                                         |
+|                    +--------------------------------------+                 |
+|                    |  RAILWAY (Caddy Static Serving)      |                 |
+|                    |  CI/CD: GitHub -> Railway Auto-Deploy |                 |
+|                    +--------------------------------------+                 |
++-----------------------------------------------------------------------------+
+
+DATA FLOW
+-------------------------------------------------------------------------------
+
+  Ingestion:   Telegram -> Telethon listener -> Redis message queue ->
+               Deduplication -> Batch formation (50-100 messages)
+
+  Extraction:  Batch -> GPT-4o-mini (structured JSON output) -> Validation ->
+               Neo4j write transaction
+
+  Serving:     Dashboard -> REST/GraphQL API -> Neo4j Cypher queries ->
+               Aggregated JSON response
+
+  Real-time:   WebSocket updates push new data to connected dashboard
+               clients every 5 minutes
+
+
+================================================================================
+  5. TELEGRAM INGESTION PIPELINE
+================================================================================
+
+ARCHITECTURE
+-------------------------------------------------------------------------------
+
+The ingestion layer uses Telethon (Python) for real-time Telegram monitoring
+with fallback to the Telegram Bot API. Messages are buffered in a Redis queue
+for reliable, ordered processing.
+
+  - Multi-channel listener: Monitors 50+ Armenian community channels
+    simultaneously with configurable priority levels.
+
+  - Message deduplication: Content-hash based dedup prevents processing
+    forwarded/cross-posted messages multiple times.
+
+  - Rate limiting: Respects Telegram API limits with exponential backoff and
+    circuit breaker patterns.
+
+  - Channel auto-discovery: Detects new relevant channels from forwarded
+    messages and channel mentions.
+
+  - Historical backfill: Can ingest up to 6 months of historical data per
+    channel for initial graph population.
+
+  - Media handling: Extracts text from images (OCR), voice messages
+    (Whisper API), and document attachments.
+
+PROCESSING PIPELINE
+-------------------------------------------------------------------------------
+
+  Raw Message -> Language Detection -> Text Cleaning -> Queue (Redis) ->
+  Batch Formation -> GPT-4o-mini -> Validation -> Neo4j Write
+
+ESTIMATED THROUGHPUT
+-------------------------------------------------------------------------------
+
+  Messages / Day:         14,000+
+  Processing Latency:     < 30 seconds
+  API Cost / Day:         ~$2.50
+
+
+================================================================================
+  6. AI EXTRACTION ENGINE (GPT-4o-mini)
+================================================================================
+
+EXTRACTION PIPELINE
+-------------------------------------------------------------------------------
+
+Each message batch is processed through a carefully engineered GPT-4o-mini
+prompt chain that extracts structured data in a single API call, optimizing
+for cost efficiency while maintaining extraction quality.
+
+EXTRACTED DATA TYPES
+-------------------------------------------------------------------------------
+
+  Topics
+    Auto-classified into 20+ category taxonomy (housing, banking,
+    education, legal, employment, social, healthcare, etc.)
+
+  Sentiment
+    Tri-polar classification (positive/negative/neutral) with intensity
+    score 0-10
+
+  Named Entities
+    People, organizations, locations, products, services, prices
+
+  Problems
+    Community pain points with severity (1-10) and urgency (1-10) scoring
+
+  Questions
+    Extracted questions with answer-status tracking
+
+  Recommendations
+    User-generated recommendations with confidence score and category
+
+  Demographics
+    Inferred user attributes: origin city, age range, gender, profession
+
+  Relationships
+    16 relationship types connecting all extracted entities in the graph
+
+COST OPTIMIZATION STRATEGY
+-------------------------------------------------------------------------------
+
+  - Batch processing: 50-100 messages per API call reduces overhead tokens
+    by ~60%.
+
+  - Structured output mode: JSON schema enforcement eliminates parsing
+    errors and retries.
+
+  - Tiered processing: Simple messages get lightweight extraction; complex
+    threads get deep analysis.
+
+  - Estimated monthly API cost: ~$75-$100 for GPT-4o-mini at 14K
+    messages/day.
+
+
+================================================================================
+  7. GRAPH DATABASE (Neo4j)
+================================================================================
+
+GRAPH SCHEMA -- 12 NODE TYPES
+-------------------------------------------------------------------------------
+
+  1.  User            Telegram user profile with demographics, activity
+                      metrics, persona classification
+
+  2.  Channel         Telegram channel/group with metadata, member count,
+                      activity level
+
+  3.  Message         Individual message with extracted entities, sentiment,
+                      language
+
+  4.  Topic           Auto-detected topic cluster (Housing, Education,
+                      Banking, etc.)
+
+  5.  Sentiment       Emotional classification node (positive, negative,
+                      neutral, mixed)
+
+  6.  Entity          Named entity (person, organization, location, product)
+
+  7.  Problem         Community pain point with severity and urgency scoring
+
+  8.  Question        Extracted question with answer status tracking
+
+  9.  Recommendation  User-generated recommendation (service, place, product)
+
+  10. Event           Community event mention with date, location, type
+
+  11. Location        Geographic reference (neighborhood, city, country)
+
+  12. Interest        User interest cluster for psychographic profiling
+
+16 RELATIONSHIP TYPES
+-------------------------------------------------------------------------------
+
+  POSTED_IN          AUTHORED           MENTIONS_TOPIC     HAS_SENTIMENT
+  REPLIES_TO         MEMBER_OF          REFERS_TO_ENTITY   RAISES_PROBLEM
+  ASKS_QUESTION      RECOMMENDS         LOCATED_IN         INTERESTED_IN
+  SIMILAR_TO         INFLUENCES         ANSWERED_BY        TRIGGERED_BY
+
+GRAPH ALGORITHMS USED
+-------------------------------------------------------------------------------
+
+  PageRank
+    Identifies most influential community members across the network.
+
+  Community Detection (Louvain)
+    Discovers clusters of users with shared interests and topics.
+
+  Shortest Path
+    Traces information spread patterns between channels and users.
+
+  Similarity (Jaccard)
+    Recommends related topics and identifies duplicate discussions.
+
+
+================================================================================
+  8. ADMIN DASHBOARD PLATFORM
+================================================================================
+
+DASHBOARD PAGES (6 PAGES)
+-------------------------------------------------------------------------------
+
+  1. Dashboard
+     30+ widgets organized in 8 collapsible tiers with executive-to-analyst
+     progressive disclosure. Each tier can be expanded/collapsed independently.
+
+  2. Graph Explorer
+     Interactive force-directed graph visualization with node inspector,
+     filtering by node type/sentiment/topic, and visual clustering.
+
+  3. Topics Deep-Dive
+     Topic cards with trend charts, evidence trail (actual Telegram messages),
+     sentiment breakdown, channel distribution, and drill-down capability.
+
+  4. Channels Analytics
+     Channel comparison matrix, activity heatmaps, cross-posting analysis,
+     growth tracking, and influence mapping.
+
+  5. Audience Intelligence
+     Member profiles with persona classification, interest mapping,
+     engagement scoring, activity timeline, and demographic inference.
+
+  6. Settings & Admin
+     Language preferences, notification rules, pipeline configuration,
+     user management, and API key management.
+
+WIDGET ARCHITECTURE -- 30+ WIDGETS ACROSS 8 TIERS
+-------------------------------------------------------------------------------
+
+  TIER 1: Community Pulse (30-second executive overview)
+    - Community Health Score
+    - Trending Topics Feed
+    - Community Brief (AI-generated)
+
+  TIER 2: What People Talk About (deep topic intelligence)
+    - Topic Landscape
+    - Conversation Trends
+    - Content Engagement Heatmap
+    - Question Cloud
+    - Q&A Gap Analysis
+    - Topic Lifecycle
+
+  TIER 3: Problems & Satisfaction (pain point monitoring)
+    - Problem Tracker
+    - Service Gap Detector
+    - Satisfaction by Area
+    - Mood Over Time
+    - Emotional Urgency Index
+
+  TIER 4: Channels, Voices & Activity (network intelligence)
+    - Top Channels
+    - Key Voices
+    - Recommendation Tracker
+    - Information Velocity
+
+  TIER 5: Who Are They (demographic & psychographic profiling)
+    - Persona Gallery
+    - Interest Radar
+
+  TIER 6: Growth, Retention & Journey (engagement lifecycle)
+    - Community Growth Funnel
+    - Retention Risk Gauge
+    - Decision Stage Tracker
+    - Emerging Interests
+    - New vs Returning Voice
+
+  TIER 7: Business & Opportunity Intelligence (commercial opportunity detection)
+    - Business Opportunity Tracker
+    - Job Market Pulse
+
+  TIER 8: Performance & Analytics (content strategy optimization)
+    - Week-over-Week Shifts
+    - Sentiment by Topic
+    - Content Performance
+
+MOBILE-FIRST DESIGN
+-------------------------------------------------------------------------------
+
+  - Responsive AdminLayout: Collapsible sidebar on desktop, spring-animated
+    slide-in drawer on mobile with "Radar Obshchiny" header.
+
+  - Bottom navigation bar: 5 tabs (Dashboard, Graph, Topics, Audience,
+    AI Assistant) with animated active indicator.
+
+  - Bottom sheets: Mobile-optimized modals and filters using Vaul.
+
+  - Motion animations: Spring physics via motion/react for all transitions,
+    drawer slides, and tab switches.
+
+  - Mobile date filtering: Calendar icon in fixed top bar opens date picker
+    bottom sheet.
+
+  - Floating scroll-to-top: Appears after 300px scroll with smooth spring
+    animation.
+
+  - Base font size: 17.5px on screens <= 768px for improved readability.
+
+  - Notification bell popup: Rich notification list with alert types
+    (red alert, briefing, trend, system), mark-all-read, and dismiss.
+
+  - Account dropdown: User profile, language switcher, settings link,
+    logout action.
+
+
+================================================================================
+  9. GRAPH VISUALIZATION MODULE
+================================================================================
+
+The graph visualization page provides an interactive, force-directed graph
+explorer built with react-force-graph-2d, enabling analysts to visually explore
+the knowledge graph, discover hidden relationships, and investigate network
+patterns.
+
+FEATURES
+-------------------------------------------------------------------------------
+
+  - Force-directed layout: Physics-based node positioning with adjustable
+    charge, distance, and collision parameters.
+
+  - Node Inspector panel: Click any node to see full details, connected
+    entities, and relationship paths.
+
+  - Dynamic filtering: Filter by node type, sentiment, topic, channel, time
+    range -- graph updates in real-time.
+
+  - Visual clustering: Color-coded node types with size mapped to
+    influence/activity metrics.
+
+  - Search & focus: Search for any entity and auto-zoom to its neighborhood
+    in the graph.
+
+  - Export capabilities: Export visible graph as PNG, SVG, or raw JSON for
+    external analysis.
+
+  - Graph legend: Interactive legend showing all node and relationship types
+    with toggle visibility.
+
+  - Floating controls: Zoom in/out, zoom to fit, center graph buttons.
+
+  - Global filters: Filter by brands/entities, sentiments, timeframe with
+    real-time graph response.
+
+
+================================================================================
+  10. AI ASSISTANT
+================================================================================
+
+A floating conversational AI assistant integrated into the dashboard, accessible
+from any page. It enables natural language querying over the Neo4j knowledge
+graph, providing instant answers with source citations.
+
+CAPABILITIES
+-------------------------------------------------------------------------------
+
+  - Natural Language -> Cypher: Translates user questions into Neo4j Cypher
+    queries automatically.
+
+  - RAG over graph data: Retrieval-Augmented Generation using graph context
+    for accurate, grounded responses.
+
+  - Contextual suggestions: Pre-built prompt suggestions based on current
+    page context and recent data.
+
+  - Streaming responses: Real-time token streaming for responsive UX.
+
+  - Bilingual support: Responds in Russian or English based on user language
+    preference.
+
+  - Mobile: 5th tab in bottom navigation for quick access on mobile devices.
+
+  - Conversation history: Maintains session context for follow-up questions.
+
+EXAMPLE QUERIES
+-------------------------------------------------------------------------------
+
+  "What are the top community concerns this week?"
+  "Which topics need urgent attention?"
+  "Who are the most influential voices in the housing discussion?"
+  "Summarize housing sentiment trends over the last month"
+  "Which channels have the most cross-posting activity?"
+  "How many new members joined community channels this week?"
+
+
+================================================================================
+  11. AUTHENTICATION & ROLE-BASED ACCESS CONTROL
+================================================================================
+
+AUTHENTICATION
+-------------------------------------------------------------------------------
+
+  - Supabase Auth: Email/password authentication with secure session
+    management.
+
+  - Row-Level Security: Supabase RLS policies ensure data isolation between
+    organizations.
+
+  - Session management: JWT-based with automatic refresh and secure cookie
+    storage.
+
+THREE USER ROLES
+-------------------------------------------------------------------------------
+
+  EXECUTIVE
+    Access to Dashboard (Tier 1-2), high-level trends, AI briefings.
+    No raw data access. Read-only interface optimized for quick consumption.
+
+  INTELLIGENCE ANALYST
+    Full dashboard access (all 8 tiers), graph explorer, topic deep-dives,
+    audience profiles. Can create saved views and export reports.
+
+  EXPERT RESEARCHER
+    Everything + raw Cypher queries, API access, export capabilities,
+    pipeline configuration, and user management.
+
+MULTI-LANGUAGE SUPPORT
+-------------------------------------------------------------------------------
+
+  Russian (default):  Primary language for the Armenian-Russian diaspora
+                      community. Set as default in LanguageContext.
+
+  English:            Full translation for international stakeholders and
+                      partners.
+
+  Armenian:           Native language support for local community leaders.
+
+  Implementation:     LanguageContext.tsx provider propagates locale to all
+                      components via useLanguage() hook. Each widget renders
+                      content based on lang === 'ru' conditional.
+
+
+================================================================================
+  12. TECHNOLOGY STACK
+================================================================================
+
+FRONTEND
+-------------------------------------------------------------------------------
+  React 18 + TypeScript          Core UI framework
+  Tailwind CSS v4                Utility-first styling
+  React Router v7 (Data Mode)   Multi-page routing with RouterProvider
+  Recharts                       Charts & data visualization (30+ widgets)
+  react-force-graph-2d           Force-directed graph visualization
+  motion/react                   Spring physics animations
+  Lucide React                   Icon library
+  Radix UI                       Accessible UI primitives
+  Vaul                           Mobile bottom sheets
+  date-fns                       Date formatting and manipulation
+  cmdk                           Command palette
+  Sonner                         Toast notifications
+
+BACKEND & DATA
+-------------------------------------------------------------------------------
+  Neo4j                          Knowledge graph database (12 nodes, 16 rels)
+  Supabase                       Authentication + user management + settings
+  Redis                          Message queue + cache layer
+  Python (Telethon)              Telegram ingestion service
+  Node.js                        API layer (REST + GraphQL)
+  GPT-4o-mini (OpenAI)           AI extraction engine
+
+INFRASTRUCTURE
+-------------------------------------------------------------------------------
+  Railway                        Application deployment platform
+  Caddy                          Static file serving + reverse proxy
+  Vite                           Build tool & dev server
+  GitHub Actions                 CI/CD pipeline
+  Sentry                         Error monitoring & performance tracking
+  Docker                         Containerization for backend services
+
+DESIGN SYSTEM
+-------------------------------------------------------------------------------
+  Color scheme:       Blue gradient (#1a56db -> #1e3a8a)
+  Theme:              Clean light/white admin dashboard
+  Layout:             AdminLayout.tsx with sidebar + mobile drawer
+  Typography:         System font stack, 17.5px mobile base
+  Animations:         Spring physics (motion/react)
+  Mobile patterns:    Bottom nav, bottom sheets, slide-in drawer
+
+
+================================================================================
+  13. TEAM STRUCTURE
+================================================================================
+
+The project is executed by a lean, high-efficiency team of 5 specialists
+working in tightly coordinated overlapping phases. Each member covers
+multiple responsibilities, maximizing output per dollar invested.
+
++--------------------------------------+--------+---------------------+
+| Role                                 | Rate   | Allocation          |
++--------------------------------------+--------+---------------------+
+| Tech Lead / Project Manager          | $30/hr | 20 hrs/wk x 18 wks |
+| Full-Stack Frontend Engineer (React) | $25/hr | 40 hrs/wk x 14 wks |
+| Backend / ML Engineer (Python)       | $25/hr | 40 hrs/wk x 12 wks |
+| Neo4j + DevOps Engineer              | $25/hr | 20 hrs/wk x 10 wks |
+| QA + UI/UX Specialist                | $20/hr | 20 hrs/wk x  8 wks |
++--------------------------------------+--------+---------------------+
+
+ROLE RESPONSIBILITIES
+-------------------------------------------------------------------------------
+
+  Tech Lead / Project Manager
+    Architecture decisions, sprint planning, stakeholder communication,
+    code review, technical direction, Supabase Auth integration, and
+    cross-functional coordination across all phases.
+
+  Full-Stack Frontend Engineer (React)
+    Dashboard UI, 30+ widgets across 8 tiers, responsive AdminLayout,
+    graph visualization page (react-force-graph-2d), Motion spring
+    animations, mobile-first design, API integration layer.
+
+  Backend / ML Engineer (Python)
+    Telegram ingestion pipeline (Telethon), GPT-4o-mini prompt engineering,
+    batch processing, structured output validation, API layer (REST),
+    AI Assistant RAG pipeline, Redis queue management.
+
+  Neo4j + DevOps Engineer
+    Graph schema design (12 node types, 16 relationship types), Cypher
+    query library (40+ queries), graph algorithms (PageRank, Louvain),
+    performance indexing, Railway deployment, CI/CD (GitHub Actions),
+    Docker containerization, Caddy configuration, Sentry monitoring.
+
+  QA + UI/UX Specialist
+    Design system creation, widget layout design, mobile UX optimization,
+    data visualization design, E2E testing, regression testing, performance
+    benchmarking, security review, user documentation.
+
+EFFICIENCY NOTES
+-------------------------------------------------------------------------------
+
+  The 5-person structure eliminates management overhead typical of larger
+  teams. Each specialist owns their domain end-to-end, reducing handoff
+  delays. The Tech Lead actively codes (~40% of time) while managing
+  sprints and stakeholder communication (~60%).
+
+  Total billable hours: 1,760 hours across all team members.
+
+
+================================================================================
+  14. DEVELOPMENT TIMELINE (18 WEEKS)
+================================================================================
+
+PHASE 1: Foundation (Weeks 1-3)
+-------------------------------------------------------------------------------
+  - System architecture design & documentation
+  - Neo4j schema design (12 node types, 16 relationship types)
+  - Supabase project setup (auth, RLS policies, settings tables)
+  - CI/CD pipeline (GitHub -> Railway auto-deploy)
+  - Dev / staging / production environments
+
+PHASE 2: Data Pipeline (Weeks 4-7)
+-------------------------------------------------------------------------------
+  - Telegram Bot API / Telethon integration
+  - Message ingestion queue (Redis)
+  - Deduplication & rate limiting
+  - Channel auto-discovery engine
+  - Historical data backfill (up to 6 months per channel)
+
+PHASE 3: AI Extraction (Weeks 5-8)  [overlaps with Phase 2]
+-------------------------------------------------------------------------------
+  - GPT-4o-mini prompt engineering & optimization
+  - 12-type entity extraction pipeline
+  - 16-type relationship mapping
+  - Batch processing optimization (50-100 msgs/call)
+  - Cost & token management dashboard
+
+PHASE 4: Graph Layer (Weeks 7-10)
+-------------------------------------------------------------------------------
+  - Neo4j Cypher query library (40+ queries)
+  - Graph algorithm integration (PageRank, Louvain, Shortest Path, Jaccard)
+  - Real-time graph updates from ingestion pipeline
+  - Performance indexing & query optimization
+  - API endpoints (REST + GraphQL)
+
+PHASE 5: Dashboard UI (Weeks 6-11)  [overlaps with Phase 4]
+-------------------------------------------------------------------------------
+  - AdminLayout with responsive sidebar & mobile drawer
+  - 30+ widgets across 8 collapsible tiers
+  - 6 pages: Dashboard, Graph, Topics, Channels, Audience, Settings
+  - Mobile-first design with Motion spring animations
+  - Date range filtering & global filter system
+  - Notification bell popup & account dropdown
+
+PHASE 6: Graph Visualization (Weeks 11-13)
+-------------------------------------------------------------------------------
+  - Force-directed graph rendering (react-force-graph-2d)
+  - Node inspector panel with relationship details
+  - Dynamic filtering & visual clustering
+  - Graph export (PNG/SVG/JSON)
+  - Zoom, pan, search, and floating controls
+
+PHASE 7: AI Assistant (Weeks 12-14)
+-------------------------------------------------------------------------------
+  - Natural language -> Cypher query translation
+  - RAG over graph data (Retrieval-Augmented Generation)
+  - Contextual suggestion engine
+  - Streaming response UI
+  - Conversation history & session management
+
+PHASE 8: Auth & i18n (Weeks 14-16)
+-------------------------------------------------------------------------------
+  - Supabase Auth integration (email/password)
+  - Role-based access control (Executive, Analyst, Researcher)
+  - Russian / English / Armenian language system
+  - Settings page with user preferences
+  - Notification system with alert types
+
+PHASE 9-10: QA & Launch (Weeks 16-18)
+-------------------------------------------------------------------------------
+  - End-to-end testing suite
+  - Load testing & performance optimization
+  - Security audit (RLS policies, API auth, data privacy)
+  - Production deployment to Railway
+  - Documentation & knowledge transfer
+  - 2-week post-launch bug fix support
+
+GANTT OVERVIEW
+-------------------------------------------------------------------------------
+
+  Week:       1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 17 18
+              |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+  Foundation  [=========]
+  Telegram       [=============]
+  AI Extract        [=============]
+  Neo4j Graph          [============]
+  Dashboard UI      [=====================]
+  Graph Viz                        [=========]
+  AI Assistant                        [=========]
+  Auth & i18n                               [=========]
+  QA & Launch                                     [=========]
+
+
+================================================================================
+  15. BUDGET BREAKDOWN ($45,000)
+================================================================================
+
+PHASE-BY-PHASE COST ALLOCATION
+-------------------------------------------------------------------------------
+
+  +-----------------------------------------------+-----------+----------+
+  | Phase                                         | Duration  | Cost     |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 1: Architecture & Infrastructure        | 3 weeks   | $4,200   |
+  |   System design, CI/CD pipeline, Neo4j +      |           |          |
+  |   Supabase setup, Railway, Caddy config       |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 2: Telegram Ingestion Pipeline          | 4 weeks   | $6,300   |
+  |   Bot API / Telethon listener, Redis queue,   |           |          |
+  |   dedup, rate limiting, channel discovery      |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 3: GPT-4o-mini Extraction Engine        | 4 weeks   | $7,000   |
+  |   Prompt engineering, entity extraction (12),  |           |          |
+  |   relationship mapping (16), batch processing  |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 4: Neo4j Graph Database Layer           | 4 weeks   | $5,000   |
+  |   Schema design, Cypher library, indexing,     |           |          |
+  |   graph algorithms, API endpoints              |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 5: Admin Dashboard Frontend             | 6 weeks   | $8,100   |
+  |   React + Tailwind UI, 30+ widgets (8 tiers), |           |          |
+  |   6 pages, AdminLayout, mobile-first design    |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 6: Graph Visualization Module           | 3 weeks   | $4,500   |
+  |   Force-directed graph, node inspector,        |           |          |
+  |   filtering, clustering, export                |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 7: AI Assistant Integration             | 3 weeks   | $3,200   |
+  |   NL->Cypher, RAG, contextual suggestions,     |           |          |
+  |   streaming responses                          |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 8: Auth, RBAC & Multi-language          | 3 weeks   | $2,500   |
+  |   Supabase Auth, 3 user roles, RU/EN/HY       |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 9: Testing, QA & Hardening              | 2 weeks   | $2,400   |
+  |   E2E tests, load testing, security audit,     |           |          |
+  |   error boundaries, logging, Sentry            |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | Phase 10: Deployment & Launch                 | 1 week    | $1,800   |
+  |   Production deploy, documentation,            |           |          |
+  |   knowledge transfer, 2-wk post-launch fixes   |           |          |
+  +-----------------------------------------------+-----------+----------+
+  | TOTAL PROJECT COST                            | 33 wks*   | $45,000  |
+  +-----------------------------------------------+-----------+----------+
+
+  * 33 total person-weeks across parallel workstreams; calendar duration
+    is 18 weeks due to overlapping phases.
+
+COST DISTRIBUTION BY CATEGORY
+-------------------------------------------------------------------------------
+
+  Infrastructure & Architecture:     $4,200       (9.3%)
+  Data Pipeline (Telegram + AI):     $13,300      (29.6%)
+  Graph Database (Neo4j):            $5,000       (11.1%)
+  Frontend (Dashboard + Graph):      $12,600      (28.0%)
+  Auth, QA & Launch:                 $6,700       (14.9%)
+  AI Assistant:                      $3,200       (7.1%)
+                                     -------
+  TOTAL:                             $45,000      (100%)
+
+TEAM COST BREAKDOWN
+-------------------------------------------------------------------------------
+
+  +--------------------------------------+-------+--------+----------+
+  | Role                                 | Hours | Rate   | Total    |
+  +--------------------------------------+-------+--------+----------+
+  | Tech Lead / Project Manager          |   360 | $30/hr | $10,800  |
+  | Full-Stack Frontend Engineer (React) |   560 | $25/hr | $14,000  |
+  | Backend / ML Engineer (Python)       |   480 | $25/hr | $12,000  |
+  | Neo4j + DevOps Engineer              |   200 | $25/hr |  $5,000  |
+  | QA + UI/UX Specialist                |   160 | $20/hr |  $3,200  |
+  +--------------------------------------+-------+--------+----------+
+  | TOTAL                                | 1,760 |        | $45,000  |
+  +--------------------------------------+-------+--------+----------+
+
+OPERATIONAL COSTS (POST-LAUNCH, MONTHLY)
+-------------------------------------------------------------------------------
+
+  Neo4j Aura (Pro):        $65/month
+  Railway Hosting:         $20/month
+  GPT-4o-mini API:         $75-100/month
+  Supabase (Pro):          $25/month
+  Redis Cloud:             $10-15/month
+  Sentry Monitoring:       $0 (free tier)
+  ----------------------------------------
+  TOTAL MONTHLY:           ~$195-$225/month
+  TOTAL ANNUAL:            ~$2,340-$2,700/year
+
+  Note: Operational costs are extremely lean due to efficient architecture
+  choices. GPT-4o-mini is ~100x cheaper than GPT-4 for equivalent throughput.
+
+
+================================================================================
+  16. RISK MITIGATION
+================================================================================
+
+  RISK: Telegram API Rate Limits
+  SEVERITY: Medium
+  MITIGATION: Exponential backoff, circuit breaker, multiple bot tokens,
+  Telethon session pooling. Fallback to less frequent polling during
+  high-load periods.
+
+  RISK: GPT-4o-mini Output Quality
+  SEVERITY: Medium
+  MITIGATION: Structured output schema with JSON validation, fallback
+  prompts for edge cases, human-in-the-loop review for training data
+  refinement. Continuous prompt tuning based on extraction accuracy metrics.
+
+  RISK: Neo4j Performance at Scale
+  SEVERITY: Low
+  MITIGATION: Composite indexes on high-query properties, query optimization
+  with EXPLAIN/PROFILE, pagination for large result sets, archival strategy
+  for data older than 6 months.
+
+  RISK: Scope Creep
+  SEVERITY: High
+  MITIGATION: Fixed-scope phases with clear deliverables, MoSCoW
+  prioritization (Must/Should/Could/Won't), bi-weekly stakeholder demos,
+  formal change request process with impact assessment.
+
+  RISK: Data Privacy (GDPR)
+  SEVERITY: Medium
+  MITIGATION: Only public Telegram data is processed. No private messages.
+  No PII storage -- usernames are pseudonymized. Anonymization layer for
+  exports. Data retention policies with automatic purging. Supabase RLS
+  for access control.
+
+  RISK: Team Availability
+  SEVERITY: Low
+  MITIGATION: Overlapping knowledge between team members (bus factor >= 2),
+  comprehensive documentation, modular architecture allowing independent
+  component development.
+
+
+================================================================================
+  17. DELIVERABLES
+================================================================================
+
+SOFTWARE DELIVERABLES
+-------------------------------------------------------------------------------
+
+  [x] Fully deployed React dashboard with 6 pages and 30+ analytical widgets
+  [x] Telegram ingestion service monitoring 50+ channels in real-time
+  [x] GPT-4o-mini extraction pipeline processing 14,000+ messages/day
+  [x] Neo4j knowledge graph with 12 node types and 16 relationship types
+  [x] Interactive force-directed graph visualization with node inspector
+  [x] Conversational AI assistant with natural language -> Cypher translation
+  [x] Supabase authentication with 3-tier role-based access control
+  [x] Tri-lingual interface (Russian, English, Armenian)
+  [x] Mobile-first responsive design with spring animations
+  [x] CI/CD pipeline (GitHub -> Railway) with staging environment
+  [x] Notification system with 4 alert types and real-time updates
+  [x] Date range filtering and global filter system across all pages
+
+DOCUMENTATION DELIVERABLES
+-------------------------------------------------------------------------------
+
+  [x] System architecture document with data flow diagrams
+  [x] API documentation (REST + GraphQL endpoints)
+  [x] Neo4j schema reference with Cypher query cookbook (40+ queries)
+  [x] GPT-4o-mini prompt engineering guide with optimization notes
+  [x] Deployment runbook and infrastructure configuration guide
+  [x] User manual for each role (Executive, Analyst, Researcher)
+
+POST-LAUNCH SUPPORT
+-------------------------------------------------------------------------------
+
+  [x] 2-week bug fix period included in project budget
+  [x] Knowledge transfer sessions with client engineering team
+  [x] Performance monitoring setup (Sentry + custom dashboards)
+  [x] Infrastructure documentation for independent maintenance
+
+
+================================================================================
+                              END OF PROPOSAL
+================================================================================
+
+  Project:     Radar Obshchiny -- Armenian Telegram Community Intelligence
+  Investment:  $45,000
+  Timeline:    18 calendar weeks
+  Team:        5 specialists
+  Prepared:    February 2026
+  Status:      Confidential
+
+================================================================================

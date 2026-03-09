@@ -23,3 +23,13 @@ logs/
 # IDE
 .vscode/
 .idea/
+
+# Local backup artifacts
+backups/
+
+# Frontend build artifacts (monorepo)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.*
