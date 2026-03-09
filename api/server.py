@@ -15,9 +15,10 @@ Run:
 """
 from __future__ import annotations
 import sys, os
+import asyncio
 from datetime import datetime, timezone
 import re
-from typing import Optional
+from typing import Optional, List
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +35,8 @@ from api.aggregator import (
     get_dashboard_data, get_topics_page, get_channels_page,
     get_audience_page, invalidate_cache
 )
+from api.queries import graph_dashboard
+from api.freshness import get_freshness_snapshot
 from api import db
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
@@ -77,9 +80,51 @@ class ScraperSchedulerUpdateRequest(BaseModel):
     interval_minutes: int = Field(..., ge=1, le=1440)
 
 
+class GraphRequest(BaseModel):
+    mode: Optional[str] = Field(default=None, max_length=64)
+    timeframe: Optional[str] = Field(default="Last 7 Days", max_length=64)
+    channels: Optional[List[str]] = None
+    brandSource: Optional[List[str]] = None
+    sentiment: Optional[List[str]] = None
+    sentiments: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    layers: Optional[List[str]] = None
+    insightMode: Optional[str] = Field(default=None, max_length=64)
+    sourceProfile: Optional[str] = Field(default=None, max_length=64)
+    connectionStrength: Optional[int] = Field(default=None, ge=1, le=5)
+    confidenceThreshold: Optional[int] = Field(default=None, ge=1, le=100)
+    min_weight: Optional[int] = Field(default=None, ge=1, le=10000)
+    max_nodes: Optional[int] = Field(default=None, ge=10, le=5000)
+    max_edges: Optional[int] = Field(default=None, ge=10, le=10000)
+
+
 supabase_writer = SupabaseWriter()
 scraper_scheduler = ScraperSchedulerService(supabase_writer)
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
+
+
+async def _warm_dashboard_cache() -> None:
+    """Warm dashboard cache in background after startup."""
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, get_dashboard_data)
+        logger.info("Dashboard cache warm-up completed")
+    except Exception as e:
+        logger.warning(f"Dashboard cache warm-up failed: {e}")
+
+
+async def _warm_detail_caches() -> None:
+    """Warm detail page caches in background after startup."""
+    try:
+        loop = asyncio.get_running_loop()
+        await asyncio.gather(
+            loop.run_in_executor(None, lambda: get_topics_page(0, 500)),
+            loop.run_in_executor(None, get_channels_page),
+            loop.run_in_executor(None, lambda: get_audience_page(0, 500)),
+        )
+        logger.info("Detail caches warm-up completed")
+    except Exception as e:
+        logger.warning(f"Detail caches warm-up failed: {e}")
 
 
 def _normalize_channel_username(raw: str) -> str:
@@ -273,7 +318,8 @@ async def dashboard():
     Cached for 5 minutes. Call POST /api/cache/clear to refresh.
     """
     try:
-        return get_dashboard_data()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_dashboard_data)
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -296,10 +342,11 @@ async def ai_query(request: AIQueryRequest):
 
 
 @app.get("/api/topics")
-async def topics(page: int = Query(0, ge=0), size: int = Query(50, ge=1, le=200)):
+async def topics(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1000)):
     """Topics detail page — paginated."""
     try:
-        return get_topics_page(page, size)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: get_topics_page(page, size))
     except Exception as e:
         logger.error(f"Topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -309,9 +356,150 @@ async def topics(page: int = Query(0, ge=0), size: int = Query(50, ge=1, le=200)
 async def channels():
     """Channels detail page."""
     try:
-        return get_channels_page()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_channels_page)
     except Exception as e:
         logger.error(f"Channels endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/graph")
+async def graph_data(payload: GraphRequest):
+    """Graph dataset for /graph page (server-side Neo4j)."""
+    try:
+        filters = payload.model_dump(exclude_none=True)
+        graph = graph_dashboard.get_graph_data(filters)
+        freshness = get_freshness_snapshot(
+            supabase_writer,
+            scheduler_status=scraper_scheduler.status(),
+        )
+        if not isinstance(graph, dict):
+            return graph
+        meta_existing = graph.get("meta")
+        meta_dict = dict(meta_existing) if isinstance(meta_existing, dict) else {}
+        meta_dict["freshness"] = {
+            "status": freshness.get("health", {}).get("status"),
+            "score": freshness.get("health", {}).get("score"),
+            "generatedAt": freshness.get("generated_at"),
+            "lastScrapeAt": freshness.get("pipeline", {}).get("scrape", {}).get("last_scrape_at"),
+            "lastProcessAt": freshness.get("pipeline", {}).get("process", {}).get("last_process_at"),
+            "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
+            "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
+            "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
+            "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
+        }
+        graph["meta"] = meta_dict
+        return graph
+    except Exception as e:
+        logger.error(f"Graph data endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/node-details")
+async def node_details(
+    nodeId: str = Query(...),
+    nodeType: str = Query(...),
+    timeframe: Optional[str] = Query(default="Last 7 Days"),
+    channels: Optional[str] = Query(default=None),
+):
+    """Detailed panel data for a graph node."""
+    try:
+        channel_filters = [c.strip() for c in (channels or "").split(",") if c.strip()]
+        details = graph_dashboard.get_node_details(
+            nodeId,
+            nodeType,
+            timeframe=timeframe,
+            channels=channel_filters,
+        )
+        if not details:
+            raise HTTPException(status_code=404, detail="Node not found")
+        return details
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Node details endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/search")
+async def search_graph(query: str = Query("", min_length=0, max_length=200), limit: int = Query(20, ge=1, le=100)):
+    """Graph search across channels/topics/intents."""
+    try:
+        if not (query or "").strip():
+            return []
+        return graph_dashboard.search_graph(query, limit)
+    except Exception as e:
+        logger.error(f"Graph search endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/trending-topics")
+async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
+    """Top trending topics for graph filters."""
+    try:
+        return graph_dashboard.get_trending_topics(limit, timeframe)
+    except Exception as e:
+        logger.error(f"Trending topics endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/top-channels")
+async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
+    """Top channels by post activity (graph context)."""
+    try:
+        return graph_dashboard.get_top_channels(limit, timeframe)
+    except Exception as e:
+        logger.error(f"Top channels endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/all-channels")
+async def all_channels_graph():
+    """All channels list for graph filters."""
+    try:
+        return graph_dashboard.get_all_channels()
+    except Exception as e:
+        logger.error(f"All channels endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/top-brands")
+async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
+    """Compatibility endpoint: returns top channels in legacy shape."""
+    try:
+        return graph_dashboard.get_top_channels(limit, timeframe)
+    except Exception as e:
+        logger.error(f"Top brands compatibility endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/all-brands")
+async def all_brands_compat():
+    """Compatibility endpoint: returns all channels in legacy shape."""
+    try:
+        return graph_dashboard.get_all_channels()
+    except Exception as e:
+        logger.error(f"All brands compatibility endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sentiment-distribution")
+async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
+    """Sentiment distribution for graph side panels/filters."""
+    try:
+        return graph_dashboard.get_sentiment_distribution(timeframe)
+    except Exception as e:
+        logger.error(f"Sentiment distribution endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/graph-insights")
+async def graph_insights(timeframe: str = Query("Last 7 Days")):
+    """Narrative summary for graph context."""
+    try:
+        return graph_dashboard.get_graph_insights(timeframe)
+    except Exception as e:
+        logger.error(f"Graph insights endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -428,6 +616,20 @@ async def get_scraper_scheduler_status():
     return scraper_scheduler.status()
 
 
+@app.get("/api/freshness")
+async def freshness_snapshot(force: bool = Query(False)):
+    """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
+    try:
+        return get_freshness_snapshot(
+            supabase_writer,
+            scheduler_status=scraper_scheduler.status(),
+            force_refresh=force,
+        )
+    except Exception as e:
+        logger.error(f"Freshness endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/scraper/scheduler/start")
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
@@ -468,11 +670,22 @@ async def run_scraper_once():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/scraper/scheduler/catchup-once")
+async def run_scraper_catchup_once():
+    """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
+    try:
+        return await scraper_scheduler.run_catchup_once()
+    except Exception as e:
+        logger.error(f"Catchup-once scraper error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/audience")
-async def audience(page: int = Query(0, ge=0), size: int = Query(50, ge=1, le=200)):
+async def audience(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1000)):
     """Audience detail page — paginated."""
     try:
-        return get_audience_page(page, size)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: get_audience_page(page, size))
     except Exception as e:
         logger.error(f"Audience endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -490,6 +703,8 @@ async def clear_cache():
 @app.on_event("startup")
 async def startup():
     await scraper_scheduler.startup()
+    asyncio.create_task(_warm_dashboard_cache())
+    asyncio.create_task(_warm_detail_caches())
 
 @app.on_event("shutdown")
 async def shutdown():

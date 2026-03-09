@@ -1,201 +1,475 @@
 """
 aggregator.py — Assembles the full AppData response from all query modules.
 
-This is the single function the API endpoint calls. It runs all queries,
-shapes the results to match the frontend's AppData TypeScript interface,
-and applies the in-memory cache.
+Professional reliability features:
+- cache-first with stale-while-revalidate
+- single-flight refresh lock to prevent stampede
+- bounded parallel tier execution
+- per-tier timeout with safe fallback
+- atomic cache swap after full snapshot build
 """
 from __future__ import annotations
+
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from typing import Callable, Dict, List, Optional, Tuple
+
 from loguru import logger
 
-from api.queries import pulse, strategic, behavioral, network
-from api.queries import psychographic, predictive, actionable, comparative
+from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
 
-# ── In-memory cache ──────────────────────────────────────────────────────────
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+# ── Cache + reliability config ───────────────────────────────────────────────
+CACHE_TTL_SECONDS = int(os.getenv("DASH_CACHE_TTL_SECONDS", "300"))
+STALE_WHILE_REVALIDATE = _env_flag("DASH_STALE_WHILE_REVALIDATE_ENABLED", True)
+PARALLEL_ENABLED = _env_flag("DASH_PARALLEL_ENABLED", True)
+PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4")), 8))
+TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "3.5")))
+WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
+DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+
 
 _cache: dict = {}
-_cache_ts: float = 0
-CACHE_TTL_SECONDS = 300  # 5 minutes
+_cache_ts: float = 0.0
+_refresh_in_progress: bool = False
+_last_refresh_error: Optional[str] = None
+
+_cache_lock = threading.Lock()
+_cache_cond = threading.Condition(_cache_lock)
+
+_detail_cache_lock = threading.Lock()
+_detail_cache: Dict[str, Tuple[float, list[dict]]] = {}
 
 
-def _is_cache_valid() -> bool:
-    return bool(_cache) and (time.time() - _cache_ts) < CACHE_TTL_SECONDS
+def _is_cache_valid(now: Optional[float] = None) -> bool:
+    t = now if now is not None else time.time()
+    return bool(_cache) and (t - _cache_ts) < CACHE_TTL_SECONDS
 
 
-def invalidate_cache():
+def invalidate_cache() -> None:
     global _cache, _cache_ts
-    _cache = {}
-    _cache_ts = 0
+    with _cache_cond:
+        _cache = {}
+        _cache_ts = 0.0
+        _cache_cond.notify_all()
+    with _detail_cache_lock:
+        _detail_cache.clear()
 
 
-# ── Main aggregation ─────────────────────────────────────────────────────────
+def _fallback_for_tier(name: str) -> dict:
+    if name == "pulse":
+        return {"communityHealth": {"score": 0, "trend": "neutral"}, "trendingTopics": [], "communityBrief": {}}
+    if name == "strategic":
+        return {"topicBubbles": [], "trendLines": [], "trendData": [], "heatmap": [], "questionCategories": [], "lifecycleStages": []}
+    if name == "behavioral":
+        return {"problems": [], "serviceGaps": [], "satisfactionAreas": [], "moodData": [], "moodConfig": {}, "urgencySignals": []}
+    if name == "network":
+        return {"communityChannels": [], "keyVoices": [], "hourlyActivity": [], "weeklyActivity": [], "recommendations": [], "viralTopics": []}
+    if name == "psychographic":
+        return {
+            "personas": [],
+            "interests": [],
+            "origins": [],
+            "integrationData": [],
+            "integrationLevels": [],
+            "integrationConfig": {},
+            "integrationSeriesConfig": [],
+            "newcomerJourney": [],
+        }
+    if name == "predictive":
+        return {"emergingInterests": [], "retentionFactors": [], "churnSignals": [], "growthFunnel": [], "decisionStages": []}
+    if name == "actionable":
+        return {"businessOpportunities": [], "jobSeeking": [], "jobTrends": [], "housingData": [], "housingHotTopics": []}
+    if name == "comparative":
+        return {"weeklyShifts": [], "sentimentByTopic": [], "topPosts": [], "contentTypePerformance": [], "vitalityIndicators": {}}
+    if name == "details":
+        return {"allTopics": [], "allChannels": [], "allAudience": []}
+    return {}
 
-def get_dashboard_data() -> dict:
-    """
-    Assemble the full AppData response.
-    Returns a dict matching the frontend's AppData interface.
-    """
-    global _cache, _cache_ts
 
-    if _is_cache_valid():
-        logger.debug("Serving dashboard data from cache")
-        return _cache
+# ── Tier builders ────────────────────────────────────────────────────────────
 
-    logger.info("Aggregating dashboard data from Neo4j...")
-    t0 = time.time()
-
-    data = {}
-
-    # ── Tier 1: Community Pulse ──
+def _tier_pulse() -> dict:
     try:
-        data["communityHealth"] = pulse.get_community_health()
-        data["trendingTopics"] = pulse.get_trending_topics()
-        data["communityBrief"] = pulse.get_community_brief()
+        return {
+            "communityHealth": pulse.get_community_health(),
+            "trendingTopics": pulse.get_trending_topics(),
+            "communityBrief": pulse.get_community_brief(),
+        }
     except Exception as e:
-        logger.error(f"Tier 1 (pulse) failed: {e}")
-        data["communityHealth"] = {"score": 0, "trend": "neutral"}
-        data["trendingTopics"] = []
-        data["communityBrief"] = {}
+        logger.error(f"Tier pulse failed: {e}")
+        return _fallback_for_tier("pulse")
 
-    # ── Tier 2: Strategic Topics ──
+
+def _tier_strategic() -> dict:
     try:
-        data["topicBubbles"] = strategic.get_topic_bubbles()
-        data["trendLines"] = strategic.get_trend_lines()
-        data["trendData"] = data["trendLines"]  # alias
-        data["heatmap"] = strategic.get_heatmap()
-        data["questionCategories"] = strategic.get_question_categories()
-        data["lifecycleStages"] = strategic.get_lifecycle_stages()
+        trend_lines = strategic.get_trend_lines()
+        return {
+            "topicBubbles": strategic.get_topic_bubbles(),
+            "trendLines": trend_lines,
+            "trendData": trend_lines,
+            "heatmap": strategic.get_heatmap(),
+            "questionCategories": strategic.get_question_categories(),
+            "lifecycleStages": strategic.get_lifecycle_stages(),
+        }
     except Exception as e:
-        logger.error(f"Tier 2 (strategic) failed: {e}")
-        data.update({"topicBubbles": [], "trendLines": [], "trendData": [],
-                      "heatmap": [], "questionCategories": [], "lifecycleStages": []})
+        logger.error(f"Tier strategic failed: {e}")
+        return _fallback_for_tier("strategic")
 
-    # ── Tier 3: Behavioral / Pain Points ──
+
+def _tier_behavioral() -> dict:
     try:
-        data["problems"] = behavioral.get_problems()
-        data["serviceGaps"] = behavioral.get_service_gaps()
-        data["satisfactionAreas"] = behavioral.get_satisfaction_areas()
-        data["moodData"] = behavioral.get_mood_data()
-        data["moodConfig"] = {"sentiments": ["Positive", "Negative", "Neutral", "Mixed", "Urgent", "Sarcastic"]}
-        data["urgencySignals"] = behavioral.get_urgency_signals()
+        return {
+            "problems": behavioral.get_problems(),
+            "serviceGaps": behavioral.get_service_gaps(),
+            "satisfactionAreas": behavioral.get_satisfaction_areas(),
+            "moodData": behavioral.get_mood_data(),
+            "moodConfig": {"sentiments": ["Positive", "Negative", "Neutral", "Mixed", "Urgent", "Sarcastic"]},
+            "urgencySignals": behavioral.get_urgency_signals(),
+        }
     except Exception as e:
-        logger.error(f"Tier 3 (behavioral) failed: {e}")
-        data.update({"problems": [], "serviceGaps": [], "satisfactionAreas": [],
-                      "moodData": [], "moodConfig": {}, "urgencySignals": []})
+        logger.error(f"Tier behavioral failed: {e}")
+        return _fallback_for_tier("behavioral")
 
-    # ── Tier 4: Network / Channels ──
+
+def _tier_network() -> dict:
     try:
-        data["communityChannels"] = network.get_community_channels()
-        data["keyVoices"] = network.get_key_voices()
-        data["hourlyActivity"] = network.get_hourly_activity()
-        data["weeklyActivity"] = network.get_weekly_activity()
-        data["recommendations"] = network.get_recommendations()
-        data["viralTopics"] = network.get_viral_topics()
+        return {
+            "communityChannels": network.get_community_channels(),
+            "keyVoices": network.get_key_voices(),
+            "hourlyActivity": network.get_hourly_activity(),
+            "weeklyActivity": network.get_weekly_activity(),
+            "recommendations": network.get_recommendations(),
+            "viralTopics": network.get_viral_topics(),
+        }
     except Exception as e:
-        logger.error(f"Tier 4 (network) failed: {e}")
-        data.update({"communityChannels": [], "keyVoices": [], "hourlyActivity": [],
-                      "weeklyActivity": [], "recommendations": [], "viralTopics": []})
+        logger.error(f"Tier network failed: {e}")
+        return _fallback_for_tier("network")
 
-    # ── Tier 5: Psychographic / Audience ──
+
+def _tier_psychographic() -> dict:
     try:
-        data["personas"] = psychographic.get_personas()
-        data["interests"] = psychographic.get_interests()
-        data["origins"] = psychographic.get_origins()
-        data["integrationData"] = psychographic.get_integration_data()
-        data["integrationLevels"] = data["integrationData"]  # alias
-        data["integrationConfig"] = {"languages": ["ru", "hy", "en", "mixed"]}
-        data["integrationSeriesConfig"] = [
-            {"key": "learning", "color": "#3b82f6", "label": "Learning & Mixing", "labelRu": "Учится и смешивается", "polarity": "positive"},
-            {"key": "bilingual", "color": "#8b5cf6", "label": "Bilingual Bubble", "labelRu": "Двуязычный пузырь", "polarity": "neutral"},
-            {"key": "russianOnly", "color": "#f59e0b", "label": "Russian Only", "labelRu": "Только по-русски", "polarity": "negative"},
-            {"key": "integrated", "color": "#10b981", "label": "Fully Integrated", "labelRu": "Полностью интегрирован", "polarity": "positive"},
-        ]
-        data["newcomerJourney"] = psychographic.get_newcomer_journey()
+        integration_data = psychographic.get_integration_data()
+        return {
+            "personas": psychographic.get_personas(),
+            "interests": psychographic.get_interests(),
+            "origins": psychographic.get_origins(),
+            "integrationData": integration_data,
+            "integrationLevels": integration_data,
+            "integrationConfig": {"languages": ["ru", "hy", "en", "mixed"]},
+            "integrationSeriesConfig": [
+                {"key": "learning", "color": "#3b82f6", "label": "Learning & Mixing", "labelRu": "Учится и смешивается", "polarity": "positive"},
+                {"key": "bilingual", "color": "#8b5cf6", "label": "Bilingual Bubble", "labelRu": "Двуязычный пузырь", "polarity": "neutral"},
+                {"key": "russianOnly", "color": "#f59e0b", "label": "Russian Only", "labelRu": "Только по-русски", "polarity": "negative"},
+                {"key": "integrated", "color": "#10b981", "label": "Fully Integrated", "labelRu": "Полностью интегрирован", "polarity": "positive"},
+            ],
+            "newcomerJourney": psychographic.get_newcomer_journey(),
+        }
     except Exception as e:
-        logger.error(f"Tier 5 (psychographic) failed: {e}")
-        data.update({"personas": [], "interests": [], "origins": [],
-                      "integrationData": [], "integrationLevels": [],
-                      "integrationConfig": {}, "integrationSeriesConfig": [], "newcomerJourney": []})
+        logger.error(f"Tier psychographic failed: {e}")
+        return _fallback_for_tier("psychographic")
 
-    # ── Tier 6: Predictive ──
+
+def _tier_predictive() -> dict:
     try:
-        data["emergingInterests"] = predictive.get_emerging_interests()
-        data["retentionFactors"] = predictive.get_retention_factors()
-        data["churnSignals"] = predictive.get_churn_signals()
-        data["growthFunnel"] = predictive.get_growth_funnel()
-        data["decisionStages"] = predictive.get_decision_stages()
+        return {
+            "emergingInterests": predictive.get_emerging_interests(),
+            "retentionFactors": predictive.get_retention_factors(),
+            "churnSignals": predictive.get_churn_signals(),
+            "growthFunnel": predictive.get_growth_funnel(),
+            "decisionStages": predictive.get_decision_stages(),
+        }
     except Exception as e:
-        logger.error(f"Tier 6 (predictive) failed: {e}")
-        data.update({"emergingInterests": [], "retentionFactors": [],
-                      "churnSignals": [], "growthFunnel": [], "decisionStages": []})
+        logger.error(f"Tier predictive failed: {e}")
+        return _fallback_for_tier("predictive")
 
-    # ── Tier 7: Actionable / Business ──
+
+def _tier_actionable() -> dict:
     try:
-        data["businessOpportunities"] = actionable.get_business_opportunities()
-        data["jobSeeking"] = actionable.get_job_seeking()
-        data["jobTrends"] = actionable.get_job_trends()
-        data["housingData"] = actionable.get_housing_data()
-        data["housingHotTopics"] = data["housingData"]  # alias
+        housing_data = actionable.get_housing_data()
+        return {
+            "businessOpportunities": actionable.get_business_opportunities(),
+            "jobSeeking": actionable.get_job_seeking(),
+            "jobTrends": actionable.get_job_trends(),
+            "housingData": housing_data,
+            "housingHotTopics": housing_data,
+        }
     except Exception as e:
-        logger.error(f"Tier 7 (actionable) failed: {e}")
-        data.update({"businessOpportunities": [], "jobSeeking": [],
-                      "jobTrends": [], "housingData": [], "housingHotTopics": []})
+        logger.error(f"Tier actionable failed: {e}")
+        return _fallback_for_tier("actionable")
 
-    # ── Tier 8: Comparative / Deep Dive ──
+
+def _tier_comparative() -> dict:
     try:
-        data["weeklyShifts"] = comparative.get_weekly_shifts()
-        data["sentimentByTopic"] = comparative.get_sentiment_by_topic()
-        data["topPosts"] = comparative.get_top_posts()
-        data["contentTypePerformance"] = comparative.get_content_type_performance()
-        data["vitalityIndicators"] = comparative.get_vitality_indicators()
+        return {
+            "weeklyShifts": comparative.get_weekly_shifts(),
+            "sentimentByTopic": comparative.get_sentiment_by_topic(),
+            "topPosts": comparative.get_top_posts(),
+            "contentTypePerformance": comparative.get_content_type_performance(),
+            "vitalityIndicators": comparative.get_vitality_indicators(),
+        }
     except Exception as e:
-        logger.error(f"Tier 8 (comparative) failed: {e}")
-        data.update({"weeklyShifts": [], "sentimentByTopic": [],
-                      "topPosts": [], "contentTypePerformance": [],
-                      "vitalityIndicators": {}})
+        logger.error(f"Tier comparative failed: {e}")
+        return _fallback_for_tier("comparative")
 
-    # ── Derived / Computed fields ──
+
+def _tier_details() -> dict:
     try:
-        data["voiceData"] = data.get("keyVoices", [])
-        data["topNewTopics"] = data.get("emergingInterests", [])
-        data["qaGap"] = {
-            "totalQuestions": len(data.get("questionCategories", [])),
-            "answered": 0,  # computed from reply chains
+        return {
+            "allTopics": comparative.get_all_topics(page=0, size=500),
+            "allChannels": comparative.get_all_channels(),
+            "allAudience": comparative.get_all_audience(page=0, size=500),
+        }
+    except Exception as e:
+        logger.error(f"Tier details failed: {e}")
+        return _fallback_for_tier("details")
+
+
+def _tier_derived(data: dict) -> dict:
+    try:
+        return {
+            "voiceData": data.get("keyVoices", []),
+            "topNewTopics": data.get("emergingInterests", []),
+            "qaGap": {
+                "totalQuestions": len(data.get("questionCategories", [])),
+                "answered": 0,
+            },
         }
     except Exception:
-        pass
+        return {}
 
-    # ── Detail pages payload (raw rows, frontend adapter reshapes) ──
+
+def _ordered_tiers() -> List[Tuple[str, Callable[[], dict]]]:
+    return [
+        ("pulse", _tier_pulse),
+        ("strategic", _tier_strategic),
+        ("behavioral", _tier_behavioral),
+        ("network", _tier_network),
+        ("psychographic", _tier_psychographic),
+        ("predictive", _tier_predictive),
+        ("actionable", _tier_actionable),
+        ("comparative", _tier_comparative),
+    ]
+
+
+def _run_tier_builder(fn: Callable[[], dict]) -> Tuple[dict, float]:
+    t0 = time.time()
+    payload = fn()
+    return payload, round(time.time() - t0, 3)
+
+
+def _build_snapshot_sequential() -> Tuple[dict, Dict[str, Optional[float]]]:
+    data: dict = {}
+    tier_times: Dict[str, Optional[float]] = {}
+
+    for name, builder in _ordered_tiers():
+        t0 = time.time()
+        payload = builder()
+        tier_times[name] = round(time.time() - t0, 3)
+        data.update(payload)
+
+    t0 = time.time()
+    data.update(_tier_derived(data))
+    tier_times["derived"] = round(time.time() - t0, 3)
+    return data, tier_times
+
+
+def _build_snapshot_parallel(use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]]]:
+    ordered = _ordered_tiers()
+    tier_payloads: Dict[str, dict] = {}
+    tier_times: Dict[str, Optional[float]] = {}
+
+    executor = ThreadPoolExecutor(max_workers=PARALLEL_MAX_WORKERS, thread_name_prefix="dash-tier")
+    futures = {name: executor.submit(_run_tier_builder, builder) for name, builder in ordered}
+
     try:
-        data["allTopics"] = comparative.get_all_topics(page=0, size=500)
-        data["allChannels"] = comparative.get_all_channels()
-        data["allAudience"] = comparative.get_all_audience(page=0, size=500)
+        for name, future in futures.items():
+            try:
+                if use_timeouts:
+                    payload, duration = future.result(timeout=TIER_TIMEOUT_SECONDS)
+                else:
+                    payload, duration = future.result()
+                tier_payloads[name] = payload
+                tier_times[name] = duration
+            except FuturesTimeout:
+                logger.warning(f"Tier {name} timed out after {TIER_TIMEOUT_SECONDS}s — using fallback")
+                tier_payloads[name] = _fallback_for_tier(name)
+                tier_times[name] = None
+            except Exception as e:
+                logger.error(f"Tier {name} crashed — using fallback: {e}")
+                tier_payloads[name] = _fallback_for_tier(name)
+                tier_times[name] = None
+    finally:
+        # wait=False prevents hanging cold starts when a tier thread stalls.
+        executor.shutdown(wait=False)
+
+    data: dict = {}
+    for name, _builder in ordered:
+        data.update(tier_payloads.get(name, _fallback_for_tier(name)))
+
+    t0 = time.time()
+    data.update(_tier_derived(data))
+    tier_times["derived"] = round(time.time() - t0, 3)
+    return data, tier_times
+
+
+def _build_snapshot(use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
+    mode = "parallel" if PARALLEL_ENABLED else "sequential"
+    t0 = time.time()
+
+    if PARALLEL_ENABLED:
+        data, tier_times = _build_snapshot_parallel(use_timeouts=use_timeouts)
+    else:
+        data, tier_times = _build_snapshot_sequential()
+
+    elapsed = round(time.time() - t0, 3)
+    return data, tier_times, elapsed, mode
+
+
+def _start_background_refresh_locked() -> None:
+    global _refresh_in_progress
+    if _refresh_in_progress:
+        return
+    _refresh_in_progress = True
+
+    def _worker() -> None:
+        global _refresh_in_progress, _last_refresh_error, _cache, _cache_ts
+        try:
+            data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=True)
+            with _cache_cond:
+                _cache = data
+                _cache_ts = time.time()
+                _refresh_in_progress = False
+                _last_refresh_error = None
+                _cache_cond.notify_all()
+            logger.success(f"Dashboard refresh completed in {elapsed}s ({mode}) | tiers={tier_times}")
+        except Exception as e:
+            with _cache_cond:
+                _refresh_in_progress = False
+                _last_refresh_error = str(e)
+                _cache_cond.notify_all()
+            logger.error(f"Dashboard refresh failed: {e}")
+
+    threading.Thread(target=_worker, name="dashboard-refresh", daemon=True).start()
+
+
+# ── Main aggregation API ─────────────────────────────────────────────────────
+
+def get_dashboard_data(force_refresh: bool = False) -> dict:
+    """Assemble full AppData snapshot with cache, SWR, and single-flight refresh."""
+    global _cache, _cache_ts, _refresh_in_progress, _last_refresh_error
+
+    now = time.time()
+    with _cache_cond:
+        has_cache = bool(_cache)
+        had_cache_before_build = has_cache
+        is_fresh = _is_cache_valid(now)
+        stale_snapshot = _cache if has_cache else None
+
+        if is_fresh and not force_refresh:
+            logger.debug("Serving dashboard data from fresh cache")
+            return _cache
+
+        if has_cache and STALE_WHILE_REVALIDATE and not force_refresh:
+            _start_background_refresh_locked()
+            logger.debug("Serving stale dashboard cache while background refresh runs")
+            return _cache
+
+        if _refresh_in_progress:
+            deadline = time.time() + WAIT_FOR_REFRESH_SECONDS
+            while _refresh_in_progress and time.time() < deadline:
+                _cache_cond.wait(timeout=0.1)
+
+            if _cache and not force_refresh:
+                logger.debug("Serving dashboard cache after waiting for in-flight refresh")
+                return _cache
+
+            # If refresh is still running and no cache available, wait until complete
+            while _refresh_in_progress and not _cache:
+                _cache_cond.wait(timeout=0.1)
+
+            if _cache and not force_refresh:
+                return _cache
+
+        _refresh_in_progress = True
+
+    # Build outside lock
+    try:
+        data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=had_cache_before_build)
+        with _cache_cond:
+            _cache = data
+            _cache_ts = time.time()
+            _refresh_in_progress = False
+            _last_refresh_error = None
+            _cache_cond.notify_all()
+        logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | tiers={tier_times}")
+        return data
     except Exception as e:
-        logger.error(f"Detail pages payload failed: {e}")
-        data.setdefault("allTopics", [])
-        data.setdefault("allChannels", [])
-        data.setdefault("allAudience", [])
+        with _cache_cond:
+            _refresh_in_progress = False
+            _last_refresh_error = str(e)
+            fallback: Optional[dict] = _cache if _cache else stale_snapshot
+            _cache_cond.notify_all()
 
-    elapsed = round(time.time() - t0, 2)
-    logger.success(f"Dashboard data assembled in {elapsed}s — {len(data)} keys")
+        if fallback is not None:
+            logger.warning(f"Dashboard rebuild failed; serving stale cache instead: {e}")
+            return fallback
 
-    # Cache the result
-    _cache = data
-    _cache_ts = time.time()
-
-    return data
+        logger.error(f"Dashboard rebuild failed with no fallback cache: {e}")
+        raise
 
 
-# ── Detail page queries (not cached) ─────────────────────────────────────────
+# ── Detail page queries (independent cache) ──────────────────────────────────
+
+def _get_cached_detail_list(
+    cache_key: str,
+    builder: Callable[[], list[dict]],
+    ttl_seconds: int = DETAIL_CACHE_TTL_SECONDS,
+) -> list[dict]:
+    now = time.time()
+    stale: Optional[list[dict]] = None
+
+    with _detail_cache_lock:
+        entry = _detail_cache.get(cache_key)
+        if entry is not None:
+            ts, data = entry
+            stale = data
+            if (now - ts) < ttl_seconds:
+                return data
+
+    try:
+        fresh = builder() or []
+        if stale and len(stale) > 0 and len(fresh) == 0:
+            logger.warning(f"Detail query {cache_key} returned empty payload; serving stale cache")
+            return stale
+        with _detail_cache_lock:
+            _detail_cache[cache_key] = (time.time(), fresh)
+        return fresh
+    except Exception as e:
+        if stale is not None:
+            logger.warning(f"Detail query {cache_key} failed; serving stale cache instead: {e}")
+            return stale
+        raise
+
 
 def get_topics_page(page: int = 0, size: int = 50) -> list[dict]:
-    return comparative.get_all_topics(page, size)
+    cache_key = f"topics:{page}:{size}"
+    return _get_cached_detail_list(cache_key, lambda: comparative.get_all_topics(page, size))
 
 
 def get_channels_page() -> list[dict]:
-    return comparative.get_all_channels()
+    return _get_cached_detail_list("channels:all", comparative.get_all_channels)
 
 
 def get_audience_page(page: int = 0, size: int = 50) -> list[dict]:
-    return comparative.get_all_audience(page, size)
+    cache_key = f"audience:{page}:{size}"
+    return _get_cached_detail_list(cache_key, lambda: comparative.get_all_audience(page, size))

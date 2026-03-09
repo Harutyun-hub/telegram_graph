@@ -34,13 +34,12 @@ def get_topic_bubbles() -> list[dict]:
                (postMentions + commentMentions) AS mentionCount,
                userInterest, totalInteractions,
                mentions7d, mentionsPrev7d,
+               (mentions7d + mentionsPrev7d) AS growthSupport,
                CASE
-                   WHEN mentionsPrev7d > 0
-                   THEN round(100.0 * (mentions7d - mentionsPrev7d) / mentionsPrev7d, 1)
-                   WHEN mentions7d > 0 THEN 100.0
-                   ELSE 0.0
-               END AS growth7dPct
-        ORDER BY postMentions DESC
+                    WHEN (mentions7d + mentionsPrev7d) < 8 THEN null
+                    ELSE round(100.0 * (mentions7d - mentionsPrev7d) / (mentionsPrev7d + 3), 1)
+                END AS growth7dPct
+        ORDER BY mentionCount DESC
     """)
 
 
@@ -75,15 +74,29 @@ def get_question_categories() -> list[dict]:
         MATCH (u:User)-[:EXHIBITS]->(i:Intent {name: 'Information Seeking'})
         MATCH (u)-[:INTERESTED_IN]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         OPTIONAL MATCH (:User)-[r:REPLIED_TO_USER]->(u)
-        WHERE r.last_seen > datetime() - duration('P14D')
-        WITH cat.name AS category, t.name AS topic,
+        WITH cat.name AS category, t AS topicNode, t.name AS topic,
              count(DISTINCT u) AS seekers,
-             count(DISTINCT CASE WHEN r IS NOT NULL THEN u END) AS respondedSeekers
+             count(DISTINCT CASE WHEN r.last_seen > datetime() - duration('P14D') THEN u END) AS respondedSeekers
+        OPTIONAL MATCH (p:Post)-[:TAGGED]->(topicNode)
+        WHERE p.posted_at > datetime() - duration('P30D')
+          AND p.text IS NOT NULL
+          AND trim(p.text) <> ''
+          AND p.text CONTAINS '?'
+        WITH category, topicNode, topic, seekers, respondedSeekers,
+             collect(DISTINCT left(trim(p.text), 180))[0] AS samplePostQuestion
+        OPTIONAL MATCH (c:Comment)-[:TAGGED]->(topicNode)
+        WHERE c.posted_at > datetime() - duration('P30D')
+          AND c.text IS NOT NULL
+          AND trim(c.text) <> ''
+          AND c.text CONTAINS '?'
+        WITH category, topic, seekers, respondedSeekers, samplePostQuestion,
+             collect(DISTINCT left(trim(c.text), 180))[0] AS sampleCommentQuestion
         RETURN category, topic, seekers, respondedSeekers,
                CASE
-                   WHEN seekers > 0 THEN round(100.0 * respondedSeekers / seekers, 1)
-                   ELSE 0.0
-               END AS coveragePct
+                    WHEN seekers > 0 THEN round(100.0 * respondedSeekers / seekers, 1)
+                    ELSE 0.0
+               END AS coveragePct,
+               coalesce(samplePostQuestion, sampleCommentQuestion, topic) AS sampleQuestion
         ORDER BY seekers DESC
     """)
 

@@ -34,6 +34,14 @@ NEO4J_SYNC_INTERVAL_MINUTES = 60  # How often to sync AI results to Neo4j
 
 # ── AI Processing ─────────────────────────────────────────────────────────────
 AI_BATCH_SIZE = 50   # Messages per user per AI call
+AI_NORMAL_COMMENT_LIMIT = int(os.getenv("AI_NORMAL_COMMENT_LIMIT", "60"))
+AI_NORMAL_POST_LIMIT = int(os.getenv("AI_NORMAL_POST_LIMIT", "25"))
+AI_NORMAL_SYNC_LIMIT = int(os.getenv("AI_NORMAL_SYNC_LIMIT", "80"))
+
+# Catch-up mode (processing/sync heavy, optionally without scraping)
+AI_CATCHUP_COMMENT_LIMIT = int(os.getenv("AI_CATCHUP_COMMENT_LIMIT", "220"))
+AI_CATCHUP_POST_LIMIT = int(os.getenv("AI_CATCHUP_POST_LIMIT", "120"))
+AI_CATCHUP_SYNC_LIMIT = int(os.getenv("AI_CATCHUP_SYNC_LIMIT", "320"))
 
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():

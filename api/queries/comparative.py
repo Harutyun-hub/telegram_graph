@@ -149,8 +149,31 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
               AND c.posted_at <= datetime() - duration('P7D')
             RETURN count(c) AS commentsPrev7d
         }
+        CALL (t) {
+            OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at > datetime() - duration('P56D')
+            WITH date(p.posted_at).year AS year, date(p.posted_at).week AS week, count(p) AS count
+            WHERE week IS NOT NULL
+            ORDER BY year, week
+            RETURN collect({year: year, week: week, count: count}) AS weeklyRows
+        }
+        CALL (t) {
+            OPTIONAL MATCH (u:User)-[:INTERESTED_IN]->(t)
+            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            WHERE label <> ''
+            RETURN
+                sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,
+                sum(CASE WHEN label = 'neutral' THEN score ELSE 0 END) AS neutralScore,
+                sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
+        }
         WITH t, cat, postCount, commentCount, userCount, totalInteractions,
              posts7d, comments7d, postsPrev7d, commentsPrev7d,
+             weeklyRows,
+             coalesce(positiveScore, 0) AS positiveScore,
+             coalesce(neutralScore, 0) AS neutralScore,
+             coalesce(negativeScore, 0) AS negativeScore,
+             coalesce(positiveScore, 0) + coalesce(neutralScore, 0) + coalesce(negativeScore, 0) AS sentimentTotal,
              (postCount + commentCount) AS mentionCount,
              (posts7d + comments7d) AS last7Mentions,
              (postsPrev7d + commentsPrev7d) AS prev7Mentions
@@ -194,6 +217,51 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
             })[..3] AS commentEvidence
         }
 
+        // Question-like posts for proof mode
+        CALL (t) {
+            MATCH (p:Post)-[:TAGGED]->(t)
+            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+            WHERE p.posted_at > datetime() - duration('P90D')
+              AND p.text IS NOT NULL
+              AND trim(p.text) <> ''
+              AND p.text CONTAINS '?'
+            WITH p, ch
+            ORDER BY p.posted_at DESC
+            RETURN collect({
+                id: p.uuid,
+                type: 'message',
+                author: coalesce(ch.username, ch.title, 'unknown'),
+                channel: coalesce(ch.title, ch.username, 'unknown'),
+                text: left(coalesce(p.text, ''), 500),
+                timestamp: toString(p.posted_at),
+                reactions: coalesce(p.views, 0),
+                replies: coalesce(p.comment_count, 0)
+            })[..6] AS questionPostEvidence
+        }
+
+        // Question-like comments for proof mode
+        CALL (t) {
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
+            WHERE c.posted_at > datetime() - duration('P90D')
+              AND c.text IS NOT NULL
+              AND trim(c.text) <> ''
+              AND c.text CONTAINS '?'
+            WITH c, u, ch
+            ORDER BY c.posted_at DESC
+            RETURN collect({
+                id: c.uuid,
+                type: 'reply',
+                author: coalesce(toString(u.telegram_user_id), 'anonymous'),
+                channel: coalesce(ch.title, ch.username, 'unknown'),
+                text: left(coalesce(c.text, ''), 500),
+                timestamp: toString(c.posted_at),
+                reactions: 0,
+                replies: 0
+            })[..6] AS questionCommentEvidence
+        }
+
         RETURN t.name AS name,
                cat.name AS category,
                postCount,
@@ -203,13 +271,18 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
                totalInteractions,
                last7Mentions,
                prev7Mentions,
-               CASE
-                   WHEN prev7Mentions > 0
-                   THEN round(100.0 * (last7Mentions - prev7Mentions) / prev7Mentions, 1)
-                   WHEN last7Mentions > 0 THEN 100.0
-                   ELSE 0.0
-               END AS growth7dPct,
-               postEvidence + commentEvidence AS evidence
+               weeklyRows,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * positiveScore / sentimentTotal)) ELSE 0 END AS sentimentPositive,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * neutralScore / sentimentTotal)) ELSE 0 END AS sentimentNeutral,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * negativeScore / sentimentTotal)) ELSE 0 END AS sentimentNegative,
+                CASE
+                    WHEN prev7Mentions > 0
+                    THEN round(100.0 * (last7Mentions - prev7Mentions) / prev7Mentions, 1)
+                    WHEN last7Mentions > 0 THEN 100.0
+                    ELSE 0.0
+                END AS growth7dPct,
+                postEvidence + commentEvidence AS evidence,
+                questionPostEvidence + questionCommentEvidence AS questionEvidence
     """, {"skip": page * size, "size": size})
 
 
@@ -217,15 +290,122 @@ def get_all_channels() -> list[dict]:
     """All channels with full stats for the Channels detail page."""
     return run_query("""
         MATCH (ch:Channel)
-        OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
-        WITH ch, count(p) AS postCount,
-             avg(p.views) AS avgViews,
-             max(p.posted_at) AS lastPost
-        RETURN ch.username AS username, ch.title AS title,
+        OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(pAll:Post)
+        WITH ch,
+             count(pAll) AS postCount,
+             avg(coalesce(pAll.views, 0)) AS avgViews,
+             max(pAll.posted_at) AS lastPost
+
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WHERE p.posted_at > datetime() - duration('P7D')
+            RETURN count(p) AS posts7d
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WHERE p.posted_at > datetime() - duration('P14D')
+              AND p.posted_at <= datetime() - duration('P7D')
+            RETURN count(p) AS postsPrev7d
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WHERE p.posted_at > datetime() - duration('P7D')
+            WITH p.posted_at.dayOfWeek AS dow, count(p) AS c
+            WHERE dow IS NOT NULL
+            RETURN collect({dow: dow, count: c}) AS weeklyRows
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WHERE p.posted_at > datetime() - duration('P7D')
+            WITH p.posted_at.hour AS hour, count(p) AS c
+            WHERE hour IS NOT NULL
+            RETURN collect({hour: hour, count: c}) AS hourlyRows
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
+            WITH t.name AS topic, count(p) AS mentions
+            WHERE topic IS NOT NULL
+            ORDER BY mentions DESC
+            WITH collect({name: topic, mentions: mentions})[..6] AS topTopics, sum(mentions) AS totalMentions
+            RETURN [tt IN topTopics | {
+                name: tt.name,
+                mentions: tt.mentions,
+                pct: CASE WHEN totalMentions > 0 THEN toInteger(round(100.0 * tt.mentions / totalMentions)) ELSE 0 END
+            }] AS topTopics
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WITH coalesce(p.media_type, 'text') AS mediaType, count(p) AS count
+            WHERE mediaType IS NOT NULL
+            ORDER BY count DESC
+            RETURN collect({type: mediaType, count: count})[..6] AS messageTypes
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch)
+            WITH u, count(c) AS posts
+            WHERE u IS NOT NULL
+            ORDER BY posts DESC
+            RETURN collect({
+                name: coalesce(toString(u.telegram_user_id), 'anonymous'),
+                posts: posts,
+                helpScore: toInteger(CASE WHEN posts * 5 > 100 THEN 100 ELSE posts * 5 END)
+            })[..4] AS topVoices
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
+            WITH ch, p
+            ORDER BY p.posted_at DESC
+            RETURN collect({
+                id: coalesce(p.uuid, ''),
+                author: coalesce(ch.username, ch.title, 'unknown'),
+                text: left(coalesce(p.text, ''), 220),
+                timestamp: toString(p.posted_at),
+                reactions: coalesce(p.views, 0),
+                replies: coalesce(p.comment_count, 0)
+            })[..6] AS recentPosts
+        }
+        CALL (ch) {
+            OPTIONAL MATCH (u:User)-[:WROTE]->(:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch)
+            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            WHERE label <> ''
+            RETURN
+                sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,
+                sum(CASE WHEN label = 'neutral' THEN score ELSE 0 END) AS neutralScore,
+                sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
+        }
+
+        WITH ch, postCount, avgViews, lastPost,
+             posts7d, postsPrev7d,
+             weeklyRows, hourlyRows,
+             topTopics, messageTypes, topVoices, recentPosts,
+             coalesce(positiveScore, 0) AS positiveScore,
+             coalesce(neutralScore, 0) AS neutralScore,
+             coalesce(negativeScore, 0) AS negativeScore,
+             coalesce(positiveScore, 0) + coalesce(neutralScore, 0) + coalesce(negativeScore, 0) AS sentimentTotal
+
+        RETURN ch.username AS username,
+               ch.title AS title,
                ch.member_count AS memberCount,
                ch.description AS description,
-               postCount, round(avgViews) AS avgViews,
-               toString(lastPost) AS lastPost
+               postCount,
+               round(avgViews) AS avgViews,
+               toString(lastPost) AS lastPost,
+               toInteger(round(posts7d / 7.0)) AS dailyMessages,
+               CASE
+                   WHEN postsPrev7d > 0 THEN round(100.0 * (posts7d - postsPrev7d) / postsPrev7d, 1)
+                   WHEN posts7d > 0 THEN 100.0
+                   ELSE 0.0
+               END AS growth7dPct,
+               weeklyRows,
+               hourlyRows,
+               topTopics,
+               messageTypes,
+               topVoices,
+               recentPosts,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * positiveScore / sentimentTotal)) ELSE 0 END AS sentimentPositive,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * neutralScore / sentimentTotal)) ELSE 0 END AS sentimentNeutral,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * negativeScore / sentimentTotal)) ELSE 0 END AS sentimentNegative
         ORDER BY postCount DESC
     """)
 
@@ -237,7 +417,56 @@ def get_all_audience(page: int = 0, size: int = 50) -> list[dict]:
         OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
         WITH u, count(c) AS commentCount
         OPTIONAL MATCH (u)-[:INTERESTED_IN]->(t:Topic)
-        WITH u, commentCount, collect(t.name)[..5] AS topics
+        WITH u, commentCount,
+             collect(t.name)[..5] AS topics,
+             collect({name: t.name, count: 1})[..5] AS topTopics
+
+        CALL (u) {
+            OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+            WITH ch, count(c) AS messageCount
+            WHERE ch IS NOT NULL
+            ORDER BY messageCount DESC
+            RETURN collect({
+                name: coalesce(ch.title, ch.username, 'unknown'),
+                type: 'General',
+                role: 'Member',
+                messageCount: messageCount
+            })[..3] AS channels
+        }
+        CALL (u) {
+            OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+            WITH c, ch
+            ORDER BY c.posted_at DESC
+            RETURN collect({
+                text: left(coalesce(c.text, ''), 220),
+                channel: coalesce(ch.title, ch.username, 'unknown'),
+                timestamp: toString(c.posted_at),
+                reactions: 0,
+                replies: 0
+            })[..4] AS recentMessages
+        }
+        CALL (u) {
+            OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
+            WHERE c.posted_at > datetime() - duration('P42D')
+            WITH date(c.posted_at) AS day, count(c) AS msgs
+            WHERE day IS NOT NULL
+            ORDER BY day ASC
+            RETURN collect({week: toString(day), msgs: msgs})[..6] AS activityData
+        }
+        CALL (u) {
+            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            WHERE label <> ''
+            RETURN
+                sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,
+                sum(CASE WHEN label = 'neutral' THEN score ELSE 0 END) AS neutralScore,
+                sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
+        }
+        WITH u, commentCount, topics, topTopics, channels, recentMessages, activityData,
+             coalesce(positiveScore, 0) AS positiveScore,
+             coalesce(neutralScore, 0) AS neutralScore,
+             coalesce(negativeScore, 0) AS negativeScore,
+             coalesce(positiveScore, 0) + coalesce(neutralScore, 0) + coalesce(negativeScore, 0) AS sentimentTotal
         RETURN u.telegram_user_id AS userId,
                u.inferred_gender AS gender,
                u.inferred_age_bracket AS age,
@@ -248,7 +477,15 @@ def get_all_audience(page: int = 0, size: int = 50) -> list[dict]:
                u.financial_distress_level AS financialDistress,
                u.price_sensitivity AS priceSensitivity,
                toString(u.last_seen) AS lastSeen,
-               commentCount, topics
+               commentCount,
+               topics,
+               topTopics,
+               channels,
+               recentMessages,
+               activityData,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * positiveScore / sentimentTotal)) ELSE 0 END AS sentimentPositive,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * neutralScore / sentimentTotal)) ELSE 0 END AS sentimentNeutral,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * negativeScore / sentimentTotal)) ELSE 0 END AS sentimentNegative
         ORDER BY commentCount DESC
         SKIP $skip LIMIT $size
     """, {"skip": page * size, "size": size})

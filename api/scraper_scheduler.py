@@ -1,9 +1,10 @@
 """
-scraper_scheduler.py — Runtime scheduler for scraper-only orchestration.
+scraper_scheduler.py — Runtime scheduler for scrape/process/sync orchestration.
 """
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -12,7 +13,7 @@ from loguru import logger
 from telethon import TelegramClient
 
 import config
-from scraper.scrape_orchestrator import run_scrape_cycle
+from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -38,9 +39,12 @@ class ScraperSchedulerService:
         self.last_success_at: Optional[datetime] = None
         self.last_error: Optional[str] = None
         self.last_result: Optional[dict] = None
+        self.last_mode: str = "normal"
+        self._run_history = deque(maxlen=12)
 
         self._run_lock = asyncio.Lock()
         self._client: Optional[TelegramClient] = None
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
         self.scheduler.start()
@@ -67,6 +71,12 @@ class ScraperSchedulerService:
             except Exception:
                 pass
             self._client = None
+
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     def _upsert_interval_job(self) -> None:
         try:
@@ -124,13 +134,41 @@ class ScraperSchedulerService:
 
             try:
                 client = await self._get_or_create_client()
-                result = await run_scrape_cycle(client, self.db)
+                result = await run_full_cycle(client, self.db)
+                self.last_mode = "normal"
                 self.last_result = result
                 self.last_success_at = datetime.now(timezone.utc)
-                logger.success(f"Scraper cycle completed: {result}")
+                self._record_success_run(result=result, mode="normal")
+                logger.success(f"Pipeline cycle completed: {result}")
             except Exception as e:
                 self.last_error = str(e)
-                logger.error(f"Scraper cycle failed: {e}")
+                logger.error(f"Pipeline cycle failed: {e}")
+            finally:
+                self.last_run_finished_at = datetime.now(timezone.utc)
+                self.running_now = False
+
+    async def _run_catchup_cycle(self) -> None:
+        if self._run_lock.locked():
+            logger.warning("Catch-up cycle skipped: previous run still active")
+            return
+
+        async with self._run_lock:
+            self.running_now = True
+            self.last_error = None
+            self.last_run_started_at = datetime.now(timezone.utc)
+            self.last_run_finished_at = None
+
+            try:
+                client = await self._get_or_create_client()
+                result = await run_catchup_cycle(client, self.db)
+                self.last_mode = "catchup"
+                self.last_result = result
+                self.last_success_at = datetime.now(timezone.utc)
+                self._record_success_run(result=result, mode="catchup")
+                logger.success(f"Catch-up cycle completed: {result}")
+            except Exception as e:
+                self.last_error = str(e)
+                logger.error(f"Catch-up cycle failed: {e}")
             finally:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
@@ -175,7 +213,38 @@ class ScraperSchedulerService:
         if self.running_now:
             return self.status()
 
-        asyncio.create_task(self._run_cycle())
+        task = asyncio.create_task(self._run_cycle())
+        self._background_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._background_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                logger.error(f"Manual scheduler run crashed: {exc}")
+
+        task.add_done_callback(_on_done)
+        return self.status()
+
+    async def run_catchup_once(self) -> dict:
+        if self.running_now:
+            return self.status()
+
+        task = asyncio.create_task(self._run_catchup_cycle())
+        self._background_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._background_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                logger.error(f"Catch-up run crashed: {exc}")
+
+        task.add_done_callback(_on_done)
         return self.status()
 
     def status(self, persisted: Optional[dict] = None) -> dict:
@@ -190,5 +259,39 @@ class ScraperSchedulerService:
             "next_run_at": self._next_run_iso(),
             "last_error": self.last_error,
             "last_result": self.last_result,
+            "last_mode": self.last_mode,
+            "catchup_limits": {
+                "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
+                "post_limit": config.AI_CATCHUP_POST_LIMIT,
+                "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
+            },
+            "normal_limits": {
+                "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
+                "post_limit": config.AI_NORMAL_POST_LIMIT,
+                "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
+            },
+            "run_history": list(self._run_history),
             "persisted": persisted,
         }
+
+    def _record_success_run(self, *, result: dict, mode: str) -> None:
+        started = self.last_run_started_at
+        finished = self.last_success_at
+
+        duration_minutes: Optional[float] = None
+        if started and finished:
+            duration_minutes = max(0.01, (finished - started).total_seconds() / 60.0)
+
+        ai_processed_items = int(result.get("ai_analysis_saved", 0) or 0) + int(result.get("posts_processed", 0) or 0)
+
+        self._run_history.append(
+            {
+                "finished_at": _iso(finished),
+                "mode": mode,
+                "duration_minutes": round(duration_minutes, 2) if duration_minutes is not None else None,
+                "scraped_items": int(result.get("posts_found", 0) or 0) + int(result.get("comments_found", 0) or 0),
+                "ai_processed_items": ai_processed_items,
+                "neo4j_synced_posts": int(result.get("posts_synced", 0) or 0),
+                "raw": result,
+            }
+        )

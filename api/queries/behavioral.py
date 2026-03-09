@@ -19,23 +19,35 @@ def get_problems() -> list[dict]:
              count(DISTINCT CASE WHEN hs.last_seen > datetime() - duration('P7D')
                                    AND i.last_seen > datetime() - duration('P7D')
                                  THEN u END) AS affectedThisWeek,
-             count(DISTINCT CASE WHEN hs.last_seen > datetime() - duration('P14D')
-                                   AND hs.last_seen <= datetime() - duration('P7D')
-                                   AND i.last_seen > datetime() - duration('P14D')
-                                   AND i.last_seen <= datetime() - duration('P7D')
-                                 THEN u END) AS affectedPrevWeek
+              count(DISTINCT CASE WHEN hs.last_seen > datetime() - duration('P14D')
+                                    AND hs.last_seen <= datetime() - duration('P7D')
+                                    AND i.last_seen > datetime() - duration('P14D')
+                                    AND i.last_seen <= datetime() - duration('P7D')
+                                  THEN u END) AS affectedPrevWeek
+        OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
+        WHERE p.posted_at > datetime() - duration('P30D')
+          AND p.text IS NOT NULL
+          AND trim(p.text) <> ''
+        WITH t, cat, affectedUsers, affectedThisWeek, affectedPrevWeek, urgentUsers,
+             collect(DISTINCT left(trim(p.text), 180))[0] AS samplePostText
+        OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
+        WHERE c.posted_at > datetime() - duration('P30D')
+          AND c.text IS NOT NULL
+          AND trim(c.text) <> ''
+        WITH t, cat, affectedUsers, affectedThisWeek, affectedPrevWeek, urgentUsers, samplePostText,
+             collect(DISTINCT left(trim(c.text), 180))[0] AS sampleCommentText
         RETURN t.name AS topic,
                cat.name AS category,
                affectedUsers,
                affectedThisWeek,
                affectedPrevWeek,
+               (affectedThisWeek + affectedPrevWeek) AS trendSupport,
+               coalesce(samplePostText, sampleCommentText, '') AS sampleText,
                CASE WHEN urgentUsers > 0 THEN 'Urgent' ELSE 'Negative' END AS severity,
                CASE
-                   WHEN affectedPrevWeek > 0
-                   THEN round(100.0 * (affectedThisWeek - affectedPrevWeek) / affectedPrevWeek, 1)
-                   WHEN affectedThisWeek > 0 THEN 100.0
-                   ELSE 0.0
-               END AS trendPct
+                    WHEN (affectedThisWeek + affectedPrevWeek) < 8 THEN null
+                    ELSE round(100.0 * (affectedThisWeek - affectedPrevWeek) / (affectedPrevWeek + 3), 1)
+                END AS trendPct
         ORDER BY affectedUsers DESC
         LIMIT 20
     """)
@@ -59,13 +71,12 @@ def get_service_gaps() -> list[dict]:
         RETURN topic, demand,
                negCount, posCount,
                demandThisWeek, demandPrevWeek,
+               (demandThisWeek + demandPrevWeek) AS demandGrowthSupport,
                round(100.0 * negCount / (negCount + posCount + 1), 1) AS dissatisfactionPct,
                CASE
-                   WHEN demandPrevWeek > 0
-                   THEN round(100.0 * (demandThisWeek - demandPrevWeek) / demandPrevWeek, 1)
-                   WHEN demandThisWeek > 0 THEN 100.0
-                   ELSE 0.0
-               END AS demandGrowthPct
+                    WHEN (demandThisWeek + demandPrevWeek) < 8 THEN null
+                    ELSE round(100.0 * (demandThisWeek - demandPrevWeek) / (demandPrevWeek + 3), 1)
+                END AS demandGrowthPct
         ORDER BY dissatisfactionPct DESC
         LIMIT 15
     """)

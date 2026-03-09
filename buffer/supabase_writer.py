@@ -12,6 +12,26 @@ from loguru import logger
 import config
 
 
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except Exception:
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class SupabaseWriter:
 
     def __init__(self):
@@ -319,6 +339,75 @@ class SupabaseWriter:
             .update({"neo4j_synced": True}) \
             .eq("id", post_uuid) \
             .execute()
+
+    def _count_rows(self, table_name: str, filters: dict | None = None) -> int | None:
+        """Count rows with optional equality filters; returns None on failure."""
+        try:
+            query = self.client.table(table_name).select("id", count="exact").limit(1)  # type: ignore[arg-type]
+            for key, value in (filters or {}).items():
+                query = query.eq(key, value)
+            res = query.execute()
+            count = getattr(res, "count", None)
+            if count is None and isinstance(res, dict):
+                count = res.get("count")
+            return int(count) if count is not None else None
+        except Exception as e:
+            logger.debug(f"Count query failed for {table_name}: {e}")
+            return None
+
+    def _latest_timestamp(self, table_name: str, column: str, filters: dict | None = None) -> str | None:
+        """Fetch latest non-null timestamp-like field from a table."""
+        try:
+            query = self.client.table(table_name).select(column).not_.is_(column, "null")
+            for key, value in (filters or {}).items():
+                query = query.eq(key, value)
+            res = query.order(column, desc=True).limit(1).execute()
+            row = (res.data or [{}])[0]
+            return row.get(column)
+        except Exception as e:
+            logger.debug(f"Latest timestamp query failed for {table_name}.{column}: {e}")
+            return None
+
+    def get_pipeline_freshness_snapshot(self) -> dict:
+        """
+        Return Supabase-side freshness/backlog snapshot for trust monitoring.
+        """
+        active_channels = self.get_active_channels()
+        scraped_times = []
+        active_never_scraped = 0
+
+        for channel in active_channels:
+            parsed = _parse_iso_datetime(channel.get("last_scraped_at"))
+            if parsed:
+                scraped_times.append(parsed)
+            else:
+                active_never_scraped += 1
+
+        last_scrape_at = max(scraped_times).isoformat() if scraped_times else None
+        last_post_at = self._latest_timestamp("telegram_posts", "posted_at")
+        last_analysis_created_at = self._latest_timestamp("ai_analysis", "created_at")
+        last_synced_post_content_at = self._latest_timestamp("telegram_posts", "posted_at", {"neo4j_synced": True})
+        last_unsynced_post_content_at = self._latest_timestamp("telegram_posts", "posted_at", {"neo4j_synced": False})
+        last_synced_analysis_created_at = self._latest_timestamp("ai_analysis", "created_at", {"neo4j_synced": True})
+
+        return {
+            "active_channels": len(active_channels),
+            "active_channels_never_scraped": active_never_scraped,
+            "last_scrape_at": last_scrape_at,
+            "last_post_at": last_post_at,
+            "last_process_at": last_analysis_created_at,
+            "last_graph_sync_at": last_synced_post_content_at or last_synced_analysis_created_at,
+            "last_graph_sync_post_content_at": last_synced_post_content_at,
+            "last_graph_sync_analysis_created_at": last_synced_analysis_created_at,
+            "last_unsynced_post_content_at": last_unsynced_post_content_at,
+            "unprocessed_posts": self._count_rows("telegram_posts", {"is_processed": False}),
+            "unprocessed_comments": self._count_rows("telegram_comments", {"is_processed": False}),
+            "unsynced_posts": self._count_rows("telegram_posts", {"neo4j_synced": False}),
+            "unsynced_analysis": self._count_rows("ai_analysis", {"neo4j_synced": False}),
+            "total_posts": self._count_rows("telegram_posts"),
+            "total_comments": self._count_rows("telegram_comments"),
+            "total_analysis": self._count_rows("ai_analysis"),
+        }
 
     # ── Neo4j Bundle Assembly ────────────────────────────────────────────────
 
