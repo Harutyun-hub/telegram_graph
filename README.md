@@ -1,319 +1,147 @@
-# DeepGraph — Telegram Intelligence Pipeline
+# Radar Obshchiny Monorepo
 
-> **Version:** 1.0.0 | **Status:** Active Development | **Classification:** OSINT / Behavioral Analytics
+Production-oriented community intelligence platform with:
 
----
+- Backend data pipeline + API (Python, FastAPI, Neo4j, Supabase, Telethon)
+- Frontend dashboard app (React, Vite, TypeScript)
 
-## Executive Summary
+This repository is now a single monorepo so a new engineer can run and understand the full stack from one place.
 
-DeepGraph is an end-to-end intelligence pipeline that collects public Telegram channel data, extracts behavioral signals using large language models, and represents the results as an interactive knowledge graph. The system enables analysts to understand **who is talking, what they care about, how they interact, and why** — across any number of public Telegram channels simultaneously.
+## Repository Layout
 
-The pipeline is designed around a **decoupled, async-first architecture** that separates data collection, AI enrichment, and graph storage into independent layers. Each layer can operate, scale, and fail independently without affecting the others.
-
----
-
-## Problem Statement
-
-Public Telegram channels represent one of the richest sources of unstructured behavioral data available today. However, the raw data — millions of posts and comments — is impossible to analyze manually. Three core challenges exist:
-
-1. **Volume** — Active channels produce thousands of messages per day
-2. **Context Loss** — Flat text exports destroy the conversational thread structure
-3. **Meaning Gap** — Raw text doesn't reveal *intent*, *sentiment*, or *topic clusters*
-
-DeepGraph solves all three by combining Telegram's MTProto API, a structured PostgreSQL buffer, GPT-4o-mini batch processing, and a Neo4j graph database.
-
----
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          DeepGraph Pipeline                             │
-│                                                                         │
-│  ┌──────────────────┐     ┌──────────────────┐     ┌────────────────┐  │
-│  │  EXTRACTION      │     │  INTELLIGENCE    │     │  GRAPH LAYER   │  │
-│  │  LAYER           │────▶│  LAYER           │────▶│                │  │
-│  │                  │     │                  │     │                │  │
-│  │  Telethon        │     │  GPT-4o-mini     │     │  Neo4j AuraDB  │  │
-│  │  (MTProto API)   │     │  Batch Processor │     │  Knowledge     │  │
-│  │                  │     │                  │     │  Graph         │  │
-│  │  • Channel posts │     │  • Intent extract│     │                │  │
-│  │  • Comments      │     │  • Sentiment     │     │  • User nodes  │  │
-│  │  • User profiles │     │  • Topic tagging │     │  • Topic nodes │  │
-│  │  • Reply threads │     │  • Demographics  │     │  • Intent nodes│  │
-│  └────────┬─────────┘     └────────┬─────────┘     └───────┬────────┘  │
-│           │                        │                        │           │
-│           ▼                        ▼                        ▼           │
-│  ┌────────────────────────────────────────────────────────────────────┐ │
-│  │                    BUFFER LAYER (Supabase / PostgreSQL)            │ │
-│  │  telegram_channels │ telegram_posts │ telegram_comments │          │ │
-│  │  telegram_users    │ ai_analysis                                   │ │
-│  └────────────────────────────────────────────────────────────────────┘ │
-│                                    │                                    │
-│                                    ▼                                    │
-│                        ┌───────────────────────┐                        │
-│                        │  VISUALIZATION LAYER  │                        │
-│                        │  Graph Dashboard      │                        │
-│                        │  (Neo4j Bloom / D3.js)│                        │
-│                        └───────────────────────┘                        │
-└─────────────────────────────────────────────────────────────────────────┘
+```text
+.
+├── api/                    # FastAPI server, dashboard aggregation, query tiers
+├── scraper/                # Telegram extraction orchestration
+├── processor/              # LLM enrichment (intent/sentiment/topic)
+├── ingester/               # Neo4j write path
+├── buffer/                 # Supabase/Postgres read-write layer
+├── frontend/               # React dashboard application
+├── config.py               # central env/config loader + validation
+├── main.py                 # pipeline runtime entrypoint
+└── requirements.txt        # backend dependencies
 ```
 
----
+## Quick Start (Local)
 
-## Technology Stack
+### 1) Prerequisites
 
-| Layer | Technology | Purpose | Why Chosen |
-|---|---|---|---|
-| **Extraction** | Python 3.8+ / Telethon 1.42 | Async Telegram API client | Most stable MTProto library; async-first; handles FloodWait natively |
-| **Buffer** | Supabase (PostgreSQL) | Staging database + processing queue | Managed Postgres with REST API; built-in auth; no infra management |
-| **AI Processing** | OpenAI GPT-4o-mini | Intent, sentiment, topic extraction | Best cost/quality ratio; structured JSON output; 128K context window |
-| **Graph Database** | Neo4j AuraDB | Behavioral knowledge graph | Native graph traversal; Cypher query language; built-in visualization |
-| **Scheduling** | APScheduler 3.11 | Periodic pipeline execution | Async-compatible; lightweight; no external queue dependency |
-| **Logging** | Loguru | Structured application logging | Zero-config; colored output; file rotation built-in |
-| **Config** | python-dotenv | Environment variable management | Simple; widely adopted; no external dependencies |
+- Python 3.10+
+- Node.js 20+
+- npm 10+
+- Access to: Telegram API credentials, Supabase, Neo4j, OpenAI API key
 
----
+### 2) Configure environment
 
-## Data Model
-
-### PostgreSQL Schema (Buffer Layer)
-
-```
-telegram_channels          telegram_posts              telegram_comments
-─────────────────          ──────────────              ─────────────────
-id (UUID) PK          ┌──▶ id (UUID) PK           ┌──▶ id (UUID) PK
-channel_username       │    channel_id (FK) ────────┘    post_id (FK)
-channel_title          │    telegram_message_id           channel_id (FK)
-telegram_channel_id    │    text                          user_id (FK)
-member_count           │    media_type                    telegram_message_id
-is_active              │    views / forwards              reply_to_message_id ◀─┐
-scrape_depth_days      │    reactions (JSONB)             text                   │
-scrape_comments        │    has_comments                  telegram_user_id       │
-last_scraped_at        │    comment_count                 posted_at              │
-                       │    is_processed ◀── AI queue     is_processed           │
-                       │    neo4j_synced ◀── Graph queue  neo4j_synced           │
-                       │                                  (self-referential) ────┘
-                       │
-                       │    telegram_users              ai_analysis
-                       │    ──────────────              ───────────
-                       └──  id (UUID) PK               id (UUID) PK
-                            telegram_user_id (UNIQUE)   channel_id (FK)
-                            username / first_name       telegram_user_id
-                            last_name / bio             primary_intent
-                            is_bot                      sentiment_score (-1→1)
-                            first_seen_at               topics (JSONB array)
-                            last_seen_at                language (ISO 639-1)
-                                                        inferred_gender
-                                                        inferred_age_bracket
-                                                        raw_llm_response (JSONB)
-                                                        neo4j_synced
+```bash
+cp .env.example .env
+cp frontend/.env.example frontend/.env
 ```
 
-### Neo4j Graph Schema (Intelligence Layer)
+Fill `.env` with real secrets.
 
-```
-Node Types:                    Relationship Types:
-───────────                    ──────────────────
-(:Channel)                     (Post)-[:IN_CHANNEL]->(Channel)
-(:Post)                        (Comment)-[:ON_POST]->(Post)
-(:Comment)                     (Comment)-[:REPLIED_TO]->(Comment)
-(:User)                        (User)-[:COMMENTED]->(Comment)
-(:Topic)                       (User)-[:EXHIBITS]->(Intent)
-(:Intent)                      (User)-[:INTERESTED_IN]->(Topic)
-                               (Channel)-[:DISCUSSES]->(Topic)
+### 3) Install dependencies
 
-Relationship Properties:
-  EXHIBITS    → { count: int, sentiment: float }
-  INTERESTED_IN → { count: int }
-  DISCUSSES   → { count: int }
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend
+npm ci
+cd ..
 ```
 
----
+### 4) Run backend API
 
-## Project Structure
-
-```
-DeepGraph/
-│
-├── .env                        # Credentials (never committed)
-├── .gitignore                  # Protects .env, .session, __pycache__
-├── requirements.txt            # Python dependencies
-├── config.py                   # Environment loader + validation
-├── main.py                     # Pipeline entry point + APScheduler
-│
-├── scraper/                    # EXTRACTION LAYER
-│   ├── session_manager.py      # Telethon auth (SMS/app code → session file)
-│   ├── channel_scraper.py      # iter_messages() with FloodWait handling
-│   └── comment_scraper.py      # GetDiscussionMessage for threaded comments
-│
-├── buffer/                     # BUFFER LAYER
-│   └── supabase_writer.py      # All Supabase CRUD (upsert with dedup)
-│
-├── processor/                  # INTELLIGENCE LAYER
-│   └── intent_extractor.py     # GPT-4o-mini batch processor (50 msgs/call)
-│
-└── ingester/                   # GRAPH LAYER
-    └── neo4j_writer.py         # Cypher MERGE statements + constraint setup
+```bash
+source venv/bin/activate
+python -m uvicorn api.server:app --reload --port 8001
 ```
 
----
+### 5) Run frontend
 
-## Pipeline Execution Flow
-
-```
-Every 15 minutes — SCRAPE JOB
-  1. Read telegram_channels WHERE is_active = TRUE
-  2. For each channel:
-     a. Fetch messages newer than last_scraped_at
-     b. Upsert to telegram_posts (dedup on channel_id + message_id)
-     c. For posts with has_comments = TRUE:
-        → Fetch replies via GetDiscussionMessage
-        → Preserve reply_to_message_id for thread structure
-        → Upsert to telegram_comments
-     d. Update last_scraped_at = NOW()
-
-Every 60 minutes — AI PROCESS JOB
-  1. Fetch comments WHERE is_processed = FALSE (batch 200)
-  2. Group by (telegram_user_id, channel_id)
-  3. For each user group:
-     → Send up to 50 messages as single GPT-4o-mini prompt
-     → Receive structured JSON: { intent, sentiment, topics, language,
-                                   inferred_gender, inferred_age_bracket }
-     → Save to ai_analysis table
-     → Mark comments as is_processed = TRUE
-  4. Process standalone posts (no comments) similarly
-
-Every 60 minutes — NEO4J SYNC JOB
-  1. Sync all active Channel nodes
-  2. Fetch ai_analysis WHERE neo4j_synced = FALSE
-  3. For each record:
-     → MERGE User node (by telegram_user_id)
-     → MERGE Intent node → create EXHIBITS relationship (accumulate count)
-     → MERGE Topic nodes → create INTERESTED_IN relationships
-     → MERGE Channel → DISCUSSES → Topic
-     → Mark as neo4j_synced = TRUE
+```bash
+cd frontend
+npm run dev
 ```
 
----
+Frontend defaults to proxy-style `/api`; set `VITE_API_BASE_URL` in `frontend/.env` if needed.
 
-## AI Intelligence Layer
+## Developer Commands
 
-### Prompt Strategy
+Use `Makefile` shortcuts from repo root:
 
-Each GPT-4o-mini call receives **up to 50 messages from the same user** in the same channel, grouped together. This approach:
-
-- **Reduces API cost by ~80%** vs. per-message processing
-- **Improves accuracy** — the model sees conversational context, not isolated messages
-- **Extracts richer signals** — repeated topics across messages are more reliably detected
-
-### Output Schema
-
-```json
-{
-  "primary_intent": "Information Seeking",
-  "sentiment_score": 0.65,
-  "topics": ["cryptocurrency", "privacy", "regulation"],
-  "language": "en",
-  "inferred_gender": "male",
-  "inferred_age_bracket": "25-34"
-}
+```bash
+make setup-backend
+make setup-frontend
+make run-api
+make run-frontend
+make qa
 ```
 
-### Intent Taxonomy
+## Backend Overview
 
-| Intent | Description |
-|---|---|
-| Information Seeking | Asking questions, requesting clarification |
-| Opinion Sharing | Expressing views, making statements |
-| Promotion/Spam | Advertising products, services, or channels |
-| Emotional Expression | Reactions, celebration, frustration |
-| Debate/Argument | Contradicting others, defending positions |
-| Humor/Sarcasm | Jokes, memes, ironic statements |
-| Support/Help | Answering questions, offering assistance |
-| Coordination | Organizing events, calling for action |
+- `api/server.py`: API endpoints (`/api/dashboard`, `/api/topics`, `/api/channels`, `/api/audience`, graph and scheduler endpoints)
+- `api/aggregator.py`: dashboard tier aggregation, cache strategy, stale-safe fallback behavior
+- `api/queries/*.py`: Cypher query contracts grouped by semantic tier
+- `api/scraper_scheduler.py`: periodic + manual run control
 
----
+### Data Pipeline Flow
 
-## Graph Intelligence Queries (Cypher Examples)
+1. Scrape Telegram public channels/comments
+2. Persist raw data in Supabase
+3. Enrich text with LLM analysis (intent/sentiment/topics)
+4. Sync into Neo4j graph
+5. API query layer assembles dashboard payloads for frontend
 
-```cypher
-// Top topics in a channel
-MATCH (c:Channel {username: "russianteaminarmenia"})-[r:DISCUSSES]->(t:Topic)
-RETURN t.name, r.count ORDER BY r.count DESC LIMIT 10
+## Frontend Overview
 
-// Most active users by comment count
-MATCH (u:User)-[:COMMENTED]->(c:Comment)-[:ON_POST]->(p:Post)
-RETURN u.telegram_user_id, count(c) AS comments ORDER BY comments DESC LIMIT 20
+- `frontend/src/app/contexts/DataContext.tsx`: dashboard data bootstrap
+- `frontend/src/app/services/dashboardAdapter.ts`: backend -> UI adapter
+- `frontend/src/app/services/detailData.ts`: dedicated Topics/Channels/Audience loading
+- `frontend/src/app/pages/*`: dashboard + detail pages
+- `frontend/src/app/graph/*`: graph experience
 
-// Users who exhibit a specific intent
-MATCH (u:User)-[r:EXHIBITS]->(i:Intent {name: "Promotion/Spam"})
-WHERE r.count > 3
-RETURN u.username, r.count, r.sentiment ORDER BY r.count DESC
+## Quality Gates
 
-// Conversation thread (who replied to whom)
-MATCH path = (c1:Comment)-[:REPLIED_TO*1..5]->(c2:Comment)
-RETURN path LIMIT 25
+- Backend syntax check:
 
-// Users interested in multiple topics (cross-interest analysis)
-MATCH (u:User)-[:INTERESTED_IN]->(t:Topic)
-WITH u, collect(t.name) AS topics
-WHERE size(topics) >= 3
-RETURN u.telegram_user_id, topics
+```bash
+python3 -m compileall api buffer scraper processor ingester
 ```
 
----
+- Frontend production build:
 
-## Security & Compliance
-
-| Principle | Implementation |
-|---|---|
-| **No credentials in code** | All secrets loaded from `.env` via python-dotenv |
-| **No private data scraped** | Only public channels accessed |
-| **Session isolation** | `.session` file stored locally, never shared |
-| **Data minimization** | Only text content and public profile fields stored |
-| **Rate limit compliance** | `wait_time=2` between API calls; exponential backoff on FloodWait |
-| **Telegram ToS** | Scraping public channels via official MTProto API is authorized |
-
----
-
-## Environment Variables Reference
-
-```env
-# Telegram (from my.telegram.org)
-TELEGRAM_API_ID=<numeric app ID>
-TELEGRAM_API_HASH=<32-char hex string>
-TELEGRAM_PHONE=<+country_code_number>
-
-# Supabase
-SUPABASE_URL=https://<project>.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<jwt_service_role_key>
-SUPABASE_ANON_KEY=<jwt_anon_key>
-
-# Neo4j AuraDB
-NEO4J_URI=neo4j+s://<instance>.databases.neo4j.io
-NEO4J_USERNAME=<username>
-NEO4J_PASSWORD=<password>
-NEO4J_DATABASE=<database_name>
-
-# OpenAI
-OpenAI_API=sk-proj-<key>
+```bash
+cd frontend && npm run build
 ```
 
----
+- CI runs both checks on pushes/PRs (`.github/workflows/ci.yml`).
 
-## Roadmap
+## Environment Variables
 
-| Phase | Feature | Status |
-|---|---|---|
-| ✅ v1.0 | Core scraper + AI processor + Neo4j ingestion | **Complete** |
-| 🔄 v1.1 | Multi-account session rotation for higher throughput | Planned |
-| 🔄 v1.2 | User bio enrichment (GetFullUser) for better demographics | Planned |
-| 🔄 v1.3 | Real-time dashboard integration via Neo4j Bloom | Planned |
-| 🔄 v2.0 | Cross-channel user linkage (same user, multiple channels) | Planned |
-| 🔄 v2.1 | Influence scoring (centrality analysis in Neo4j) | Planned |
-| 🔄 v2.2 | Anomaly detection (sudden topic spikes, bot detection) | Planned |
+See `.env.example` for required variables.
 
----
+Most important:
 
-*Built with Telethon · Supabase · OpenAI GPT-4o-mini · Neo4j AuraDB*
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+- `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+- `OpenAI_API`
+
+## Security Notes
+
+- Never commit `.env`, `.session`, or service keys
+- Use least-privilege credentials for production
+- Restrict CORS and scheduler control endpoints in production deployments
+
+## Troubleshooting
+
+- If dashboard is blank, hit `POST /api/cache/clear` and reload
+- If detail pages are slow/empty, verify Neo4j connectivity via `GET /api/health`
+- If frontend cannot reach API, set `VITE_API_BASE_URL=http://127.0.0.1:8001/api`
+
+## Contributing
+
+Start with `CONTRIBUTING.md` for branch, QA, and commit standards.

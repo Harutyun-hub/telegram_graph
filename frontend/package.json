@@ -1,11 +1,13 @@
 {
-  "name": "@figma/my-make-file",
+  "name": "radar-obshchiny-frontend",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "preview": "vite preview",
+    "qa": "npm run build"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

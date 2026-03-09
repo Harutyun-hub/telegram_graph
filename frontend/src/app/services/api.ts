@@ -13,8 +13,10 @@
 // ================================================================
 
 // ── Configuration ──────────────────────────────────────────────
-// Change this when connecting to your real backend
-const API_BASE_URL = '/api'; // e.g. 'https://your-backend.fly.dev/api'
+// Prefer VITE_API_BASE_URL for local/prod environments.
+const API_BASE_URL =
+  (import.meta as any)?.env?.VITE_API_BASE_URL?.toString()?.replace(/\/$/, '') ||
+  '/api';
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
