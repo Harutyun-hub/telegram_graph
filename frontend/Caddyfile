@@ -1,0 +1,58 @@
+{
+	admin off
+	persist_config off
+	auto_https off
+
+	log {
+		format json
+	}
+
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:{$PORT:80} {
+	log {
+		format json
+	}
+
+	respond /health 200
+
+	# Security headers
+	header {
+		X-XSS-Protection "1; mode=block"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: https: *; style-src 'self' 'unsafe-inline' https: *; script-src 'self' 'unsafe-inline' https: *; font-src 'self' data: https: *; connect-src 'self' https: *; media-src 'self' https: *; object-src 'none'; frame-src 'self' https: *;"
+		-Server
+	}
+
+	# Reverse proxy all /api/* requests to the backend service.
+	# Set BACKEND_URL in Railway variables (e.g. https://telegramgraph-production.up.railway.app)
+	handle /api/* {
+		reverse_proxy {$BACKEND_URL}
+	}
+
+	# Serve static files for everything else (SPA)
+	handle {
+		root * /app/dist
+
+		file_server {
+			hide .git
+			hide .env*
+		}
+
+		encode {
+			gzip
+			zstd
+		}
+
+		try_files {path} {path}.html {path}/index.html /index.html
+	}
+
+	handle_errors {
+		rewrite * /{err.status_code}.html
+		file_server
+	}
+}
