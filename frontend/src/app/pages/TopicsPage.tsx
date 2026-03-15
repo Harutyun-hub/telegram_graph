@@ -4,7 +4,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianG
 import { useSearchParams } from 'react-router';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTopicsDetailData } from '../services/detailData';
-import type { TopicDetail } from '../types/data';
+import type { TopicDetail, TopicEvidence } from '../types/data';
 
 const categoryColors: Record<string, string> = {
   Living: '#ef4444', Work: '#3b82f6', Family: '#8b5cf6',
@@ -41,11 +41,25 @@ export function TopicsPage() {
   const [selectedTopic, setSelectedTopic] = useState<TopicDetail | null>(null);
   const [sortBy, setSortBy] = useState<'mentions' | 'growth'>('mentions');
   const [proofView, setProofView] = useState<'evidence' | 'questions'>('evidence');
+  const [focusedEvidenceId, setFocusedEvidenceId] = useState('');
+  const [highlightEvidenceId, setHighlightEvidenceId] = useState('');
+
+  const getQuestionEvidence = (topic: TopicDetail | null): TopicEvidence[] => {
+    if (!topic) return [];
+    if (topic.questionEvidence && topic.questionEvidence.length > 0) return topic.questionEvidence;
+    return topic.evidence.filter((ev) => ev.text.includes('?'));
+  };
 
   useEffect(() => {
     const viewParam = searchParams.get('view');
     if (viewParam === 'questions' || viewParam === 'evidence') {
       setProofView(viewParam);
+    }
+
+    const evidenceParam = (searchParams.get('evidenceId') || '').trim();
+    setFocusedEvidenceId(evidenceParam);
+    if (evidenceParam && viewParam !== 'questions') {
+      setProofView('questions');
     }
 
     const topicParam = (searchParams.get('topic') || '').trim().toLowerCase();
@@ -59,20 +73,26 @@ export function TopicsPage() {
     }
   }, [searchParams, allTopics, selectedTopic?.id]);
 
-  const selectTopic = (topic: TopicDetail, view: 'evidence' | 'questions' = proofView) => {
+  const selectTopic = (topic: TopicDetail, view: 'evidence' | 'questions' = proofView, evidenceId?: string) => {
     setSelectedTopic(topic);
     setProofView(view);
+    setFocusedEvidenceId(evidenceId || '');
     const next = new URLSearchParams(searchParams);
     next.set('topic', topic.name);
     next.set('view', view);
+    if (evidenceId) next.set('evidenceId', evidenceId);
+    else next.delete('evidenceId');
     setSearchParams(next);
   };
 
   const clearTopicSelection = () => {
     setSelectedTopic(null);
+    setFocusedEvidenceId('');
+    setHighlightEvidenceId('');
     const next = new URLSearchParams(searchParams);
     next.delete('topic');
     next.delete('view');
+    next.delete('evidenceId');
     setSearchParams(next);
   };
 
@@ -87,6 +107,32 @@ export function TopicsPage() {
       setSelectedTopic(fresh);
     }
   }, [allTopics, selectedTopic]);
+
+  useEffect(() => {
+    if (!selectedTopic || proofView !== 'questions' || !focusedEvidenceId) return;
+    const questionEvidence = getQuestionEvidence(selectedTopic);
+    if (!questionEvidence.some((ev) => ev.id === focusedEvidenceId)) return;
+
+    const domId = `question-evidence-${focusedEvidenceId}`;
+    const scrollToEvidence = () => {
+      const el = document.getElementById(domId);
+      if (!el) return false;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightEvidenceId(focusedEvidenceId);
+      return true;
+    };
+
+    let timeoutId: number | null = null;
+    if (!scrollToEvidence()) {
+      timeoutId = window.setTimeout(scrollToEvidence, 120);
+    }
+
+    const clearId = window.setTimeout(() => setHighlightEvidenceId(''), 2600);
+    return () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      window.clearTimeout(clearId);
+    };
+  }, [selectedTopic, proofView, focusedEvidenceId]);
 
   const categories = ru ? categoryLabelsRU : categoryLabelsEN;
 
@@ -330,9 +376,7 @@ export function TopicsPage() {
             </div>
 
             {(() => {
-              const questionEvidence = (selectedTopic.questionEvidence && selectedTopic.questionEvidence.length > 0)
-                ? selectedTopic.questionEvidence
-                : selectedTopic.evidence.filter((ev) => ev.text.includes('?'));
+              const questionEvidence = getQuestionEvidence(selectedTopic);
               const visibleEvidence = proofView === 'questions' ? questionEvidence : selectedTopic.evidence;
 
               return (
@@ -369,7 +413,15 @@ export function TopicsPage() {
             ) : (
               <div className="space-y-3">
                 {visibleEvidence.map((ev) => (
-                  <div key={ev.id} className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-sm transition-shadow">
+                  <div
+                    id={`question-evidence-${ev.id}`}
+                    key={ev.id}
+                    className={`bg-white rounded-xl border p-4 hover:shadow-sm transition-shadow ${
+                      highlightEvidenceId === ev.id
+                        ? 'border-amber-300 ring-2 ring-amber-200'
+                        : 'border-gray-200'
+                    }`}
+                  >
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <div className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center">

@@ -38,6 +38,7 @@ export interface CommunityHealthData {
 export interface TrendingTopic {
   id: number;
   topic: string;
+  sourceTopic?: string;
   mentions: number;
   trend: number;
   category: string;
@@ -48,10 +49,10 @@ export interface TrendingTopic {
 export interface CommunityBriefData {
   messagesAnalyzed: number;
   updatedMinutesAgo: number;
-  activeMembers: string;
-  messagesToday: string;
-  positiveMood: string;
-  newMembersGrowth: string;
+  postsAnalyzed24h: number;
+  commentScopesAnalyzed24h: number;
+  positiveIntentPct24h: number;
+  negativeIntentPct24h: number;
   mainBrief: BilingualValue<string>;
   expandedBrief: BilingualValue<string[]>;
 }
@@ -60,12 +61,14 @@ export interface CommunityBriefData {
 
 export interface TopicBubble {
   name: string;
+  sourceTopic?: string;
   value: number;
   category: string;
   color: string;
   growth: number;
   growthReliable?: boolean;
   evidenceCount?: number;
+  sampleQuote?: string;
 }
 
 export interface TrendLine {
@@ -84,7 +87,82 @@ export interface TrendDataPoint {
 export interface QuestionCategory {
   category: string;
   color: string;
-  questions: { q: string; topic?: string; preview?: string; count: number; answered: boolean; coveragePct?: number; lowEvidence?: boolean }[];
+  questions: { q: string; topic?: string; preview?: string; count: number; answered: boolean; coveragePct?: number; lowEvidence?: boolean; evidenceId?: string }[];
+}
+
+export interface QuestionBriefEvidence {
+  id: string;
+  quote: string;
+  channel: string;
+  timestamp: string;
+  kind: string;
+}
+
+export interface QuestionBrief {
+  id: string;
+  topic: string;
+  sourceTopic?: string;
+  category: string;
+  question: string;
+  summary: string;
+  title?: string;
+  brief?: string;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  status: 'needs_guide' | 'partially_answered' | 'well_covered';
+  resolvedPct: number;
+  demandSignals: {
+    messages: number;
+    uniqueUsers: number;
+    channels: number;
+    trend7dPct: number;
+  };
+  sampleEvidenceId?: string;
+  latestAt?: string;
+  evidence: QuestionBriefEvidence[];
+}
+
+export interface ProblemBriefCard {
+  id: string;
+  topic: string;
+  sourceTopic?: string;
+  category: string;
+  problem: string;
+  summary: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  demandSignals: {
+    messages: number;
+    uniqueUsers: number;
+    channels: number;
+    trend7dPct: number;
+  };
+  sampleEvidenceId?: string;
+  latestAt?: string;
+  evidence: QuestionBriefEvidence[];
+}
+
+export interface ServiceGapBriefCard {
+  id: string;
+  topic: string;
+  sourceTopic?: string;
+  category: string;
+  serviceNeed: string;
+  unmetReason: string;
+  urgency: 'critical' | 'high' | 'medium' | 'low';
+  unmetPct: number;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  demandSignals: {
+    messages: number;
+    uniqueUsers: number;
+    channels: number;
+    trend7dPct: number;
+  };
+  sampleEvidenceId?: string;
+  latestAt?: string;
+  evidence: QuestionBriefEvidence[];
 }
 
 export interface QAGapItem {
@@ -96,9 +174,17 @@ export interface QAGapItem {
 
 export interface LifecycleTopic {
   name: string;
+  sourceTopic?: string;
   daysActive: number;
+  ageWeeks?: number;
   momentum: number;
   volume: number;
+  support?: number;
+  confidence?: number;
+  rollingGrowth?: number;
+  summary?: string;
+  topChannels?: string[];
+  evidence?: { text: string; channel: string; timestamp: string }[];
 }
 
 export interface LifecycleStage {
@@ -525,6 +611,7 @@ export interface AppData {
   // Tier 1
   communityHealth: CommunityHealthData;
   trendingTopics: BilingualData<TrendingTopic>;
+  trendingNewTopics: BilingualData<TrendingTopic>;
   communityBrief: CommunityBriefData;
 
   // Tier 2
@@ -533,10 +620,13 @@ export interface AppData {
   trendData: TrendDataPoint[];
   heatmap: BilingualValue<HeatmapData>;
   questionCategories: BilingualData<QuestionCategory>;
+  questionBriefs: BilingualData<QuestionBrief>;
   qaGap: BilingualData<QAGapItem>;
   lifecycleStages: BilingualData<LifecycleStage>;
 
   // Tier 3
+  problemBriefs: BilingualData<ProblemBriefCard>;
+  serviceGapBriefs: BilingualData<ServiceGapBriefCard>;
   problems: BilingualData<ProblemCategory>;
   serviceGaps: BilingualData<ServiceGap>;
   satisfactionAreas: BilingualData<SatisfactionArea>;

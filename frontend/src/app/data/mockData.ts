@@ -63,25 +63,38 @@ export const mockAppData: AppData = {
     ],
   },
 
+  trendingNewTopics: {
+    en: [
+      { id: 101, topic: 'Humanitarian aid coordination for border families', mentions: 14, trend: +120, category: 'Social Services', sentiment: 'concerned', sampleQuote: 'Where can families near the border request immediate support?' },
+      { id: 102, topic: 'Government service quality in municipalities', mentions: 11, trend: +95, category: 'Government & Leadership', sentiment: 'curious', sampleQuote: 'Which municipality actually resolves resident complaints fastest?' },
+      { id: 103, topic: 'Religious freedom concerns in local communities', mentions: 9, trend: +88, category: 'Religion', sentiment: 'seeking', sampleQuote: 'Is there any legal channel for reporting religious discrimination?' },
+    ],
+    ru: [
+      { id: 101, topic: 'Координация гуманитарной помощи приграничным семьям', mentions: 14, trend: +120, category: 'Социальные услуги', sentiment: 'concerned', sampleQuote: 'Где семьям рядом с границей можно запросить срочную поддержку?' },
+      { id: 102, topic: 'Качество госуслуг в муниципалитетах', mentions: 11, trend: +95, category: 'Госуправление', sentiment: 'curious', sampleQuote: 'Какой муниципалитет быстрее всего решает обращения жителей?' },
+      { id: 103, topic: 'Сигналы нарушения религиозной свободы', mentions: 9, trend: +88, category: 'Религия', sentiment: 'seeking', sampleQuote: 'Есть ли законный канал для жалоб на религиозную дискриминацию?' },
+    ],
+  },
+
   communityBrief: {
     messagesAnalyzed: 14238,
     updatedMinutesAgo: 35,
-    activeMembers: '12.4K',
-    messagesToday: '3,847',
-    positiveMood: '68%',
-    newMembersGrowth: '+34%',
+    postsAnalyzed24h: 153,
+    commentScopesAnalyzed24h: 236,
+    positiveIntentPct24h: 46,
+    negativeIntentPct24h: 34,
     mainBrief: {
-      en: 'The community is buzzing about housing affordability — rental prices in central Yerevan dominate conversations with a frustrated but pragmatic tone. The second biggest theme is children\'s education, with parents actively comparing international schools and seeking Russian-language options. New member introductions are up 34% this week, with most newcomers arriving from Moscow and St. Petersburg, asking about banking, SIM cards, and neighborhood recommendations.',
-      ru: 'Сообщество активно обсуждает доступность жилья — цены на аренду в центре Еревана доминируют в разговорах с раздражённым, но прагматичным тоном. Вторая по значимости тема — образование детей: родители сравнивают международные школы и ищут варианты с русским языком обучения. Количество новых знакомств выросло на 34% за неделю, большинство прибывших — из Москвы и Санкт-Петербурга, они спрашивают о банках, SIM-картах и рекомендациях по районам.',
+      en: 'Snapshot from the last 24 hours of analyzed content. Use the topic list and message evidence to verify what people discuss most.',
+      ru: 'Снимок за последние 24 часа по проанализированному контенту. Используйте список тем и цитаты сообщений, чтобы проверить, о чём люди говорят чаще всего.',
     },
     expandedBrief: {
       en: [
-        'There\'s a growing cluster of IT freelancers discussing coworking spaces, tax optimization, and crypto-friendly banking. Weekend activity groups (hiking, board games, kids\' playgroups) are getting the highest engagement per post. People are increasingly asking about Armenian language courses — a strong integration signal.',
-        'Create a pinned "Newcomer\'s Checklist" guide covering banking, SIM, registration, and neighborhoods. The same 15 questions get asked daily. A comprehensive guide would reduce repetitive posts and become the community\'s most shared resource.',
+        'Positive and negative intent percentages are computed from analyzed intent and sentiment signals, not from raw message volume alone.',
+        'For trust, open a topic to see real post/comment evidence snippets attached to each trend.',
       ],
       ru: [
-        'Растёт кластер IT-фрилансеров, обсуждающих коворкинги, налоговую оптимизацию и крипто-дружественные банки. Группы выходного дня (хайкинг, настольные игры, детские площадки) получают наибольшее вовлечение на пост. Запросы на курсы армянского языка усиливаются — сильный сигнал интеграции.',
-        'Создайте закреплённое руководство «Чеклист новичка», охватывающее банки, SIM-карту, регистрацию и районы. Одни и те же 15 вопросов задаются ежедневно. Исчерпывающее руководство сократит повторяющиеся публикации и станет самым репостируемым ресурсом сообщества.',
+        'Доли позитивного и негативного интента считаются по сигналам интента и тональности в анализе, а не только по объёму сообщений.',
+        'Для доверия к данным откройте тему: там есть реальные цитаты постов и комментариев по каждому тренду.',
       ],
     },
   },
@@ -240,6 +253,49 @@ export const mockAppData: AppData = {
     ],
   },
 
+  questionBriefs: {
+    en: [
+      {
+        id: 'qb-banking-account-opening',
+        topic: 'Banking Sector',
+        category: 'Financial System',
+        question: 'How can non-residents open a bank account in Armenia with clear and consistent requirements?',
+        summary: 'People repeatedly ask for a reliable checklist of required documents, residency constraints, and realistic timelines across major banks.',
+        confidence: 'high',
+        confidenceScore: 0.84,
+        status: 'needs_guide',
+        resolvedPct: 28,
+        demandSignals: { messages: 49, uniqueUsers: 31, channels: 12, trend7dPct: 18 },
+        sampleEvidenceId: 'demo-qb-1',
+        latestAt: '2026-03-13T14:10:00Z',
+        evidence: [
+          { id: 'demo-qb-1', quote: 'Which exact documents does Ameriabank require for non-residents right now?', channel: 'Armenian Life', timestamp: '2026-03-13T14:10:00Z', kind: 'comment' },
+          { id: 'demo-qb-2', quote: 'Different branches ask for different paperwork. Is there any official checklist?', channel: 'Bambasank', timestamp: '2026-03-12T09:03:00Z', kind: 'comment' },
+        ],
+      },
+    ],
+    ru: [
+      {
+        id: 'qb-banking-account-opening',
+        topic: 'Banking Sector',
+        category: 'Финансовая система',
+        question: 'Как нерезиденту открыть банковский счёт в Армении при понятных и единых требованиях?',
+        summary: 'Пользователи регулярно просят актуальный и понятный чеклист: какие документы нужны, влияет ли статус резидентства и сколько реально занимает процедура в разных банках.',
+        confidence: 'high',
+        confidenceScore: 0.84,
+        status: 'needs_guide',
+        resolvedPct: 28,
+        demandSignals: { messages: 49, uniqueUsers: 31, channels: 12, trend7dPct: 18 },
+        sampleEvidenceId: 'demo-qb-1',
+        latestAt: '2026-03-13T14:10:00Z',
+        evidence: [
+          { id: 'demo-qb-1', quote: 'Какие именно документы сейчас нужны для открытия счёта нерезиденту в Ameriabank?', channel: 'Armenian Life', timestamp: '2026-03-13T14:10:00Z', kind: 'comment' },
+          { id: 'demo-qb-2', quote: 'В разных отделениях называют разные требования. Есть ли официальный список?', channel: 'Bambasank', timestamp: '2026-03-12T09:03:00Z', kind: 'comment' },
+        ],
+      },
+    ],
+  },
+
   qaGap: {
     en: [
       { topic: 'Legal & Residency', asked: 1250, rate: 22 },
@@ -267,23 +323,15 @@ export const mockAppData: AppData = {
 
   lifecycleStages: {
     en: [
-      { stage: 'Emerging', color: '#10b981', bgColor: 'bg-emerald-50', borderColor: 'border-emerald-200', textColor: 'text-emerald-700', desc: 'Jump in early to lead',
-        topics: [{ name: 'Co-living for nomads', daysActive: 3, momentum: +120, volume: 180 }, { name: 'Armenian language learning', daysActive: 8, momentum: +85, volume: 320 }] },
-      { stage: 'Rising', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', desc: 'Double down now',
+      { stage: 'Growing', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', desc: 'uptrend',
         topics: [{ name: 'Banking & Finance', daysActive: 21, momentum: +42, volume: 1680 }, { name: 'Schools & Education', daysActive: 14, momentum: +35, volume: 1950 }, { name: 'Armenian wine tourism', daysActive: 10, momentum: +28, volume: 580 }] },
-      { stage: 'Peak', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', desc: 'Highest volume, steady',
-        topics: [{ name: 'Housing & Rent', daysActive: 45, momentum: +8, volume: 2840 }, { name: 'Jobs & Freelance', daysActive: 38, momentum: +5, volume: 2200 }] },
-      { stage: 'Declining', color: '#6b7280', bgColor: 'bg-gray-50', borderColor: 'border-gray-200', textColor: 'text-gray-600', desc: 'Archive or pivot',
+      { stage: 'Declining', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', desc: 'downtrend',
         topics: [{ name: 'Relocation Logistics', daysActive: 12, momentum: -18, volume: 620 }, { name: 'SIM & Internet Setup', daysActive: 20, momentum: -32, volume: 380 }] },
     ],
     ru: [
-      { stage: 'Зарождение', color: '#10b981', bgColor: 'bg-emerald-50', borderColor: 'border-emerald-200', textColor: 'text-emerald-700', desc: 'Вступайте раньше других',
-        topics: [{ name: 'Коливинг для номадов', daysActive: 3, momentum: +120, volume: 180 }, { name: 'Курсы армянского языка', daysActive: 8, momentum: +85, volume: 320 }] },
-      { stage: 'Подъём', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', desc: 'Усильте присутствие сейчас',
+      { stage: 'Рост', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', desc: 'рост',
         topics: [{ name: 'Банки и финансы', daysActive: 21, momentum: +42, volume: 1680 }, { name: 'Школы и образование', daysActive: 14, momentum: +35, volume: 1950 }, { name: 'Армянский винный туризм', daysActive: 10, momentum: +28, volume: 580 }] },
-      { stage: 'Пик', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', desc: 'Максимальный объём, стабильно',
-        topics: [{ name: 'Жильё и аренда', daysActive: 45, momentum: +8, volume: 2840 }, { name: 'Работа и фриланс', daysActive: 38, momentum: +5, volume: 2200 }] },
-      { stage: 'Спад', color: '#6b7280', bgColor: 'bg-gray-50', borderColor: 'border-gray-200', textColor: 'text-gray-600', desc: 'Архивировать или сменить фокус',
+      { stage: 'Снижение', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', desc: 'снижение',
         topics: [{ name: 'Логистика переезда', daysActive: 12, momentum: -18, volume: 620 }, { name: 'SIM-карта и интернет', daysActive: 20, momentum: -32, volume: 380 }] },
     ],
   },
@@ -291,6 +339,16 @@ export const mockAppData: AppData = {
   // ════════════════════════════════════════════════════════
   // TIER 3: BEHAVIORAL / PROBLEMS
   // ════════════════════════════════════════════════════════
+
+  problemBriefs: {
+    en: [],
+    ru: [],
+  },
+
+  serviceGapBriefs: {
+    en: [],
+    ru: [],
+  },
 
   problems: {
     en: [

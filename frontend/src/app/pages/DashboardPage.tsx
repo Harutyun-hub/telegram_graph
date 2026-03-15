@@ -7,7 +7,7 @@ import { useData } from '../contexts/DataContext';
 import { CommunityHealthScore, TrendingTopicsFeed, CommunityBrief } from '../components/widgets/ExecutiveGlance';
 
 // Tier 2: What People Talk About
-import { TopicLandscape, ConversationTrends, ContentEngagementHeatmap, QuestionCloud, QuestionAnswerGap, TopicLifecycle } from '../components/widgets/StrategicWidgets';
+import { TopicLandscape, ConversationTrends, QuestionCloud, TopicLifecycle } from '../components/widgets/StrategicWidgets';
 
 // Tier 3: Problems & Satisfaction
 import { ProblemTracker, ServiceGapDetector, SatisfactionByArea, MoodOverTime, EmotionalUrgencyIndex } from '../components/widgets/BehavioralWidgets';
@@ -177,11 +177,7 @@ export function DashboardPage() {
             <ConversationTrends />
             <QuestionCloud />
           </div>
-          <ContentEngagementHeatmap />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <QuestionAnswerGap />
-            <TopicLifecycle />
-          </div>
+          <TopicLifecycle />
         </div>
       )}
 

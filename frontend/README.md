@@ -35,6 +35,11 @@ cp .env.example .env
 Key variable:
 
 - `VITE_API_BASE_URL` (defaults to `/api`)
+- `VITE_W9_SYNTHETIC_MODE` (`auto` | `off` | `force`)
+  - `auto` (recommended for local/staging): use synthetic W9 bars only when real aligned AI rows are empty
+  - `off` (recommended for production): never use synthetic bars
+  - `force` (QA/demo): always use synthetic bars
+- `VITE_W9_ENABLE_LEGACY_DEBUG` (`true`/`false`, default `false`) — enables old deterministic W9 rows for internal debug only
 
 Example:
 

@@ -17,12 +17,142 @@ const CATEGORY_RU: Record<string, string> = {
   Culture: 'Культура',
   Security: 'Безопасность',
   General: 'Общий',
+  'Government & Leadership': 'Государственное управление и лидерство',
+  'Opposition & Protest': 'Оппозиция и протестная активность',
+  'Nagorno-Karabakh & Artsakh': 'Нагорный Карабах и Арцах',
+  'Global Conflict': 'Международные конфликты',
+  'National Identity': 'Национальная идентичность',
+  'Regional Security': 'Региональная безопасность',
+  Employment: 'Рынок труда',
+  'Democracy & Reform': 'Демократия и реформы',
+  'Military & Defense': 'Армия и оборона',
+  'Business & Enterprise': 'Бизнес и предпринимательство',
+  'Arts & Entertainment': 'Культура и развлечения',
+  'Macroeconomic Condition': 'Макроэкономическая ситуация',
+  Emigration: 'Эмиграция',
+  'Geopolitical Alignment': 'Геополитическая ориентация',
+  'Financial System': 'Финансовая система',
+  Education: 'Образование',
+  Religion: 'Религия',
+  'Social Services': 'Социальная поддержка',
+  'Media Landscape': 'Медийная среда',
+  'Information Integrity': 'Информационная достоверность',
+  'Community Life': 'Жизнь сообщества',
+  'Housing & Infrastructure': 'Жилье и инфраструктура',
+};
+
+const TOPIC_RU: Record<string, string> = {
+  'Political Protest': 'Политические протесты',
+  'Armenian Government Performance': 'Оценка работы правительства Армении',
+  'Nagorno-Karabakh Conflict': 'Нагорно-Карабахский конфликт',
+  'Middle East Conflict': 'Конфликт на Ближнем Востоке',
+  'Armenian National Identity': 'Армянская национальная идентичность',
+  'Armenian Genocide Remembrance': 'Память о Геноциде армян',
+  'Armenian Opposition Movement': 'Армянское оппозиционное движение',
+  'Azerbaijan Aggression': 'Агрессия Азербайджана',
+  'Armenian Border Security': 'Безопасность границы Армении',
+  'Political Prisoner': 'Политические заключенные',
+  'Job Market Condition': 'Ситуация на рынке труда',
+  'Collective Memory': 'Коллективная память',
+  'Electoral Integrity': 'Честность выборов',
+  'Armenian Armed Force': 'Вооруженные силы Армении',
+  'Business Opportunity': 'Возможности для бизнеса',
+  'Iranian-Armenian Relation': 'Ирано-армянские отношения',
+  'Artsakh Sovereignty': 'Суверенитет Арцаха',
+  'Cultural Festival': 'Культурный фестиваль',
+  'Economic Growth': 'Экономический рост',
+  'Visa And Residency': 'Визы и ВНЖ',
+  'Pro-Western Orientation': 'Проевропейская ориентация',
+  'Russian Sanctions Impact': 'Влияние антироссийских санкций',
+  'Banking Sector': 'Банковский сектор',
+  'School System Quality': 'Качество школьного образования',
+  'Personal Insult': 'Личное оскорбление',
+  'Armenian Political Discourse': 'Армянская политическая дискуссия',
+  'Cognitive Style': 'Когнитивный стиль',
+  'Fear Los': 'Страх потерь',
+  'Language And Identity': 'Язык и идентичность',
+  'Political Candidate Criticism': 'Критика политических кандидатов',
+  'Information Clarity': 'Ясность информации',
+  'Iranian Response': 'Реакция Ирана',
+  'Ukraine Conflict': 'Конфликт в Украине',
+  'Public Opinion Poll': 'Опрос общественного мнения',
+  'Arts Entertainment': 'Культура и развлечения',
+  'Genetic Testing': 'Генетическое тестирование',
+  'Political Mythology': 'Политическая мифология',
+  'Analytical Critique': 'Аналитическая критика',
+  'Social Media Trend': 'Тренды в социальных сетях',
+  'Russian Propaganda': 'Российская пропаганда',
+  'Anti-Corruption Effort': 'Антикоррупционная повестка',
+  'South Caucasus Stability': 'Стабильность Южного Кавказа',
+  'Military Tactic': 'Военная тактика',
+  'Multi-Vector Foreign Policy': 'Многовекторная внешняя политика',
+  'Conspiracy Theory': 'Теория заговора',
+  'Armenian Geopolitical Strategy': 'Геополитическая стратегия Армении',
+  'Iranian Political Landscape': 'Политический ландшафт Ирана',
+  'Iranian Military Action': 'Военные действия Ирана',
+  'Political Insult': 'Политические оскорбления',
+  'Iranian Political Climate': 'Политический климат Ирана',
+  'War Commentary': 'Военные комментарии',
+  'American Propaganda': 'Американская пропаганда',
+  'Mental Health': 'Психическое здоровье',
+  'Armenian Dram Exchange': 'Курс армянского драма',
+  'Political Commentary': 'Политические комментарии',
+  'Military Support': 'Военная поддержка',
+  'Interfaith Dialogue': 'Межконфессиональный диалог',
+  'Constitutional Reform': 'Конституционная реформа',
+  'Post-Soviet Identity': 'Постсоветская идентичность',
+  'Ukrainian Conflict': 'Украинский конфликт',
+  'Culinary Culture': 'Кулинарная культура',
+  'Telegram Community': 'Телеграм-сообщество',
+  'Housing Market': 'Рынок жилья',
+  'Family Life': 'Семейная жизнь',
+  'Banking Service': 'Банковские услуги',
+  'Military Conflict': 'Военный конфликт',
+  'Social Infrastructure': 'Социальная инфраструктура',
+  'Political Tension': 'Политическая напряжённость',
+  'Public Space': 'Общественное пространство',
+  'Religious Sentiment': 'Религиозные настроения',
+  'Government Criticism': 'Критика правительства',
+  'Political Disillusionment': 'Политическое разочарование',
+  'Iranian Political Discourse': 'Политический дискурс Ирана',
+  'Bot Activity': 'Активность ботов',
+  'Historical Claim': 'Исторические заявления',
+  'Urban Development': 'Городское развитие',
+  'Migration Intent': 'Миграционные намерения',
+  'Tech Startup': 'Технологические стартапы',
+  'Geopolitical Discontent': 'Геополитическое недовольство',
+  'Armenian-Turkish Relation': 'Армяно-турецкие отношения',
+  'Evil Force': 'Враждебные силы',
+  'Iranian Conflict': 'Иранский конфликт',
+  'Healthcare Access': 'Доступ к здравоохранению',
+  'Economic Sanctions': 'Экономические санкции',
+  'Military Recruitment': 'Военный призыв',
+  'Disinformation Campaign': 'Кампания дезинформации',
+  'Orthodox Christianity': 'Православное христианство',
+  'Russian Expat Community': 'Русскоязычная экспат-среда',
+  'Armenian Diaspora Identity': 'Идентичность армянской диаспоры',
 };
 const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DOW_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MIN_SUPPORT_FOR_TREND = 8;
 const MIN_SUPPORT_FOR_QA = 5;
 const MAX_ABS_TREND_PCT = 100;
+
+const HEALTH_LABEL_RU: Record<string, string> = {
+  'Constructive Intent': 'Конструктивный интент',
+  'Emotional Stability': 'Эмоциональная стабильность',
+  'Discussion Diversity': 'Разнообразие дискуссий',
+  'Conversation Depth': 'Глубина обсуждений',
+};
+
+const HEALTH_DESC_RU: Record<string, string> = {
+  'Share of constructive intent in analyzed messages': 'Доля конструктивного интента в проанализированных сообщениях',
+  'Inverse of negative-intent pressure': 'Обратный показатель давления негативного интента',
+  'How concentrated discussions are around few topics': 'Насколько обсуждения сосредоточены вокруг малого числа тем',
+  'Comment-scope depth per analyzed post': 'Глубина комментариев на один проанализированный пост',
+};
+
+const NOISY_TOPIC_KEYS = new Set(['', 'null', 'unknown', 'none', 'n/a', 'na']);
 
 function toEmptyShape(value: any): any {
   if (Array.isArray(value)) return [];
@@ -63,6 +193,27 @@ function normalizeTopicLabel(v: any): string {
   return asStr(v, '').replace(/\s+/g, ' ').trim();
 }
 
+function translateTopicRu(topicRaw: any): string {
+  const topic = normalizeTopicLabel(topicRaw);
+  if (!topic) return topic;
+
+  const exact = TOPIC_RU[topic];
+  if (exact) return exact;
+
+  const normalized = topic.toLowerCase();
+  if (normalized === 'null' || normalized === 'unknown' || normalized === 'none') {
+    return 'Неопределенная тема';
+  }
+
+  return topic;
+}
+
+function translateCategory(categoryRaw: any, ru: boolean): string {
+  const category = asStr(categoryRaw, 'General');
+  if (!ru) return category;
+  return CATEGORY_RU[category] || category;
+}
+
 function topicKey(v: any): string {
   return normalizeTopicLabel(v).toLowerCase();
 }
@@ -71,6 +222,33 @@ function snippet(v: any, maxLen = 180): string {
   const text = asStr(v, '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
+}
+
+function questionSnippet(v: any, maxLen = 160): string {
+  const text = asStr(v, '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+
+  const qPos = text.indexOf('?');
+  if (qPos < 0) return '';
+
+  const priorStops = [
+    text.lastIndexOf('.', qPos),
+    text.lastIndexOf('!', qPos),
+    text.lastIndexOf('?', qPos - 1),
+  ].filter((n) => n >= 0);
+  const start = priorStops.length ? Math.max(...priorStops) + 1 : 0;
+
+  const nextStops = [
+    text.indexOf('?', qPos + 1),
+    text.indexOf('.', qPos + 1),
+    text.indexOf('!', qPos + 1),
+  ].filter((n) => n >= 0);
+  const end = nextStops.length ? Math.min(...nextStops) : qPos;
+
+  const focused = text.slice(start, end + 1).trim();
+  const fallback = text.slice(Math.max(0, qPos - 90), Math.min(text.length, qPos + 70)).trim();
+  const candidate = focused.length >= 12 ? focused : fallback;
+  return snippet(candidate, maxLen);
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -115,16 +293,10 @@ function unwrapPayload(payload: any): any {
 
 function stageStyle(stageRaw: string) {
   const stage = stageRaw.toLowerCase();
-  if (stage.includes('emerg')) {
-    return { en: 'Emerging', ru: 'Зарождение', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', descEn: 'new', descRu: 'новая' };
+  if (stage.includes('grow') || stage.includes('emerg') || stage.includes('ris')) {
+    return { key: 'growing', en: 'Growing', ru: 'Рост', color: '#3b82f6', bgColor: 'bg-blue-50', borderColor: 'border-blue-200', textColor: 'text-blue-700', descEn: 'uptrend', descRu: 'рост' };
   }
-  if (stage.includes('peak')) {
-    return { en: 'Peak', ru: 'Пик', color: '#10b981', bgColor: 'bg-emerald-50', borderColor: 'border-emerald-200', textColor: 'text-emerald-700', descEn: 'high', descRu: 'высокая' };
-  }
-  if (stage.includes('estab')) {
-    return { en: 'Established', ru: 'Стабильная', color: '#8b5cf6', bgColor: 'bg-violet-50', borderColor: 'border-violet-200', textColor: 'text-violet-700', descEn: 'stable', descRu: 'стабильная' };
-  }
-  return { en: 'Fading', ru: 'Угасание', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', descEn: 'fading', descRu: 'спад' };
+  return { key: 'declining', en: 'Declining', ru: 'Снижение', color: '#f59e0b', bgColor: 'bg-amber-50', borderColor: 'border-amber-200', textColor: 'text-amber-700', descEn: 'downtrend', descRu: 'снижение' };
 }
 
 export function adaptDashboardPayload(payload: any): AppData {
@@ -132,6 +304,7 @@ export function adaptDashboardPayload(payload: any): AppData {
   const app = createEmptyAppData();
 
   const rawTrending = asArray(raw.trendingTopics);
+  const rawTrendingNew = asArray(raw.trendingNewTopics);
   const rawTopicBubbles = asArray(raw.topicBubbles);
   const rawTrendRows = asArray(raw.trendLines);
   const rawLifecycle = asArray(raw.lifecycleStages);
@@ -144,6 +317,11 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   const topicEvidenceTextByTopic = new Map<string, string>();
   const topicQuestionEvidenceByTopic = new Map<string, string[]>();
+  const topicLifecycleDetailsByTopic = new Map<string, {
+    summary: string;
+    topChannels: string[];
+    evidence: { text: string; channel: string; timestamp: string }[];
+  }>();
   rawAllTopics.forEach((row: any) => {
     const topic = normalizeTopicLabel(row?.name);
     if (!topic) return;
@@ -159,41 +337,86 @@ export function adaptDashboardPayload(payload: any): AppData {
     }
 
     const questionSnippets = [
-      ...questionRows.map((ev: any) => snippet(ev?.text, 180)),
-      ...evidenceRows.map((ev: any) => snippet(ev?.text, 180)).filter((text: string) => text.includes('?')),
+      ...questionRows.map((ev: any) => questionSnippet(ev?.text, 180)),
+      ...evidenceRows.map((ev: any) => questionSnippet(ev?.text, 180)),
     ].filter((text: string) => text.length > 0);
     if (questionSnippets.length > 0) {
       topicQuestionEvidenceByTopic.set(key, questionSnippets.slice(0, 10));
+    }
+
+    const combinedEvidence = [...questionRows, ...evidenceRows]
+      .map((ev: any) => ({
+        text: snippet(ev?.text, 260),
+        channel: asStr(ev?.channel, 'unknown'),
+        timestamp: asStr(ev?.timestamp, ''),
+      }))
+      .filter((ev: any) => ev.text.length > 0)
+      .slice(0, 4);
+
+    const channelCounts = new Map<string, number>();
+    [...questionRows, ...evidenceRows].forEach((ev: any) => {
+      const channel = asStr(ev?.channel, '').trim();
+      if (!channel) return;
+      channelCounts.set(channel, (channelCounts.get(channel) || 0) + 1);
+    });
+    const topChannels = Array.from(channelCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([channel]) => channel);
+
+    if (combinedEvidence.length > 0 || topChannels.length > 0) {
+      topicLifecycleDetailsByTopic.set(key, {
+        summary: combinedEvidence[0]?.text || firstEvidence || '',
+        topChannels,
+        evidence: combinedEvidence,
+      });
     }
   });
 
   try {
     const score = clamp(asNum(raw?.communityHealth?.score, app.communityHealth.currentScore), 0, 100);
-    const trendDirection = asStr(raw?.communityHealth?.trend, 'up');
-    const weekAgo = clamp(score - (trendDirection === 'up' ? 6 : -6), 0, 100);
+    const previousScore = clamp(
+      asNum(raw?.communityHealth?.previousScore, asNum(raw?.communityHealth?.weekAgoScore, score)),
+      0,
+      100,
+    );
     app.communityHealth.currentScore = score;
-    app.communityHealth.weekAgoScore = weekAgo;
-    app.communityHealth.history = Array.from({ length: 7 }).map((_, i) => ({
-      time: i === 6 ? 'Now' : `${6 - i}h ago`,
-      score: clamp(Math.round(weekAgo + ((score - weekAgo) * (i / 6))), 0, 100),
-    }));
-    const totalUsers = Math.max(1, asNum(raw?.communityHealth?.totalUsers, 1));
-    const activeUsers = asNum(raw?.communityHealth?.activeUsers, 0);
-    const totalPosts = asNum(raw?.communityHealth?.totalPosts, 0);
-    app.communityHealth.components = {
-      en: [
-        { label: 'Engagement Rate', value: clamp(pct(activeUsers, totalUsers), 0, 100), trend: score >= weekAgo ? 4 : -4, desc: 'Active users in last 7d' },
-        { label: 'Community Growth', value: clamp(score, 0, 100), trend: score - weekAgo, desc: 'Composite vitality index' },
-        { label: 'Content Velocity', value: clamp(Math.round(totalPosts / 8), 0, 100), trend: 3, desc: 'Posting volume trend' },
-        { label: 'Sentiment Stability', value: clamp(Math.round((score + 100) / 2), 0, 100), trend: 2, desc: 'Sentiment and tone balance' },
-      ],
-      ru: [
-        { label: 'Вовлечённость', value: clamp(pct(activeUsers, totalUsers), 0, 100), trend: score >= weekAgo ? 4 : -4, desc: 'Активные участники за 7 дней' },
-        { label: 'Рост сообщества', value: clamp(score, 0, 100), trend: score - weekAgo, desc: 'Композитный индекс динамики' },
-        { label: 'Скорость контента', value: clamp(Math.round(totalPosts / 8), 0, 100), trend: 3, desc: 'Динамика публикаций' },
-        { label: 'Стабильность тона', value: clamp(Math.round((score + 100) / 2), 0, 100), trend: 2, desc: 'Баланс настроений и тона' },
-      ],
-    };
+    app.communityHealth.weekAgoScore = previousScore;
+
+    const rawHistory = asArray(raw?.communityHealth?.history);
+    if (rawHistory.length > 0) {
+      app.communityHealth.history = rawHistory.slice(0, 7).map((row: any, i: number) => ({
+        time: asStr(row?.time, i === 6 ? 'Now' : `${6 - i}h ago`),
+        score: clamp(asNum(row?.score, previousScore), 0, 100),
+      }));
+    } else {
+      app.communityHealth.history = Array.from({ length: 7 }).map((_, i) => ({
+        time: i === 6 ? 'Now' : `${6 - i}h ago`,
+        score: clamp(Math.round(previousScore + ((score - previousScore) * (i / 6))), 0, 100),
+      }));
+    }
+
+    const rawComponents = asArray(raw?.communityHealth?.components);
+    if (rawComponents.length > 0) {
+      app.communityHealth.components = {
+        en: rawComponents.slice(0, 4).map((comp: any) => ({
+          label: asStr(comp?.label, 'Signal'),
+          value: clamp(asNum(comp?.value, 0), 0, 100),
+          trend: Math.round(asNum(comp?.trend, 0)),
+          desc: asStr(comp?.desc, ''),
+        })),
+        ru: rawComponents.slice(0, 4).map((comp: any) => {
+          const labelEn = asStr(comp?.label, 'Signal');
+          const descEn = asStr(comp?.desc, '');
+          return {
+            label: HEALTH_LABEL_RU[labelEn] || labelEn,
+            value: clamp(asNum(comp?.value, 0), 0, 100),
+            trend: Math.round(asNum(comp?.trend, 0)),
+            desc: HEALTH_DESC_RU[descEn] || descEn,
+          };
+        }),
+      };
+    }
   } catch {
     // Keep mock defaults.
   }
@@ -213,48 +436,66 @@ export function adaptDashboardPayload(payload: any): AppData {
               : (asNum(row.currentMentions, 0) > 0 ? 100 : 0))
           : asNum(row.trend, 0),
       );
-        const quoteFromEvidence = topicEvidenceTextByTopic.get(key) || topicQuestionEvidenceByTopic.get(key)?.[0] || '';
+        const quoteFromEvidence = snippet(row.sampleQuote, 180) || topicEvidenceTextByTopic.get(key) || topicQuestionEvidenceByTopic.get(key)?.[0] || '';
         return {
           id: i + 1,
-          topic: ru ? topic : topic,
+          topic: ru ? translateTopicRu(topic) : topic,
+          sourceTopic: topic,
         mentions,
         trend,
-          category: ru ? (CATEGORY_RU[category] || category) : category,
+          category: translateCategory(category, ru),
           sentiment: sentiments[i % sentiments.length],
           sampleQuote: quoteFromEvidence,
         };
       };
-    if (rawTrending.length > 0) {
-      app.trendingTopics.en = rawTrending.slice(0, 12).map((r: any, i: number) => toTopic(r, i, false));
-      app.trendingTopics.ru = rawTrending.slice(0, 12).map((r: any, i: number) => toTopic(r, i, true));
+    const filteredTrending = rawTrending.filter((row: any) => {
+      const topic = normalizeTopicLabel(row?.name || row?.topic);
+      if (!topic) return false;
+      if (NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return false;
+      return asNum(row?.mentions || row?.postMentions || row?.totalPosts, 0) > 0;
+    });
+
+    if (filteredTrending.length > 0) {
+      app.trendingTopics.en = filteredTrending.slice(0, 12).map((r: any, i: number) => toTopic(r, i, false));
+      app.trendingTopics.ru = filteredTrending.slice(0, 12).map((r: any, i: number) => toTopic(r, i, true));
+    }
+
+    if (rawTrendingNew.length > 0) {
+      app.trendingNewTopics.en = rawTrendingNew.slice(0, 12).map((r: any, i: number) => toTopic(r, i, false));
+      app.trendingNewTopics.ru = rawTrendingNew.slice(0, 12).map((r: any, i: number) => toTopic(r, i, true));
+    } else if (rawEmerging.length > 0) {
+      app.trendingNewTopics.en = rawEmerging.slice(0, 12).map((r: any, i: number) => toTopic(r, i, false));
+      app.trendingNewTopics.ru = rawEmerging.slice(0, 12).map((r: any, i: number) => toTopic(r, i, true));
     }
   } catch {
     // Keep mock defaults.
   }
 
   try {
-    const posts24h = asNum(raw?.communityBrief?.postsLast24h, 0);
-    const comments24h = asNum(raw?.communityBrief?.commentsLast24h, 0);
-    const active24h = asNum(raw?.communityBrief?.activeUsersLast24h, 0);
+    const posts24h = asNum(raw?.communityBrief?.postsAnalyzed24h, asNum(raw?.communityBrief?.postsLast24h, 0));
+    const commentScopes24h = asNum(raw?.communityBrief?.commentScopesAnalyzed24h, asNum(raw?.communityBrief?.commentsLast24h, 0));
+    const positiveIntentPct = clamp(asNum(raw?.communityBrief?.positiveIntentPct24h, 0), 0, 100);
+    const negativeIntentPct = clamp(asNum(raw?.communityBrief?.negativeIntentPct24h, 0), 0, 100);
+    const neutralIntentPct = clamp(100 - positiveIntentPct - negativeIntentPct, 0, 100);
     const topTopics = asArray<string>(raw?.communityBrief?.topTopics).slice(0, 5);
-    app.communityBrief.messagesAnalyzed = asNum(raw?.vitalityIndicators?.totalComments, comments24h) + asNum(raw?.vitalityIndicators?.totalPosts, posts24h);
-    app.communityBrief.updatedMinutesAgo = 5;
-    app.communityBrief.activeMembers = active24h.toLocaleString();
-    app.communityBrief.messagesToday = (posts24h + comments24h).toLocaleString();
-    app.communityBrief.positiveMood = `${clamp(asNum(raw?.communityHealth?.score, 60), 0, 100)}%`;
-    const newMembersGrowth = asNum(raw?.communityBrief?.newActiveUsersGrowthPct, Number.NaN);
-    const postChangeFallback = asNum(asArray(raw.weeklyShifts)[0]?.postChange, 0);
-    const newGrowth = Number.isFinite(newMembersGrowth) ? newMembersGrowth : postChangeFallback;
-    app.communityBrief.newMembersGrowth = `${newGrowth > 0 ? '+' : ''}${Math.round(newGrowth)}%`;
-    app.communityBrief.mainBrief.en = `Community data shows ${posts24h} posts and ${comments24h} comments in the last 24h. Top themes include ${topTopics.join(', ') || 'core community topics'}.`;
-    app.communityBrief.mainBrief.ru = `Данные сообщества показывают ${posts24h} постов и ${comments24h} комментариев за 24 часа. Ключевые темы: ${topTopics.join(', ') || 'основные темы сообщества'}.`;
+    const topTopicsRu = topTopics.map((t) => translateTopicRu(t));
+    const totalAnalyses = asNum(raw?.communityBrief?.totalAnalyses24h, posts24h + commentScopes24h);
+    app.communityBrief.messagesAnalyzed = totalAnalyses;
+    app.communityBrief.updatedMinutesAgo = asNum(raw?.communityBrief?.refreshedMinutesAgo, 5);
+    app.communityBrief.postsAnalyzed24h = posts24h;
+    app.communityBrief.commentScopesAnalyzed24h = commentScopes24h;
+    app.communityBrief.positiveIntentPct24h = positiveIntentPct;
+    app.communityBrief.negativeIntentPct24h = negativeIntentPct;
+
+    app.communityBrief.mainBrief.en = `Last 24h snapshot: ${posts24h} posts and ${commentScopes24h} analyzed comment scopes. People talk mostly about ${topTopics.join(', ') || 'core community topics'}.`;
+    app.communityBrief.mainBrief.ru = `Снимок за 24 часа: ${posts24h} постов и ${commentScopes24h} контекстных групп комментариев. Чаще всего обсуждают: ${topTopicsRu.join(', ') || 'ключевые темы сообщества'}.`;
     app.communityBrief.expandedBrief.en = [
-      `Active users in the last 24h: ${active24h}.`,
-      'Dashboard metrics are aggregated from the backend data pipeline.',
+      `Intent split: ${positiveIntentPct}% positive, ${negativeIntentPct}% negative, ${neutralIntentPct}% neutral.`,
+      'Every top topic can be opened with real post/comment evidence snippets.',
     ];
     app.communityBrief.expandedBrief.ru = [
-      `Активных пользователей за 24 часа: ${active24h}.`,
-      'Метрики панели агрегируются из серверного контура данных.',
+      `Распределение интента: ${positiveIntentPct}% позитивный, ${negativeIntentPct}% негативный, ${neutralIntentPct}% нейтральный.`,
+      'Каждую топ-тему можно открыть и проверить по реальным цитатам постов/комментариев.',
     ];
   } catch {
     // Keep mock defaults.
@@ -266,6 +507,7 @@ export function adaptDashboardPayload(payload: any): AppData {
       rawTopicBubbles.forEach((r: any) => {
         const name = normalizeTopicLabel(r.name || r.topic);
         if (!name) return;
+        if (NOISY_TOPIC_KEYS.has(name.toLowerCase())) return;
         const key = topicKey(name);
         const existing = mergedByTopic.get(key);
         if (!existing) {
@@ -295,24 +537,29 @@ export function adaptDashboardPayload(payload: any): AppData {
       const convert = (ru: boolean) => dedupedRows.map((r: any) => {
         const category = asStr(r.category, 'General');
         const value = asNum(r.mentionCount, asNum(r.postMentions, 0) + asNum(r.commentMentions, 0));
+        if (value <= 0) return null;
         const weeklyCurrent = asNum(r.mentions7d, 0);
         const weeklyPrevious = asNum(r.mentionsPrev7d, 0);
         const fromWindow = boundedTrend(weeklyCurrent, weeklyPrevious);
         const support = asNum(r.growthSupport, fromWindow.support);
         const backendGrowth = asNum(r.growth7dPct, Number.NaN);
         const backendReliable = Number.isFinite(backendGrowth) && support >= MIN_SUPPORT_FOR_TREND;
+        const sourceTopic = normalizeTopicLabel(r.name);
+        const sourceKey = topicKey(sourceTopic);
         return {
-          name: normalizeTopicLabel(r.name),
+          name: ru ? translateTopicRu(sourceTopic) : sourceTopic,
+          sourceTopic,
           value,
-          category: ru ? (CATEGORY_RU[category] || category) : category,
+          category: translateCategory(category, ru),
           color: hashColor(category),
           growth: backendReliable
             ? clamp(Math.round(backendGrowth), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
             : fromWindow.value,
           growthReliable: backendReliable || fromWindow.reliable,
           evidenceCount: support,
+          sampleQuote: topicEvidenceTextByTopic.get(sourceKey) || topicQuestionEvidenceByTopic.get(sourceKey)?.[0] || '',
         };
-      });
+      }).filter((item): item is NonNullable<typeof item> => Boolean(item));
       app.topicBubbles.en = convert(false);
       app.topicBubbles.ru = convert(true);
     }
@@ -322,37 +569,65 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawTrendRows.length > 0) {
-      const totals = new Map<string, number>();
+      const perTopicPerWeek = new Map<string, Map<string, number>>();
+      const weekSet = new Set<string>();
       rawTrendRows.forEach((r: any) => {
-        const t = asStr(r.topic, 'topic');
-        totals.set(t, (totals.get(t) || 0) + asNum(r.posts, 0));
-      });
-      const topTopics = Array.from(totals.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([t]) => t);
-      const keyByTopic = Object.fromEntries(topTopics.map((t) => [t, slugify(t)]));
-      const weeksMap = new Map<string, any>();
-      rawTrendRows.forEach((r: any) => {
-        const topic = asStr(r.topic);
-        if (!topTopics.includes(topic)) return;
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
         const year = asNum(r.year, 0);
         const week = asNum(r.week, 0);
+        if (!year || !week) return;
         const label = `${year}-W${String(week).padStart(2, '0')}`;
-        if (!weeksMap.has(label)) weeksMap.set(label, { week: label });
-        weeksMap.get(label)[keyByTopic[topic]] = asNum(r.posts, 0);
+        weekSet.add(label);
+        if (!perTopicPerWeek.has(topic)) perTopicPerWeek.set(topic, new Map<string, number>());
+        const wMap = perTopicPerWeek.get(topic)!;
+        wMap.set(label, asNum(wMap.get(label), 0) + asNum(r.posts, 0));
       });
-      app.trendData = Array.from(weeksMap.values()).sort((a, b) => asStr(a.week).localeCompare(asStr(b.week)));
+
+      const weeksOrdered = Array.from(weekSet).sort((a, b) => asStr(a).localeCompare(asStr(b)));
+      if (weeksOrdered.length === 0) {
+        app.trendData = [];
+        app.trendLines.en = [];
+        app.trendLines.ru = [];
+      } else {
+        const recentWeeks = weeksOrdered.slice(-2);
+        const topicScoreRows = Array.from(perTopicPerWeek.entries()).map(([topic, wMap]) => {
+          const recentVolume = recentWeeks.reduce((sum, w) => sum + asNum(wMap.get(w), 0), 0);
+          const totalVolume = weeksOrdered.reduce((sum, w) => sum + asNum(wMap.get(w), 0), 0);
+          return { topic, recentVolume, totalVolume };
+        });
+
+        const topTopics = topicScoreRows
+          .sort((a, b) => (b.recentVolume - a.recentVolume) || (b.totalVolume - a.totalVolume))
+          .slice(0, 6)
+          .map((r) => r.topic);
+
+        const keyByTopic = Object.fromEntries(topTopics.map((t) => [t, slugify(t)]));
+        app.trendData = weeksOrdered.map((weekLabel) => {
+          const row: Record<string, string | number> = { week: weekLabel };
+          topTopics.forEach((topic) => {
+            const key = keyByTopic[topic];
+            row[key] = asNum(perTopicPerWeek.get(topic)?.get(weekLabel), 0);
+          });
+          return row;
+        });
+
       app.trendLines.en = topTopics.map((topic, i) => {
         const key = keyByTopic[topic];
-        const first = asNum(app.trendData[0]?.[key], 0);
-        const current = asNum(app.trendData[app.trendData.length - 1]?.[key], 0);
+        const lastIdx = app.trendData.length - 1;
+        const prevIdx = Math.max(0, lastIdx - 1);
+        const current = asNum(app.trendData[lastIdx]?.[key], 0);
+        const previous = asNum(app.trendData[prevIdx]?.[key], 0);
         return {
           key,
           label: topic,
           color: TOPIC_COLORS[i % TOPIC_COLORS.length],
           current,
-          change: first > 0 ? Math.round(((current - first) / first) * 100) : 0,
+          change: previous > 0 ? Math.round(((current - previous) / previous) * 100) : (current > 0 ? 100 : 0),
         };
       });
       app.trendLines.ru = app.trendLines.en.map((line) => ({ ...line }));
+      }
     }
   } catch {
     // Keep mock defaults.
@@ -393,6 +668,95 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
+    const briefRows = asArray(raw.questionBriefs);
+    if (briefRows.length > 0) {
+      const merged = new Map<string, any>();
+      briefRows.forEach((r: any) => {
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
+        const key = asStr(r.id, '').trim() || topicKey(topic);
+        if (merged.has(key)) return;
+
+        const evidenceRows = asArray(r.evidence)
+          .map((ev: any) => ({
+            id: asStr(ev.id, ''),
+            quote: snippet(ev.quote, 500),
+            channel: asStr(ev.channel, 'unknown'),
+            timestamp: asStr(ev.timestamp, ''),
+            kind: asStr(ev.kind, 'message'),
+          }))
+          .filter((ev: any) => ev.id && ev.quote)
+          .slice(0, 4);
+
+        merged.set(key, {
+          id: key,
+          topic,
+          category: asStr(r.category, 'General'),
+          questionEn: asStr(r.canonicalQuestionEn, asStr(r.questionEn, asStr(r.question, asStr(r.titleEn, asStr(r.title, topic))))),
+          questionRu: asStr(r.canonicalQuestionRu, asStr(r.questionRu, asStr(r.canonicalQuestionEn, asStr(r.question, asStr(r.titleRu, asStr(r.titleEn, asStr(r.title, topic))))))),
+          summaryEn: asStr(r.summaryEn, asStr(r.briefEn, asStr(r.summary, asStr(r.brief, '')))),
+          summaryRu: asStr(r.summaryRu, asStr(r.briefRu, asStr(r.summaryEn, asStr(r.summary, asStr(r.briefEn, asStr(r.brief, '')))))),
+          confidence: asStr(r.confidence, 'medium').toLowerCase(),
+          confidenceScore: clamp(asNum(r.confidenceScore, 0.6), 0, 1),
+          status: asStr(r.status, 'partially_answered'),
+          resolvedPct: clamp(asNum(r.resolvedPct, 0), 0, 100),
+          demandSignals: {
+            messages: Math.max(0, asNum(r?.demandSignals?.messages, asNum(r.signalCount, 0))),
+            uniqueUsers: Math.max(0, asNum(r?.demandSignals?.uniqueUsers, asNum(r.uniqueUsers, 0))),
+            channels: Math.max(0, asNum(r?.demandSignals?.channels, asNum(r.channelCount, 0))),
+            trend7dPct: clamp(asNum(r?.demandSignals?.trend7dPct, asNum(r.trend7dPct, 0)), -100, 100),
+          },
+          sampleEvidenceId: asStr(r.sampleEvidenceId, evidenceRows[0]?.id || ''),
+          latestAt: asStr(r.latestAt, ''),
+          evidence: evidenceRows,
+        });
+      });
+
+      const en = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: r.topic,
+        sourceTopic: r.topic,
+        category: r.category,
+        question: r.questionEn || r.topic,
+        summary: r.summaryEn || r.questionEn || r.topic,
+        title: r.questionEn || r.topic,
+        brief: r.summaryEn || r.questionEn || r.topic,
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        status: (['needs_guide', 'partially_answered', 'well_covered'].includes(r.status) ? r.status : 'partially_answered') as 'needs_guide' | 'partially_answered' | 'well_covered',
+        resolvedPct: r.resolvedPct,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+      const ruRows = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: translateTopicRu(r.topic),
+        sourceTopic: r.topic,
+        category: translateCategory(r.category, true),
+        question: r.questionRu || r.questionEn || translateTopicRu(r.topic),
+        summary: r.summaryRu || r.summaryEn || r.questionRu || r.questionEn || translateTopicRu(r.topic),
+        title: r.questionRu || r.questionEn || translateTopicRu(r.topic),
+        brief: r.summaryRu || r.summaryEn || r.questionRu || r.questionEn || translateTopicRu(r.topic),
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        status: (['needs_guide', 'partially_answered', 'well_covered'].includes(r.status) ? r.status : 'partially_answered') as 'needs_guide' | 'partially_answered' | 'well_covered',
+        resolvedPct: r.resolvedPct,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+
+      app.questionBriefs.en = en.slice(0, 8);
+      app.questionBriefs.ru = ruRows.slice(0, 8);
+    }
+  } catch {
+    // Keep mock defaults.
+  }
+
+  try {
     const qRows = asArray(raw.questionCategories);
     if (qRows.length > 0) {
       const merged = new Map<string, any>();
@@ -407,6 +771,7 @@ export function adaptDashboardPayload(payload: any): AppData {
             topic,
             seekers: asNum(r.seekers, 0),
             respondedSeekers: asNum(r.respondedSeekers, 0),
+            sampleQuestionId: asStr(r.sampleQuestionId, ''),
           });
           return;
         }
@@ -415,6 +780,7 @@ export function adaptDashboardPayload(payload: any): AppData {
           seekers: asNum(existing.seekers, 0) + asNum(r.seekers, 0),
           respondedSeekers: asNum(existing.respondedSeekers, 0) + asNum(r.respondedSeekers, 0),
           sampleQuestion: asStr(existing.sampleQuestion) || asStr(r.sampleQuestion),
+          sampleQuestionId: asStr(existing.sampleQuestionId) || asStr(r.sampleQuestionId),
           category: asStr(existing.category || r.category, 'General'),
         });
       });
@@ -430,14 +796,13 @@ export function adaptDashboardPayload(payload: any): AppData {
         const coveragePct = lowEvidence
           ? 0
           : clamp(Math.round(asNum(r.coveragePct, count > 0 ? (answeredCount / count) * 100 : 0)), 0, 100);
-        const sampleQuestion = snippet(r.sampleQuestion, 140);
-        const questionText = sampleQuestion && topicKey(sampleQuestion) !== topicKey(topic)
-          ? sampleQuestion
-          : (topicQuestionEvidenceByTopic.get(topicKey(topic))?.[0] || '');
+        const sampleQuestion = questionSnippet(r.sampleQuestion, 140);
+        const questionText = sampleQuestion;
         byCat.get(cat)?.push({
           q: topic,
           preview: questionText,
           topic,
+          evidenceId: asStr(r.sampleQuestionId, ''),
           count,
           answered: lowEvidence ? false : answeredCount > 0,
           coveragePct,
@@ -470,30 +835,240 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawLifecycle.length > 0) {
+      const stageOrder = ['growing', 'declining'];
       const byStage = new Map<string, any[]>();
       rawLifecycle.forEach((r: any) => {
-        const stage = asStr(r.stage, 'established');
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
+        const topicKeyNorm = topic.trim().toLowerCase();
+        if (!topicKeyNorm || ['null', 'unknown', 'none', 'n/a', 'na'].includes(topicKeyNorm)) return;
+
+        const style = stageStyle(asStr(r.stage, 'peak'));
+        const stage = style.key;
         if (!byStage.has(stage)) byStage.set(stage, []);
+
+        const key = topicKey(topic);
+        const details = topicLifecycleDetailsByTopic.get(key);
+
         const first = new Date(asStr(r.firstSeen, new Date().toISOString()));
-        const daysActive = Math.max(1, Math.round((Date.now() - first.getTime()) / 86400000));
-        const total = Math.max(1, asNum(r.totalPosts, 1));
-        const recent = asNum(r.recentPosts, 0);
+        const fallbackDays = Math.max(1, Math.round((Date.now() - first.getTime()) / 86400000));
+        const daysActive = Math.max(1, asNum(r.ageDays, fallbackDays));
+
+        const weeklyCurrent = Math.max(0, asNum(r.weeklyCurrent, asNum(r.recentPosts, 0)));
+        const weeklyPrev = Math.max(0, asNum(r.weeklyPrev, 0));
+        const weeklyDelta = asNum(r.weeklyDelta, weeklyCurrent - weeklyPrev);
+
         byStage.get(stage)?.push({
-          name: asStr(r.topic),
+          name: topic,
+          sourceTopic: topic,
           daysActive,
-          momentum: clamp(Math.round((recent / total) * 100), -100, 200),
-          volume: recent || total,
+          momentum: Math.round(weeklyDelta),
+          volume: weeklyCurrent,
+          summary: details?.summary || '',
+          topChannels: details?.topChannels || [],
+          evidence: details?.evidence || [],
         });
       });
-      const stagesEn = Array.from(byStage.entries()).map(([stage, topics]) => {
-        const s = stageStyle(stage);
-        return { stage: s.en, color: s.color, bgColor: s.bgColor, borderColor: s.borderColor, textColor: s.textColor, desc: s.descEn, topics: topics.slice(0, 8) };
+
+      stageOrder.forEach((stage) => {
+        if (!byStage.has(stage)) byStage.set(stage, []);
+        byStage.set(
+          stage,
+          (byStage.get(stage) || [])
+            .sort((a, b) => (b.volume - a.volume) || (b.momentum - a.momentum))
+            .slice(0, 8),
+        );
       });
-      const stagesRu = Array.from(byStage.entries()).map(([stage, topics]) => {
+
+      const stagesEn = stageOrder.map((stage) => {
         const s = stageStyle(stage);
-        return { stage: s.ru, color: s.color, bgColor: s.bgColor, borderColor: s.borderColor, textColor: s.textColor, desc: s.descRu, topics: topics.slice(0, 8) };
+        return { stage: s.en, color: s.color, bgColor: s.bgColor, borderColor: s.borderColor, textColor: s.textColor, desc: s.descEn, topics: byStage.get(stage) || [] };
+      });
+      const stagesRu = stageOrder.map((stage) => {
+        const s = stageStyle(stage);
+        return {
+          stage: s.ru,
+          color: s.color,
+          bgColor: s.bgColor,
+          borderColor: s.borderColor,
+          textColor: s.textColor,
+          desc: s.descRu,
+          topics: (byStage.get(stage) || []).map((topic: any) => ({
+            ...topic,
+            name: translateTopicRu(topic.name),
+          })),
+        };
       });
       app.lifecycleStages = { en: stagesEn, ru: stagesRu };
+    }
+  } catch {
+    // Keep mock defaults.
+  }
+
+  try {
+    const pbRows = asArray(raw.problemBriefs);
+    if (pbRows.length > 0) {
+      const merged = new Map<string, any>();
+      pbRows.forEach((r: any) => {
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
+        const key = asStr(r.id, '').trim() || `pb-${topicKey(topic)}`;
+        if (merged.has(key)) return;
+
+        const evidenceRows = asArray(r.evidence)
+          .map((ev: any) => ({
+            id: asStr(ev.id, ''),
+            quote: snippet(ev.quote, 500),
+            channel: asStr(ev.channel, 'unknown'),
+            timestamp: asStr(ev.timestamp, ''),
+            kind: asStr(ev.kind, 'message'),
+          }))
+          .filter((ev: any) => ev.id && ev.quote)
+          .slice(0, 4);
+
+        const severity = asStr(r.severity, 'medium').toLowerCase();
+        merged.set(key, {
+          id: key,
+          topic,
+          category: asStr(r.category, 'General'),
+          problemEn: asStr(r.problemEn, asStr(r.problem, topic)),
+          problemRu: asStr(r.problemRu, asStr(r.problemEn, asStr(r.problem, topic))),
+          summaryEn: asStr(r.summaryEn, asStr(r.summary, '')),
+          summaryRu: asStr(r.summaryRu, asStr(r.summaryEn, asStr(r.summary, ''))),
+          severity: (['critical', 'high', 'medium', 'low'].includes(severity) ? severity : 'medium') as 'critical' | 'high' | 'medium' | 'low',
+          confidence: asStr(r.confidence, 'medium').toLowerCase(),
+          confidenceScore: clamp(asNum(r.confidenceScore, 0.6), 0, 1),
+          demandSignals: {
+            messages: Math.max(0, asNum(r?.demandSignals?.messages, asNum(r.signalCount, 0))),
+            uniqueUsers: Math.max(0, asNum(r?.demandSignals?.uniqueUsers, asNum(r.uniqueUsers, 0))),
+            channels: Math.max(0, asNum(r?.demandSignals?.channels, asNum(r.channelCount, 0))),
+            trend7dPct: clamp(asNum(r?.demandSignals?.trend7dPct, asNum(r.trend7dPct, 0)), -100, 100),
+          },
+          sampleEvidenceId: asStr(r.sampleEvidenceId, evidenceRows[0]?.id || ''),
+          latestAt: asStr(r.latestAt, ''),
+          evidence: evidenceRows,
+        });
+      });
+
+      const en = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: r.topic,
+        sourceTopic: r.topic,
+        category: r.category,
+        problem: r.problemEn || r.topic,
+        summary: r.summaryEn || r.problemEn || r.topic,
+        severity: r.severity,
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+      const ruRows = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: translateTopicRu(r.topic),
+        sourceTopic: r.topic,
+        category: translateCategory(r.category, true),
+        problem: r.problemRu || r.problemEn || translateTopicRu(r.topic),
+        summary: r.summaryRu || r.summaryEn || r.problemRu || r.problemEn || translateTopicRu(r.topic),
+        severity: r.severity,
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+
+      app.problemBriefs.en = en.slice(0, 8);
+      app.problemBriefs.ru = ruRows.slice(0, 8);
+    }
+  } catch {
+    // Keep mock defaults.
+  }
+
+  try {
+    const sgbRows = asArray(raw.serviceGapBriefs);
+    if (sgbRows.length > 0) {
+      const merged = new Map<string, any>();
+      sgbRows.forEach((r: any) => {
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
+        const key = asStr(r.id, '').trim() || `sg-${topicKey(topic)}`;
+        if (merged.has(key)) return;
+
+        const evidenceRows = asArray(r.evidence)
+          .map((ev: any) => ({
+            id: asStr(ev.id, ''),
+            quote: snippet(ev.quote, 500),
+            channel: asStr(ev.channel, 'unknown'),
+            timestamp: asStr(ev.timestamp, ''),
+            kind: asStr(ev.kind, 'message'),
+          }))
+          .filter((ev: any) => ev.id && ev.quote)
+          .slice(0, 4);
+
+        const urgency = asStr(r.urgency, 'medium').toLowerCase();
+        merged.set(key, {
+          id: key,
+          topic,
+          category: asStr(r.category, 'General'),
+          serviceNeedEn: asStr(r.serviceNeedEn, asStr(r.serviceNeed, topic)),
+          serviceNeedRu: asStr(r.serviceNeedRu, asStr(r.serviceNeedEn, asStr(r.serviceNeed, topic))),
+          unmetReasonEn: asStr(r.unmetReasonEn, asStr(r.unmetReason, '')),
+          unmetReasonRu: asStr(r.unmetReasonRu, asStr(r.unmetReasonEn, asStr(r.unmetReason, ''))),
+          urgency: (['critical', 'high', 'medium', 'low'].includes(urgency) ? urgency : 'medium') as 'critical' | 'high' | 'medium' | 'low',
+          unmetPct: clamp(asNum(r.unmetPct, asNum(r.dissatisfactionPct, 0)), 0, 100),
+          confidence: asStr(r.confidence, 'medium').toLowerCase(),
+          confidenceScore: clamp(asNum(r.confidenceScore, 0.6), 0, 1),
+          demandSignals: {
+            messages: Math.max(0, asNum(r?.demandSignals?.messages, asNum(r.signalCount, 0))),
+            uniqueUsers: Math.max(0, asNum(r?.demandSignals?.uniqueUsers, asNum(r.uniqueUsers, 0))),
+            channels: Math.max(0, asNum(r?.demandSignals?.channels, asNum(r.channelCount, 0))),
+            trend7dPct: clamp(asNum(r?.demandSignals?.trend7dPct, asNum(r.trend7dPct, 0)), -100, 100),
+          },
+          sampleEvidenceId: asStr(r.sampleEvidenceId, evidenceRows[0]?.id || ''),
+          latestAt: asStr(r.latestAt, ''),
+          evidence: evidenceRows,
+        });
+      });
+
+      const en = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: r.topic,
+        sourceTopic: r.topic,
+        category: r.category,
+        serviceNeed: r.serviceNeedEn || r.topic,
+        unmetReason: r.unmetReasonEn || r.serviceNeedEn || r.topic,
+        urgency: r.urgency,
+        unmetPct: Math.round(r.unmetPct),
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+      const ruRows = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: translateTopicRu(r.topic),
+        sourceTopic: r.topic,
+        category: translateCategory(r.category, true),
+        serviceNeed: r.serviceNeedRu || r.serviceNeedEn || translateTopicRu(r.topic),
+        unmetReason: r.unmetReasonRu || r.unmetReasonEn || r.serviceNeedRu || r.serviceNeedEn || translateTopicRu(r.topic),
+        urgency: r.urgency,
+        unmetPct: Math.round(r.unmetPct),
+        confidence: (['high', 'medium', 'low'].includes(r.confidence) ? r.confidence : 'medium') as 'high' | 'medium' | 'low',
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+
+      app.serviceGapBriefs.en = en.slice(0, 8);
+      app.serviceGapBriefs.ru = ruRows.slice(0, 8);
     }
   } catch {
     // Keep mock defaults.
@@ -509,6 +1084,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const sev = asStr(r.severity, 'Negative').toLowerCase().includes('urgent') ? 'high' : 'medium';
         const topic = normalizeTopicLabel(r.topic);
         if (!topic) return;
+        if (NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return;
         const key = topicKey(topic);
         const weeklyCurrent = asNum(r.affectedThisWeek, 0);
         const weeklyPrevious = asNum(r.affectedPrevWeek, 0);
@@ -571,8 +1147,9 @@ export function adaptDashboardPayload(payload: any): AppData {
         const support = asNum(r.demandGrowthSupport, computedGrowth.support);
         const backendGrowth = asNum(r.demandGrowthPct, Number.NaN);
         const growthReliable = Number.isFinite(backendGrowth) && support >= MIN_SUPPORT_FOR_TREND;
+        const topic = normalizeTopicLabel(r.topic);
         return {
-          service: asStr(r.topic),
+          service: ru ? translateTopicRu(topic) : topic,
           demand: asNum(r.demand, 0),
           supply,
           gap: clamp(Math.round(dissatisfaction), 0, 100),
@@ -584,8 +1161,12 @@ export function adaptDashboardPayload(payload: any): AppData {
           supplyLevel,
         };
       };
-      app.serviceGaps.en = sgRows.map((r: any) => mapGap(r, false)).slice(0, 12);
-      app.serviceGaps.ru = sgRows.map((r: any) => mapGap(r, true)).slice(0, 12);
+      const filtered = sgRows.filter((r: any) => {
+        const topic = normalizeTopicLabel(r.topic);
+        return topic.length > 0 && !NOISY_TOPIC_KEYS.has(topic.toLowerCase());
+      });
+      app.serviceGaps.en = filtered.map((r: any) => mapGap(r, false)).slice(0, 12);
+      app.serviceGaps.ru = filtered.map((r: any) => mapGap(r, true)).slice(0, 12);
     }
   } catch {
     // Keep mock defaults.
@@ -595,18 +1176,22 @@ export function adaptDashboardPayload(payload: any): AppData {
     const satRows = asArray(raw.satisfactionAreas);
     if (satRows.length > 0) {
       const mk = (r: any) => {
-        const area = asStr(r.category, 'General');
+        const area = normalizeTopicLabel(r.category || r.topic || 'General');
         const satisfaction = clamp(Math.round(asNum(r.satisfactionPct, 0)), 0, 100);
         return {
+          sourceArea: area,
           area,
           satisfaction,
           mentions: asNum(r.pos, 0) + asNum(r.neg, 0) + asNum(r.neu, 0),
           trend: clamp(Math.round((asNum(r.pos, 0) - asNum(r.neg, 0)) / 8), -50, 50),
-          emoji: satisfaction >= 65 ? '🙂' : satisfaction >= 45 ? '😐' : '😟',
+          emoji: satisfaction >= 60 ? '🙂' : satisfaction >= 40 ? '😐' : '😟',
         };
       };
-      app.satisfactionAreas.en = satRows.map(mk);
-      app.satisfactionAreas.ru = satRows.map((r: any) => ({ ...mk(r), area: CATEGORY_RU[asStr(r.category)] || asStr(r.category) }));
+      app.satisfactionAreas.en = satRows.map(mk).filter((r: any) => r.area && !NOISY_TOPIC_KEYS.has(r.area.toLowerCase()));
+      app.satisfactionAreas.ru = satRows.map((r: any) => {
+        const base = mk(r);
+        return { ...base, area: translateTopicRu(base.sourceArea) || base.sourceArea };
+      }).filter((r: any) => r.area && !NOISY_TOPIC_KEYS.has(r.sourceArea.toLowerCase()));
     }
   } catch {
     // Keep mock defaults.
@@ -625,11 +1210,9 @@ export function adaptDashboardPayload(payload: any): AppData {
         if (sentiment.includes('positive')) row.satisfied += count;
         else if (sentiment.includes('negative')) row.frustrated += count;
         else if (sentiment.includes('urgent')) row.anxious += count;
-        else if (sentiment.includes('mixed')) row.excited += Math.round(count / 2);
-        else row.neutral += count;
+        else row.neutral += count; // Map 'mixed' purely to neutral, avoid data injection
       });
       const mood = Array.from(byWeek.values()).sort((a, b) => asStr(a.week).localeCompare(asStr(b.week))).slice(-10);
-      mood.forEach((m) => { if (m.excited === 0) m.excited = Math.round(m.satisfied * 0.35); });
       app.moodData = mood;
     }
     app.moodConfig = {
@@ -656,18 +1239,18 @@ export function adaptDashboardPayload(payload: any): AppData {
     const uRows = asArray(raw.urgencySignals);
     if (uRows.length > 0) {
       const en = uRows.map((r: any) => ({
-        message: `Need immediate help around ${asStr(r.topic)}.`,
-        topic: asStr(r.topic),
-        urgency: asNum(r.urgentUsers, 0) > 8 ? 'critical' : 'high',
-        count: asNum(r.urgentUsers, 0),
-        action: 'Assign moderator follow-up and pin guidance',
+        message: asStr(r.messageEn) || `Need immediate help around ${asStr(r.topicEn || r.topic)}.`,
+        topic: asStr(r.topicEn || r.topic),
+        urgency: asStr(r.urgency, asNum(r.messages || r.count, 0) > 8 ? 'critical' : 'high').toLowerCase(),
+        count: asNum(r.count, 0) || asNum(r.messages, 0) || asNum(r.urgentUsers, 0),
+        action: asStr(r.actionEn) || 'Assign moderator follow-up and pin guidance',
       }));
       const ru = uRows.map((r: any) => ({
-        message: `Нужна срочная помощь по теме: ${asStr(r.topic)}.`,
-        topic: asStr(r.topic),
-        urgency: asNum(r.urgentUsers, 0) > 8 ? 'critical' : 'high',
-        count: asNum(r.urgentUsers, 0),
-        action: 'Назначить модератора и закрепить инструкцию',
+        message: asStr(r.messageRu) || `Нужна срочная помощь по теме: ${asStr(r.topicRu || r.topic)}.`,
+        topic: asStr(r.topicRu || r.topic),
+        urgency: asStr(r.urgency, asNum(r.messages || r.count, 0) > 8 ? 'critical' : 'high').toLowerCase(),
+        count: asNum(r.count, 0) || asNum(r.messages, 0) || asNum(r.urgentUsers, 0),
+        action: asStr(r.actionRu) || 'Назначить модератора и закрепить инструкцию',
       }));
       app.urgencySignals = { en, ru };
     }
@@ -677,16 +1260,50 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawChannels.length > 0) {
-      app.communityChannels = rawChannels.map((c: any, i: number) => ({
-        name: asStr(c.title || c.username || `Channel ${i + 1}`),
-        type: 'General',
-        members: Math.max(500, asNum(c.memberCount, 0) || asNum(c.postCount, 0) * 120),
-        dailyMessages: Math.max(1, Math.round(asNum(c.postCount, 0) / 30)),
-        engagement: clamp(Math.round(asNum(c.avgViews, 0) / 25), 5, 99),
-        growth: clamp(Math.round(asNum(c.postCount, 0) / 20), -20, 50),
-        topTopicEN: asStr(asArray(c.topTopics)[0], app.trendingTopics.en[0]?.topic || 'General'),
-        topTopicRU: asStr(asArray(c.topTopics)[0], app.trendingTopics.ru[0]?.topic || 'Общий'),
-      }));
+      app.communityChannels = rawChannels.map((c: any, i: number) => {
+        const topTopic = asStr(asArray(c.topTopics)[0], 'General');
+        
+        let chType = 'General';
+        const tLower = topTopic.toLowerCase();
+        if (tLower.includes('job') || tLower.includes('work') || tLower.includes('career') || tLower.includes('employ')) chType = 'Work';
+        else if (tLower.includes('hous') || tLower.includes('rent') || tLower.includes('apart') || tLower.includes('real estate')) chType = 'Housing';
+        else if (tLower.includes('business') || tLower.includes('invest') || tLower.includes('tax') || tLower.includes('market')) chType = 'Business';
+        else if (tLower.includes('fam') || tLower.includes('child') || tLower.includes('school') || tLower.includes('educa')) chType = 'Family';
+        else if (tLower.includes('law') || tLower.includes('legal') || tLower.includes('visa') || tLower.includes('pass') || tLower.includes('resid')) chType = 'Legal';
+        else if (tLower.includes('art') || tLower.includes('music') || tLower.includes('food') || tLower.includes('cultur') || tLower.includes('event')) chType = 'Lifestyle';
+
+        const trueMembers = asNum(c.memberCount, 0) || Math.max(500, asNum(c.postCount, 0) * 120);
+        const trueDaily = Math.max(1, Math.round(asNum(c.recentPosts, 0) / 14));
+        const trueGrowth = asNum(c.posts7d, 0) - asNum(c.posts14to7d, 0);
+
+        // Calculate a reasonable engagement score combining views, replies, and forwards relative to audience size over the recent period
+        // If members are unknown, we fall back to a view-based scaling.
+        const avgV = asNum(c.avgViews, 1);
+        const avgF = asNum(c.avgForwards, 0);
+        const avgC = asNum(c.avgComments, 0);
+        
+        let engagementPct = 0;
+        if (trueMembers > 0) {
+            // Give 1 point for a view, 5 for a forward, 10 for a comment
+            const interactions = avgV + (avgF * 5) + (avgC * 10);
+            engagementPct = (interactions / trueMembers) * 100;
+            // Cap at 99% for channels whose views greatly exceed subscribers
+            if (engagementPct > 99) engagementPct = 99;
+        } else {
+            engagementPct = clamp(Math.round(avgV / 25), 5, 99);
+        }
+
+        return {
+          name: asStr(c.title || c.username || `Channel ${i + 1}`),
+          type: chType,
+          members: trueMembers,
+          dailyMessages: trueDaily,
+          engagement: clamp(Math.round(engagementPct), 1, 99),
+          growth: trueGrowth,
+          topTopicEN: topTopic,
+          topTopicRU: topTopic, // Let frontend handle translation or fallback
+        };
+      });
     }
   } catch {
     // Keep mock defaults.
@@ -1137,7 +1754,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const count = asNum(r.count, 0);
         rec.volume += count;
         if (sentiment.includes('positive')) rec.positive += count;
-        else if (sentiment.includes('negative')) rec.negative += count;
+        else if (sentiment.includes('negative') || sentiment.includes('urgent') || sentiment.includes('sarcastic')) rec.negative += count;
         else rec.neutral += count;
       });
       const rows = Array.from(byTopic.entries()).map(([topic, s]) => {

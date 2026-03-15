@@ -16,6 +16,9 @@ import type {
   TrendingTopic,
   TopChannel,
   SentimentData,
+  InsightAudience,
+  InsightCard,
+  InsightCardsResponse,
 } from '@/app/graph/contracts';
 
 export type {
@@ -34,6 +37,9 @@ export type {
   TrendingTopic,
   TopChannel,
   SentimentData,
+  InsightAudience,
+  InsightCard,
+  InsightCardsResponse,
 };
 
 function normalizeNodeType(type: unknown): string {
@@ -364,6 +370,24 @@ export async function getGraphInsights(): Promise<{ insight: string; timestamp: 
       insight: 'Graph insights endpoint is not connected yet.',
       timestamp: new Date().toISOString(),
     };
+  }
+}
+
+export async function getInsightCards(
+  filters: AIClientFilters = {},
+  audience: InsightAudience = 'analyst',
+): Promise<InsightCard[]> {
+  try {
+    const payload = await requestJson<InsightCardsResponse>('/api/insights/cards', {
+      method: 'POST',
+      body: JSON.stringify({ filters, audience }),
+    });
+    return Array.isArray(payload?.cards) ? payload.cards : [];
+  } catch (error) {
+    if (isMissingEndpointError(error)) {
+      return [];
+    }
+    throw error;
   }
 }
 

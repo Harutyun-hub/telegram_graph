@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
@@ -15,21 +16,85 @@ function getCategoryColor(_category: string, index: number): string {
   return FALLBACK_COLORS[index % FALLBACK_COLORS.length];
 }
 
+function topicTileSpec(value: number, minValue: number, maxValue: number) {
+  const range = Math.max(1, maxValue - minValue);
+  const normalized = (value - minValue) / range;
+
+  if (normalized >= 0.82) {
+    return {
+      tileClass: 'col-span-2 md:col-span-4 xl:col-span-5 row-span-3',
+      titleClass: 'text-base md:text-[17px]',
+      lineClamp: 2,
+      showMeta: true,
+      showSnippet: true,
+    };
+  }
+  if (normalized >= 0.55) {
+    return {
+      tileClass: 'col-span-2 md:col-span-3 xl:col-span-4 row-span-2',
+      titleClass: 'text-sm md:text-[15px]',
+      lineClamp: 2,
+      showMeta: true,
+      showSnippet: false,
+    };
+  }
+  if (normalized >= 0.30) {
+    return {
+      tileClass: 'col-span-1 md:col-span-3 xl:col-span-3 row-span-2',
+      titleClass: 'text-xs md:text-sm',
+      lineClamp: 2,
+      showMeta: true,
+      showSnippet: false,
+    };
+  }
+  return {
+    tileClass: 'col-span-1 md:col-span-2 xl:col-span-2 row-span-1',
+    titleClass: 'text-xs',
+    lineClamp: 1,
+    showMeta: false,
+    showSnippet: false,
+  };
+}
+
 export function TopicLandscape() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
   const topicBubbles = data.topicBubbles[lang] ?? [];
+  const [activeCategory, setActiveCategory] = useState<string>('__all__');
+
   const totalMentions = topicBubbles.reduce((sum, t) => sum + (t.value || 0), 0);
   const lowEvidenceGrowth = topicBubbles.filter((t) => !t.growthReliable).length;
 
   if (!topicBubbles.length) return <EmptyWidget title={ru ? 'Карта тем' : 'Topic Landscape'} />;
 
-  // Derive unique categories dynamically from the data
-  const categoryMap = new Map<string, string>();
-  topicBubbles.forEach(t => { if (!categoryMap.has(t.category)) categoryMap.set(t.category, t.color); });
-  const catLabels = Array.from(categoryMap.keys());
-  const catColors = Object.fromEntries(categoryMap);
+  const categoryLegend = useMemo(() => {
+    const map = new Map<string, { color: string; topics: number; mentions: number }>();
+    topicBubbles.forEach((item) => {
+      const current = map.get(item.category);
+      if (!current) {
+        map.set(item.category, { color: item.color, topics: 1, mentions: item.value || 0 });
+        return;
+      }
+      current.topics += 1;
+      current.mentions += item.value || 0;
+    });
+
+    return Array.from(map.entries())
+      .map(([category, meta]) => ({ category, ...meta }))
+      .sort((a, b) => b.mentions - a.mentions);
+  }, [topicBubbles]);
+
+  const primaryCategories = categoryLegend.slice(0, 6);
+  const extraCategories = categoryLegend.slice(6);
+
+  const visibleTopics = useMemo(() => {
+    if (activeCategory === '__all__') return topicBubbles;
+    return topicBubbles.filter((item) => item.category === activeCategory);
+  }, [topicBubbles, activeCategory]);
+
+  const maxValue = Math.max(...visibleTopics.map((t) => t.value || 0), 1);
+  const minValue = Math.min(...visibleTopics.map((t) => t.value || 0), maxValue);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -43,46 +108,164 @@ export function TopicLandscape() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Размер = число упоминаний. Рост показывается только если данных за 2 недели достаточно.'
-          : 'Size = mention volume. Growth is shown only when 2-week evidence is sufficient.'}
+          ? 'Площадь плитки = число упоминаний за 14 дней. Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.'
+          : 'Tile area = mentions in the last 14 days. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.'}
       </p>
 
-      <div className="flex flex-wrap gap-2">
-        {topicBubbles.map((topic) => {
-          const size = Math.max(60, Math.sqrt(topic.value) * 2);
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <button
+          onClick={() => setActiveCategory('__all__')}
+          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+            activeCategory === '__all__' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+          }`}
+          style={{ fontWeight: 500 }}
+        >
+          {ru ? 'Все категории' : 'All categories'}
+        </button>
+        {primaryCategories.map((cat, i) => (
+          <button
+            key={cat.category}
+            onClick={() => setActiveCategory(cat.category)}
+            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+              activeCategory === cat.category ? 'bg-slate-100 text-slate-900 border-slate-300' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+            }`}
+            style={{ fontWeight: 500 }}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color ?? getCategoryColor(cat.category, i) }} />
+              <span>{cat.category}</span>
+              <span className="text-gray-400">· {cat.topics}</span>
+            </span>
+          </button>
+        ))}
+
+        {extraCategories.length > 0 && (
+          <details className="relative">
+            <summary className="list-none text-xs px-2.5 py-1 rounded-full border bg-white text-gray-600 border-gray-200 hover:bg-gray-50 cursor-pointer" style={{ fontWeight: 500 }}>
+              {ru ? `Ещё категории (${extraCategories.length})` : `More categories (${extraCategories.length})`}
+            </summary>
+            <div className="absolute z-20 mt-2 w-[320px] max-w-[85vw] rounded-xl border border-gray-200 bg-white shadow-lg p-2">
+              <div className="flex flex-wrap gap-1.5">
+                {extraCategories.map((cat, i) => (
+                  <button
+                    key={cat.category}
+                    onClick={() => setActiveCategory(cat.category)}
+                    className={`text-xs px-2 py-1 rounded-full border transition-colors ${
+                      activeCategory === cat.category ? 'bg-slate-100 text-slate-900 border-slate-300' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                    }`}
+                    style={{ fontWeight: 500 }}
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color ?? getCategoryColor(cat.category, i) }} />
+                      <span>{cat.category}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </details>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-8 xl:grid-cols-12 auto-rows-[64px] gap-3">
+        {visibleTopics.map((topic) => {
+          const spec = topicTileSpec(topic.value || 0, minValue, maxValue);
+          const growthLabel = topic.growthReliable
+            ? `${topic.growth > 0 ? '+' : ''}${topic.growth}%`
+            : (ru ? 'н/д' : 'n/a');
+          const growthClass = topic.growthReliable
+            ? (topic.growth >= 0 ? 'text-emerald-600' : 'text-red-500')
+            : 'text-gray-400';
+          const borderColor = `${topic.color}55`;
+          const accentColor = `${topic.color}D9`;
+
           return (
             <Link
-              key={topic.name}
-              to={`/topics?topic=${encodeURIComponent(topic.name)}`}
-              className="rounded-xl flex flex-col items-center justify-center cursor-pointer hover:scale-105 transition-transform"
-              style={{ width: size, height: size * 0.7, backgroundColor: topic.color + '15', border: `1px solid ${topic.color}30` }}
+              key={`${topic.sourceTopic || topic.name}-${topic.category}`}
+              to={`/topics?topic=${encodeURIComponent(topic.sourceTopic || topic.name)}`}
+              className={`${spec.tileClass} relative rounded-xl border bg-white p-2 md:p-3 overflow-hidden hover:shadow-sm transition-shadow`}
+              style={{ borderColor }}
             >
-              <span className="text-xs text-gray-900 text-center px-1 leading-tight" style={{ fontWeight: 500, fontSize: size > 80 ? '11px' : '9px' }}>
-                {topic.name}
-              </span>
-                <span className={`text-xs ${topic.growthReliable ? (topic.growth >= 0 ? 'text-emerald-600' : 'text-red-500') : 'text-gray-400'}`} style={{ fontSize: '9px', fontWeight: 600 }}>
-                  {topic.growthReliable ? `${topic.growth > 0 ? '+' : ''}${topic.growth}%` : (ru ? 'н/д' : 'n/a')}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
+              <div className="absolute left-0 top-0 w-full h-1" style={{ backgroundColor: accentColor }} />
 
-      <div className="flex items-center gap-4 mt-4 pt-3 border-t border-gray-100">
-        {catLabels.map((cat, i) => (
-          <div key={cat} className="flex items-center gap-1">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: catColors[cat] ?? getCategoryColor(cat, i) }} />
-            <span className="text-xs text-gray-500">{cat}</span>
-          </div>
-        ))}
+              <div className="flex h-full flex-col justify-between gap-1">
+                <span
+                  className={`${spec.titleClass} text-gray-900 leading-tight`}
+                  style={{
+                    fontWeight: 600,
+                    display: '-webkit-box',
+                    WebkitLineClamp: spec.lineClamp,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                  }}
+                  title={topic.name}
+                >
+                  {topic.name}
+                </span>
+
+                {spec.showSnippet && topic.sampleQuote && (
+                  <span
+                    className="text-[11px] text-gray-600 leading-tight"
+                    style={{
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                    title={topic.sampleQuote}
+                  >
+                    {topic.sampleQuote}
+                  </span>
+                )}
+
+                <div className="flex items-end justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] text-gray-600">
+                      {topic.value.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}
+                    </div>
+                    {spec.showMeta && (
+                      <div className="text-[10px] text-gray-500">
+                        {ru ? 'категория' : 'category'}: {topic.category}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="text-right">
+                    <div className="text-[10px] text-gray-500" style={{ fontWeight: 600 }}>
+                      {ru ? '7д Δ' : '7d Δ'}
+                    </div>
+                    <div className={`text-xs ${growthClass}`} style={{ fontWeight: 700 }}>
+                      {growthLabel}
+                    </div>
+                    {spec.showMeta && (
+                      <div className="text-[10px] text-gray-500">
+                        {topic.growthReliable ? (ru ? 'статистика достаточна' : 'evidence sufficient') : (ru ? 'мало данных' : 'low evidence')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-4 mt-4 pt-3 border-t border-gray-100">
+        <span className="text-xs text-gray-500">
+          {ru ? 'Цвет полоски = категория темы' : 'Top strip color = topic category'}
+        </span>
+        <span className="text-xs text-gray-500">
+          {ru ? '7д Δ = изменение за 7 дней к предыдущим 7 дням' : '7d Δ = last 7 days vs previous 7 days'}
+        </span>
         <Link to="/topics" className="ml-auto text-xs text-blue-600 hover:text-blue-800 hover:underline transition-colors" style={{ fontWeight: 500 }}>
           {ru ? 'Все темы →' : 'See all topics →'}
         </Link>
       </div>
+
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalMentions.toLocaleString()} упоминаний по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
-          : `Evidence: ${totalMentions.toLocaleString()} mentions across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
+          ? `Основа: ${totalMentions.toLocaleString()} упоминаний за 14 дней по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
+          : `Evidence: ${totalMentions.toLocaleString()} mentions in the last 14 days across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
       </p>
     </div>
   );
@@ -263,20 +446,100 @@ export function QuestionCloud() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
+  const questionBriefs = data.questionBriefs[lang] ?? [];
   const questionCategories = data.questionCategories[lang] ?? [];
 
-  if (!questionCategories.length) return <EmptyWidget title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
+  if (!questionBriefs.length && !questionCategories.length) {
+    return <EmptyWidget title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
+  }
 
-  // Compute unanswered count dynamically
-  const unansweredCount = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.filter(q => !q.answered && !q.lowEvidence).length, 0
-  );
-  const lowEvidenceCount = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.filter(q => q.lowEvidence).length, 0
-  );
-  const totalAsked = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.reduce((inner, q) => inner + q.count, 0), 0
-  );
+  if (!questionBriefs.length) {
+    const totalSignals = questionCategories.reduce(
+      (sum, cat) => sum + cat.questions.reduce((inner, q) => inner + q.count, 0), 0,
+    );
+
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+            {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
+          </h3>
+          <span className="text-xs text-gray-500">{ru ? 'Резервный режим' : 'Fallback mode'}</span>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          {ru
+            ? 'Пока AI-карточки недоступны, показываем сигналы вопросов по темам. Это не число повторов одной и той же формулировки.'
+            : 'AI question cards are unavailable, so this view shows topic-level question signals. This is not an exact repeat count of one phrasing.'}
+        </p>
+
+        <div className="space-y-4">
+          {questionCategories.map((cat) => (
+            <div key={cat.category}>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{cat.category}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {cat.questions.map((q) => (
+                  <Link
+                    key={`${cat.category}-${q.topic || q.q}`}
+                    to={(() => {
+                      const params = new URLSearchParams();
+                      params.set('topic', q.topic || q.q);
+                      params.set('view', 'questions');
+                      if (q.evidenceId) params.set('evidenceId', q.evidenceId);
+                      return `/topics?${params.toString()}`;
+                    })()}
+                    className="px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors bg-gray-50 border-gray-100 text-gray-700 hover:bg-gray-100"
+                  >
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="truncate" style={{ fontWeight: 600 }}>{q.topic || q.q}</span>
+                    </div>
+                    <span className="text-xs text-gray-500 mt-0.5 block truncate">
+                      {q.preview || (ru ? 'Нет зафиксированного вопроса в текущем срезе' : 'No captured question in current slice')}
+                    </span>
+                    <span className="text-xs text-gray-400 mt-0.5 block">
+                      {q.count.toLocaleString()} {ru ? 'сигналов вопроса (30д)' : 'question signals (30d)'}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <p className="text-xs text-gray-400 mt-3">
+          {ru
+            ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выборке за 30 дней.`
+            : `Evidence: ${totalSignals.toLocaleString()} question signals in the 30-day sample.`}
+        </p>
+      </div>
+    );
+  }
+
+  const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
+  const totalSignals = questionBriefs.reduce((sum, b) => sum + (b.demandSignals?.messages || 0), 0);
+  const avgConfidence = questionBriefs.length
+    ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
+    : 0;
+
+  const statusLabel = (status: string) => {
+    if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
+    if (status === 'well_covered') return ru ? 'Тема в целом покрыта' : 'Mostly covered';
+    return ru ? 'Частично покрыта' : 'Partially covered';
+  };
+
+  const statusClass = (status: string) => {
+    if (status === 'needs_guide') return 'bg-amber-50 border-amber-200 text-amber-900';
+    if (status === 'well_covered') return 'bg-emerald-50 border-emerald-200 text-emerald-900';
+    return 'bg-blue-50 border-blue-200 text-blue-900';
+  };
+
+  const confidenceLabel = (value: string) => {
+    if (value === 'high') return ru ? 'Высокая' : 'High';
+    if (value === 'medium') return ru ? 'Средняя' : 'Medium';
+    return ru ? 'Низкая' : 'Low';
+  };
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -284,76 +547,70 @@ export function QuestionCloud() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
         </h3>
-        <span className="text-xs text-gray-500">{ru ? 'По категориям' : 'Grouped by category'}</span>
+        <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Показываем реальные формулировки, если они есть. При малом объёме данных отмечаем это явно.'
-          : 'Shows real question wording when available. Low-sample items are flagged explicitly.'}
+          ? 'Показываем общественные вопросы в форме вопроса: объединяем похожие запросы и привязываем каждую карточку к реальным сообщениям-источникам.'
+          : 'Shows societal questions in question form: similar asks are combined, and each card is tied to real source evidence.'}
       </p>
 
-      <div className="space-y-4">
-        {questionCategories.map((cat) => (
-          <div key={cat.category}>
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-              <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{cat.category}</span>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+        {questionBriefs.map((brief) => (
+          <Link
+            key={brief.id}
+            to={(() => {
+              const params = new URLSearchParams();
+              params.set('topic', brief.sourceTopic || brief.topic);
+              params.set('view', 'questions');
+              if (brief.sampleEvidenceId) params.set('evidenceId', brief.sampleEvidenceId);
+              return `/topics?${params.toString()}`;
+            })()}
+            className={`rounded-xl border p-3 transition-colors hover:shadow-sm ${statusClass(brief.status)}`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] opacity-80">{brief.category}</div>
+                <div className="text-sm leading-snug" style={{ fontWeight: 700 }}>{brief.question}</div>
+              </div>
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20" style={{ fontWeight: 600 }}>
+                {confidenceLabel(brief.confidence)} {ru ? 'уверенность' : 'confidence'}
+              </span>
             </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              {cat.questions.map((q) => (
-                <Link
-                  key={`${cat.category}-${q.topic || q.q}`}
-                  to={`/topics?topic=${encodeURIComponent(q.topic || q.q)}&view=questions`}
-                  className={`px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors ${
-                    q.lowEvidence
-                      ? 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100'
-                      : q.answered
-                      ? 'bg-gray-50 border-gray-100 text-gray-600 hover:bg-gray-100'
-                      : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    <span className="truncate" style={{ fontWeight: 600 }}>{q.topic || q.q}</span>
-                  </div>
-                  <span className="text-xs text-gray-500 mt-0.5 block truncate">
-                    {q.preview || (ru ? 'Нет зафиксированного вопроса в текущем срезе' : 'No captured question in current slice')}
-                  </span>
-                  <span className="text-xs text-gray-400 mt-0.5 block">
-                    {q.count} {ru ? 'раз задан' : 'times asked'}
-                  </span>
-                  {q.lowEvidence && (
-                    <span className="text-xs text-slate-400 mt-0.5 block">
-                      {ru ? 'Недостаточно данных для оценки ответов' : 'Insufficient data to score answers'}
-                    </span>
-                  )}
-                </Link>
-              ))}
+
+            <p className="text-xs leading-relaxed mt-1.5 opacity-90">{brief.summary}</p>
+
+            <div className="text-[11px] mt-2 opacity-85">
+              {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
             </div>
-          </div>
+            <div className="text-[11px] mt-0.5 opacity-85">
+              {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}% · {statusLabel(brief.status)}
+            </div>
+          </Link>
         ))}
       </div>
 
       <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
         <div className="flex items-center gap-1.5">
           <div className="w-3 h-3 rounded bg-amber-50 border border-amber-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Нужен гайд' : 'Needs a guide'}</span>
+          <span className="text-xs text-gray-500">{ru ? 'Нужен чёткий ответ/гайд' : 'Needs clear response/guide'}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-gray-50 border border-gray-100" />
-          <span className="text-xs text-gray-500">{ru ? 'Ответ / гайд есть' : 'Answered/guide exists'}</span>
+          <div className="w-3 h-3 rounded bg-blue-50 border border-blue-200" />
+          <span className="text-xs text-gray-500">{ru ? 'Частично покрыто' : 'Partially covered'}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-slate-50 border border-slate-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Мало данных' : 'Low evidence'}</span>
+          <div className="w-3 h-3 rounded bg-emerald-50 border border-emerald-200" />
+          <span className="text-xs text-gray-500">{ru ? 'В целом покрыто' : 'Mostly covered'}</span>
         </div>
         <span className="text-xs text-amber-600 ml-auto" style={{ fontWeight: 500 }}>
-          {unansweredCount} {ru ? 'вопросов без гайда' : 'questions need guides'}
+          {needsGuideCount} {ru ? 'карточек требуют гайд' : 'cards need guides'}
         </span>
       </div>
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalAsked.toLocaleString()} запросов в выборке. ${lowEvidenceCount > 0 ? `${lowEvidenceCount} пунктов с низкой статистикой.` : ''}`
-          : `Evidence: ${totalAsked.toLocaleString()} asks in sample. ${lowEvidenceCount > 0 ? `${lowEvidenceCount} low-evidence items.` : ''}`}
+          ? `Основа: ${totalSignals.toLocaleString()} сигналов в выборке. Показаны только карточки со средней/высокой уверенностью (средняя уверенность ${avgConfidence}%).`
+          : `Evidence: ${totalSignals.toLocaleString()} signals in sample. Only medium/high confidence cards are shown (avg confidence ${avgConfidence}%).`}
       </p>
     </div>
   );
@@ -471,6 +728,7 @@ export function TopicLifecycle() {
   const { data } = useData();
   const ru = lang === 'ru';
   const lifecycleStages = data.lifecycleStages[lang] ?? [];
+  const [expandedKey, setExpandedKey] = useState('');
 
   if (!lifecycleStages.length) return <EmptyWidget title={ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'} />;
 
@@ -481,16 +739,21 @@ export function TopicLifecycle() {
           {ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'}
         </h3>
         <span className="text-xs text-gray-500">
-          {ru ? 'Зарождение -> Пик -> Угасание' : 'Emerging -> Peak -> Fading'}
+          {ru ? 'Рост -> Снижение' : 'Growing -> Declining'}
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'На каком этапе жизненного цикла находится каждая тема? Действуйте на стадии Зарождения, усиливайте Подъём, готовьте выход на Спаде.'
-          : 'Where is each conversation in its lifecycle? Act early on Emerging, capitalize on Rising, plan exits for Declining.'}
+          ? 'Показывает, где внимание к теме растёт, а где снижается, на основе недельных сигналов (посты + комментарии).'
+          : 'Shows where attention is growing and where it is declining, based on weekly signals (posts + comments).'}
+      </p>
+      <p className="text-xs text-gray-400 mb-4">
+        {ru
+          ? 'X/нед. — объём обсуждений за 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема активна.'
+          : 'X/wk = discussion volume in 7 days; Δ = change vs previous 7 days; d = how many days the topic has been active.'}
       </p>
 
-      <div className="grid grid-cols-4 gap-1 mb-4">
+      <div className="grid grid-cols-2 gap-1 mb-4">
         {lifecycleStages.map((s) => (
           <div key={s.stage} className={`${s.bgColor} border ${s.borderColor} rounded-lg px-2 py-1.5 text-center`}>
             <div className="w-2 h-2 rounded-full mx-auto mb-1" style={{ backgroundColor: s.color }} />
@@ -510,15 +773,74 @@ export function TopicLifecycle() {
             </div>
             <div className="space-y-1.5 pl-4">
               {stageGroup.topics.map((topic) => (
-                <div key={topic.name} className={`flex items-center justify-between px-3 py-2 rounded-lg ${stageGroup.bgColor} border ${stageGroup.borderColor}`}>
-                  <span className="text-xs text-gray-900" style={{ fontWeight: 500 }}>{topic.name}</span>
-                  <div className="flex items-center gap-3 text-xs">
-                    <span className="text-gray-400">{topic.volume.toLocaleString()} {ru ? '/нед.' : '/wk'}</span>
-                    <span className={topic.momentum > 0 ? 'text-emerald-600' : 'text-red-500'} style={{ fontWeight: 600 }}>
-                      {topic.momentum > 0 ? '+' : ''}{topic.momentum}%
-                    </span>
-                    <span className="text-gray-400 w-8 text-right">{topic.daysActive}{ru ? 'д.' : 'd'}</span>
-                  </div>
+                <div key={`${stageGroup.stage}-${topic.sourceTopic || topic.name}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const key = `${stageGroup.stage}-${topic.sourceTopic || topic.name}`;
+                      setExpandedKey((prev) => (prev === key ? '' : key));
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg ${stageGroup.bgColor} border ${stageGroup.borderColor} hover:brightness-[0.99] transition-colors`}
+                  >
+                    <span className="text-xs text-gray-900 text-left" style={{ fontWeight: 500 }}>{topic.name}</span>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="text-gray-400">{topic.volume.toLocaleString()} {ru ? '/нед.' : '/wk'}</span>
+                      <span className={topic.momentum > 0 ? 'text-emerald-600' : (topic.momentum < 0 ? 'text-red-500' : 'text-gray-500')} style={{ fontWeight: 600 }}>
+                        Δ {topic.momentum > 0 ? '+' : ''}{topic.momentum}
+                      </span>
+                      <span className="text-gray-400 w-8 text-right">{topic.daysActive}{ru ? 'д.' : 'd'}</span>
+                      <span className="text-gray-400 w-4 text-right" style={{ fontWeight: 600 }}>
+                        {expandedKey === `${stageGroup.stage}-${topic.sourceTopic || topic.name}` ? '−' : '+'}
+                      </span>
+                    </div>
+                  </button>
+
+                  {expandedKey === `${stageGroup.stage}-${topic.sourceTopic || topic.name}` && (
+                    <div className="mt-1.5 ml-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                      <p className="text-xs text-gray-600 leading-relaxed">
+                        {ru
+                          ? `За последние 7 дней тема получила ${topic.volume.toLocaleString()} упоминаний. По сравнению с предыдущими 7 днями изменение составило ${topic.momentum > 0 ? '+' : ''}${topic.momentum} упоминаний.`
+                          : `In the last 7 days this topic had ${topic.volume.toLocaleString()} mentions. Compared with the previous 7 days, the change is ${topic.momentum > 0 ? '+' : ''}${topic.momentum} mentions.`}
+                      </p>
+
+                      {topic.topChannels && topic.topChannels.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          <span className="text-[11px] text-gray-500">{ru ? 'Каналы:' : 'Channels:'}</span>
+                          {topic.topChannels.slice(0, 3).map((ch) => (
+                            <span key={`${topic.name}-${ch}`} className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                              {ch}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {topic.evidence && topic.evidence.length > 0 ? (
+                        <div className="mt-2 space-y-1.5">
+                          {topic.evidence.slice(0, 2).map((ev, idx) => (
+                            <div key={`${topic.name}-ev-${idx}`} className="text-[11px] text-gray-600 rounded border border-gray-100 bg-gray-50 px-2 py-1.5">
+                              <div className="text-gray-700" style={{ fontWeight: 500 }}>{ev.channel || (ru ? 'канал' : 'channel')}</div>
+                              <div className="mt-0.5 leading-relaxed">{ev.text}</div>
+                              {ev.timestamp && <div className="mt-0.5 text-gray-400">{ev.timestamp.slice(0, 16).replace('T', ' ')}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-gray-400">
+                          {ru ? 'Пока нет сохранённых примеров сообщений для этой темы.' : 'No saved message evidence for this topic yet.'}
+                        </p>
+                      )}
+
+                      <div className="mt-2">
+                        <Link
+                          to={`/topics?topic=${encodeURIComponent(topic.sourceTopic || topic.name)}&view=evidence`}
+                          className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                          style={{ fontWeight: 500 }}
+                        >
+                          {ru ? 'Открыть полные доказательства →' : 'Open full evidence →'}
+                        </Link>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

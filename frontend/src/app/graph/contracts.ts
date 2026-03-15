@@ -59,3 +59,30 @@ export interface SentimentData {
   label: string;
   count: number;
 }
+
+export type InsightAudience = 'executive' | 'analyst';
+
+export interface InsightEvidenceItem {
+  query_id: string;
+  metric: string;
+  value: number | string | null;
+  note?: string;
+}
+
+export interface InsightCard {
+  id: string;
+  title: string;
+  summary: string;
+  why_it_matters: string;
+  confidence: number;
+  priority: 'high' | 'medium' | 'low';
+  audience: InsightAudience;
+  evidence: InsightEvidenceItem[];
+  generated_at: string;
+}
+
+export interface InsightCardsResponse {
+  cards: InsightCard[];
+  source: 'ai' | 'deterministic_fallback';
+  generated_at: string;
+}

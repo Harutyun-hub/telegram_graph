@@ -46,16 +46,16 @@ function mapTopicEvidence(rows: any[], prefix: string): TopicEvidence[] {
     .map((ev: any, idx: number) => {
       const rawType = asStr(ev.type, 'message').toLowerCase();
       const type = rawType === 'post' ? 'message' : rawType;
-      return {
-        id: asStr(ev.id, `${prefix}-${idx}`),
-        type: (type === 'message' || type === 'reply' || type === 'reaction') ? type : 'message',
-        author: asStr(ev.author, 'unknown'),
-        channel: asStr(ev.channel, 'unknown'),
-        text: asStr(ev.text, '').slice(0, 500),
-        timestamp: asStr(ev.timestamp, ''),
-        reactions: Math.max(0, asNum(ev.reactions, 0)),
-        replies: Math.max(0, asNum(ev.replies, 0)),
-      };
+        return {
+          id: asStr(ev.id, `${prefix}-${idx}`),
+          type: (type === 'message' || type === 'reply' || type === 'reaction') ? type : 'message',
+          author: asStr(ev.author, 'unknown'),
+          channel: asStr(ev.channel, 'unknown'),
+          text: asStr(ev.text, ''),
+          timestamp: asStr(ev.timestamp, ''),
+          reactions: Math.max(0, asNum(ev.reactions, 0)),
+          replies: Math.max(0, asNum(ev.replies, 0)),
+        };
     })
     .filter((ev) => ev.text.length > 0);
 }
