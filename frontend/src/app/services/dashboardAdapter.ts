@@ -1261,8 +1261,24 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     if (rawChannels.length > 0) {
       app.communityChannels = rawChannels.map((c: any, i: number) => {
+        // Use the new backend fields directly when available
+        if (c.engagement !== undefined && c.type !== undefined && c.dailyMessages !== undefined) {
+          // Backend already provides calculated metrics
+          return {
+            name: asStr(c.name || c.title || c.username || `Channel ${i + 1}`),
+            type: asStr(c.type, 'General'),
+            members: asNum(c.members || c.memberCount, 1000),
+            dailyMessages: asNum(c.dailyMessages, 0),
+            engagement: clamp(Math.round(asNum(c.engagement, 0)), 1, 99),
+            growth: asNum(c.growth, 0),
+            topTopicEN: asStr(c.topTopicEN || asArray(c.topTopics)[0], 'General'),
+            topTopicRU: asStr(c.topTopicRU || asArray(c.topTopics)[0], 'General'),
+          };
+        }
+
+        // Fallback to old calculation method if backend hasn't been updated
         const topTopic = asStr(asArray(c.topTopics)[0], 'General');
-        
+
         let chType = 'General';
         const tLower = topTopic.toLowerCase();
         if (tLower.includes('job') || tLower.includes('work') || tLower.includes('career') || tLower.includes('employ')) chType = 'Work';
@@ -1281,7 +1297,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const avgV = asNum(c.avgViews, 1);
         const avgF = asNum(c.avgForwards, 0);
         const avgC = asNum(c.avgComments, 0);
-        
+
         let engagementPct = 0;
         if (trueMembers > 0) {
             // Give 1 point for a view, 5 for a forward, 10 for a comment

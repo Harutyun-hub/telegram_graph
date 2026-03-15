@@ -30,13 +30,26 @@ export function TopChannels() {
 
   const labels = typeLabels[lang];
 
+  // Filter out invalid channels and limit to top 10 most engaged
+  const validChannels = communityChannels.filter(ch =>
+    ch.name &&
+    ch.members > 0 &&
+    ch.engagement >= 0 &&
+    ch.engagement <= 100
+  );
+
+  // Sort by engagement and take top 10
+  const topChannels = [...validChannels]
+    .sort((a, b) => b.engagement - a.engagement)
+    .slice(0, 10);
+
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Топ-каналы сообщества' : 'Top Community Channels'}
         </h3>
-        <span className="text-xs text-gray-500">{communityChannels.length} {ru ? 'активных групп' : 'active groups'}</span>
+        <span className="text-xs text-gray-500">{topChannels.length} {ru ? 'активных групп' : 'active groups'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -45,8 +58,7 @@ export function TopChannels() {
       </p>
 
       <div className="space-y-2">
-        {/* ✅ FIX: spread to avoid mutating the shared context array */}
-        {[...communityChannels].sort((a, b) => b.engagement - a.engagement).map((ch, i) => (
+        {topChannels.map((ch, i) => (
           <div key={ch.name} className="flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-gray-50 transition-colors">
             <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
               style={{ backgroundColor: typeColors[ch.type] + '20' }}>
@@ -61,9 +73,13 @@ export function TopChannels() {
                 }}>{labels[ch.type as keyof typeof labels]}</span>
               </div>
               <div className="flex items-center gap-3 mt-0.5 text-xs text-gray-400">
-                <span>{(ch.members / 1000).toFixed(1)}K {ru ? 'уч.' : 'members'}</span>
-                <span>{ch.dailyMessages}/{ru ? 'день' : 'day'}</span>
-                <span className={ch.growth >= 0 ? 'text-emerald-500' : 'text-red-500'}>{ch.growth > 0 ? '+' : ''}{ch.growth}</span>
+                <span>{ch.members >= 1000 ? `${(ch.members / 1000).toFixed(1)}K` : ch.members} {ru ? 'уч.' : 'members'}</span>
+                <span>{ch.dailyMessages > 0 ? `${ch.dailyMessages}/${ru ? 'день' : 'day'}` : ru ? 'Неактивен' : 'Inactive'}</span>
+                {ch.growth !== 0 && (
+                  <span className={ch.growth > 0 ? 'text-emerald-500' : 'text-red-500'}>
+                    {ch.growth > 0 ? '+' : ''}{ch.growth.toFixed(1)}%
+                  </span>
+                )}
               </div>
             </div>
             <div className="text-right flex-shrink-0">
