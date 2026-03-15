@@ -1,6 +1,7 @@
 # Environment variables — DO NOT COMMIT THIS FILE
 .env
 .env.backup*
+.env.telegram_session
 
 # Telethon session file — contains your login credentials
 *.session

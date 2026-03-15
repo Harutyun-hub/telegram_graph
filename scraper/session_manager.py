@@ -1,6 +1,10 @@
 """
 session_manager.py — Handles Telethon authentication via QR code.
 
+Supports two modes:
+1. StringSession from environment variable (for Railway/cloud deployments)
+2. File-based session (for local development)
+
 QR Login (recommended):
   1. Run the script
   2. A QR code appears in the terminal
@@ -11,14 +15,19 @@ QR Login (recommended):
 
 Fallback (phone code):
   If QR login fails, falls back to phone code entry.
+
+For Railway deployment:
+  Use scripts/export_telegram_session.py to generate TELEGRAM_SESSION_STRING
 """
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from loguru import logger
 import asyncio
 import qrcode
 import config
 import sys
+import os
 
 
 def _print_qr(url: str):
@@ -48,14 +57,31 @@ def _print_qr(url: str):
 async def get_client() -> TelegramClient:
     """
     Returns an authenticated Telethon client.
-    Tries QR login first, falls back to phone code if needed.
-    Session saved to telegram_scraper.session — never asked again.
+
+    Priority:
+    1. Use TELEGRAM_SESSION_STRING if available (Railway/cloud deployment)
+    2. Fall back to file-based session (local development)
+    3. Authenticate via QR code or phone code if no session exists
     """
-    client = TelegramClient(
-        config.TELEGRAM_SESSION_NAME,
-        config.TELEGRAM_API_ID,
-        config.TELEGRAM_API_HASH,
-    )
+
+    # Check for session string from environment (Railway deployment)
+    session_string = os.getenv("TELEGRAM_SESSION_STRING")
+
+    if session_string:
+        logger.info("Using session from TELEGRAM_SESSION_STRING environment variable")
+        client = TelegramClient(
+            StringSession(session_string),
+            config.TELEGRAM_API_ID,
+            config.TELEGRAM_API_HASH,
+        )
+    else:
+        # Use file-based session for local development
+        logger.info(f"Using file-based session: {config.TELEGRAM_SESSION_NAME}.session")
+        client = TelegramClient(
+            config.TELEGRAM_SESSION_NAME,
+            config.TELEGRAM_API_ID,
+            config.TELEGRAM_API_HASH,
+        )
 
     await client.connect()
 
@@ -64,6 +90,17 @@ async def get_client() -> TelegramClient:
         me = await client.get_me()
         logger.success(f"Session active — logged in as: {me.first_name} (@{me.username})")
         return client
+
+    # No session string in cloud deployment - can't authenticate interactively
+    if session_string:
+        logger.error("TELEGRAM_SESSION_STRING is invalid or expired!")
+        logger.error("Please run locally: python scripts/export_telegram_session.py")
+        logger.error("Then update TELEGRAM_SESSION_STRING in Railway environment variables")
+        await client.disconnect()
+        raise RuntimeError(
+            "Invalid TELEGRAM_SESSION_STRING. Cannot authenticate interactively in cloud deployment. "
+            "Run 'python scripts/export_telegram_session.py' locally and update the environment variable."
+        )
 
     logger.info("No active session found. Starting QR code login...")
 
