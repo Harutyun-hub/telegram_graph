@@ -1,5 +1,6 @@
 # Environment variables — DO NOT COMMIT THIS FILE
 .env
+.env.backup*
 
 # Telethon session file — contains your login credentials
 *.session
@@ -35,3 +36,15 @@ frontend/.env
 frontend/.env.local
 frontend/.env.*.local
 !frontend/.env.example
+
+# Backup and test files
+*.bak
+*.bak2
+test_*.py
+snapshot_output.json
+
+# Backup directory
+backups/
+
+# Documentation (keep PLATFORM_IMPROVEMENT_PLAN.md in repo)
+docs/
