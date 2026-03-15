@@ -44,10 +44,18 @@ def get_weekly_shifts() -> list[dict]:
 def get_sentiment_by_topic() -> list[dict]:
     """Sentiment breakdown per topic."""
     return run_query("""
-        MATCH (u:User)-[:INTERESTED_IN]->(t:Topic)
-        MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-        WITH t.name AS topic, s.label AS sentiment, sum(hs.count) AS count
-        RETURN topic, sentiment, count
+        CALL () {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)
+            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+            RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)
+            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+            RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
+        }
+        RETURN topic, sentiment, sum(count) AS count
         ORDER BY topic, count DESC
     """)
 
@@ -158,9 +166,18 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
             RETURN collect({year: year, week: week, count: count}) AS weeklyRows
         }
         CALL (t) {
-            OPTIONAL MATCH (u:User)-[:INTERESTED_IN]->(t)
-            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            CALL {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN toLower(coalesce(s.label, '')) AS label, count(*) AS score
+                UNION ALL
+                WITH t
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN toLower(coalesce(s.label, '')) AS label, count(*) AS score
+            }
+            WITH label, sum(score) AS score
             WHERE label <> ''
             RETURN
                 sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,
@@ -187,11 +204,11 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
             WITH p, ch
             ORDER BY p.posted_at DESC
             RETURN collect({
-                id: p.uuid,
+                id: coalesce(p.uuid, 'post:' + elementId(p)),
                 type: 'message',
                 author: coalesce(ch.username, ch.title, 'unknown'),
                 channel: coalesce(ch.title, ch.username, 'unknown'),
-                text: left(coalesce(p.text, ''), 500),
+                text: left(coalesce(p.text, ''), 1200),
                 timestamp: toString(p.posted_at),
                 reactions: coalesce(p.views, 0),
                 replies: coalesce(p.comment_count, 0)
@@ -206,11 +223,11 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
             WITH c, u, ch
             ORDER BY c.posted_at DESC
             RETURN collect({
-                id: c.uuid,
+                id: coalesce(c.uuid, 'comment:' + elementId(c)),
                 type: 'reply',
                 author: coalesce(toString(u.telegram_user_id), 'anonymous'),
                 channel: coalesce(ch.title, ch.username, 'unknown'),
-                text: left(coalesce(c.text, ''), 500),
+                text: left(coalesce(c.text, ''), 1200),
                 timestamp: toString(c.posted_at),
                 reactions: 0,
                 replies: 0
@@ -220,19 +237,19 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
         // Question-like posts for proof mode
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
             WHERE p.posted_at > datetime() - duration('P90D')
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
+            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
             WITH p, ch
             ORDER BY p.posted_at DESC
             RETURN collect({
-                id: p.uuid,
+                id: coalesce(p.uuid, 'post:' + elementId(p)),
                 type: 'message',
                 author: coalesce(ch.username, ch.title, 'unknown'),
                 channel: coalesce(ch.title, ch.username, 'unknown'),
-                text: left(coalesce(p.text, ''), 500),
+                text: left(coalesce(p.text, ''), 1200),
                 timestamp: toString(p.posted_at),
                 reactions: coalesce(p.views, 0),
                 replies: coalesce(p.comment_count, 0)
@@ -242,20 +259,20 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
         // Question-like comments for proof mode
         CALL (t) {
             MATCH (c:Comment)-[:TAGGED]->(t)
-            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
-            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at > datetime() - duration('P90D')
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
             WITH c, u, ch
             ORDER BY c.posted_at DESC
             RETURN collect({
-                id: c.uuid,
+                id: coalesce(c.uuid, 'comment:' + elementId(c)),
                 type: 'reply',
                 author: coalesce(toString(u.telegram_user_id), 'anonymous'),
                 channel: coalesce(ch.title, ch.username, 'unknown'),
-                text: left(coalesce(c.text, ''), 500),
+                text: left(coalesce(c.text, ''), 1200),
                 timestamp: toString(c.posted_at),
                 reactions: 0,
                 replies: 0
@@ -365,9 +382,17 @@ def get_all_channels() -> list[dict]:
             })[..6] AS recentPosts
         }
         CALL (ch) {
-            OPTIONAL MATCH (u:User)-[:WROTE]->(:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch)
-            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            CALL {
+                WITH ch
+                OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN toLower(coalesce(s.label, '')) AS label, count(s) AS score
+                UNION ALL
+                WITH ch
+                OPTIONAL MATCH (u:User)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch)
+                OPTIONAL MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN toLower(coalesce(s.label, '')) AS label, count(s) AS score
+            }
+            WITH label, sum(score) AS score
             WHERE label <> ''
             RETURN
                 sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,
@@ -454,8 +479,8 @@ def get_all_audience(page: int = 0, size: int = 50) -> list[dict]:
             RETURN collect({week: toString(day), msgs: msgs})[..6] AS activityData
         }
         CALL (u) {
-            OPTIONAL MATCH (u)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-            WITH toLower(coalesce(s.label, '')) AS label, sum(coalesce(hs.count, 0)) AS score
+            OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WITH toLower(coalesce(s.label, '')) AS label, count(s) AS score
             WHERE label <> ''
             RETURN
                 sum(CASE WHEN label = 'positive' THEN score ELSE 0 END) AS positiveScore,

@@ -100,6 +100,14 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append(
             f"{backlog.get('unprocessed_comments')} comments are waiting for AI processing."
         )
+    if _to_int(backlog.get("dead_letter_scopes"), 0) > 0:
+        notes.append(
+            f"{backlog.get('dead_letter_scopes')} AI scopes are in dead-letter state and need operator retry."
+        )
+    if _to_int(backlog.get("retry_blocked_scopes"), 0) > 0:
+        notes.append(
+            f"{backlog.get('retry_blocked_scopes')} AI scopes are temporarily backoff-blocked."
+        )
     if drift.get("latest_post_delta_minutes") is not None and _to_int(drift.get("latest_post_delta_minutes"), 0) > 120:
         notes.append("Latest post timestamp differs by more than 2 hours between Supabase and Neo4j.")
     if pipeline.get("scrape", {}).get("status") == "stale":
@@ -155,6 +163,20 @@ def _avg_rate_per_hour(run_history: list[dict], key: str) -> float:
     if not rates:
         return 0.0
     return round(sum(rates) / len(rates), 2)
+
+
+def _avg_ai_failure_rate(run_history: list[dict]) -> float:
+    ratios: list[float] = []
+    for item in run_history:
+        processed = _to_int(item.get("ai_processed_items"), 0)
+        failed = _to_int(item.get("ai_failed_items"), 0)
+        total = processed + failed
+        if total <= 0:
+            continue
+        ratios.append(failed / total)
+    if not ratios:
+        return 0.0
+    return round((sum(ratios) / len(ratios)) * 100.0, 2)
 
 
 def _eta_minutes(backlog_count: int, rate_per_hour: float) -> int | None:
@@ -222,15 +244,22 @@ def get_freshness_snapshot(
     recent_history = run_history[-6:] if isinstance(run_history, list) else []
 
     ai_items_last_run = 0
+    ai_failed_last_run = 0
+    ai_blocked_last_run = 0
+    ai_deferred_last_run = 0
     neo4j_synced_last_run = 0
     scraped_items_last_run = 0
     if recent_history:
         latest = recent_history[-1]
         ai_items_last_run = _to_int(latest.get("ai_processed_items"), 0)
+        ai_failed_last_run = _to_int(latest.get("ai_failed_items"), 0)
+        ai_blocked_last_run = _to_int(latest.get("ai_blocked_items"), 0)
+        ai_deferred_last_run = _to_int(latest.get("ai_deferred_items"), 0)
         neo4j_synced_last_run = _to_int(latest.get("neo4j_synced_posts"), 0)
         scraped_items_last_run = _to_int(latest.get("scraped_items"), 0)
 
     ai_rate_per_hour = _avg_rate_per_hour(recent_history, "ai_processed_items")
+    ai_failure_rate = _avg_ai_failure_rate(recent_history)
     sync_rate_per_hour = _avg_rate_per_hour(recent_history, "neo4j_synced_posts")
     scrape_rate_per_hour = _avg_rate_per_hour(recent_history, "scraped_items")
 
@@ -285,6 +314,8 @@ def get_freshness_snapshot(
             "unprocessed_comments": _to_int(supa.get("unprocessed_comments"), 0),
             "unsynced_posts": _to_int(supa.get("unsynced_posts"), 0),
             "unsynced_analysis": _to_int(supa.get("unsynced_analysis"), 0),
+            "dead_letter_scopes": _to_int(supa.get("dead_letter_scopes"), 0),
+            "retry_blocked_scopes": _to_int(supa.get("retry_blocked_scopes"), 0),
         },
         "drift": {
             "supabase_total_posts": _to_int(supa.get("total_posts"), 0),
@@ -306,8 +337,12 @@ def get_freshness_snapshot(
             "processed": {
                 "scraped_items_last_run": scraped_items_last_run,
                 "ai_items_last_run": ai_items_last_run,
+                "ai_failed_last_run": ai_failed_last_run,
+                "ai_blocked_last_run": ai_blocked_last_run,
+                "ai_deferred_last_run": ai_deferred_last_run,
                 "neo4j_posts_last_run": neo4j_synced_last_run,
                 "ai_rate_per_hour": ai_rate_per_hour,
+                "ai_failure_rate_percent": ai_failure_rate,
                 "neo4j_rate_per_hour": sync_rate_per_hour,
                 "scrape_rate_per_hour": scrape_rate_per_hour,
             },
@@ -331,3 +366,4 @@ def get_freshness_snapshot(
     _CACHE = snapshot
     _CACHE_TS = now
     return snapshot
+    

@@ -11,20 +11,29 @@ Graph Expert Rules Applied:
   6. Channel anchoring — every node traceable to Channel
   7. MERGE-only on relationships (no duplicate creation)
 
-Node Types (12):
+Node Types (15):
   Channel, Post, Comment, User, Topic, TopicCategory,
-  Intent, Sentiment, GeopoliticalStance, LifeStage,
-  BusinessOpportunity, CollectiveMemory
+  TopicDomain, Entity, Intent, Sentiment, SentimentTag,
+  GeopoliticalStance, LifeStage, BusinessOpportunity, CollectiveMemory
 
-Relationship Types (16):
+Relationship Types (20):
   IN_CHANNEL, REPLIES_TO, WROTE, TAGGED, EXHIBITS,
   HAS_SENTIMENT, ALIGNED_WITH, REMEMBERS, IN_LIFE_STAGE,
   SIGNALS_OPPORTUNITY, INTERESTED_IN, DISCUSSES,
-  CO_OCCURS_WITH, BELONGS_TO_CATEGORY
+  CO_OCCURS_WITH, BELONGS_TO_CATEGORY, IN_DOMAIN,
+  MENTIONS, MENTIONS_ENTITY, HAS_SENTIMENT_TAG
 """
 from neo4j import GraphDatabase
 from loguru import logger
-from utils.topic_normalizer import normalize_topics, normalize_topic, get_topic_category
+from typing import cast
+from utils.topic_normalizer import (
+    normalize_model_topics,
+    normalize_topics,
+    get_topic_category,
+    get_topic_domain,
+    normalize_topic_category,
+    normalize_topic_domain,
+)
 import config
 
 
@@ -58,8 +67,11 @@ class Neo4jWriter:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:User)                REQUIRE n.telegram_user_id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Topic)               REQUIRE n.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicCategory)       REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicDomain)         REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Entity)              REQUIRE n.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Intent)              REQUIRE n.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Sentiment)           REQUIRE n.label IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:SentimentTag)        REQUIRE n.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:GeopoliticalStance)  REQUIRE n.alignment IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:LifeStage)           REQUIRE n.name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:BusinessOpportunity) REQUIRE n.type IS UNIQUE",
@@ -107,6 +119,7 @@ class Neo4jWriter:
         channel        = bundle["channel"]
         comments       = bundle["comments"]
         analyses       = bundle["analyses"]
+        post_analysis  = bundle.get("post_analysis")
         reply_user_map = bundle.get("reply_user_map", {})
 
         with self.driver.session(database=config.NEO4J_DATABASE) as session:
@@ -124,19 +137,16 @@ class Neo4jWriter:
                 session.run(_CYPHER_COMMENT, params)
 
             # 3. Topics — normalized union across all users in this post
-            raw_topics   = _collect_raw_topics(analyses)
-            canon_topics = normalize_topics(raw_topics)
-
-            if canon_topics:
-                topics_with_cats = [
-                    {"name": t, "category": get_topic_category(t)}
-                    for t in canon_topics
-                ]
+            topic_items = _collect_topic_items(analyses, post_analysis=post_analysis)
+            post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
+            if topic_items or post_sentiment or post_social_sentiment_tags:
                 session.run(_CYPHER_POST_TOPICS, {
                     "post_uuid":    post["id"],
                     "channel_uuid": channel["id"],
                     "posted_at":    str(post.get("posted_at")),
-                    "topics":       topics_with_cats,
+                    "topics":       topic_items,
+                    "post_sentiment": post_sentiment,
+                    "post_social_sentiment_tags": post_social_sentiment_tags,
                 })
 
     # ── Orphan Check (Expert Rule 6) ─────────────────────────────────────────
@@ -158,6 +168,46 @@ class Neo4jWriter:
         if orphan_posts > 0 or orphan_comments > 0:
             logger.warning(f"Graph integrity issue: {result}")
         return result
+
+    def list_topic_promotion_candidates(
+        self,
+        *,
+        min_discuss_count: int = 12,
+        min_channel_count: int = 2,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Return high-signal proposed topics that are good candidates
+        for taxonomy promotion during weekly review.
+        """
+        query = """
+        MATCH (ch:Channel)-[d:DISCUSSES]->(t:Topic {proposed: true})
+        OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+        OPTIONAL MATCH (cat)-[:IN_DOMAIN]->(dom:TopicDomain)
+        WITH t, cat, dom,
+             sum(coalesce(d.count, 1)) AS discuss_count,
+             count(DISTINCT ch) AS channel_count
+        WHERE discuss_count >= $min_discuss_count
+          AND channel_count >= $min_channel_count
+        RETURN t.name AS topic,
+               coalesce(cat.name, 'General') AS category,
+               coalesce(dom.name, 'General') AS domain,
+               discuss_count,
+               channel_count
+        ORDER BY discuss_count DESC, channel_count DESC, topic ASC
+        LIMIT $limit
+        """
+
+        with self.driver.session(database=config.NEO4J_DATABASE) as session:
+            rows = session.run(
+                query,
+                {
+                    "min_discuss_count": max(1, int(min_discuss_count)),
+                    "min_channel_count": max(1, int(min_channel_count)),
+                    "limit": max(1, int(limit)),
+                },
+            )
+            return [dict(row) for row in rows]
 
 
 # ── Cypher Templates ──────────────────────────────────────────────────────────
@@ -201,6 +251,28 @@ SET   c.telegram_message_id = $telegram_message_id,
 MERGE (p:Post {uuid: $post_uuid})
 MERGE (c)-[rcp:REPLIES_TO]->(p)
 ON CREATE SET rcp.posted_at = datetime($posted_at)
+
+// ── Comment → Primary Sentiment (message-scoped) ──
+FOREACH (_ IN CASE WHEN $sentiment IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (smsg:Sentiment {label: $sentiment})
+  MERGE (c)-[rcs:HAS_SENTIMENT]->(smsg)
+  ON CREATE SET rcs.count = 1,
+                rcs.first_seen = datetime($posted_at),
+                rcs.last_seen = datetime($posted_at)
+  ON MATCH  SET rcs.count = coalesce(rcs.count, 0) + 1,
+                rcs.last_seen = datetime($posted_at)
+)
+
+// ── Comment → Social sentiment tags (message-scoped) ──
+FOREACH (tag IN $social_sentiment_tags |
+  MERGE (st:SentimentTag {name: tag})
+  MERGE (c)-[rct:HAS_SENTIMENT_TAG]->(st)
+  ON CREATE SET rct.count = 1,
+                rct.first_seen = datetime($posted_at),
+                rct.last_seen = datetime($posted_at)
+  ON MATCH  SET rct.count = coalesce(rct.count, 0) + 1,
+                rct.last_seen = datetime($posted_at)
+)
 
 // ── User node + all AI intelligence (only if real user) ──
 FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
@@ -262,6 +334,17 @@ FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
                   rs.last_seen  = datetime($posted_at)
   )
 
+  // User → Social sentiment tags
+  FOREACH (tag IN $social_sentiment_tags |
+    MERGE (st:SentimentTag {name: tag})
+    MERGE (u)-[rst:HAS_SENTIMENT_TAG]->(st)
+    ON CREATE SET rst.count      = 1,
+                  rst.first_seen = datetime($posted_at),
+                  rst.last_seen  = datetime($posted_at)
+    ON MATCH  SET rst.count      = coalesce(rst.count, 0) + 1,
+                  rst.last_seen  = datetime($posted_at)
+  )
+
   // User → GeopoliticalStance
   FOREACH (_ IN CASE WHEN $geopolitical_alignment IS NOT NULL
                       AND $geopolitical_alignment <> 'Neutral'
@@ -313,6 +396,29 @@ FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
     // Tag the comment itself
     MERGE (c)-[:TAGGED]->(t)
   )
+
+  // User → Entity mentions (with sentiment and frequency)
+  FOREACH (entity IN $entities |
+    MERGE (e:Entity {name: entity.name})
+    ON CREATE SET e.type = entity.type
+    ON MATCH  SET e.type = coalesce(e.type, entity.type)
+    MERGE (u)-[rm:MENTIONS]->(e)
+    ON CREATE SET rm.count      = 1,
+                  rm.first_seen = datetime($posted_at),
+                  rm.last_seen  = datetime($posted_at),
+                  rm.sentiment  = entity.sentiment_toward
+    ON MATCH  SET rm.count      = rm.count + 1,
+                  rm.last_seen  = datetime($posted_at),
+                  rm.sentiment  = coalesce(entity.sentiment_toward, rm.sentiment)
+  )
+)
+
+// Comment → Entity mentions (available even for anonymous users)
+FOREACH (entity IN $entities |
+  MERGE (e:Entity {name: entity.name})
+  ON CREATE SET e.type = entity.type
+  ON MATCH  SET e.type = coalesce(e.type, entity.type)
+  MERGE (c)-[:MENTIONS_ENTITY]->(e)
 )
 
 // ── User → User Social Network (who replied to whom) ──
@@ -340,9 +446,14 @@ MERGE (ch:Channel {uuid: $channel_uuid})
 FOREACH (item IN $topics |
   // Topic node (canonical name, pre-normalized)
   MERGE (t:Topic {name: item.name})
+  ON CREATE SET t.proposed  = coalesce(item.proposed, false),
+                t.created_at = datetime($posted_at)
+  ON MATCH  SET t.proposed  = coalesce(t.proposed, false) OR coalesce(item.proposed, false)
 
   // TopicCategory hierarchy (prevents super-nodes)
   MERGE (cat:TopicCategory {name: item.category})
+  MERGE (dom:TopicDomain {name: item.domain})
+  MERGE (cat)-[:IN_DOMAIN]->(dom)
   MERGE (t)-[:BELONGS_TO_CATEGORY]->(cat)
 
   // Post tagged with topic
@@ -370,6 +481,28 @@ FOREACH (t1 IN $topics |
     )
   )
 )
+
+// ── Post → Primary Sentiment (message-scoped) ──
+FOREACH (_ IN CASE WHEN $post_sentiment IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (smsg:Sentiment {label: $post_sentiment})
+  MERGE (p)-[rps:HAS_SENTIMENT]->(smsg)
+  ON CREATE SET rps.count = 1,
+                rps.first_seen = datetime($posted_at),
+                rps.last_seen = datetime($posted_at)
+  ON MATCH  SET rps.count = coalesce(rps.count, 0) + 1,
+                rps.last_seen = datetime($posted_at)
+)
+
+// ── Post → Social sentiment tags (message-scoped) ──
+FOREACH (tag IN $post_social_sentiment_tags |
+  MERGE (st:SentimentTag {name: tag})
+  MERGE (p)-[rpt:HAS_SENTIMENT_TAG]->(st)
+  ON CREATE SET rpt.count = 1,
+                rpt.first_seen = datetime($posted_at),
+                rpt.last_seen = datetime($posted_at)
+  ON MATCH  SET rpt.count = coalesce(rpt.count, 0) + 1,
+                rpt.last_seen = datetime($posted_at)
+)
 """
 
 
@@ -389,6 +522,113 @@ def _normalize_enum(value: str | None) -> str | None:
     normalized = value.strip().replace("-", "_").replace(" ", "_")
     parts = normalized.split("_")
     return "_".join(p.capitalize() for p in parts if p)
+
+
+_SOCIAL_SENTIMENT_TAGS = {
+    "Anxious",
+    "Frustrated",
+    "Angry",
+    "Confused",
+    "Hopeful",
+    "Trusting",
+    "Distrustful",
+    "Solidarity",
+    "Exhausted",
+    "Grief",
+}
+
+_SENTIMENT_CANON = {
+    "positive": "Positive",
+    "negative": "Negative",
+    "neutral": "Neutral",
+    "mixed": "Mixed",
+    "urgent": "Urgent",
+    "sarcastic": "Sarcastic",
+}
+
+_EMOTIONAL_TONE_HINTS = [
+    ("anx", "Anxious"),
+    ("worr", "Anxious"),
+    ("fear", "Anxious"),
+    ("frustr", "Frustrated"),
+    ("ang", "Angry"),
+    ("indignan", "Angry"),
+    ("confus", "Confused"),
+    ("uncertain", "Confused"),
+    ("hope", "Hopeful"),
+    ("optim", "Hopeful"),
+    ("trust", "Trusting"),
+    ("distrust", "Distrustful"),
+    ("skeptic", "Distrustful"),
+    ("solidar", "Solidarity"),
+    ("exhaust", "Exhausted"),
+    ("fatigue", "Exhausted"),
+    ("grief", "Grief"),
+    ("mour", "Grief"),
+]
+
+_DEFAULT_TAGS_BY_PRIMARY = {
+    "Urgent": ["Anxious"],
+    "Negative": ["Frustrated"],
+    "Sarcastic": ["Distrustful"],
+    "Positive": ["Hopeful"],
+}
+
+
+def _normalize_sentiment_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    key = str(value).strip().lower()
+    if not key or key in {"null", "none", "n/a", "unknown"}:
+        return None
+    return _SENTIMENT_CANON.get(key)
+
+
+def _normalize_social_sentiment_tags(
+    raw_tags: list | None,
+    *,
+    primary_sentiment: str | None = None,
+    emotional_tone: str | None = None,
+) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tag: str | None) -> None:
+        if not tag:
+            return
+        normalized = str(tag).strip().title()
+        if normalized not in _SOCIAL_SENTIMENT_TAGS or normalized in seen:
+            return
+        seen.add(normalized)
+        tags.append(normalized)
+
+    for item in raw_tags or []:
+        if isinstance(item, str):
+            _add(item)
+
+    tone = str(emotional_tone or "").strip().lower()
+    if tone:
+        for needle, mapped in _EMOTIONAL_TONE_HINTS:
+            if needle in tone:
+                _add(mapped)
+
+    for fallback in _DEFAULT_TAGS_BY_PRIMARY.get(primary_sentiment or "", []):
+        _add(fallback)
+
+    return tags
+
+
+def _extract_sentiment_payload_from_analysis(analysis: dict) -> tuple[str | None, list[str]]:
+    raw = analysis.get("raw_llm_response") or {}
+    primary = _normalize_sentiment_label(raw.get("sentiment"))
+    emotional_tone = raw.get("emotional_tone") if isinstance(raw.get("emotional_tone"), str) else None
+    raw_tags = raw.get("social_sentiment_tags") if isinstance(raw.get("social_sentiment_tags"), list) else []
+    tags = _normalize_social_sentiment_tags(
+        raw_tags,
+        primary_sentiment=primary,
+        emotional_tone=emotional_tone,
+    )
+    return primary, tags
 
 
 # ── Parameter Builders ────────────────────────────────────────────────────────
@@ -450,8 +690,17 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         pass
 
     # Normalize topics for this specific user
-    raw_topics = analysis.get("topics") or []
-    canon_user_topics = normalize_topics(raw_topics)
+    candidate_topics = raw.get("topics")
+    raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
+    model_topics = normalize_model_topics(raw_topics)
+    if model_topics:
+        canon_user_topics = [str(item["name"]) for item in model_topics if item.get("name")]
+    else:
+        fallback_topics = [str(item) for item in (analysis.get("topics") or []) if item]
+        canon_user_topics = normalize_topics(fallback_topics)
+
+    entities = _extract_entities(raw)
+    primary_sentiment, social_sentiment_tags = _extract_sentiment_payload_from_analysis(analysis)
 
     return {
         "comment_uuid":                 comment["id"],
@@ -500,23 +749,84 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         "business_opportunity_desc":    (biz.get("description") or "")[:200],
         # ── Intent & sentiment ──
         "primary_intent":               analysis.get("primary_intent"),
-        "sentiment":                    raw.get("sentiment"),
+        "sentiment":                    primary_sentiment,
+        "social_sentiment_tags":        social_sentiment_tags,
         "sentiment_score":              float(analysis.get("sentiment_score") or 0.0),
         # ── Normalized topics for this user ──
         "user_topics":                  canon_user_topics,
+        # ── Entity mentions for user/comment linking ──
+        "entities":                     entities,
     }
 
 
-def _collect_raw_topics(analyses: dict) -> list[str]:
-    """Collect all raw topic strings across all user analyses for this post."""
+def _extract_entities(raw_response: dict) -> list[dict]:
+    entities: list[dict] = []
     seen: set[str] = set()
-    result: list[str] = []
-    for analysis in analyses.values():
-        for t in (analysis.get("topics") or []):
-            if t and t not in seen:
-                seen.add(t)
-                result.append(t)
-    return result
+
+    for item in (raw_response.get("entities") or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entities.append(
+            {
+                "name": name,
+                "type": str(item.get("type") or "concept"),
+                "sentiment_toward": item.get("sentiment_toward"),
+            }
+        )
+    return entities
+
+
+def _collect_topic_items(analyses: dict, post_analysis: dict | None = None) -> list[dict]:
+    """Collect canonical topic items with category, domain, and proposed flag."""
+    items_by_name: dict[str, dict] = {}
+
+    analysis_rows = list(analyses.values())
+    if isinstance(post_analysis, dict):
+        analysis_rows.append(post_analysis)
+
+    for analysis in analysis_rows:
+        raw = analysis.get("raw_llm_response") or {}
+        candidate_topics = raw.get("topics")
+        raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
+        normalized_topics = normalize_model_topics(raw_topics)
+        if not normalized_topics:
+            normalized_topics = normalize_model_topics(
+                [str(topic) for topic in (analysis.get("topics") or []) if topic]
+            )
+
+        for topic_item in normalized_topics:
+            name = str(topic_item.get("name") or "").strip()
+            if not name:
+                continue
+
+            proposed = bool(topic_item.get("proposed", False))
+            category = normalize_topic_category(topic_item.get("closest_category") or get_topic_category(name))
+            domain = normalize_topic_domain(topic_item.get("domain") or get_topic_domain(name))
+
+            existing = items_by_name.get(name)
+            if not existing:
+                items_by_name[name] = {
+                    "name": name,
+                    "category": category,
+                    "domain": domain,
+                    "proposed": proposed,
+                }
+            else:
+                existing["proposed"] = bool(existing.get("proposed") or proposed)
+
+    return list(items_by_name.values())
+
+
+def _collect_raw_topics(analyses: dict) -> list[str]:
+    """Collect topic names across all analyses for compatibility callers."""
+    return [item["name"] for item in _collect_topic_items(analyses)]
 
 
 # ── Re-export for main.py ─────────────────────────────────────────────────────

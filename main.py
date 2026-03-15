@@ -19,7 +19,7 @@ from scraper.session_manager  import get_client
 from scraper.channel_scraper  import scrape_channel
 from scraper.comment_scraper  import scrape_comments_for_post
 from buffer.supabase_writer   import SupabaseWriter
-from processor.intent_extractor import extract_intents, extract_post_intent
+from processor.intent_extractor import extract_intents, extract_post_intents
 from ingester.neo4j_writer import Neo4jWriter, _collect_topics
 
 # Shared instances
@@ -88,9 +88,8 @@ async def process_job():
     posts = db.get_unprocessed_posts(limit=50)
     if posts:
         logger.info(f"Processing {len(posts)} unprocessed posts...")
-        for post in posts:
-            extract_post_intent(post, db)
-        logger.success(f"Processed {len(posts)} posts")
+        processed_posts = extract_post_intents(posts, db)
+        logger.success(f"Processed {processed_posts}/{len(posts)} posts")
     else:
         logger.info("No unprocessed posts found")
 
@@ -147,7 +146,8 @@ async def neo4j_sync_job():
             db.mark_post_neo4j_synced(post["id"])
 
             # Mark each ai_analysis row as synced too
-            for analysis in bundle["analyses"].values():
+            analysis_records = bundle.get("analysis_records") or list(bundle["analyses"].values())
+            for analysis in analysis_records:
                 if analysis.get("id"):
                     db.mark_analysis_synced(analysis["id"])
 
@@ -169,6 +169,14 @@ async def neo4j_sync_job():
                 break
 
     logger.success(f"═══ NEO4J SYNC JOB COMPLETE — {synced}/{len(posts)} posts ═══")
+
+    # Reconcile historic post-level analyses that were left unsynced.
+    try:
+        reconciled = db.reconcile_post_analysis_sync(limit=300)
+        if reconciled:
+            logger.info(f"Post-analysis reconciliation marked {reconciled} rows as synced")
+    except Exception as e:
+        logger.warning(f"Post-analysis reconciliation skipped: {e}")
 
 
 

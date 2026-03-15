@@ -11,20 +11,29 @@ from api.db import run_query
 def get_community_channels() -> list[dict]:
     """All channels with post counts, top topics, activity stats."""
     return run_query("""
+        MATCH (all_p:Post)
+        WITH max(all_p.posted_at) AS globalLatest
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
-        WITH ch, count(p) AS postCount,
+        WITH ch, globalLatest, count(p) AS postCount,
              avg(p.views) AS avgViews,
-             max(p.posted_at) AS lastPost
+             avg(p.forwards) AS avgForwards,
+             avg(p.comments) AS avgComments,
+             max(p.posted_at) AS lastPost,
+             sum(CASE WHEN p.posted_at >= globalLatest - duration('P14D') THEN 1 ELSE 0 END) AS recentPosts,
+             sum(CASE WHEN p.posted_at >= globalLatest - duration('P7D') THEN 1 ELSE 0 END) AS posts7d,
+             sum(CASE WHEN p.posted_at >= globalLatest - duration('P14D') AND p.posted_at < globalLatest - duration('P7D') THEN 1 ELSE 0 END) AS posts14to7d
         OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p2:Post)-[:TAGGED]->(t:Topic)
-        WITH ch, postCount, round(avgViews) AS avgViews, lastPost,
+        WITH ch, postCount, avgViews, avgForwards, avgComments, lastPost, recentPosts, posts7d, posts14to7d,
              t.name AS topic, count(p2) AS topicPosts
         ORDER BY topicPosts DESC
-        WITH ch, postCount, avgViews, lastPost,
+        WITH ch, postCount, avgViews, avgForwards, avgComments, lastPost, recentPosts, posts7d, posts14to7d,
              collect(topic)[..5] AS topTopics
         RETURN ch.username AS username, ch.title AS title,
                ch.member_count AS memberCount,
                ch.description AS description,
-               postCount, avgViews,
+               postCount, round(avgViews) AS avgViews,
+               round(avgForwards) AS avgForwards, round(avgComments) AS avgComments,
+               recentPosts, posts7d, posts14to7d,
                toString(lastPost) AS lastPost,
                topTopics
         ORDER BY postCount DESC

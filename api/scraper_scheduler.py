@@ -283,6 +283,9 @@ class ScraperSchedulerService:
             duration_minutes = max(0.01, (finished - started).total_seconds() / 60.0)
 
         ai_processed_items = int(result.get("ai_analysis_saved", 0) or 0) + int(result.get("posts_processed", 0) or 0)
+        ai_failed_items = int(result.get("ai_failed_items", 0) or 0)
+        ai_blocked_items = int(result.get("ai_blocked_items", 0) or 0)
+        ai_deferred_items = int(result.get("ai_deferred_items", 0) or 0)
 
         self._run_history.append(
             {
@@ -291,6 +294,9 @@ class ScraperSchedulerService:
                 "duration_minutes": round(duration_minutes, 2) if duration_minutes is not None else None,
                 "scraped_items": int(result.get("posts_found", 0) or 0) + int(result.get("comments_found", 0) or 0),
                 "ai_processed_items": ai_processed_items,
+                "ai_failed_items": ai_failed_items,
+                "ai_blocked_items": ai_blocked_items,
+                "ai_deferred_items": ai_deferred_items,
                 "neo4j_synced_posts": int(result.get("posts_synced", 0) or 0),
                 "raw": result,
             }

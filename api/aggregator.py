@@ -18,7 +18,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from api import behavioral_briefs
+from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
+from buffer.supabase_writer import SupabaseWriter
+
+
+_supabase_writer = SupabaseWriter()
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -33,9 +39,13 @@ CACHE_TTL_SECONDS = int(os.getenv("DASH_CACHE_TTL_SECONDS", "300"))
 STALE_WHILE_REVALIDATE = _env_flag("DASH_STALE_WHILE_REVALIDATE_ENABLED", True)
 PARALLEL_ENABLED = _env_flag("DASH_PARALLEL_ENABLED", True)
 PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4")), 8))
-TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "3.5")))
+TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "8.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+
+# If one of these tiers falls back during refresh, prefer preserving an
+# existing healthy cache instead of replacing it with an empty/degraded view.
+CRITICAL_TIERS = {"pulse", "strategic"}
 
 
 _cache: dict = {}
@@ -48,6 +58,60 @@ _cache_cond = threading.Condition(_cache_lock)
 
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, list[dict]]] = {}
+
+
+def _fallback_tiers(tier_times: Dict[str, Optional[float]]) -> list[str]:
+    return [name for name, duration in tier_times.items() if name != "derived" and duration is None]
+
+
+def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    brief = snapshot.get("communityBrief")
+    health = snapshot.get("communityHealth")
+    trending = snapshot.get("trendingTopics")
+
+    if not isinstance(brief, dict) or not brief:
+        return False
+    if not isinstance(health, dict) or not health:
+        return False
+    if not isinstance(trending, list):
+        return False
+
+    has_brief_volume = any(
+        key in brief
+        for key in (
+            "totalAnalyses24h",
+            "postsAnalyzed24h",
+            "postsLast24h",
+            "commentsLast24h",
+        )
+    )
+    has_health_shape = any(key in health for key in ("components", "score", "totalUsers"))
+    return has_brief_volume and has_health_shape and len(trending) > 0
+
+
+def _should_preserve_existing_cache(
+    *,
+    existing_cache: Optional[dict],
+    new_snapshot: dict,
+    tier_times: Dict[str, Optional[float]],
+) -> tuple[bool, list[str]]:
+    fallback = _fallback_tiers(tier_times)
+    if not fallback:
+        return False, fallback
+
+    critical_fallback = any(name in CRITICAL_TIERS for name in fallback)
+    if not critical_fallback:
+        return False, fallback
+
+    if not _snapshot_has_core_pulse_data(existing_cache):
+        return False, fallback
+
+    if _snapshot_has_core_pulse_data(new_snapshot):
+        return False, fallback
+
+    return True, fallback
 
 
 def _is_cache_valid(now: Optional[float] = None) -> bool:
@@ -67,11 +131,33 @@ def invalidate_cache() -> None:
 
 def _fallback_for_tier(name: str) -> dict:
     if name == "pulse":
-        return {"communityHealth": {"score": 0, "trend": "neutral"}, "trendingTopics": [], "communityBrief": {}}
+        return {
+            "communityHealth": {"score": 0, "trend": "neutral"},
+            "trendingTopics": [],
+            "trendingNewTopics": [],
+            "communityBrief": {},
+        }
     if name == "strategic":
-        return {"topicBubbles": [], "trendLines": [], "trendData": [], "heatmap": [], "questionCategories": [], "lifecycleStages": []}
+        return {
+            "topicBubbles": [],
+            "trendLines": [],
+            "trendData": [],
+            "heatmap": [],
+            "questionCategories": [],
+            "questionBriefs": [],
+            "lifecycleStages": [],
+        }
     if name == "behavioral":
-        return {"problems": [], "serviceGaps": [], "satisfactionAreas": [], "moodData": [], "moodConfig": {}, "urgencySignals": []}
+        return {
+            "problemBriefs": [],
+            "serviceGapBriefs": [],
+            "problems": [],
+            "serviceGaps": [],
+            "satisfactionAreas": [],
+            "moodData": [],
+            "moodConfig": {},
+            "urgencySignals": [],
+        }
     if name == "network":
         return {"communityChannels": [], "keyVoices": [], "hourlyActivity": [], "weeklyActivity": [], "recommendations": [], "viralTopics": []}
     if name == "psychographic":
@@ -99,10 +185,32 @@ def _fallback_for_tier(name: str) -> dict:
 # ── Tier builders ────────────────────────────────────────────────────────────
 
 def _tier_pulse() -> dict:
+    def _trending_new_topics() -> list[dict]:
+        try:
+            rows = _supabase_writer.list_emerging_topic_candidates(status="pending", limit=12)
+            result: list[dict] = []
+            for row in rows:
+                mentions = int(row.get("distinct_content_count") or row.get("proposed_count") or 0)
+                trend = min(300, max(0, (int(row.get("proposed_count") or 0) - 1) * 25))
+                result.append(
+                    {
+                        "name": row.get("topic_name"),
+                        "category": row.get("closest_category") or "General",
+                        "mentions": mentions,
+                        "trendPct": trend,
+                        "sampleQuote": row.get("latest_evidence"),
+                    }
+                )
+            return result
+        except Exception as e:
+            logger.warning(f"Tier pulse trending-new failed: {e}")
+            return []
+
     try:
         return {
             "communityHealth": pulse.get_community_health(),
             "trendingTopics": pulse.get_trending_topics(),
+            "trendingNewTopics": _trending_new_topics(),
             "communityBrief": pulse.get_community_brief(),
         }
     except Exception as e:
@@ -119,6 +227,7 @@ def _tier_strategic() -> dict:
             "trendData": trend_lines,
             "heatmap": strategic.get_heatmap(),
             "questionCategories": strategic.get_question_categories(),
+            "questionBriefs": question_briefs.get_question_briefs(),
             "lifecycleStages": strategic.get_lifecycle_stages(),
         }
     except Exception as e:
@@ -128,13 +237,16 @@ def _tier_strategic() -> dict:
 
 def _tier_behavioral() -> dict:
     try:
+        briefs = behavioral_briefs.get_behavioral_briefs()
         return {
+            "problemBriefs": briefs.get("problemBriefs", []),
+            "serviceGapBriefs": briefs.get("serviceGapBriefs", []),
             "problems": behavioral.get_problems(),
             "serviceGaps": behavioral.get_service_gaps(),
             "satisfactionAreas": behavioral.get_satisfaction_areas(),
             "moodData": behavioral.get_mood_data(),
             "moodConfig": {"sentiments": ["Positive", "Negative", "Neutral", "Mixed", "Urgent", "Sarcastic"]},
-            "urgencySignals": behavioral.get_urgency_signals(),
+            "urgencySignals": briefs.get("urgencyBriefs", []),
         }
     except Exception as e:
         logger.error(f"Tier behavioral failed: {e}")
@@ -345,13 +457,36 @@ def _start_background_refresh_locked() -> None:
         global _refresh_in_progress, _last_refresh_error, _cache, _cache_ts
         try:
             data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=True)
+
+            preserve_existing = False
+            fallback_tiers: list[str] = []
             with _cache_cond:
-                _cache = data
-                _cache_ts = time.time()
-                _refresh_in_progress = False
-                _last_refresh_error = None
-                _cache_cond.notify_all()
-            logger.success(f"Dashboard refresh completed in {elapsed}s ({mode}) | tiers={tier_times}")
+                preserve_existing, fallback_tiers = _should_preserve_existing_cache(
+                    existing_cache=_cache,
+                    new_snapshot=data,
+                    tier_times=tier_times,
+                )
+                if preserve_existing:
+                    _refresh_in_progress = False
+                    _last_refresh_error = (
+                        "Refresh produced degraded snapshot; preserved previous cache "
+                        f"(fallback_tiers={fallback_tiers})"
+                    )
+                    _cache_cond.notify_all()
+                else:
+                    _cache = data
+                    _cache_ts = time.time()
+                    _refresh_in_progress = False
+                    _last_refresh_error = None
+                    _cache_cond.notify_all()
+
+            if preserve_existing:
+                logger.warning(
+                    "Dashboard refresh kept previous cache because critical tiers fell back "
+                    f"({fallback_tiers}); elapsed={elapsed}s mode={mode} tiers={tier_times}"
+                )
+            else:
+                logger.success(f"Dashboard refresh completed in {elapsed}s ({mode}) | tiers={tier_times}")
         except Exception as e:
             with _cache_cond:
                 _refresh_in_progress = False
@@ -405,12 +540,38 @@ def get_dashboard_data(force_refresh: bool = False) -> dict:
     # Build outside lock
     try:
         data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=had_cache_before_build)
+
+        preserve_existing = False
+        fallback_tiers: list[str] = []
         with _cache_cond:
-            _cache = data
-            _cache_ts = time.time()
-            _refresh_in_progress = False
-            _last_refresh_error = None
-            _cache_cond.notify_all()
+            preserve_existing, fallback_tiers = _should_preserve_existing_cache(
+                existing_cache=_cache,
+                new_snapshot=data,
+                tier_times=tier_times,
+            )
+            if preserve_existing:
+                _refresh_in_progress = False
+                _last_refresh_error = (
+                    "Synchronous rebuild produced degraded snapshot; preserved previous cache "
+                    f"(fallback_tiers={fallback_tiers})"
+                )
+                preserved = _cache
+                _cache_cond.notify_all()
+            else:
+                _cache = data
+                _cache_ts = time.time()
+                _refresh_in_progress = False
+                _last_refresh_error = None
+                preserved = None
+                _cache_cond.notify_all()
+
+        if preserve_existing and preserved is not None:
+            logger.warning(
+                "Dashboard rebuild preserved previous cache because critical tiers fell back "
+                f"({fallback_tiers}); elapsed={elapsed}s mode={mode} tiers={tier_times}"
+            )
+            return preserved
+
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | tiers={tier_times}")
         return data
     except Exception as e:

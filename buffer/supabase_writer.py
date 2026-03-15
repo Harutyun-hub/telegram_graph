@@ -6,10 +6,11 @@ touch Supabase directly from scrapers or processors.
 """
 from __future__ import annotations
 from supabase import create_client, Client
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from loguru import logger
 import config
+from utils.topic_normalizer import set_runtime_topic_aliases
 
 
 def _parse_iso_datetime(value):
@@ -39,8 +40,39 @@ class SupabaseWriter:
             config.SUPABASE_URL,
             config.SUPABASE_SERVICE_ROLE_KEY
         )
+        self._failure_table_warning_emitted = False
+        self._topic_review_warning_emitted = False
+        self._topic_promotion_warning_emitted = False
         self._runtime_bucket_name = "runtime-config"
         self._scheduler_settings_path = "scraper/scheduler_settings.json"
+        self.refresh_runtime_topic_aliases()
+
+    def _warn_failure_table_once(self, error: Exception):
+        if self._failure_table_warning_emitted:
+            return
+        self._failure_table_warning_emitted = True
+        logger.warning(
+            "ai_processing_failures table unavailable; retry/dead-letter safeguards disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_topic_review_table_once(self, error: Exception):
+        if self._topic_review_warning_emitted:
+            return
+        self._topic_review_warning_emitted = True
+        logger.warning(
+            "topic_review_queue table unavailable; proposed-topic review queue is disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_topic_promotion_table_once(self, error: Exception):
+        if self._topic_promotion_warning_emitted:
+            return
+        self._topic_promotion_warning_emitted = True
+        logger.warning(
+            "topic_taxonomy_promotions table unavailable; runtime taxonomy promotions are disabled until migration is applied "
+            f"({error})"
+        )
 
     def _ensure_runtime_bucket(self):
         """Ensure runtime config bucket exists in Supabase Storage."""
@@ -98,6 +130,69 @@ class SupabaseWriter:
             {"content-type": "application/json", "upsert": "true"},
         )
         return payload
+
+    def get_runtime_json(self, path: str, default: dict | None = None) -> dict:
+        """Load a JSON object from runtime-config storage bucket."""
+        fallback = default if isinstance(default, dict) else {}
+        key = str(path or "").strip()
+        if not key:
+            return dict(fallback)
+
+        try:
+            self._ensure_runtime_bucket()
+            raw = self.client.storage.from_(self._runtime_bucket_name).download(key)
+            if not raw:
+                return dict(fallback)
+            parsed = json.loads(raw.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else dict(fallback)
+        except Exception:
+            return dict(fallback)
+
+    def save_runtime_json(self, path: str, payload: dict) -> bool:
+        """Persist a JSON object to runtime-config storage bucket."""
+        key = str(path or "").strip()
+        if not key:
+            return False
+
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            self._ensure_runtime_bucket()
+            try:
+                self.client.storage.from_(self._runtime_bucket_name).remove([key])
+            except Exception:
+                pass
+            self.client.storage.from_(self._runtime_bucket_name).upload(
+                key,
+                json.dumps(data, ensure_ascii=True).encode("utf-8"),
+                {"content-type": "application/json", "upsert": "true"},
+            )
+            return True
+        except Exception:
+            return False
+
+    def list_runtime_files(self, folder: str) -> list[dict]:
+        """List files under a runtime-config folder path."""
+        path = str(folder or "").strip().strip("/")
+        if not path:
+            return []
+        try:
+            self._ensure_runtime_bucket()
+            rows = self.client.storage.from_(self._runtime_bucket_name).list(path)
+            return rows if isinstance(rows, list) else []
+        except Exception:
+            return []
+
+    def delete_runtime_files(self, paths: list[str]) -> int:
+        """Delete runtime-config files; returns number of requested paths."""
+        keys = [str(p or "").strip() for p in (paths or []) if str(p or "").strip()]
+        if not keys:
+            return 0
+        try:
+            self._ensure_runtime_bucket()
+            self.client.storage.from_(self._runtime_bucket_name).remove(keys)
+            return len(keys)
+        except Exception:
+            return 0
 
     # ── Channels ─────────────────────────────────────────────────────────────
 
@@ -313,11 +408,103 @@ class SupabaseWriter:
 
     # ── AI Analysis ─────────────────────────────────────────────────────────
 
-    def save_analysis(self, analysis: dict):
-        """Save AI analysis result."""
-        self.client.table("ai_analysis") \
-            .insert(analysis) \
+    def save_analysis(self, analysis: dict) -> dict | None:
+        """
+        Save AI analysis result.
+
+        Contract hardening:
+        - Post-level analyses are idempotent by logical key
+          (`content_type='post'` + `content_id`), so repeated processing
+          updates the latest row instead of creating duplicates.
+        - Comment user-per-post analyses are idempotent by logical key
+          (`content_type='batch'` + `content_id` + `channel_id` + `telegram_user_id`)
+          when `content_id` is present.
+        - Other analysis types keep insert behavior for backward compatibility.
+        """
+        payload = dict(analysis or {})
+
+        content_type = str(payload.get("content_type") or "")
+        content_id = payload.get("content_id")
+        channel_id = payload.get("channel_id")
+        telegram_user_id = payload.get("telegram_user_id")
+
+        idempotency_query = None
+        idempotency_label = None
+
+        if content_type == "post" and content_id:
+            idempotency_query = self.client.table("ai_analysis") \
+                .select("id, created_at") \
+                .eq("content_type", "post") \
+                .eq("content_id", content_id) \
+                .order("created_at", desc=True) \
+                .limit(1)
+            idempotency_label = f"post content_id={content_id}"
+        elif (
+            content_type == "batch"
+            and content_id
+            and channel_id
+            and telegram_user_id is not None
+        ):
+            idempotency_query = self.client.table("ai_analysis") \
+                .select("id, created_at") \
+                .eq("content_type", "batch") \
+                .eq("content_id", content_id) \
+                .eq("channel_id", channel_id) \
+                .eq("telegram_user_id", telegram_user_id) \
+                .order("created_at", desc=True) \
+                .limit(1)
+            idempotency_label = (
+                f"batch(content-scoped) content_id={content_id} channel_id={channel_id} "
+                f"telegram_user_id={telegram_user_id}"
+            )
+
+        if idempotency_query is not None:
+            try:
+                existing_res = idempotency_query.execute()
+                existing = (existing_res.data or [None])[0]
+
+                if existing and existing.get("id"):
+                    update_payload = {
+                        k: v
+                        for k, v in payload.items()
+                        if k not in {"id", "created_at"}
+                    }
+                    # Re-analysis must be re-synced to graph.
+                    update_payload["neo4j_synced"] = False
+
+                    updated_res = self.client.table("ai_analysis") \
+                        .update(update_payload) \
+                        .eq("id", existing["id"]) \
+                        .execute()
+                    self._register_topic_proposals_from_analysis(
+                        payload,
+                        analysis_id=str(existing.get("id") or "") or None,
+                        channel_id=str(channel_id) if channel_id else None,
+                        content_type=content_type,
+                        content_id=str(content_id) if content_id else None,
+                        telegram_user_id=int(telegram_user_id) if telegram_user_id is not None else None,
+                    )
+                    if updated_res.data:
+                        return updated_res.data[0]
+                    return {"id": existing["id"], **update_payload}
+            except Exception as e:
+                logger.warning(
+                    f"Analysis idempotent update path failed for {idempotency_label}: {e}. Falling back to insert."
+                )
+
+        inserted_res = self.client.table("ai_analysis") \
+            .insert(payload) \
             .execute()
+        inserted = inserted_res.data[0] if inserted_res.data else None
+        self._register_topic_proposals_from_analysis(
+            payload,
+            analysis_id=str(inserted.get("id") or "") if isinstance(inserted, dict) else None,
+            channel_id=str(channel_id) if channel_id else None,
+            content_type=content_type,
+            content_id=str(content_id) if content_id else None,
+            telegram_user_id=int(telegram_user_id) if telegram_user_id is not None else None,
+        )
+        return inserted
 
     def get_unsynced_analysis(self, limit: int = 100) -> list[dict]:
         """Fetch AI analysis not yet pushed to Neo4j."""
@@ -327,6 +514,648 @@ class SupabaseWriter:
             .limit(limit) \
             .execute()
         return res.data or []
+
+    def _failure_backoff_seconds(self, attempt_count: int) -> int:
+        base = max(5, int(config.AI_FAILURE_BACKOFF_SECONDS))
+        max_backoff = max(base, int(config.AI_FAILURE_BACKOFF_MAX_SECONDS))
+        value = base * (2 ** max(0, int(attempt_count) - 1))
+        return int(min(max_backoff, value))
+
+    def get_blocked_scopes(self, scope_type: str, scope_keys: list[str]) -> set[str]:
+        """Return scope keys blocked by retry delay or dead-letter state."""
+        keys = [str(key).strip() for key in (scope_keys or []) if str(key).strip()]
+        if not keys:
+            return set()
+
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            res = self.client.table("ai_processing_failures") \
+                .select("scope_key, is_dead_letter, next_retry_at") \
+                .eq("scope_type", scope_type) \
+                .in_("scope_key", keys) \
+                .execute()
+
+            blocked: set[str] = set()
+            for row in (res.data or []):
+                key = str(row.get("scope_key") or "").strip()
+                if not key:
+                    continue
+                if bool(row.get("is_dead_letter", False)):
+                    blocked.add(key)
+                    continue
+                next_retry_at = row.get("next_retry_at")
+                if next_retry_at and str(next_retry_at) > now_iso:
+                    blocked.add(key)
+            return blocked
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return set()
+
+    def record_processing_failure(
+        self,
+        *,
+        scope_type: str,
+        scope_key: str,
+        channel_id: str | None,
+        post_id: str | None,
+        telegram_user_id: int | None,
+        error: str,
+    ) -> dict:
+        """Increment failure tracking with backoff and dead-letter thresholds."""
+        scope_key_norm = str(scope_key or "").strip()
+        if not scope_key_norm:
+            return {"attempt_count": 0, "is_dead_letter": False}
+
+        try:
+            now = datetime.now(timezone.utc)
+            existing_res = self.client.table("ai_processing_failures") \
+                .select("id, attempt_count, first_failed_at") \
+                .eq("scope_type", scope_type) \
+                .eq("scope_key", scope_key_norm) \
+                .limit(1) \
+                .execute()
+            existing = (existing_res.data or [None])[0]
+
+            attempt_count = int(existing.get("attempt_count") or 0) + 1 if existing else 1
+            dead_letter = attempt_count >= max(1, int(config.AI_FAILURE_MAX_RETRIES))
+            next_retry_at = now + timedelta(seconds=self._failure_backoff_seconds(attempt_count))
+
+            payload = {
+                "scope_type": scope_type,
+                "scope_key": scope_key_norm,
+                "channel_id": channel_id,
+                "post_id": post_id,
+                "telegram_user_id": telegram_user_id,
+                "attempt_count": attempt_count,
+                "last_error": (error or "")[:1800],
+                "last_failed_at": now.isoformat(),
+                "next_retry_at": next_retry_at.isoformat(),
+                "is_dead_letter": dead_letter,
+                "resolved_at": None,
+                "updated_at": now.isoformat(),
+            }
+
+            if existing and existing.get("first_failed_at"):
+                payload["first_failed_at"] = existing.get("first_failed_at")
+            else:
+                payload["first_failed_at"] = now.isoformat()
+
+            if existing and existing.get("id"):
+                self.client.table("ai_processing_failures") \
+                    .update(payload) \
+                    .eq("id", existing["id"]) \
+                    .execute()
+            else:
+                self.client.table("ai_processing_failures") \
+                    .insert(payload) \
+                    .execute()
+
+            return {
+                "attempt_count": attempt_count,
+                "is_dead_letter": dead_letter,
+                "next_retry_at": next_retry_at.isoformat(),
+            }
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return {"attempt_count": 0, "is_dead_letter": False}
+
+    def clear_processing_failure(self, scope_type: str, scope_key: str) -> None:
+        """Clear failure tracking on successful processing."""
+        key = str(scope_key or "").strip()
+        if not key:
+            return
+        try:
+            self.client.table("ai_processing_failures") \
+                .delete() \
+                .eq("scope_type", scope_type) \
+                .eq("scope_key", key) \
+                .execute()
+        except Exception as e:
+            self._warn_failure_table_once(e)
+
+    def list_processing_failures(
+        self,
+        *,
+        dead_letter_only: bool = True,
+        scope_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List tracked processing failures for operator triage."""
+        try:
+            query = self.client.table("ai_processing_failures") \
+                .select("*") \
+                .order("last_failed_at", desc=True) \
+                .limit(max(1, min(int(limit), 500)))
+
+            if dead_letter_only:
+                query = query.eq("is_dead_letter", True)
+            if scope_type:
+                query = query.eq("scope_type", scope_type)
+
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return []
+
+    def retry_processing_failures(self, *, scope_type: str, scope_keys: list[str]) -> int:
+        """Unlock selected failures for immediate retry."""
+        keys = [str(key).strip() for key in (scope_keys or []) if str(key).strip()]
+        if not keys:
+            return 0
+
+        try:
+            existing_res = self.client.table("ai_processing_failures") \
+                .select("scope_key") \
+                .eq("scope_type", scope_type) \
+                .in_("scope_key", keys) \
+                .execute()
+            existing_keys = {
+                str(row.get("scope_key") or "").strip()
+                for row in (existing_res.data or [])
+                if row.get("scope_key")
+            }
+            if not existing_keys:
+                return 0
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            self.client.table("ai_processing_failures") \
+                .update({
+                    "is_dead_letter": False,
+                    "next_retry_at": now_iso,
+                    "updated_at": now_iso,
+                }) \
+                .eq("scope_type", scope_type) \
+                .in_("scope_key", list(existing_keys)) \
+                .execute()
+            return len(existing_keys)
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return 0
+
+    def get_processing_failure_counts(self) -> dict:
+        """Return dead-letter and retry-blocked failure scope counts."""
+        try:
+            dead = self.client.table("ai_processing_failures") \
+                .select("id") \
+                .eq("is_dead_letter", True) \
+                .execute()
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            blocked = self.client.table("ai_processing_failures") \
+                .select("id") \
+                .eq("is_dead_letter", False) \
+                .gt("next_retry_at", now_iso) \
+                .execute()
+
+            return {
+                "dead_letter_scopes": len(dead.data or []),
+                "retry_blocked_scopes": len(blocked.data or []),
+            }
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return {
+                "dead_letter_scopes": 0,
+                "retry_blocked_scopes": 0,
+            }
+
+    def refresh_runtime_topic_aliases(self) -> int:
+        """Load operator-approved topic promotions into runtime normalizer aliases."""
+        try:
+            res = self.client.table("topic_taxonomy_promotions") \
+                .select("alias_name, canonical_topic") \
+                .eq("is_active", True) \
+                .execute()
+
+            alias_map: dict[str, str] = {}
+            for row in (res.data or []):
+                alias = str(row.get("alias_name") or "").strip()
+                canonical = str(row.get("canonical_topic") or "").strip()
+                if alias and canonical:
+                    alias_map[alias.lower()] = canonical
+            set_runtime_topic_aliases(alias_map)
+            return len(alias_map)
+        except Exception as e:
+            set_runtime_topic_aliases({})
+            self._warn_topic_promotion_table_once(e)
+            return 0
+
+    def list_topic_promotions(self, *, limit: int = 200, active_only: bool = True) -> list[dict]:
+        """List operator-approved topic promotions/aliases."""
+        try:
+            query = self.client.table("topic_taxonomy_promotions") \
+                .select("*") \
+                .order("updated_at", desc=True) \
+                .limit(max(1, min(int(limit), 500)))
+
+            if active_only:
+                query = query.eq("is_active", True)
+
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_topic_promotion_table_once(e)
+            return []
+
+    def _extract_proposed_topics(self, analysis_payload: dict) -> list[dict]:
+        raw = analysis_payload.get("raw_llm_response") if isinstance(analysis_payload, dict) else None
+        if not isinstance(raw, dict):
+            return []
+
+        topics = raw.get("topics")
+        if not isinstance(topics, list):
+            return []
+
+        proposals: list[dict] = []
+        seen: set[str] = set()
+        for item in topics:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get("proposed", False)):
+                continue
+
+            topic_name = str(item.get("proposed_topic") or item.get("name") or "").strip()
+            if not topic_name:
+                continue
+            key = topic_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            proposals.append(
+                {
+                    "topic_name": topic_name,
+                    "closest_category": str(item.get("closest_category") or "General").strip() or "General",
+                    "domain": str(item.get("domain") or "General").strip() or "General",
+                    "evidence": str(item.get("evidence") or "").strip()[:1000] or None,
+                }
+            )
+        return proposals
+
+    def _json_text_list(self, value) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                decoded = json.loads(text)
+                if isinstance(decoded, list):
+                    return [str(item).strip() for item in decoded if str(item).strip()]
+            except Exception:
+                return []
+        return []
+
+    def _proposal_scope_key(
+        self,
+        *,
+        analysis_id: str | None,
+        channel_id: str | None,
+        content_type: str | None,
+        content_id: str | None,
+        telegram_user_id: int | None,
+    ) -> str:
+        parts = [
+            str(channel_id or "").strip() or "none",
+            str(content_type or "").strip() or "unknown",
+            str(content_id or "").strip() or "none",
+            str(telegram_user_id) if telegram_user_id is not None else "none",
+        ]
+        scope_key = "|".join(parts)
+        if scope_key == "none|unknown|none|none":
+            return str(analysis_id or "").strip() or "unknown"
+        return scope_key
+
+    def _topic_visibility_state(
+        self,
+        *,
+        distinct_content_count: int,
+        distinct_user_count: int,
+        distinct_channel_count: int,
+    ) -> tuple[bool, str]:
+        eligible = (
+            distinct_content_count >= 3
+            and distinct_user_count >= 3
+            and distinct_channel_count >= 2
+        )
+        return eligible, ("emerging_visible" if eligible else "candidate")
+
+    def _register_topic_proposals_from_analysis(
+        self,
+        analysis_payload: dict,
+        *,
+        analysis_id: str | None,
+        channel_id: str | None,
+        content_type: str | None,
+        content_id: str | None,
+        telegram_user_id: int | None,
+    ) -> None:
+        proposals = self._extract_proposed_topics(analysis_payload)
+        if not proposals:
+            return
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        scope_key = self._proposal_scope_key(
+            analysis_id=analysis_id,
+            channel_id=channel_id,
+            content_type=content_type,
+            content_id=content_id,
+            telegram_user_id=telegram_user_id,
+        )
+        channel_marker = str(channel_id or "").strip()
+        user_marker = str(telegram_user_id) if telegram_user_id is not None else ""
+        content_marker = f"{str(content_type or 'unknown').strip() or 'unknown'}:{str(content_id or '').strip() or 'none'}"
+
+        for proposal in proposals:
+            topic_name = proposal["topic_name"]
+            try:
+                existing_res = self.client.table("topic_review_queue") \
+                    .select("*") \
+                    .eq("topic_name", topic_name) \
+                    .limit(1) \
+                    .execute()
+                existing = (existing_res.data or [None])[0]
+
+                existing_scope_keys = self._json_text_list((existing or {}).get("seen_scope_keys"))
+                existing_content_keys = self._json_text_list((existing or {}).get("seen_content_keys"))
+                existing_channel_ids = self._json_text_list((existing or {}).get("seen_channel_ids"))
+                existing_user_ids = self._json_text_list((existing or {}).get("seen_user_ids"))
+
+                scope_keys = list(dict.fromkeys(existing_scope_keys + ([scope_key] if scope_key else [])))
+                content_keys = list(dict.fromkeys(existing_content_keys + ([content_marker] if content_marker else [])))
+                channel_ids = list(dict.fromkeys(existing_channel_ids + ([channel_marker] if channel_marker else [])))
+                user_ids = list(dict.fromkeys(existing_user_ids + ([user_marker] if user_marker else [])))
+
+                distinct_scope_count = len(scope_keys)
+                distinct_content_count = len(content_keys)
+                distinct_channel_count = len(channel_ids)
+                distinct_user_count = len(user_ids)
+                visibility_eligible, visibility_state = self._topic_visibility_state(
+                    distinct_content_count=distinct_content_count,
+                    distinct_user_count=distinct_user_count,
+                    distinct_channel_count=distinct_channel_count,
+                )
+
+                base_payload = {
+                    "topic_name": topic_name,
+                    "closest_category": proposal.get("closest_category"),
+                    "domain": proposal.get("domain"),
+                    "latest_evidence": proposal.get("evidence"),
+                    "last_seen_at": now_iso,
+                    "latest_analysis_id": analysis_id,
+                    "latest_channel_id": channel_id,
+                    "latest_content_type": content_type,
+                    "last_scope_key": scope_key,
+                    "seen_scope_keys": scope_keys,
+                    "seen_content_keys": content_keys,
+                    "seen_channel_ids": channel_ids,
+                    "seen_user_ids": user_ids,
+                    "distinct_scope_count": distinct_scope_count,
+                    "distinct_content_count": distinct_content_count,
+                    "distinct_channel_count": distinct_channel_count,
+                    "distinct_user_count": distinct_user_count,
+                    "visibility_eligible": visibility_eligible,
+                    "visibility_state": visibility_state,
+                    "updated_at": now_iso,
+                }
+
+                legacy_base_payload = {
+                    "topic_name": topic_name,
+                    "closest_category": proposal.get("closest_category"),
+                    "domain": proposal.get("domain"),
+                    "latest_evidence": proposal.get("evidence"),
+                    "last_seen_at": now_iso,
+                    "latest_analysis_id": analysis_id,
+                    "latest_channel_id": channel_id,
+                    "latest_content_type": content_type,
+                    "updated_at": now_iso,
+                }
+
+                if existing and existing.get("topic_name"):
+                    update_payload = {
+                        **base_payload,
+                        "proposed_count": max(int(existing.get("proposed_count") or 0), distinct_scope_count),
+                    }
+                    try:
+                        self.client.table("topic_review_queue") \
+                            .update(update_payload) \
+                            .eq("topic_name", topic_name) \
+                            .execute()
+                    except Exception:
+                        legacy_update_payload = {
+                            **legacy_base_payload,
+                            "proposed_count": int(existing.get("proposed_count") or 0) + 1,
+                        }
+                        self.client.table("topic_review_queue") \
+                            .update(legacy_update_payload) \
+                            .eq("topic_name", topic_name) \
+                            .execute()
+                else:
+                    insert_payload = {
+                        **base_payload,
+                        "status": "pending",
+                        "proposed_count": max(1, distinct_scope_count),
+                        "first_seen_at": now_iso,
+                        "created_at": now_iso,
+                    }
+                    try:
+                        self.client.table("topic_review_queue") \
+                            .insert(insert_payload) \
+                            .execute()
+                    except Exception:
+                        legacy_insert_payload = {
+                            **legacy_base_payload,
+                            "status": "pending",
+                            "proposed_count": 1,
+                            "first_seen_at": now_iso,
+                            "created_at": now_iso,
+                        }
+                        self.client.table("topic_review_queue") \
+                            .insert(legacy_insert_payload) \
+                            .execute()
+            except Exception as e:
+                self._warn_topic_review_table_once(e)
+                break
+
+    def list_topic_proposals(
+        self,
+        *,
+        status: str = "pending",
+        limit: int = 100,
+    ) -> list[dict]:
+        """List taxonomy topic proposals awaiting or post review."""
+        try:
+            query = self.client.table("topic_review_queue") \
+                .select("*") \
+                .order("last_seen_at", desc=True) \
+                .limit(max(1, min(int(limit), 500)))
+
+            normalized_status = (status or "").strip().lower()
+            if normalized_status and normalized_status != "all":
+                query = query.eq("status", normalized_status)
+
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_topic_review_table_once(e)
+            return []
+
+    def list_emerging_topic_candidates(
+        self,
+        *,
+        limit: int = 50,
+        status: str = "pending",
+    ) -> list[dict]:
+        """List proposed topics that qualify for frontend emerging visibility."""
+        scan_limit = max(100, min(500, max(1, int(limit)) * 8))
+        rows = self.list_topic_proposals(status=status, limit=scan_limit)
+        output: list[dict] = []
+
+        for row in rows:
+            proposed_count = int(row.get("proposed_count") or 0)
+            distinct_content_count = int(row.get("distinct_content_count") or 0)
+            distinct_user_count = int(row.get("distinct_user_count") or 0)
+            distinct_channel_count = int(row.get("distinct_channel_count") or 0)
+
+            if distinct_content_count <= 0:
+                distinct_content_count = proposed_count
+            if distinct_channel_count <= 0 and row.get("latest_channel_id"):
+                distinct_channel_count = 1
+            if distinct_user_count <= 0 and row.get("latest_analysis_id"):
+                distinct_user_count = 1
+
+            eligible, state = self._topic_visibility_state(
+                distinct_content_count=distinct_content_count,
+                distinct_user_count=distinct_user_count,
+                distinct_channel_count=distinct_channel_count,
+            )
+
+            stored_state = str(row.get("visibility_state") or "").strip() or state
+            stored_eligible = bool(row.get("visibility_eligible", eligible))
+            is_visible = stored_eligible or stored_state == "emerging_visible" or proposed_count >= 3
+            if not is_visible:
+                continue
+
+            output.append(
+                {
+                    "topic_name": str(row.get("topic_name") or "").strip(),
+                    "closest_category": str(row.get("closest_category") or "General").strip() or "General",
+                    "domain": str(row.get("domain") or "General").strip() or "General",
+                    "latest_evidence": str(row.get("latest_evidence") or "").strip() or None,
+                    "proposed_count": proposed_count,
+                    "distinct_content_count": distinct_content_count,
+                    "distinct_user_count": distinct_user_count,
+                    "distinct_channel_count": distinct_channel_count,
+                    "visibility_state": stored_state,
+                    "visibility_eligible": stored_eligible,
+                    "last_seen_at": row.get("last_seen_at"),
+                }
+            )
+
+        output.sort(
+            key=lambda item: (
+                int(item.get("distinct_content_count") or 0),
+                int(item.get("distinct_user_count") or 0),
+                int(item.get("proposed_count") or 0),
+                str(item.get("last_seen_at") or ""),
+            ),
+            reverse=True,
+        )
+        return output[:max(1, min(int(limit), 500))]
+
+    def review_topic_proposal(
+        self,
+        *,
+        topic_name: str,
+        decision: str,
+        canonical_topic: str | None = None,
+        aliases: list[str] | None = None,
+        notes: str | None = None,
+        reviewed_by: str | None = None,
+    ) -> dict | None:
+        """Approve or reject a proposed topic and optionally promote alias mappings."""
+        topic = str(topic_name or "").strip()
+        if not topic:
+            return None
+
+        normalized_decision = (decision or "").strip().lower()
+        if normalized_decision not in {"approve", "reject"}:
+            raise ValueError("decision must be 'approve' or 'reject'")
+
+        status = "approved" if normalized_decision == "approve" else "rejected"
+        approved_topic = str(canonical_topic or "").strip() if normalized_decision == "approve" else None
+        if normalized_decision == "approve" and not approved_topic:
+            approved_topic = topic
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "status": status,
+            "approved_topic": approved_topic,
+            "review_notes": (notes or "")[:1000] or None,
+            "reviewed_by": (reviewed_by or "")[:120] or None,
+            "reviewed_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        try:
+            updated = self.client.table("topic_review_queue") \
+                .update(payload) \
+                .eq("topic_name", topic) \
+                .execute()
+            row = updated.data[0] if updated.data else None
+        except Exception as e:
+            self._warn_topic_review_table_once(e)
+            return None
+
+        if normalized_decision == "approve" and approved_topic:
+            alias_candidates = [topic]
+            for alias in aliases or []:
+                cleaned = str(alias or "").strip()
+                if cleaned:
+                    alias_candidates.append(cleaned)
+
+            seen: set[str] = set()
+            for alias in alias_candidates:
+                key = alias.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    self.client.table("topic_taxonomy_promotions") \
+                        .upsert(
+                            {
+                                "alias_name": alias,
+                                "canonical_topic": approved_topic,
+                                "source_topic": topic,
+                                "is_active": True,
+                                "promoted_by": (reviewed_by or "")[:120] or None,
+                                "notes": (notes or "")[:1000] or None,
+                                "promoted_at": now_iso,
+                                "updated_at": now_iso,
+                                "created_at": now_iso,
+                            },
+                            on_conflict="alias_name",
+                        ) \
+                        .execute()
+                except Exception as e:
+                    self._warn_topic_promotion_table_once(e)
+                    break
+
+            self.refresh_runtime_topic_aliases()
+
+        return row
+
+    def get_latest_post_analysis(self, post_uuid: str) -> dict | None:
+        """Return latest post-level analysis row for a given post UUID."""
+        res = self.client.table("ai_analysis") \
+            .select("*") \
+            .eq("content_type", "post") \
+            .eq("content_id", post_uuid) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        return res.data[0] if res.data else None
 
     def mark_analysis_synced(self, analysis_uuid: str):
         self.client.table("ai_analysis") \
@@ -339,6 +1168,46 @@ class SupabaseWriter:
             .update({"neo4j_synced": True}) \
             .eq("id", post_uuid) \
             .execute()
+
+    def reconcile_post_analysis_sync(self, limit: int = 300) -> int:
+        """
+        Reconcile historic post analyses left unsynced while their posts are synced.
+
+        Returns number of analysis rows marked as synced.
+        """
+        res = self.client.table("ai_analysis") \
+            .select("id, content_id") \
+            .eq("content_type", "post") \
+            .eq("neo4j_synced", False) \
+            .not_.is_("content_id", "null") \
+            .order("created_at", desc=False) \
+            .limit(max(1, int(limit))) \
+            .execute()
+        candidates = res.data or []
+        if not candidates:
+            return 0
+
+        post_ids = list({str(row.get("content_id")) for row in candidates if row.get("content_id")})
+        if not post_ids:
+            return 0
+
+        synced_posts_res = self.client.table("telegram_posts") \
+            .select("id") \
+            .in_("id", post_ids) \
+            .eq("neo4j_synced", True) \
+            .execute()
+        synced_posts = {str(row.get("id")) for row in (synced_posts_res.data or []) if row.get("id")}
+        if not synced_posts:
+            return 0
+
+        reconciled = 0
+        for row in candidates:
+            analysis_id = row.get("id")
+            content_id = row.get("content_id")
+            if analysis_id and content_id and str(content_id) in synced_posts:
+                self.mark_analysis_synced(str(analysis_id))
+                reconciled += 1
+        return reconciled
 
     def _count_rows(self, table_name: str, filters: dict | None = None) -> int | None:
         """Count rows with optional equality filters; returns None on failure."""
@@ -368,10 +1237,40 @@ class SupabaseWriter:
             logger.debug(f"Latest timestamp query failed for {table_name}.{column}: {e}")
             return None
 
+    def get_backlog_counts(self) -> dict:
+        """Return key pipeline queue counters used for runtime backpressure."""
+        failure_counts = self.get_processing_failure_counts()
+        return {
+            "unprocessed_posts": self._count_rows("telegram_posts", {"is_processed": False}),
+            "unprocessed_comments": self._count_rows("telegram_comments", {"is_processed": False}),
+            "unsynced_posts": self._count_rows("telegram_posts", {"neo4j_synced": False}),
+            "unsynced_analysis": self._count_rows("ai_analysis", {"neo4j_synced": False}),
+            "dead_letter_scopes": failure_counts.get("dead_letter_scopes", 0),
+            "retry_blocked_scopes": failure_counts.get("retry_blocked_scopes", 0),
+        }
+
+    def get_posts_by_ids(self, post_ids: list[str]) -> dict[str, dict]:
+        """Fetch post records by UUID list and return dict keyed by id."""
+        ids = [str(post_id).strip() for post_id in (post_ids or []) if str(post_id).strip()]
+        if not ids:
+            return {}
+
+        res = self.client.table("telegram_posts") \
+            .select("id, channel_id, telegram_message_id, text, posted_at") \
+            .in_("id", ids) \
+            .execute()
+
+        return {
+            str(row.get("id")): row
+            for row in (res.data or [])
+            if row.get("id")
+        }
+
     def get_pipeline_freshness_snapshot(self) -> dict:
         """
         Return Supabase-side freshness/backlog snapshot for trust monitoring.
         """
+        failure_counts = self.get_processing_failure_counts()
         active_channels = self.get_active_channels()
         scraped_times = []
         active_never_scraped = 0
@@ -404,6 +1303,8 @@ class SupabaseWriter:
             "unprocessed_comments": self._count_rows("telegram_comments", {"is_processed": False}),
             "unsynced_posts": self._count_rows("telegram_posts", {"neo4j_synced": False}),
             "unsynced_analysis": self._count_rows("ai_analysis", {"neo4j_synced": False}),
+            "dead_letter_scopes": failure_counts.get("dead_letter_scopes", 0),
+            "retry_blocked_scopes": failure_counts.get("retry_blocked_scopes", 0),
             "total_posts": self._count_rows("telegram_posts"),
             "total_comments": self._count_rows("telegram_comments"),
             "total_analysis": self._count_rows("ai_analysis"),
@@ -430,7 +1331,9 @@ class SupabaseWriter:
             "post":     post dict,
             "channel":  channel dict,
             "comments": [comment dict, ...],
-            "analyses": { str(telegram_user_id): analysis_dict, ... }
+            "analyses": { str(telegram_user_id): analysis_dict, ... },
+            "post_analysis": analysis_dict | None,
+            "analysis_records": [analysis_dict, ...],
           }
         """
         # Channel
@@ -455,15 +1358,18 @@ class SupabaseWriter:
             if c.get("telegram_user_id")
         })
 
-        # Fetch AI analyses for those users in this channel
+        # Fetch scoped AI analyses for those users in this post.
+        # Fallback to legacy channel-scoped `batch` rows only when needed.
         analyses: dict[str, dict] = {}
         if user_ids:
-            an_res = self.client.table("ai_analysis") \
+            scoped_res = self.client.table("ai_analysis") \
                 .select("*") \
                 .eq("channel_id", post["channel_id"]) \
+                .eq("content_type", "batch") \
+                .eq("content_id", post["id"]) \
                 .in_("telegram_user_id", user_ids) \
                 .execute()
-            for a in (an_res.data or []):
+            for a in (scoped_res.data or []):
                 uid = str(a["telegram_user_id"])
                 # Keep the MOST RECENT analysis per user (by created_at)
                 if uid not in analyses or (
@@ -471,11 +1377,40 @@ class SupabaseWriter:
                 ):
                     analyses[uid] = a
 
+            missing_user_ids = [uid for uid in user_ids if str(uid) not in analyses]
+            if missing_user_ids:
+                fallback_res = self.client.table("ai_analysis") \
+                    .select("*") \
+                    .eq("channel_id", post["channel_id"]) \
+                    .eq("content_type", "batch") \
+                    .is_("content_id", "null") \
+                    .in_("telegram_user_id", missing_user_ids) \
+                    .execute()
+
+                for a in (fallback_res.data or []):
+                    uid = str(a["telegram_user_id"])
+                    if uid in analyses:
+                        continue
+                    if uid not in analyses or (
+                        (a.get("created_at") or "") > (analyses[uid].get("created_at") or "")
+                    ):
+                        analyses[uid] = a
+
+        post_analysis = self.get_latest_post_analysis(post["id"])
+
+        analysis_records: list[dict] = list(analyses.values())
+        if post_analysis and post_analysis.get("id"):
+            included_ids = {row.get("id") for row in analysis_records if row.get("id")}
+            if post_analysis.get("id") not in included_ids:
+                analysis_records.append(post_analysis)
+
         return {
             "post":           post,
             "channel":        channel,
             "comments":       comments,
             "analyses":       analyses,
+            "post_analysis":  post_analysis,
+            "analysis_records": analysis_records,
             # Maps telegram_message_id → telegram_user_id for User→User network
             # Used by neo4j_writer to resolve who was replied to
             "reply_user_map": {

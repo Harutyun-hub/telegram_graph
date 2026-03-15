@@ -1,380 +1,381 @@
 from __future__ import annotations
-"""
-topic_normalizer.py — Expert-grade topic canonicalization pipeline.
 
-Applied BEFORE every Neo4j MERGE to prevent graph pollution.
+"""Topic canonicalization and taxonomy lookups used before Neo4j writes."""
 
-Pipeline:
-  raw string → strip → Title Case → singular → synonym map → max 4 words
-
-This ensures "sport offer", "Sports Events", "sporting events" all
-resolve to the same canonical "Sports Event" node in Neo4j.
-"""
+from difflib import get_close_matches
 import re
+from typing import Any
 
-# ── Topic Synonym / Canonical Map ────────────────────────────────────────────
-# Keys: lowercase version of any variant
-# Values: canonical Title Case form to store in Neo4j
+from utils.taxonomy import (
+    TOPIC_ALIASES,
+    build_topic_maps,
+    canonical_category_name,
+    canonical_domain_name,
+    iter_topics,
+)
 
-TOPIC_SYNONYMS: dict[str, str] = {
-    # ── Sports ──
-    "sport":                        "Sports Event",
-    "sports":                       "Sports Event",
-    "sport event":                  "Sports Event",
-    "sports event":                 "Sports Event",
-    "sports events":                "Sports Event",
-    "sporting event":               "Sports Event",
-    "sporting events":              "Sports Event",
-    "sport offer":                  "Sports Event",
-    "sports offer":                 "Sports Event",
-    "football":                     "Football Match",
-    "football game":                "Football Match",
-    "football match":               "Football Match",
-    "soccer":                       "Football Match",
-    "soccer game":                  "Football Match",
-    "soccer match":                 "Football Match",
-    "national team":                "Armenian National Team",
+TOPIC_CATEGORIES, TOPIC_DOMAINS = build_topic_maps()
 
-    # ── Geopolitics / Conflicts ──
-    "karabakh":                     "Nagorno-Karabakh Conflict",
-    "karabakh war":                 "Nagorno-Karabakh Conflict",
-    "nagorno karabakh":             "Nagorno-Karabakh Conflict",
-    "nagorno-karabakh":             "Nagorno-Karabakh Conflict",
-    "artsakh":                      "Nagorno-Karabakh Conflict",
-    "artsakh war":                  "Nagorno-Karabakh Conflict",
-    "2020 war":                     "Nagorno-Karabakh Conflict",
-    "ukraine":                      "Russia-Ukraine War",
-    "ukraine war":                  "Russia-Ukraine War",
-    "war in ukraine":               "Russia-Ukraine War",
-    "russia ukraine":               "Russia-Ukraine War",
-    "russia-ukraine conflict":      "Russia-Ukraine War",
-    "sanctions":                    "Economic Sanctions",
-    "russian sanctions":            "Economic Sanctions",
-    "western sanctions":            "Economic Sanctions",
-
-    # ── Armenian Politics ──
-    "armenian politics":            "Armenian Political Situation",
-    "armenian government":          "Armenian Government",
-    "government":                   "Armenian Government",
-    "pashinyan":                    "Armenian Government",
-    "nikol":                        "Armenian Government",
-    "opposition":                   "Armenian Opposition",
-    "armenian opposition":          "Armenian Opposition",
-    "protest":                      "Political Protest",
-    "protests":                     "Political Protest",
-    "rally":                        "Political Protest",
-    "demonstration":                "Political Protest",
-    "corruption":                   "Government Corruption",
-    "bribe":                        "Government Corruption",
-    "bribes":                       "Government Corruption",
-    "bribery":                      "Government Corruption",
-
-    # ── Economy ──
-    "inflation":                    "Inflation And Prices",
-    "prices":                       "Inflation And Prices",
-    "high prices":                  "Inflation And Prices",
-    "price rise":                   "Inflation And Prices",
-    "cost of living":               "Inflation And Prices",
-    "economy":                      "Economic Situation",
-    "economic situation":           "Economic Situation",
-    "economic crisis":              "Economic Situation",
-    "currency":                     "Currency Situation",
-    "dram":                         "Armenian Dram",
-    "armenian dram":                "Armenian Dram",
-    "ruble":                        "Russian Ruble",
-
-    # ── Migration & Diaspora ──
-    "migration":                    "Migration Intent",
-    "immigration":                  "Migration Intent",
-    "emigration":                   "Migration Intent",
-    "relocation":                   "Migration Intent",
-    "moving abroad":                "Migration Intent",
-    "leaving armenia":              "Migration Intent",
-    "leaving russia":               "Migration Intent",
-    "diaspora":                     "Armenian Diaspora Identity",
-    "armenian diaspora":            "Armenian Diaspora Identity",
-    "diaspora identity":            "Armenian Diaspora Identity",
-    "homeland":                     "Homeland Connection",
-
-    # ── Society / Daily Life ──
-    "education":                    "Education System",
-    "school":                       "Education System",
-    "schools":                      "Education System",
-    "university":                   "Higher Education",
-    "tutor":                        "Private Education",
-    "healthcare":                   "Healthcare Quality",
-    "health":                       "Healthcare Quality",
-    "medicine":                     "Healthcare Quality",
-    "hospital":                     "Healthcare Quality",
-    "housing":                      "Housing Market",
-    "apartment":                    "Housing Market",
-    "rent":                         "Housing Market",
-    "real estate":                  "Real Estate Market",
-    "family":                       "Family Life",
-    "parenting":                    "Family Life",
-    "children":                     "Family Life",
-
-    # ── Media & Information ──
-    "propaganda":                   "Russian Propaganda",
-    "russian propaganda":           "Russian Propaganda",
-    "fake news":                    "Disinformation",
-    "disinformation":               "Disinformation",
-    "misinformation":               "Disinformation",
-    "media":                        "Media And News",
-    "news":                         "Media And News",
-    "social media":                 "Social Media",
-    "telegram":                     "Telegram Community",
-
-    # ── Religion & Culture ──
-    "religion":                     "Religion And Faith",
-    "church":                       "Armenian Apostolic Church",
-    "orthodox":                     "Orthodox Christianity",
-    "christianity":                 "Orthodox Christianity",
-    "culture":                      "Armenian Culture",
-    "armenian culture":             "Armenian Culture",
-    "history":                      "Armenian History",
-    "genocide":                     "Armenian Genocide",
-    "armenian genocide":            "Armenian Genocide",
-
-    # ── Business ──
-    "business":                     "Business Opportunity",
-    "startup":                      "Tech Startup",
-    "investment":                   "Investment Opportunity",
-    "job":                          "Employment",
-    "jobs":                         "Employment",
-    "work":                         "Employment",
-    "employment":                   "Employment",
-    "unemployment":                 "Unemployment",
-
-    # ── Identity ──
-    "identity":                     "National Identity",
-    "national identity":            "National Identity",
-    "russians in armenia":          "Russian Expat Community",
-    "expats":                       "Russian Expat Community",
-    "russian community":            "Russian Expat Community",
-    "russians":                     "Russian Community",
-}
-
-# ── Topic Category Map ─────────────────────────────────────────────────────────
-# Maps canonical topic names → their parent category (for TopicCategory nodes)
-
-TOPIC_CATEGORIES: dict[str, str] = {
-    # Politics
-    "Nagorno-Karabakh Conflict":    "Security And Conflict",
-    "Russia-Ukraine War":           "Security And Conflict",
-    "Armenian Political Situation": "Politics",
-    "Armenian Government":          "Politics",
-    "Armenian Opposition":          "Politics",
-    "Political Protest":            "Politics",
-    "Government Corruption":        "Politics",
-    "Economic Sanctions":           "Politics",
-
-    # Economy
-    "Inflation And Prices":         "Economy",
-    "Economic Situation":           "Economy",
-    "Currency Situation":           "Economy",
-    "Armenian Dram":                "Economy",
-    "Russian Ruble":                "Economy",
-    "Housing Market":               "Economy",
-    "Real Estate Market":           "Economy",
-    "Employment":                   "Economy",
-    "Unemployment":                 "Economy",
-    "Business Opportunity":         "Economy",
-    "Investment Opportunity":       "Economy",
-    "Tech Startup":                 "Economy",
-
-    # Society
-    "Education System":             "Society",
-    "Higher Education":             "Society",
-    "Private Education":            "Society",
-    "Healthcare Quality":           "Society",
-    "Family Life":                  "Society",
-
-    # Migration & Diaspora
-    "Migration Intent":             "Diaspora And Migration",
-    "Armenian Diaspora Identity":   "Diaspora And Migration",
-    "Homeland Connection":          "Diaspora And Migration",
-    "Russian Expat Community":      "Diaspora And Migration",
-
-    # Culture
-    "Armenian Culture":             "Culture And Identity",
-    "Armenian History":             "Culture And Identity",
-    "Armenian Genocide":            "Culture And Identity",
-    "National Identity":            "Culture And Identity",
-    "Orthodox Christianity":        "Culture And Identity",
-    "Armenian Apostolic Church":    "Culture And Identity",
-    "Religion And Faith":           "Culture And Identity",
-
-    # Sports
-    "Sports Event":                 "Culture And Identity",
-    "Football Match":               "Culture And Identity",
-    "Armenian National Team":       "Culture And Identity",
-
-    # Media
-    "Russian Propaganda":           "Media And Information",
-    "Disinformation":               "Media And Information",
-    "Media And News":               "Media And Information",
-    "Social Media":                 "Media And Information",
-    "Telegram Community":           "Media And Information",
-
-    # Security
-    "Russian Community":            "Diaspora And Migration",
-}
+# Lowercase variant -> canonical topic.
+TOPIC_SYNONYMS: dict[str, str] = dict(TOPIC_ALIASES)
+for _canonical_topic in iter_topics():
+    TOPIC_SYNONYMS.setdefault(_canonical_topic.lower(), _canonical_topic)
 
 DEFAULT_CATEGORY = "General"
+DEFAULT_DOMAIN = "General"
+MAX_TOPIC_WORDS = 4
+MAX_MODEL_TOPICS = 6
+_FUZZY_MATCH_CUTOFF = 0.88
+_SEMANTIC_CATEGORY_MATCH_CUTOFF = 0.74
 
-# ── Keyword-based Category Fallback ──────────────────────────────────────────
-# Used when a canonical topic doesn't have an exact entry in TOPIC_CATEGORIES.
-# Keys are lowercase keyword fragments; first match wins.
-
+# Used when a canonical topic has no explicit category mapping.
 _CATEGORY_KEYWORDS: list[tuple[str, str]] = [
-    # Security / Conflict
-    ("karabakh",       "Security And Conflict"),
-    ("artsakh",        "Security And Conflict"),
-    ("war",            "Security And Conflict"),
-    ("military",       "Security And Conflict"),
-    ("conflict",       "Security And Conflict"),
-    # Politics
-    ("government",     "Politics"),
-    ("opposition",     "Politics"),
-    ("protest",        "Politics"),
-    ("election",       "Politics"),
-    ("political",      "Politics"),
-    ("parliament",     "Politics"),
-    ("corruption",     "Politics"),
-    ("sanction",       "Politics"),
-    # Economy
-    ("bank",           "Economy"),
-    ("payment",        "Economy"),
-    ("price",          "Economy"),
-    ("money",          "Economy"),
-    ("business",       "Economy"),
-    ("registration",   "Economy"),
-    ("tax",            "Economy"),
-    ("economic",       "Economy"),
-    ("finance",        "Economy"),
-    ("invest",         "Economy"),
-    ("market",         "Economy"),
-    ("inflation",      "Economy"),
-    # Society
-    ("education",      "Society"),
-    ("school",         "Society"),
-    ("health",         "Society"),
-    ("hospital",       "Society"),
-    ("medicine",       "Society"),
-    ("family",         "Society"),
-    ("parenting",      "Society"),
-    ("housing",        "Society"),
-    ("social service", "Society"),
-    # Technology
-    ("app",            "Technology"),
-    ("mobile",         "Technology"),
-    ("digital",        "Technology"),
-    ("authentication", "Technology"),
-    ("signature",      "Technology"),
-    ("electronic",     "Technology"),
-    ("tech",           "Technology"),
-    ("telecom",        "Technology"),
-    ("internet",       "Technology"),
-    ("platform",       "Technology"),
-    # Transport
-    ("transport",      "Transportation"),
-    ("route",          "Transportation"),
-    ("travel",         "Transportation"),
-    ("bus",            "Transportation"),
-    ("metro",          "Transportation"),
-    ("vehicle",        "Transportation"),
-    ("drive",          "Transportation"),
-    # Culture / Sports
-    ("sport",          "Culture And Identity"),
-    ("football",       "Culture And Identity"),
-    ("hockey",         "Culture And Identity"),
-    ("martial art",    "Culture And Identity"),
-    ("armenian",       "Culture And Identity"),
-    ("culture",        "Culture And Identity"),
-    ("humor",          "Culture And Identity"),
-    ("religious",      "Culture And Identity"),
-    ("maslenitsa",     "Culture And Identity"),
-    ("celebration",    "Culture And Identity"),
-    ("community",      "Culture And Identity"),
-    ("gathering",      "Culture And Identity"),
-    # Diaspora / Migration
-    ("diaspora",       "Diaspora And Migration"),
-    ("migration",      "Diaspora And Migration"),
-    ("expat",          "Diaspora And Migration"),
-    ("relocation",     "Diaspora And Migration"),
-    ("homeland",       "Diaspora And Migration"),
-    # Media
-    ("media",          "Media And Information"),
-    ("news",           "Media And Information"),
-    ("propaganda",     "Media And Information"),
-    ("advertising",    "Media And Information"),
-    ("claim",          "Media And Information"),
-    ("telegram",       "Media And Information"),
+    ("karabakh", "Nagorno-Karabakh & Artsakh"),
+    ("artsakh", "Nagorno-Karabakh & Artsakh"),
+    ("war", "Global Conflict"),
+    ("military", "Military & Defense"),
+    ("conflict", "Regional Security"),
+    ("government", "Government & Leadership"),
+    ("opposition", "Opposition & Protest"),
+    ("protest", "Opposition & Protest"),
+    ("election", "Democracy & Reform"),
+    ("political", "Political Ideology"),
+    ("parliament", "Government & Leadership"),
+    ("corruption", "Democracy & Reform"),
+    ("sanction", "Financial System"),
+    ("bank", "Financial System"),
+    ("payment", "Digital Services"),
+    ("price", "Cost Of Living"),
+    ("money", "Macroeconomic Condition"),
+    ("business", "Business & Enterprise"),
+    ("tax", "Financial System"),
+    ("economic", "Macroeconomic Condition"),
+    ("finance", "Financial System"),
+    ("invest", "Business & Enterprise"),
+    ("market", "Business & Enterprise"),
+    ("inflation", "Macroeconomic Condition"),
+    ("education", "Education"),
+    ("school", "Education"),
+    ("health", "Healthcare"),
+    ("hospital", "Healthcare"),
+    ("medicine", "Healthcare"),
+    ("family", "Family & Relationships"),
+    ("parenting", "Family & Relationships"),
+    ("housing", "Housing & Infrastructure"),
+    ("rent", "Housing & Infrastructure"),
+    ("apartment", "Housing & Infrastructure"),
+    ("real estate", "Housing & Infrastructure"),
+    ("social service", "Social Services"),
+    ("sport", "Arts & Entertainment"),
+    ("football", "Arts & Entertainment"),
+    ("culture", "National Identity"),
+    ("humor", "Community Life"),
+    ("religious", "Religion"),
+    ("celebration", "Community Life"),
+    ("community", "Community Life"),
+    ("diaspora", "Diaspora"),
+    ("migration", "Emigration"),
+    ("expat", "Immigration To Armenia"),
+    ("relocation", "Emigration"),
+    ("homeland", "Diaspora"),
+    ("media", "Media Landscape"),
+    ("news", "Media Landscape"),
+    ("propaganda", "Information Integrity"),
+    ("claim", "Narrative & Frame"),
+    ("telegram", "Media Landscape"),
+    ("digital", "Digital Services"),
+    ("privacy", "Digital Rights"),
+    ("surveillance", "Digital Rights"),
+    ("foreign policy", "Geopolitical Alignment"),
+    ("foreign", "Geopolitical Alignment"),
+    ("regional", "Regional Security"),
+    ("tension", "Regional Security"),
+    ("incident", "Regional Security"),
+    ("ethnic", "National Identity"),
+    ("identity", "National Identity"),
+    ("historical", "National Identity"),
+    ("history", "National Identity"),
+    ("genocide", "National Identity"),
+    ("social", "Community Life"),
+    ("critique", "Community Life"),
+    ("commentary", "Media Landscape"),
+    ("policy", "Government & Leadership"),
+    ("leadership", "Government & Leadership"),
+    ("pashinyan", "Government & Leadership"),
+    ("nikol", "Government & Leadership"),
+    ("constitutional", "Democracy & Reform"),
+    ("activism", "Community Life"),
+    ("environment", "Housing & Infrastructure"),
+    ("water", "Housing & Infrastructure"),
+    ("donation", "Social Services"),
+    ("aid", "Social Services"),
+    ("humanitarian", "Social Services"),
+    ("bot", "Information Integrity"),
+    ("fake", "Information Integrity"),
+    ("interethnic", "National Identity"),
+    ("kurdish", "Regional Security"),
+    ("iran", "Regional Security"),
+    ("us", "Geopolitical Alignment"),
 ]
+
+_CATEGORY_TO_DOMAIN: dict[str, str] = {}
+for _topic, _category in TOPIC_CATEGORIES.items():
+    _CATEGORY_TO_DOMAIN.setdefault(_category, TOPIC_DOMAINS.get(_topic, DEFAULT_DOMAIN))
+
+_TRAILING_S = re.compile(r"(?<=[a-z]{3})s$", re.IGNORECASE)
+_NON_WORD = re.compile(r"[^\w\s\-]+", re.UNICODE)
+_MULTI_SPACE = re.compile(r"\s+")
+_CANONICAL_TOPICS: tuple[str, ...] = tuple(iter_topics())
+_CANONICAL_LOOKUP: dict[str, str] = {topic.lower(): topic for topic in _CANONICAL_TOPICS}
+_CANONICAL_LOOKUP_KEYS: tuple[str, ...] = tuple(_CANONICAL_LOOKUP.keys())
+_RUNTIME_TOPIC_ALIASES: dict[str, str] = {}
+
+_GENERIC_TRAILING_TERMS: set[str] = {
+    "issue",
+    "issues",
+    "discussion",
+    "discussions",
+    "discourse",
+    "commentary",
+    "engagement",
+    "expression",
+    "strategy",
+    "performance",
+    "policy",
+    "violation",
+    "threat",
+    "tension",
+    "study",
+    "studie",
+    "studies",
+}
+
+
+def set_runtime_topic_aliases(aliases: dict[str, str] | None) -> None:
+    """Replace runtime alias map used for operator-approved topic promotions."""
+    global _RUNTIME_TOPIC_ALIASES
+    normalized: dict[str, str] = {}
+    for alias, canonical in (aliases or {}).items():
+        alias_key = str(alias or "").strip().lower()
+        canonical_name = str(canonical or "").strip()
+        if alias_key and canonical_name:
+            normalized[alias_key] = canonical_name
+    _RUNTIME_TOPIC_ALIASES = normalized
+
+
+def runtime_topic_alias_count() -> int:
+    return len(_RUNTIME_TOPIC_ALIASES)
 
 
 def _infer_category_from_keywords(topic: str) -> str:
-    """Keyword-based category fallback for AI-generated topic names."""
     lower = topic.lower()
+
+    def _has_keyword(text: str, keyword: str) -> bool:
+        if " " in keyword:
+            return keyword in text
+        return bool(re.search(rf"\b{re.escape(keyword)}\b", text))
+
     for keyword, category in _CATEGORY_KEYWORDS:
-        if keyword in lower:
-            return category
-    return DEFAULT_CATEGORY
+        if _has_keyword(lower, keyword):
+            return canonical_category_name(category)
+    return canonical_category_name(DEFAULT_CATEGORY)
 
 
-_TRAILING_S = re.compile(r"(?<=[a-z]{3})s$", re.IGNORECASE)
+def _sanitize_topic_text(raw: str) -> str:
+    compact = _MULTI_SPACE.sub(" ", _NON_WORD.sub(" ", raw.strip()))
+    return compact.strip()
+
+
+def _normalize_title_topic(topic: str) -> str:
+    title = topic.title()
+    words = title.split()
+    if words:
+        words[-1] = _TRAILING_S.sub("", words[-1])
+    if len(words) > MAX_TOPIC_WORDS:
+        words = words[:MAX_TOPIC_WORDS]
+    return " ".join(words)
+
+
+def _closest_taxonomy_topic(candidate: str) -> str | None:
+    matches = get_close_matches(candidate.lower(), _CANONICAL_LOOKUP_KEYS, n=1, cutoff=_FUZZY_MATCH_CUTOFF)
+    if not matches:
+        return None
+    return _CANONICAL_LOOKUP.get(matches[0])
+
+
+def _infer_category_domain_by_similarity(topic: str) -> tuple[str, str] | None:
+    candidate = topic.lower().strip()
+    if not candidate:
+        return None
+    matches = get_close_matches(
+        candidate,
+        _CANONICAL_LOOKUP_KEYS,
+        n=1,
+        cutoff=_SEMANTIC_CATEGORY_MATCH_CUTOFF,
+    )
+    if not matches:
+        return None
+    canonical_topic = _CANONICAL_LOOKUP.get(matches[0])
+    if not canonical_topic:
+        return None
+    return get_topic_category(canonical_topic), get_topic_domain(canonical_topic)
+
+
+def _strip_generic_suffix(topic: str) -> str:
+    words = [word for word in topic.split() if word]
+    while words and words[-1].lower() in _GENERIC_TRAILING_TERMS:
+        words.pop()
+    return " ".join(words).strip()
+
+
+def _topic_candidates(raw: str) -> list[str]:
+    candidates: list[str] = []
+
+    def _append(value: str) -> None:
+        text = _sanitize_topic_text(value)
+        if not text:
+            return
+        if text.lower() in {item.lower() for item in candidates}:
+            return
+        candidates.append(text)
+
+    _append(raw)
+    _append(_normalize_title_topic(raw))
+    stripped = _strip_generic_suffix(raw)
+    if stripped:
+        _append(stripped)
+        _append(_normalize_title_topic(stripped))
+
+    return candidates
+
+
+def _lookup_canonical(candidate: str) -> str | None:
+    key = candidate.lower()
+    return (
+        _RUNTIME_TOPIC_ALIASES.get(key)
+        or TOPIC_SYNONYMS.get(key)
+        or _CANONICAL_LOOKUP.get(key)
+    )
+
+
+def classify_topic(raw: str | None) -> dict[str, Any] | None:
+    """Classify a topic as canonical taxonomy topic or proposed topic."""
+    if raw is None:
+        return None
+    sanitized = _sanitize_topic_text(str(raw))
+    if not sanitized:
+        return None
+
+    canonical = None
+    candidates = _topic_candidates(sanitized)
+
+    for candidate in candidates:
+        canonical = _lookup_canonical(candidate)
+        if canonical:
+            break
+
+    if not canonical:
+        for candidate in candidates:
+            canonical = _closest_taxonomy_topic(candidate)
+            if canonical:
+                break
+
+    if canonical:
+        category = get_topic_category(canonical)
+        domain = get_topic_domain(canonical)
+        return {
+            "name": canonical,
+            "taxonomy_topic": canonical,
+            "proposed_topic": None,
+            "proposed": False,
+            "closest_category": category,
+            "domain": domain,
+        }
+
+    proposed = _normalize_title_topic(sanitized)
+    category = _infer_category_from_keywords(proposed)
+    domain = _CATEGORY_TO_DOMAIN.get(category, DEFAULT_DOMAIN)
+    if category == DEFAULT_CATEGORY or domain == DEFAULT_DOMAIN:
+        inferred = _infer_category_domain_by_similarity(proposed)
+        if inferred:
+            category, domain = inferred
+    return {
+        "name": proposed,
+        "taxonomy_topic": None,
+        "proposed_topic": proposed,
+        "proposed": True,
+        "closest_category": category,
+        "domain": domain,
+    }
+
+
+def _normalize_importance(value: Any) -> str:
+    if not isinstance(value, str):
+        return "secondary"
+    normalized = value.strip().lower()
+    if normalized in {"primary", "secondary", "tertiary"}:
+        return normalized
+    return "secondary"
+
+
+def normalize_model_topics(raw_topics: list[Any]) -> list[dict[str, Any]]:
+    """Normalize model topic objects to stable extraction contract."""
+    if not isinstance(raw_topics, list):
+        return []
+
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+
+    for item in raw_topics:
+        source_name = None
+        importance = "secondary"
+        evidence = None
+
+        if isinstance(item, dict):
+            source_name = item.get("taxonomy_topic") or item.get("name") or item.get("proposed_topic")
+            importance = _normalize_importance(item.get("importance"))
+            raw_evidence = item.get("evidence")
+            if isinstance(raw_evidence, str):
+                evidence = raw_evidence.strip()[:300] or None
+        elif isinstance(item, str):
+            source_name = item
+
+        classified = classify_topic(source_name)
+        if not classified:
+            continue
+
+        name = str(classified["name"])
+        if name in seen:
+            continue
+        seen.add(name)
+
+        entry = {
+            **classified,
+            "importance": importance,
+            "evidence": evidence,
+        }
+        normalized.append(entry)
+
+        if len(normalized) >= MAX_MODEL_TOPICS:
+            break
+
+    return normalized
 
 
 def normalize_topic(raw: str) -> str:
-    """
-    Normalize a raw topic string to its canonical graph node name.
-
-    Steps:
-      1. Strip whitespace
-      2. Lowercase for synonym lookup
-      3. Synonym map lookup (returns canonical if found)
-      4. If not in map: Title Case + simple plural collapse
-      5. Truncate to max 4 words
-    """
-    if not raw or not raw.strip():
-        return "General"
-
-    stripped = raw.strip()
-    lookup_key = stripped.lower()
-
-    # Direct synonym map lookup
-    if lookup_key in TOPIC_SYNONYMS:
-        return TOPIC_SYNONYMS[lookup_key]
-
-    # Not in map → apply Title Case normalization
-    title = stripped.title()
-
-    # Remove trailing 's' from last word for simple plural collapse
-    # "Sports Events" → "Sports Event"  (only last word)
-    words = title.split()
-    if len(words) > 0:
-        last = _TRAILING_S.sub("", words[-1])
-        words[-1] = last
-    normalized = " ".join(words)
-
-    # Check again after normalization
-    if normalized.lower() in TOPIC_SYNONYMS:
-        return TOPIC_SYNONYMS[normalized.lower()]
-
-    # Truncate to 4 words max
-    if len(words) > 4:
-        normalized = " ".join(words[:4])
-
-    return normalized
+    """Normalize a raw topic string to canonical graph node name."""
+    classified = classify_topic(raw)
+    if not classified:
+        return DEFAULT_CATEGORY
+    return str(classified["name"])
 
 
 def normalize_topics(topics: list[str]) -> list[str]:
     """Normalize a list of topics, deduplicating after normalization."""
     seen: set[str] = set()
     result: list[str] = []
-    for t in topics:
-        canonical = normalize_topic(t)
+    for topic in topics:
+        canonical = normalize_topic(topic)
         if canonical not in seen:
             seen.add(canonical)
             result.append(canonical)
@@ -382,11 +383,25 @@ def normalize_topics(topics: list[str]) -> list[str]:
 
 
 def get_topic_category(canonical_topic: str) -> str:
-    """Return the TopicCategory name for a given canonical topic.
-    
-    First tries exact map lookup, then falls back to keyword inference.
-    This handles AI-generated topic names not in the synonym dictionary.
-    """
+    """Return topic category, falling back to keyword inference."""
     if canonical_topic in TOPIC_CATEGORIES:
-        return TOPIC_CATEGORIES[canonical_topic]
+        return canonical_category_name(TOPIC_CATEGORIES[canonical_topic])
     return _infer_category_from_keywords(canonical_topic)
+
+
+def get_topic_domain(canonical_topic: str) -> str:
+    """Return topic domain, inferring via category when needed."""
+    if canonical_topic in TOPIC_DOMAINS:
+        return canonical_domain_name(TOPIC_DOMAINS[canonical_topic])
+    category = get_topic_category(canonical_topic)
+    return canonical_domain_name(_CATEGORY_TO_DOMAIN.get(category, DEFAULT_DOMAIN))
+
+
+def normalize_topic_category(category_name: str | None) -> str:
+    """Normalize category labels (supports legacy aliases)."""
+    return canonical_category_name(category_name)
+
+
+def normalize_topic_domain(domain_name: str | None) -> str:
+    """Normalize domain labels (supports legacy aliases)."""
+    return canonical_domain_name(domain_name)

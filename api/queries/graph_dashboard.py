@@ -310,13 +310,26 @@ def _build_channel_topic_graph(filters: dict) -> dict:
     if requires_sentiment_stats and topic_stats:
         sentiment_rows = run_query(
             """
-            MATCH (u:User)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-            MATCH (u)-[:INTERESTED_IN]->(t:Topic)
-            WHERE hs.last_seen >= datetime($since)
-              AND t.name IN $topics
-            RETURN t.name AS topic,
-                   s.label AS sentiment,
-                   sum(hs.count) AS weight
+            CALL () {
+                MATCH (p:Post)-[:TAGGED]->(t:Topic)
+                MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WHERE p.posted_at >= datetime($since)
+                  AND t.name IN $topics
+                RETURN t.name AS topic,
+                       s.label AS sentiment,
+                       count(*) AS weight
+                UNION ALL
+                MATCH (c:Comment)-[:TAGGED]->(t:Topic)
+                MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WHERE c.posted_at >= datetime($since)
+                  AND t.name IN $topics
+                RETURN t.name AS topic,
+                       s.label AS sentiment,
+                       count(*) AS weight
+            }
+            RETURN topic,
+                   sentiment,
+                   sum(weight) AS weight
             ORDER BY weight DESC
             LIMIT 1200
             """,
@@ -1382,10 +1395,17 @@ def get_sentiment_distribution(timeframe: str | None = None) -> list[dict]:
     since = _parse_timeframe_to_since(timeframe)
     rows = run_query(
         """
-        MATCH (:User)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-        WHERE hs.last_seen >= datetime($since)
-        RETURN s.label AS label,
-               sum(hs.count) AS count
+        CALL () {
+            MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE p.posted_at >= datetime($since)
+            RETURN s.label AS label, count(*) AS count
+            UNION ALL
+            MATCH (c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE c.posted_at >= datetime($since)
+            RETURN s.label AS label, count(*) AS count
+        }
+        RETURN label,
+               sum(count) AS count
         ORDER BY count DESC
         """,
         {"since": since.isoformat()},

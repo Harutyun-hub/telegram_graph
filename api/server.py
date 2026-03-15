@@ -15,6 +15,7 @@ Run:
 """
 from __future__ import annotations
 import sys, os
+import hashlib
 import asyncio
 from datetime import datetime, timezone
 import re
@@ -29,6 +30,7 @@ config.validate()
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from api.aggregator import (
@@ -37,10 +39,14 @@ from api.aggregator import (
 )
 from api.queries import graph_dashboard
 from api.freshness import get_freshness_snapshot
+from api import insights
+from api import behavioral_briefs
+from api import question_briefs
 from api import db
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from scraper.channel_metadata import get_full_channel_metadata
+from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
@@ -50,10 +56,13 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_cors_allow_origins = config.CORS_ALLOW_ORIGINS or ["*"]
+_cors_allow_credentials = "*" not in _cors_allow_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
-    allow_credentials=True,
+    allow_origins=_cors_allow_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -98,8 +107,29 @@ class GraphRequest(BaseModel):
     max_edges: Optional[int] = Field(default=None, ge=10, le=10000)
 
 
+class InsightCardsRequest(BaseModel):
+    filters: dict = Field(default_factory=dict)
+    audience: str = Field(default="analyst", max_length=32)
+
+
+class FailureRetryRequest(BaseModel):
+    scope_type: str = Field(..., min_length=1, max_length=32)
+    scope_keys: List[str] = Field(default_factory=list)
+
+
+class TopicProposalReviewRequest(BaseModel):
+    topic_name: str = Field(..., min_length=1, max_length=200)
+    decision: str = Field(..., min_length=1, max_length=16)
+    canonical_topic: Optional[str] = Field(default=None, max_length=200)
+    aliases: List[str] = Field(default_factory=list)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+    reviewed_by: Optional[str] = Field(default=None, max_length=120)
+
+
 supabase_writer = SupabaseWriter()
 scraper_scheduler = ScraperSchedulerService(supabase_writer)
+question_cards_scheduler: AsyncIOScheduler | None = None
+behavioral_cards_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 
 
@@ -125,6 +155,74 @@ async def _warm_detail_caches() -> None:
         logger.info("Detail caches warm-up completed")
     except Exception as e:
         logger.warning(f"Detail caches warm-up failed: {e}")
+
+
+async def _materialize_question_cards_once(force: bool = False) -> None:
+    """Run question-card materialization off the request path."""
+    try:
+        loop = asyncio.get_running_loop()
+        cards = await loop.run_in_executor(
+            None,
+            lambda: question_briefs.refresh_question_briefs(force=force),
+        )
+        logger.info(f"Question cards materialization completed | cards={len(cards)}")
+    except Exception as e:
+        logger.warning(f"Question cards materialization failed: {e}")
+
+
+async def _materialize_behavioral_cards_once(force: bool = False) -> None:
+    """Run behavioral-card materialization off the request path."""
+    try:
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(
+            None,
+            lambda: behavioral_briefs.refresh_behavioral_briefs(force=force),
+        )
+        problems = len(payload.get("problemBriefs") or []) if isinstance(payload, dict) else 0
+        services = len(payload.get("serviceGapBriefs") or []) if isinstance(payload, dict) else 0
+        logger.info(f"Behavioral cards materialization completed | problem_cards={problems} service_cards={services}")
+    except Exception as e:
+        logger.warning(f"Behavioral cards materialization failed: {e}")
+
+
+def _start_question_cards_scheduler() -> None:
+    """Start recurring question-card materialization scheduler."""
+    global question_cards_scheduler
+
+    interval = max(15, int(config.QUESTION_BRIEFS_REFRESH_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _materialize_question_cards_once,
+        "interval",
+        minutes=interval,
+        id="question-cards-materializer",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    question_cards_scheduler = scheduler
+    logger.info(f"Question cards scheduler ready | interval={interval}m")
+
+
+def _start_behavioral_cards_scheduler() -> None:
+    """Start recurring W8/W9 card materialization scheduler."""
+    global behavioral_cards_scheduler
+
+    interval = max(15, int(config.BEHAVIORAL_BRIEFS_REFRESH_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _materialize_behavioral_cards_once,
+        "interval",
+        minutes=interval,
+        id="behavioral-cards-materializer",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    behavioral_cards_scheduler = scheduler
+    logger.info(f"Behavioral cards scheduler ready | interval={interval}m")
 
 
 def _normalize_channel_username(raw: str) -> str:
@@ -210,6 +308,140 @@ def _validate_channel_username(username: str) -> None:
 
 def _is_russian(text: str) -> bool:
     return bool(re.search(r"[\u0400-\u04FF]", text))
+
+
+def _normalize_taxonomy_label(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().replace("&", "and").split())
+
+
+def _taxonomy_quality_snapshot() -> dict:
+    expected_domains = set(TAXONOMY_DOMAINS.keys())
+
+    domain_rows = db.run_query("MATCH (d:TopicDomain) RETURN d.name AS name ORDER BY name")
+    domain_names = [str(row.get("name") or "").strip() for row in domain_rows if row.get("name")]
+
+    normalized_groups: dict[str, list[str]] = {}
+    for domain_name in domain_names:
+        key = _normalize_taxonomy_label(domain_name)
+        normalized_groups.setdefault(key, []).append(domain_name)
+    duplicate_domain_groups = [group for group in normalized_groups.values() if len(group) > 1]
+
+    unknown_domains = [
+        name for name in domain_names
+        if name not in expected_domains and name != "General"
+    ]
+
+    general_stats = db.run_single(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(c:TopicCategory)-[:IN_DOMAIN]->(d:TopicDomain)
+        WITH count(DISTINCT t) AS total,
+             count(DISTINCT CASE WHEN c.name='General' OR d.name='General' THEN t END) AS general_topics
+        RETURN total, general_topics,
+               CASE WHEN total = 0 THEN 0.0 ELSE toFloat(general_topics) / toFloat(total) END AS ratio
+        """
+    ) or {}
+
+    general_mention_stats = db.run_single(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(c:TopicCategory)-[:IN_DOMAIN]->(d:TopicDomain)
+        OPTIONAL MATCH (n)-[:TAGGED]->(t)
+        WITH t,c,d,count(n) AS mentions
+        RETURN sum(mentions) AS total_mentions,
+               sum(CASE WHEN c.name='General' OR d.name='General' THEN mentions ELSE 0 END) AS general_mentions,
+               CASE
+                 WHEN sum(mentions)=0 THEN 0.0
+                 ELSE toFloat(sum(CASE WHEN c.name='General' OR d.name='General' THEN mentions ELSE 0 END)) / toFloat(sum(mentions))
+               END AS ratio
+        """
+    ) or {}
+
+    multi_rows = db.run_query(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(c:TopicCategory)-[:IN_DOMAIN]->(d:TopicDomain)
+        WITH t, collect(DISTINCT c.name) AS categories, collect(DISTINCT d.name) AS domains
+        WHERE size(categories) > 1 OR size(domains) > 1
+        RETURN t.name AS topic, categories, domains
+        ORDER BY t.name
+        LIMIT 200
+        """
+    )
+
+    proposed_rows = db.run_single(
+        """
+        MATCH (t:Topic)
+        RETURN count(t) AS total,
+               sum(CASE WHEN coalesce(t.proposed,false) THEN 1 ELSE 0 END) AS proposed
+        """
+    ) or {}
+
+    proposed_mention_stats = db.run_single(
+        """
+        MATCH (t:Topic)
+        OPTIONAL MATCH (n)-[:TAGGED]->(t)
+        WITH t, count(n) AS mentions
+        RETURN sum(mentions) AS total_mentions,
+               sum(CASE WHEN coalesce(t.proposed,false) THEN mentions ELSE 0 END) AS proposed_mentions,
+               CASE
+                 WHEN sum(mentions)=0 THEN 0.0
+                 ELSE toFloat(sum(CASE WHEN coalesce(t.proposed,false) THEN mentions ELSE 0 END)) / toFloat(sum(mentions))
+               END AS ratio
+        """
+    ) or {}
+
+    pending_proposals = len(supabase_writer.list_topic_proposals(status="pending", limit=500))
+    visible_emerging_proposals = len(supabase_writer.list_emerging_topic_candidates(status="pending", limit=500))
+
+    total_topics = int(general_stats.get("total") or 0)
+    general_topics = int(general_stats.get("general_topics") or 0)
+    general_ratio = float(general_stats.get("ratio") or 0.0)
+    general_mentions = int(general_mention_stats.get("general_mentions") or 0)
+    total_mentions = int(general_mention_stats.get("total_mentions") or 0)
+    general_ratio_mentions = float(general_mention_stats.get("ratio") or 0.0)
+
+    proposed_total = int(proposed_rows.get("proposed") or 0)
+    proposed_ratio = (proposed_total / total_topics) if total_topics else 0.0
+    proposed_mentions = int(proposed_mention_stats.get("proposed_mentions") or 0)
+    proposed_total_mentions = int(proposed_mention_stats.get("total_mentions") or 0)
+    proposed_ratio_mentions = float(proposed_mention_stats.get("ratio") or 0.0)
+
+    gates = {
+        "domain_duplicates_zero": len(duplicate_domain_groups) == 0,
+        "unknown_domains_zero": len(unknown_domains) == 0,
+        "general_share_le_30pct": general_ratio_mentions <= 0.30,
+        "multi_mapped_topics_le_5": len(multi_rows) <= 5,
+        "proposed_share_le_20pct": proposed_ratio_mentions <= 0.20,
+    }
+    advisory = {
+        "general_share_topics_le_35pct": general_ratio <= 0.35,
+    }
+
+    return {
+        "summary": {
+            "domains_total": len(domain_names),
+            "topics_total": total_topics,
+            "general_topics": general_topics,
+            "general_ratio": round(general_ratio, 4),
+            "general_mentions": general_mentions,
+            "general_ratio_mentions": round(general_ratio_mentions, 4),
+            "total_mentions": total_mentions,
+            "proposed_topics": proposed_total,
+            "proposed_ratio": round(proposed_ratio, 4),
+            "proposed_mentions": proposed_mentions,
+            "proposed_ratio_mentions": round(proposed_ratio_mentions, 4),
+            "proposed_total_mentions": proposed_total_mentions,
+            "multi_mapped_topics": len(multi_rows),
+            "pending_topic_proposals": pending_proposals,
+            "visible_emerging_proposals": visible_emerging_proposals,
+        },
+        "issues": {
+            "duplicate_domain_groups": duplicate_domain_groups,
+            "unknown_domains": unknown_domains,
+            "multi_mapped_samples": multi_rows[:30],
+        },
+        "gates": gates,
+        "advisory": advisory,
+        "ready_for_phase2_signoff": all(gates.values()),
+    }
 
 
 def _build_ai_answer(query: str, dashboard: dict) -> str:
@@ -503,6 +735,23 @@ async def graph_insights(timeframe: str = Query("Last 7 Days")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/insights/cards")
+async def insight_cards(payload: InsightCardsRequest):
+    """Structured insight cards for analyst/executive surfaces."""
+    try:
+        audience = (payload.audience or "analyst").strip().lower()
+        if audience not in {"analyst", "executive"}:
+            audience = "analyst"
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: insights.get_insight_cards(payload.filters or {}, audience),
+        )
+    except Exception as e:
+        logger.error(f"Insight cards endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/sources/channels")
 async def list_channel_sources():
     """List configured Telegram channel sources from Supabase."""
@@ -630,6 +879,19 @@ async def freshness_snapshot(force: bool = Query(False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/quality/taxonomy")
+async def taxonomy_quality_snapshot():
+    """Enterprise taxonomy quality snapshot with sign-off gates."""
+    try:
+        loop = asyncio.get_running_loop()
+        snapshot = await loop.run_in_executor(None, _taxonomy_quality_snapshot)
+        snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
+        return snapshot
+    except Exception as e:
+        logger.error(f"Taxonomy quality endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/scraper/scheduler/start")
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
@@ -680,6 +942,167 @@ async def run_scraper_catchup_once():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/ai/failures")
+async def list_ai_failures(
+    dead_letter_only: bool = Query(True),
+    scope_type: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """List AI processing failure scopes for operator triage."""
+    try:
+        items = supabase_writer.list_processing_failures(
+            dead_letter_only=dead_letter_only,
+            scope_type=scope_type,
+            limit=limit,
+        )
+        return {
+            "count": len(items),
+            "items": items,
+        }
+    except Exception as e:
+        logger.error(f"List AI failures endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai/failures/retry")
+async def retry_ai_failures(payload: FailureRetryRequest):
+    """Unlock selected AI failure scopes for immediate retry."""
+    scope_type = (payload.scope_type or "").strip().lower()
+    if scope_type not in {"comment_group", "post"}:
+        raise HTTPException(status_code=400, detail="scope_type must be 'comment_group' or 'post'")
+
+    try:
+        retried = supabase_writer.retry_processing_failures(
+            scope_type=scope_type,
+            scope_keys=payload.scope_keys,
+        )
+        return {
+            "retried": int(retried),
+            "scope_type": scope_type,
+        }
+    except Exception as e:
+        logger.error(f"Retry AI failures endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/taxonomy/proposals")
+async def list_taxonomy_proposals(
+    status: str = Query("pending"),
+    visibility_state: Optional[str] = Query(None),
+    visible_only: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """List proposed topics for review queue triage."""
+    try:
+        items = supabase_writer.list_topic_proposals(status=status, limit=limit)
+        normalized_visibility = (visibility_state or "").strip().lower()
+
+        if visible_only:
+            filtered: list[dict] = []
+            for item in items:
+                state = str(item.get("visibility_state") or "").strip().lower()
+                if bool(item.get("visibility_eligible")) or state == "emerging_visible" or int(item.get("proposed_count") or 0) >= 3:
+                    filtered.append(item)
+            items = filtered
+
+        if normalized_visibility:
+            items = [
+                item for item in items
+                if str(item.get("visibility_state") or "").strip().lower() == normalized_visibility
+            ]
+
+        return {
+            "count": len(items),
+            "status": status,
+            "visibility_state": visibility_state,
+            "visible_only": visible_only,
+            "items": items,
+        }
+    except Exception as e:
+        logger.error(f"List taxonomy proposals endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/taxonomy/trending-new")
+async def list_taxonomy_trending_new(
+    status: str = Query("pending"),
+    limit: int = Query(30, ge=1, le=200),
+):
+    """List emerging proposed topics eligible for frontend visibility."""
+    try:
+        items = supabase_writer.list_emerging_topic_candidates(status=status, limit=limit)
+        return {
+            "count": len(items),
+            "status": status,
+            "items": items,
+        }
+    except Exception as e:
+        logger.error(f"List taxonomy trending-new endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/taxonomy/proposals/review")
+async def review_taxonomy_proposal(payload: TopicProposalReviewRequest):
+    """Approve or reject a proposed topic, with optional alias promotions."""
+    decision = (payload.decision or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="decision must be 'approve' or 'reject'")
+
+    try:
+        item = supabase_writer.review_topic_proposal(
+            topic_name=payload.topic_name,
+            decision=decision,
+            canonical_topic=payload.canonical_topic,
+            aliases=payload.aliases,
+            notes=payload.notes,
+            reviewed_by=payload.reviewed_by,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Topic proposal not found")
+        return {
+            "success": True,
+            "item": item,
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Review taxonomy proposal endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/taxonomy/promotions")
+async def list_taxonomy_promotions(
+    active_only: bool = Query(True),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """List runtime topic promotion aliases."""
+    try:
+        items = supabase_writer.list_topic_promotions(limit=limit, active_only=active_only)
+        return {
+            "count": len(items),
+            "active_only": active_only,
+            "items": items,
+        }
+    except Exception as e:
+        logger.error(f"List taxonomy promotions endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/taxonomy/promotions/reload")
+async def reload_taxonomy_promotions():
+    """Reload runtime alias map from approved promotions table."""
+    try:
+        loaded = supabase_writer.refresh_runtime_topic_aliases()
+        return {
+            "loaded_aliases": int(loaded),
+        }
+    except Exception as e:
+        logger.error(f"Reload taxonomy promotions endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/audience")
 async def audience(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1000)):
     """Audience detail page — paginated."""
@@ -695,6 +1118,8 @@ async def audience(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1
 async def clear_cache():
     """Invalidate the in-memory dashboard cache."""
     invalidate_cache()
+    question_briefs.invalidate_question_briefs_cache()
+    behavioral_briefs.invalidate_behavioral_briefs_cache()
     return {"success": True, "message": "Cache cleared"}
 
 
@@ -702,12 +1127,44 @@ async def clear_cache():
 
 @app.on_event("startup")
 async def startup():
+    key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
+    logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp}")
     await scraper_scheduler.startup()
+    _start_question_cards_scheduler()
+    _start_behavioral_cards_scheduler()
     asyncio.create_task(_warm_dashboard_cache())
     asyncio.create_task(_warm_detail_caches())
+    if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
+        asyncio.create_task(_materialize_question_cards_once(force=False))
+    if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
+        asyncio.create_task(_materialize_behavioral_cards_once(force=False))
 
 @app.on_event("shutdown")
 async def shutdown():
+    global question_cards_scheduler, behavioral_cards_scheduler
+    if question_cards_scheduler is not None:
+        try:
+            question_cards_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        question_cards_scheduler = None
+    if behavioral_cards_scheduler is not None:
+        try:
+            behavioral_cards_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        behavioral_cards_scheduler = None
     await scraper_scheduler.shutdown()
     db.close()
     logger.info("API server shut down — Neo4j driver closed")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "api.server:app",
+        host=config.APP_HOST,
+        port=config.APP_PORT,
+        reload=False,
+    )
