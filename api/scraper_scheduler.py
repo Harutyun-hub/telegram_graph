@@ -4,6 +4,7 @@ scraper_scheduler.py — Runtime scheduler for scrape/process/sync orchestration
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,6 +12,7 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 import config
 from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
@@ -106,17 +108,37 @@ class ScraperSchedulerService:
         if self._client and self._client.is_connected():
             return self._client
 
-        client = TelegramClient(
-            config.TELEGRAM_SESSION_NAME,
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_API_HASH,
-        )
+        # Check for session string from environment (Railway deployment)
+        session_string = os.getenv("TELEGRAM_SESSION_STRING")
+
+        if session_string:
+            logger.info("Using session from TELEGRAM_SESSION_STRING environment variable")
+            client = TelegramClient(
+                StringSession(session_string),
+                config.TELEGRAM_API_ID,
+                config.TELEGRAM_API_HASH,
+            )
+        else:
+            # Use file-based session for local development
+            logger.info(f"Using file-based session: {config.TELEGRAM_SESSION_NAME}.session")
+            client = TelegramClient(
+                config.TELEGRAM_SESSION_NAME,
+                config.TELEGRAM_API_ID,
+                config.TELEGRAM_API_HASH,
+            )
+
         await client.connect()
         if not await client.is_user_authorized():
-            client.disconnect()
-            raise RuntimeError(
-                "Telegram session is not authorized. Run authentication first (session_manager/test_auth)."
-            )
+            await client.disconnect()
+            if session_string:
+                raise RuntimeError(
+                    "TELEGRAM_SESSION_STRING is invalid or expired. "
+                    "Run 'python scripts/export_telegram_session.py' locally and update Railway environment variable."
+                )
+            else:
+                raise RuntimeError(
+                    "Telegram session is not authorized. Run authentication first (session_manager/test_auth)."
+                )
 
         self._client = client
         return client

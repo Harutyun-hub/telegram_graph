@@ -264,6 +264,8 @@ async def _try_enrich_channel_metadata(
     """
     try:
         from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        import os
     except Exception as e:
         logger.warning(f"Telethon unavailable for metadata enrichment: {e}")
         return
@@ -272,11 +274,22 @@ async def _try_enrich_channel_metadata(
     if not username:
         return
 
-    client = TelegramClient(
-        config.TELEGRAM_SESSION_NAME,
-        config.TELEGRAM_API_ID,
-        config.TELEGRAM_API_HASH,
-    )
+    # Check for session string from environment (Railway deployment)
+    session_string = os.getenv("TELEGRAM_SESSION_STRING")
+
+    if session_string:
+        client = TelegramClient(
+            StringSession(session_string),
+            config.TELEGRAM_API_ID,
+            config.TELEGRAM_API_HASH,
+        )
+    else:
+        # Use file-based session for local development
+        client = TelegramClient(
+            config.TELEGRAM_SESSION_NAME,
+            config.TELEGRAM_API_ID,
+            config.TELEGRAM_API_HASH,
+        )
 
     try:
         await client.connect()
