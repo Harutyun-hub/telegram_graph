@@ -84,6 +84,11 @@ type ScraperSchedulerStatus = {
 
 type PipelineFreshnessSnapshot = {
   generated_at: string;
+  operational?: {
+    status?: 'healthy' | 'critical' | string;
+    label?: string;
+    reason?: string | null;
+  };
   pipeline?: {
     scrape?: {
       status?: 'healthy' | 'warning' | 'stale' | 'unknown' | string;
@@ -143,8 +148,25 @@ const stageStyle: Record<string, { badge: string; dot: string; text: string }> =
   unknown: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', text: 'text-slate-600' },
 };
 
+const operationalStyle: Record<string, { badge: string; dot: string; text: string }> = {
+  healthy: { badge: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  critical: { badge: 'bg-red-50 text-red-700', dot: 'bg-red-500', text: 'text-red-700' },
+  unknown: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', text: 'text-slate-600' },
+};
+
 function toneFor(status?: string) {
   return stageStyle[(status || 'unknown').toLowerCase()] || stageStyle.unknown;
+}
+
+function operationalToneFor(status?: string) {
+  return operationalStyle[(status || 'unknown').toLowerCase()] || operationalStyle.unknown;
+}
+
+function operationalLabel(status: string | undefined, ru: boolean) {
+  const normalized = (status || 'unknown').toLowerCase();
+  if (normalized === 'healthy') return ru ? 'Система работает' : 'System operational';
+  if (normalized === 'critical') return ru ? 'Проблема системы' : 'System issue';
+  return ru ? 'Статус системы неизвестен' : 'System status unknown';
 }
 
 function TelegramIcon({ className }: { className?: string }) {
@@ -746,10 +768,9 @@ export function SourcesPage() {
   const scrapeStage = freshness?.pipeline?.scrape;
   const processStage = freshness?.pipeline?.process;
   const syncStage = freshness?.pipeline?.sync;
-
-  const scrapeTone = toneFor(scrapeStage?.status);
-  const processTone = toneFor(processStage?.status);
-  const syncTone = toneFor(syncStage?.status);
+  const operational = freshness?.operational;
+  const operationalStatus = (operational?.status || 'unknown').toLowerCase();
+  const operationalTone = operationalToneFor(operational?.status);
 
   const pulse = freshness?.pulse;
   const queueAiItems = pulse?.queue?.ai_items ?? ((backlog?.unprocessed_comments ?? 0) + (backlog?.unprocessed_posts ?? 0));
@@ -761,6 +782,11 @@ export function SourcesPage() {
   const syncRatePerHour = pulse?.processed?.neo4j_rate_per_hour;
   const etaTotal = pulse?.eta?.total_minutes;
   const etaConfidence = (pulse?.eta?.confidence || 'low').toUpperCase();
+  const dataLooksDelayed = !scheduler?.running_now && (
+    (scrapeStage?.age_minutes != null && scrapeStage.age_minutes >= 120)
+    || (processStage?.age_minutes != null && processStage.age_minutes >= 360)
+    || (syncStage?.age_minutes != null && syncStage.age_minutes >= 360)
+  );
 
   return (
     <div className="p-4 md:p-8 max-w-7xl mx-auto">
@@ -1017,20 +1043,31 @@ export function SourcesPage() {
           </div>
 
           <div className="mt-3 text-[11px] text-gray-500 flex items-center gap-3 flex-wrap">
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${scrapeTone.badge}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${scrapeTone.dot}`} /> {ru ? 'Scrape' : 'Scrape'} {(scrapeStage?.status || 'unknown').toUpperCase()}
-            </span>
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${processTone.badge}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${processTone.dot}`} /> AI {(processStage?.status || 'unknown').toUpperCase()}
-            </span>
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${syncTone.badge}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${syncTone.dot}`} /> Neo4j {(syncStage?.status || 'unknown').toUpperCase()}
+            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${operationalTone.badge}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${operationalTone.dot}`} />
+              {operationalLabel(operational?.status, ru)}
             </span>
             <span className="text-gray-500">
-              {ru ? 'Собрано за цикл:' : 'Scraped last run:'} {scrapeLastRun}
+              {ru ? 'Последний scrape:' : 'Last scrape:'} {formatDateTime(scrapeStage?.last_scrape_at || null, ru)}
             </span>
-            <span className={`${toneFor(freshness?.health?.status).text}`} style={{ fontWeight: 600 }}>
-              {ru ? 'Общее состояние:' : 'Overall health:'} {(freshness?.health?.status || 'unknown').toUpperCase()} · {ru ? 'оценка' : 'score'} {freshness?.health?.score ?? 'n/a'}
+            <span className="text-gray-500">
+              {ru ? 'Последний AI:' : 'Last AI:'} {formatDateTime(processStage?.last_process_at || null, ru)}
+            </span>
+            <span className="text-gray-500">
+              {ru ? 'Последний Neo4j sync:' : 'Last Neo4j sync:'} {formatDateTime(syncStage?.last_graph_sync_at || null, ru)}
+            </span>
+            {dataLooksDelayed && (operational?.status || 'healthy') !== 'critical' && (
+              <span className="text-gray-500">
+                {ru ? 'Данные могут быть не самыми свежими' : 'Data may be delayed'}
+              </span>
+            )}
+            {operationalStatus === 'critical' && operational?.reason && (
+              <span className={`${operationalTone.text}`} style={{ fontWeight: 500 }}>
+                {operational.reason}
+              </span>
+            )}
+            <span className="text-gray-500">
+              {ru ? 'Собрано за цикл:' : 'Scraped last run:'} {scrapeLastRun}
             </span>
             {scheduler?.last_mode && (
               <span className="text-gray-500">{ru ? 'Последний режим:' : 'Last mode:'} {scheduler.last_mode}</span>
