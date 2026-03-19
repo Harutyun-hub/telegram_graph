@@ -166,7 +166,7 @@ def get_all_topics(page: int = 0, size: int = 50) -> list[dict]:
             RETURN collect({year: year, week: week, count: count}) AS weeklyRows
         }
         CALL (t) {
-            CALL {
+            CALL (t) {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)

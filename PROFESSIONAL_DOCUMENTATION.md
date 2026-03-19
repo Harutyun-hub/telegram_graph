@@ -220,7 +220,13 @@ Deterministic service-card fallback is intentionally disabled for production beh
 
 ### Other AI Systems
 
-Other AI flows remain separately configurable and are not forced to share the behavioral model default.
+Current defaults:
+
+- `OPENAI_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5-nano`
+- `BEHAVIORAL_BRIEFS_MODEL = gpt-5-nano`
 
 ## 7. Railway Deployment Compatibility
 
@@ -246,13 +252,17 @@ That contract is unchanged in this release.
 
 The following defaults changed in code/config examples:
 
+- `OPENAI_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5-nano`
+- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5-nano`
 - `BEHAVIORAL_BRIEFS_MODEL = gpt-5-nano`
 - `BEHAVIORAL_BRIEFS_PROMPT_VERSION = behavior-v2`
 
 Compatibility note:
 
 - if Railway does not set these vars explicitly, the new defaults apply automatically
-- if Railway already pins either value, update the Railway env settings manually to match the release
+- if Railway already pins any of these values, update the Railway env settings manually to match the release
 
 ## 8. Testing and QA
 
@@ -292,7 +302,7 @@ These scripts are operational tools and should be used deliberately in productio
 - Topic Lifecycle is not yet a full lifecycle model.
 - The strategic window is intentionally short while clean history rebuilds.
 - Service-gap detection can correctly produce no result when grounded service evidence is insufficient.
-- Railway parity for behavioral briefs depends on deployed env vars not pinning old model/prompt values.
+- Railway parity depends on deployed AI env vars not pinning older model values than the current code defaults.
 
 ## 11. Release Notes for the Current Mainline
 

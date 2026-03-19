@@ -571,7 +571,7 @@ def get_mood_data() -> list[dict]:
     """Weekly sentiment distribution for mood-over-time chart from message-level edges."""
     return run_query(
         """
-        CALL {
+        CALL () {
             MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at > datetime() - duration('P84D')
             RETURN date(p.posted_at).year AS year,

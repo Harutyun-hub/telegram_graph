@@ -1,5 +1,5 @@
 """
-intent_extractor.py — Expert-grade behavioral intelligence extraction via GPT-4o-mini.
+intent_extractor.py — Expert-grade behavioral intelligence extraction via the configured OpenAI model.
 
 Expert Panel:
   1. Behavioral Intelligence Analyst     — psychological profile, desires, hidden signals
@@ -645,7 +645,7 @@ def extract_intents(
     include_stats: bool = False,
 ) -> int | dict:
     """
-    Process unprocessed comments through GPT-4o-mini.
+    Process unprocessed comments through the configured OpenAI model.
     Groups by (telegram_user_id, channel_id, post_id) — one API call per user per post.
 
     Returns: number of analysis records saved (default) or detailed stage stats.

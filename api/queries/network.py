@@ -25,9 +25,9 @@ def get_community_channels() -> list[dict]:
         WITH max(all_p.posted_at) AS globalLatest
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
         WITH ch, globalLatest, count(p) AS postCount,
-             avg(p.views) AS avgViews,
-             avg(p.forwards) AS avgForwards,
-             avg(p.comments) AS avgComments,
+             avg(coalesce(p.views, 0)) AS avgViews,
+             avg(coalesce(p.forwards, 0)) AS avgForwards,
+             avg(coalesce(p.comment_count, 0)) AS avgComments,
              max(p.posted_at) AS lastPost,
              sum(CASE WHEN p.posted_at >= globalLatest - duration('P30D') THEN 1 ELSE 0 END) AS posts30d,
              sum(CASE WHEN p.posted_at >= globalLatest - duration('P7D') THEN 1 ELSE 0 END) AS posts7d,
@@ -124,24 +124,110 @@ def get_community_channels() -> list[dict]:
 
 
 def get_key_voices() -> list[dict]:
-    """Most active/influential users by comment count + reply network."""
-    return run_query("""
+    """Most active/influential users with real usernames, channels, and topics."""
+    # First get data from Neo4j
+    neo4j_results = run_query("""
         MATCH (u:User)-[w:WROTE]->(c:Comment)
-        WITH u, count(c) AS commentCount
+        WITH u, count(c) AS commentCount, collect(DISTINCT c) AS comments
+
+        // Get channels where user is active
+        OPTIONAL MATCH (c2:Comment)<-[:WROTE]-(u)
+        OPTIONAL MATCH (c2)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
+        WITH u, commentCount, comments,
+             collect(DISTINCT ch.title)[..5] AS activeChannels
+
+        // Get topics user discusses
+        OPTIONAL MATCH (c3:Comment)<-[:WROTE]-(u)
+        OPTIONAL MATCH (c3)-[:TAGGED]->(t:Topic)
+        WITH u, commentCount, comments, activeChannels,
+             collect(DISTINCT t.name)[..5] AS userTopics
+
+        // Get reply interactions
         OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
-        WITH u, commentCount,
-             count(r) AS replyCount,
+        WITH u, commentCount, comments, activeChannels, userTopics,
+             count(r) AS replyCount
+
+        // Return user data
+        WITH u.telegram_user_id AS userId,
+             commentCount,
+             replyCount,
              u.community_role AS role,
              u.communication_style AS style,
              u.inferred_gender AS gender,
-             u.inferred_age_bracket AS age
-        RETURN u.telegram_user_id AS userId,
-               commentCount, replyCount,
+             u.inferred_age_bracket AS age,
+             activeChannels AS topChannels,
+             userTopics AS topics,
+             commentCount + replyCount * 2 AS influenceScore,
+             // Calculate posts per week (approximate from comment frequency)
+             CASE WHEN commentCount > 0 THEN
+                  round(commentCount * 7.0 / 30.0)
+             ELSE 0 END AS postsPerWeek,
+             // Reply rate percentage
+             CASE WHEN commentCount > 0 THEN
+                  round(100.0 * replyCount / commentCount)
+             ELSE 0 END AS replyRate
+
+        RETURN userId, commentCount, replyCount, influenceScore,
                role, style, gender, age,
-               commentCount + replyCount * 2 AS influenceScore
+               topChannels, topics, postsPerWeek, replyRate
         ORDER BY influenceScore DESC
         LIMIT 20
     """)
+
+    # Fetch usernames from Supabase
+    try:
+        from buffer.supabase_writer import SupabaseWriter
+        writer = SupabaseWriter()
+
+        # Get user IDs from Neo4j results
+        user_ids = [r['userId'] for r in neo4j_results if r.get('userId')]
+
+        if user_ids:
+            # Fetch usernames from Supabase
+            supabase_users = writer.client.table('telegram_users') \
+                .select('telegram_user_id, username, first_name, last_name') \
+                .in_('telegram_user_id', user_ids) \
+                .execute()
+
+            # Create a lookup dictionary
+            user_lookup = {}
+            for user in (supabase_users.data or []):
+                tid = user.get('telegram_user_id')
+                if tid:
+                    user_lookup[tid] = {
+                        'username': user.get('username'),
+                        'firstName': user.get('first_name'),
+                        'lastName': user.get('last_name')
+                    }
+
+            # Merge Supabase data with Neo4j results
+            for result in neo4j_results:
+                user_id = result.get('userId')
+                if user_id and user_id in user_lookup:
+                    user_data = user_lookup[user_id]
+                    # Create display name from available data
+                    display_name = user_data.get('username') or user_data.get('firstName') or f"User_{user_id}"
+                    result['displayName'] = display_name
+                    result['username'] = user_data.get('username')
+                    result['firstName'] = user_data.get('firstName')
+                    result['lastName'] = user_data.get('lastName')
+                else:
+                    result['displayName'] = f"User_{user_id}"
+                    result['username'] = None
+                    result['firstName'] = None
+                    result['lastName'] = None
+
+        return neo4j_results
+
+    except Exception as e:
+        # If Supabase fetch fails, return Neo4j data with default names
+        for result in neo4j_results:
+            user_id = result.get('userId')
+            result['displayName'] = f"User_{user_id}"
+            result['username'] = None
+            result['firstName'] = None
+            result['lastName'] = None
+        return neo4j_results
 
 
 def get_hourly_activity() -> list[dict]:
@@ -186,5 +272,66 @@ def get_viral_topics() -> list[dict]:
              count(DISTINCT t2) AS connectedTopics
         RETURN topic, coOccurrences, connectedTopics
         ORDER BY coOccurrences DESC
+        LIMIT 15
+    """)
+
+
+def get_information_velocity() -> list[dict]:
+    """Track how topics spread across channels with real timestamps."""
+    return run_query("""
+        // Find topics that appear in multiple channels
+        MATCH (p:Post)-[:TAGGED]->(t:Topic)
+        MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+        WHERE p.posted_at IS NOT NULL
+        WITH t, ch, min(p.posted_at) AS firstSeen,
+             count(p) AS postCount,
+             sum(p.views) AS totalViews
+
+        // Group by topic to find spread pattern
+        WITH t.name AS topic,
+             collect({
+                 channel: ch.title,
+                 firstSeen: firstSeen,
+                 postCount: postCount,
+                 views: totalViews
+             }) AS channelData
+        WHERE size(channelData) >= 2  // Topic must appear in at least 2 channels
+
+        // Find originator and calculate spread
+        WITH topic, channelData
+        ORDER BY topic
+        WITH topic, channelData,
+             // Sort by firstSeen to find originator
+             [x IN channelData | x.firstSeen][0] AS earliestTime,
+             [x IN channelData | x.firstSeen][-1] AS latestTime
+
+        WITH topic, channelData, earliestTime, latestTime,
+             [x IN channelData WHERE x.firstSeen = earliestTime | x.channel][0] AS originator
+
+        // Calculate spread metrics
+        WITH topic, originator, channelData,
+             duration.between(earliestTime, latestTime).hours AS spreadHours,
+             size(channelData) AS channelsReached,
+             reduce(s = 0, x IN channelData | s + x.views) AS totalReach,
+             // Find amplifier channels (highest engagement after originator)
+             [x IN channelData WHERE x.channel <> originator | x] AS amplifierData
+
+        WITH topic, originator, spreadHours, channelsReached, totalReach,
+             // Sort amplifiers by views to find top amplifiers
+             [x IN amplifierData | x.channel][..3] AS amplifiers,
+             // Determine velocity based on spread speed
+             CASE
+                 WHEN spreadHours <= 6 AND channelsReached >= 5 THEN 'explosive'
+                 WHEN spreadHours <= 24 AND channelsReached >= 3 THEN 'fast'
+                 ELSE 'normal'
+             END AS velocity
+
+        RETURN topic, originator,
+               coalesce(spreadHours, 0) AS spreadHours,
+               channelsReached,
+               totalReach,
+               amplifiers,
+               velocity
+        ORDER BY totalReach DESC
         LIMIT 15
     """)

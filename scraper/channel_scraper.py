@@ -18,6 +18,15 @@ import config
 from scraper.channel_metadata import get_full_channel_metadata
 
 
+def _disable_unsupported_source(supabase_writer, channel_uuid: str, username: str, reason: str) -> None:
+    """Pause a source that resolves to a non-channel Telegram peer."""
+    try:
+        supabase_writer.update_channel(channel_uuid, {"is_active": False})
+        logger.warning(f"[{username}] Source auto-paused: {reason}")
+    except Exception as exc:
+        logger.error(f"[{username}] Failed to auto-pause unsupported source: {exc}")
+
+
 async def scrape_channel(client: TelegramClient, channel_record: dict, supabase_writer) -> int:
     """
     Scrape new posts from a single channel.
@@ -54,6 +63,13 @@ async def scrape_channel(client: TelegramClient, channel_record: dict, supabase_
         entity = await client.get_entity(username)
     except (ValueError, ChannelPrivateError) as e:
         logger.error(f"[{username}] Cannot access channel: {e}")
+        return 0
+
+    if not isinstance(entity, Channel):
+        peer_type = type(entity).__name__
+        reason = f"resolved peer is {peer_type}, not a Telegram channel"
+        logger.warning(f"[{username}] Skipping unsupported source: {reason}")
+        _disable_unsupported_source(supabase_writer, channel_uuid, username, reason)
         return 0
 
     # Refresh channel metadata when key fields are missing

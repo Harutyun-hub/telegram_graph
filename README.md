@@ -109,6 +109,10 @@ Backend:
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `OPENAI_API_KEY`
+- `OPENAI_MODEL` default `gpt-5-nano`
+- `QUESTION_BRIEFS_MODEL` default `gpt-5-nano`
+- `QUESTION_BRIEFS_TRIAGE_MODEL` default `gpt-5-nano`
+- `QUESTION_BRIEFS_SYNTHESIS_MODEL` default `gpt-5-nano`
 - `GRAPH_ANALYTICS_RETENTION_DAYS` default `15`
 - `BEHAVIORAL_BRIEFS_MODEL` default `gpt-5-nano`
 - `BEHAVIORAL_BRIEFS_PROMPT_VERSION` default `behavior-v2`
@@ -119,8 +123,9 @@ Frontend:
 
 ## AI Systems
 
+- The main extraction pipeline defaults to `gpt-5-nano` through `OPENAI_MODEL`.
+- Question briefs default to `gpt-5-nano` for primary, triage, and synthesis passes.
 - Behavioral briefs default to `gpt-5-nano`.
-- Other AI flows remain independently configurable through `config.py`.
 - Service-gap cards are generated only from grounded service/help evidence in posts and related comments. There is no production fallback that turns generic topic dissatisfaction into service-gap bars.
 
 ## Railway Compatibility
@@ -133,8 +138,9 @@ The current release remains compatible with the GitHub `main` / Railway deployme
 
 Operational note:
 
-- if Railway does not explicitly set `BEHAVIORAL_BRIEFS_MODEL` or `BEHAVIORAL_BRIEFS_PROMPT_VERSION`, the new defaults apply automatically
-- if Railway already pins either variable, update the Railway env value to match this release for parity with local behavior
+- if Railway does not explicitly set the AI model variables, the new defaults apply automatically
+- if Railway already pins any of these values, update them manually for parity with this release:
+  `OPENAI_MODEL`, `QUESTION_BRIEFS_MODEL`, `QUESTION_BRIEFS_TRIAGE_MODEL`, `QUESTION_BRIEFS_SYNTHESIS_MODEL`, `BEHAVIORAL_BRIEFS_MODEL`, `BEHAVIORAL_BRIEFS_PROMPT_VERSION`
 
 The frontend still expects `/api/*` to be reverse-proxied to the backend through `BACKEND_URL` in Railway.
 
