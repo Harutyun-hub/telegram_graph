@@ -135,6 +135,7 @@ const TOPIC_RU: Record<string, string> = {
 const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DOW_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MIN_SUPPORT_FOR_TREND = 8;
+const COMPARE_BUCKET_COUNT = 7;
 const MIN_SUPPORT_FOR_QA = 5;
 const MAX_ABS_TREND_PCT = 100;
 
@@ -170,7 +171,7 @@ function toEmptyShape(value: any): any {
   return value;
 }
 
-function createEmptyAppData(): AppData {
+export function createEmptyAppData(): AppData {
   return toEmptyShape(mockAppData) as AppData;
 }
 
@@ -282,6 +283,24 @@ function slugify(text: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'item';
+}
+
+function formatTrendBucketLabel(bucketRaw: any): string {
+  const bucket = asStr(bucketRaw, '').trim();
+  if (!bucket) return '';
+
+  const isoDaily = /^(\d{4})-(\d{2})-(\d{2})$/;
+  const weekly = /^(\d{4})-W(\d{2})$/;
+  const dailyMatch = bucket.match(isoDaily);
+  if (dailyMatch) {
+    const [, year, month, day] = dailyMatch;
+    return `${day}.${month}`;
+  }
+  const weeklyMatch = bucket.match(weekly);
+  if (weeklyMatch) {
+    return `${weeklyMatch[1]}-W${weeklyMatch[2]}`;
+  }
+  return bucket;
 }
 
 function unwrapPayload(payload: any): any {
@@ -569,31 +588,34 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawTrendRows.length > 0) {
-      const perTopicPerWeek = new Map<string, Map<string, number>>();
-      const weekSet = new Set<string>();
+      const perTopicPerBucket = new Map<string, Map<string, number>>();
+      const bucketSet = new Set<string>();
       rawTrendRows.forEach((r: any) => {
         const topic = normalizeTopicLabel(r.topic);
         if (!topic) return;
-        const year = asNum(r.year, 0);
-        const week = asNum(r.week, 0);
-        if (!year || !week) return;
-        const label = `${year}-W${String(week).padStart(2, '0')}`;
-        weekSet.add(label);
-        if (!perTopicPerWeek.has(topic)) perTopicPerWeek.set(topic, new Map<string, number>());
-        const wMap = perTopicPerWeek.get(topic)!;
-        wMap.set(label, asNum(wMap.get(label), 0) + asNum(r.posts, 0));
+        const bucket = asStr(r.bucket, '').trim() || (() => {
+          const year = asNum(r.year, 0);
+          const week = asNum(r.week, 0);
+          if (!year || !week) return '';
+          return `${year}-W${String(week).padStart(2, '0')}`;
+        })();
+        if (!bucket) return;
+        bucketSet.add(bucket);
+        if (!perTopicPerBucket.has(topic)) perTopicPerBucket.set(topic, new Map<string, number>());
+        const bucketMap = perTopicPerBucket.get(topic)!;
+        bucketMap.set(bucket, asNum(bucketMap.get(bucket), 0) + asNum(r.posts, 0));
       });
 
-      const weeksOrdered = Array.from(weekSet).sort((a, b) => asStr(a).localeCompare(asStr(b)));
-      if (weeksOrdered.length === 0) {
+      const bucketsOrdered = Array.from(bucketSet).sort((a, b) => asStr(a).localeCompare(asStr(b)));
+      if (bucketsOrdered.length === 0) {
         app.trendData = [];
         app.trendLines.en = [];
         app.trendLines.ru = [];
       } else {
-        const recentWeeks = weeksOrdered.slice(-2);
-        const topicScoreRows = Array.from(perTopicPerWeek.entries()).map(([topic, wMap]) => {
-          const recentVolume = recentWeeks.reduce((sum, w) => sum + asNum(wMap.get(w), 0), 0);
-          const totalVolume = weeksOrdered.reduce((sum, w) => sum + asNum(wMap.get(w), 0), 0);
+        const recentBuckets = bucketsOrdered.slice(-COMPARE_BUCKET_COUNT);
+        const topicScoreRows = Array.from(perTopicPerBucket.entries()).map(([topic, bucketMap]) => {
+          const recentVolume = recentBuckets.reduce((sum, w) => sum + asNum(bucketMap.get(w), 0), 0);
+          const totalVolume = bucketsOrdered.reduce((sum, w) => sum + asNum(bucketMap.get(w), 0), 0);
           return { topic, recentVolume, totalVolume };
         });
 
@@ -603,11 +625,11 @@ export function adaptDashboardPayload(payload: any): AppData {
           .map((r) => r.topic);
 
         const keyByTopic = Object.fromEntries(topTopics.map((t) => [t, slugify(t)]));
-        app.trendData = weeksOrdered.map((weekLabel) => {
-          const row: Record<string, string | number> = { week: weekLabel };
+        app.trendData = bucketsOrdered.map((bucket) => {
+          const row: Record<string, string | number> = { week: formatTrendBucketLabel(bucket) };
           topTopics.forEach((topic) => {
             const key = keyByTopic[topic];
-            row[key] = asNum(perTopicPerWeek.get(topic)?.get(weekLabel), 0);
+            row[key] = asNum(perTopicPerBucket.get(topic)?.get(bucket), 0);
           });
           return row;
         });
@@ -1328,18 +1350,31 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     if (rawKeyVoices.length > 0) {
       const mk = (r: any, i: number, ru: boolean) => {
-        const baseName = `User ${asStr(r.userId, i + 1)}`;
-        const helpScore = clamp(Math.round(asNum(r.influenceScore, 0) * 2), 20, 100);
+        // Use real displayName from backend
+        const displayName = asStr(r.displayName, asStr(r.username, `User_${asStr(r.userId, i + 1)}`));
+
+        // Calculate helpScore from backend data if available, otherwise derive it
+        const helpScore = r.helpScore ? asNum(r.helpScore, 50) : clamp(Math.round(asNum(r.influenceScore, 0) * 2), 20, 100);
+
+        // Determine type based on helpScore
         const type = helpScore >= 85 ? 'Expert' : helpScore >= 70 ? 'Helper' : helpScore >= 55 ? 'Organizer' : 'Content Creator';
+
+        // Use real topics from user's comments, fallback to trending if none
+        const userTopics = asArray(r.topics).length > 0 ? asArray(r.topics) :
+                          asArray(r.userTopics).length > 0 ? asArray(r.userTopics) :
+                          app.trendingTopics.en.slice(0, 3).map((t) => t.topic);
+
         return {
-          name: baseName,
+          name: displayName,
           role: ru ? (asStr(r.role, 'Member') || 'Участник') : asStr(r.role, 'Member'),
-          followers: Math.max(100, asNum(r.commentCount, 0) * 18 + asNum(r.replyCount, 0) * 30),
+          followers: Math.max(100, asNum(r.commentCount, 0) * 50 + asNum(r.replyCount, 0) * 100), // More realistic follower count
           helpScore,
-          topics: app.trendingTopics.en.slice(0, 3).map((t) => (ru ? t.topic : t.topic)),
-          postsPerWeek: Math.max(1, asNum(r.commentCount, 0)),
-          replyRate: clamp(Math.round((asNum(r.replyCount, 0) / Math.max(1, asNum(r.commentCount, 1))) * 100), 5, 99),
+          topics: userTopics.slice(0, 3),
+          postsPerWeek: r.postsPerWeek ? asNum(r.postsPerWeek, 1) : Math.max(1, asNum(r.commentCount, 0)),
+          replyRate: r.replyRate ? asNum(r.replyRate, 20) : clamp(Math.round((asNum(r.replyCount, 0) / Math.max(1, asNum(r.commentCount, 1))) * 100), 5, 99),
           type,
+          // Add channels where user is active (new field)
+          topChannels: asArray(r.topChannels).slice(0, 3),
         };
       };
       app.keyVoices.en = rawKeyVoices.slice(0, 15).map((r: any, i: number) => mk(r, i, false));
@@ -1372,15 +1407,38 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     const recRows = asArray(raw.recommendations);
     if (recRows.length > 0) {
-      const mk = (r: any, ru: boolean) => ({
-        item: ru ? `Рекомендации пользователя ${asStr(r.userId)}` : `Recommendations from user ${asStr(r.userId)}`,
-        category: asStr(asArray(r.topics)[0], ru ? 'Общий' : 'General'),
-        mentions: asNum(r.helpCount, 0),
-        rating: clamp(Math.round(Math.min(5, 3 + asNum(r.helpCount, 0) / 4)), 1, 5),
-        sentiment: 'positive',
-      });
-      app.recommendations.en = recRows.slice(0, 12).map((r: any) => mk(r, false));
-      app.recommendations.ru = recRows.slice(0, 12).map((r: any) => mk(r, true));
+      const mk = (r: any, ru: boolean) => {
+        // Use real recommendation text from AI extraction
+        const itemText = asStr(r.item, '');
+
+        // If no real recommendation text, show "No recommendations yet"
+        if (!itemText || itemText === '') {
+          return null;
+        }
+
+        return {
+          item: itemText, // Actual recommendation text from AI
+          category: asStr(r.category, ru ? 'Общий' : 'General'),
+          mentions: asNum(r.mentions, asNum(r.helpCount, 1)),
+          rating: asNum(r.rating, clamp(Math.round(Math.min(5, 3 + asNum(r.mentions, 0) / 3)), 1, 5)),
+          sentiment: asStr(r.sentiment, 'positive'),
+          // Add evidence fields for linking to source
+          evidenceId: asStr(r.evidenceId, ''),
+          evidenceText: asStr(r.evidenceText, ''),
+          channel: asStr(r.channel, ''),
+        };
+      };
+
+      const enRecs = recRows.slice(0, 12).map((r: any) => mk(r, false)).filter(Boolean);
+      const ruRecs = recRows.slice(0, 12).map((r: any) => mk(r, true)).filter(Boolean);
+
+      // If we have real recommendations, use them
+      if (enRecs.length > 0) {
+        app.recommendations.en = enRecs;
+      }
+      if (ruRecs.length > 0) {
+        app.recommendations.ru = ruRecs;
+      }
     }
   } catch {
     // Keep mock defaults.
@@ -1419,24 +1477,44 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     const viralRows = asArray(raw.viralTopics);
     if (viralRows.length > 0) {
-      const topAmplifiers = app.communityChannels.slice(0, 3).map((c) => c.name);
       const mk = (r: any, ru: boolean) => {
+        // Use real data from get_information_velocity()
+        const originator = asStr(r.originator, '');
+        const spreadHours = asNum(r.spreadHours, 0);
+        const channelsReached = asNum(r.channelsReached, 0);
+        const amplifiers = asArray(r.amplifiers);
+        const totalReach = asNum(r.totalReach, 0);
+        const velocity = asStr(r.velocity, 'normal');
+
+        // Fallback to old calculation if new fields not available
         const co = asNum(r.coOccurrences, 0);
         const conn = asNum(r.connectedTopics, 0);
+
+        // If no real originator, don't make up fake data
+        if (!originator && !co) {
+          return null;
+        }
+
         return {
           topic: asStr(r.topic),
-          originator: app.communityChannels[0]?.name || (ru ? 'Канал сообщества' : 'Community channel'),
-          spreadHours: clamp(Math.round(72 / Math.max(1, Math.log2(co + 2))), 1, 72),
-          channelsReached: Math.max(1, conn),
-          amplifiers: topAmplifiers,
-          totalReach: co * 70,
-          velocity: co > 150 ? 'explosive' : co > 80 ? 'fast' : 'normal',
+          originator: originator || app.communityChannels[0]?.name || (ru ? 'Неизвестный источник' : 'Unknown source'),
+          spreadHours: spreadHours > 0 ? spreadHours : clamp(Math.round(72 / Math.max(1, Math.log2(co + 2))), 1, 72),
+          channelsReached: channelsReached > 0 ? channelsReached : Math.max(1, conn),
+          amplifiers: amplifiers.length > 0 ? amplifiers : app.communityChannels.slice(1, 4).map((c) => c.name).filter(Boolean),
+          totalReach: totalReach > 0 ? totalReach : co * 70,
+          velocity: velocity || (co > 150 ? 'explosive' : co > 80 ? 'fast' : 'normal'),
         };
       };
-      app.viralTopics = {
-        en: viralRows.slice(0, 12).map((r: any) => mk(r, false)),
-        ru: viralRows.slice(0, 12).map((r: any) => mk(r, true)),
-      };
+
+      const enTopics = viralRows.slice(0, 12).map((r: any) => mk(r, false)).filter(Boolean);
+      const ruTopics = viralRows.slice(0, 12).map((r: any) => mk(r, true)).filter(Boolean);
+
+      if (enTopics.length > 0) {
+        app.viralTopics.en = enTopics;
+      }
+      if (ruTopics.length > 0) {
+        app.viralTopics.ru = ruTopics;
+      }
     }
   } catch {
     // Keep mock defaults.

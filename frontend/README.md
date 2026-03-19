@@ -1,13 +1,15 @@
 # Frontend (Radar Obshchiny)
 
-React + Vite dashboard app for community intelligence.
+React + Vite dashboard frontend for the Radar Obshchiny intelligence platform.
 
-## Tech
+## Tech Stack
 
 - React 18
-- TypeScript/TSX source
+- TypeScript
 - Vite
-- Recharts, Radix UI, Lucide
+- Recharts
+- Radix UI
+- Lucide
 
 ## Run
 
@@ -26,7 +28,7 @@ npm run build
 
 ## Environment
 
-Copy example env file:
+Copy the example env file:
 
 ```bash
 cp .env.example .env
@@ -34,34 +36,36 @@ cp .env.example .env
 
 Key variable:
 
-- `VITE_API_BASE_URL` (defaults to `/api`)
-- `VITE_W9_SYNTHETIC_MODE` (`auto` | `off` | `force`)
-  - `auto` (recommended for local/staging): use synthetic W9 bars only when real aligned AI rows are empty
-  - `off` (recommended for production): never use synthetic bars
-  - `force` (QA/demo): always use synthetic bars
-- `VITE_W9_ENABLE_LEGACY_DEBUG` (`true`/`false`, default `false`) — enables old deterministic W9 rows for internal debug only
+- `VITE_API_BASE_URL`
+  - default: `/api`
+  - local explicit example: `http://127.0.0.1:8001/api`
 
-Example:
+## Deployment Notes
 
-```env
-VITE_API_BASE_URL=http://127.0.0.1:8001/api
-```
+- The production frontend is designed to work behind the Caddy config in [`/Users/harutnahapetyan/Documents/Gemini/Telegram/frontend/Caddyfile`](/Users/harutnahapetyan/Documents/Gemini/Telegram/frontend/Caddyfile).
+- `/api/*` requests are still expected to be reverse-proxied to the backend via `BACKEND_URL`.
+- This release does not change the frontend deploy contract used by Railway.
 
-Railway example (frontend and backend on different domains):
+## Current Dashboard Behavior
 
-```env
-VITE_API_BASE_URL=https://your-backend-service.up.railway.app/api
-```
+- Dashboard data is bootstrapped through `src/app/contexts/DataContext.tsx`.
+- Backend payload normalization lives in `src/app/services/dashboardAdapter.ts`.
+- Strategic topic widgets now reflect direct-message mention semantics within the clean 15-day graph window.
+- Service Gap Detector uses `serviceGapBriefs` only. It no longer renders fallback-derived service-gap bars.
+- If no AI-backed service-gap cards are available, the widget shows a soft `No service gap detected.` state.
 
 ## Important Paths
 
-- `src/app/contexts/DataContext.tsx` — main dashboard data bootstrap
-- `src/app/services/dashboardAdapter.ts` — backend payload adaptation
-- `src/app/services/detailData.ts` — dedicated Topics/Channels/Audience fetch path
-- `src/app/pages/` — route-level screens
+- `src/app/contexts/DataContext.tsx` — dashboard bootstrap and refresh flow
+- `src/app/services/dashboardAdapter.ts` — backend-to-UI transformation layer
+- `src/app/services/detailData.ts` — topic/channel/audience detail loaders
+- `src/app/components/widgets/` — dashboard widget implementations
 - `src/app/graph/` — graph feature modules
 
-## Notes
+## QA
 
-- This frontend is part of the monorepo; backend docs are in root `README.md`.
-- Keep API contracts aligned with backend query/aggregator outputs.
+```bash
+npm run build
+```
+
+Keep frontend behavior aligned with backend query semantics and documented release behavior in the root [`/Users/harutnahapetyan/Documents/Gemini/Telegram/README.md`](/Users/harutnahapetyan/Documents/Gemini/Telegram/README.md).

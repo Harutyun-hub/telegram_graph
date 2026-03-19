@@ -233,6 +233,16 @@ Capture signals of entrepreneurial activity, market observations, and economic o
     {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or observation>"}
   ],
 
+  "message_topics": [
+    {
+      "message_ref": "MSG 1",
+      "comment_id": "<comment UUID if provided in input, otherwise null>",
+      "topics": [
+        {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or observation>"}
+      ]
+    }
+  ],
+
   "desires": {
     "explicit": "<stated desire or null>",
     "implicit": "<inferred desire>",
@@ -449,6 +459,30 @@ def _normalize_payload(parsed: dict) -> dict:
             "proposed_topics": proposed_count,
         }
 
+    message_topics: list[dict] = []
+    aggregate_by_name: dict[str, dict] = {str(item.get("name")): dict(item) for item in normalized_topics if item.get("name")}
+    for item in parsed.get("message_topics") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or "").strip()
+        message_ref = str(item.get("message_ref") or "").strip()
+        item_topics = normalize_model_topics(item.get("topics") or [])
+        if not comment_id and not message_ref:
+            continue
+        message_topics.append({
+            "comment_id": comment_id,
+            "message_ref": message_ref,
+            "topics": item_topics,
+        })
+        for topic in item_topics:
+            name = str(topic.get("name") or "").strip()
+            if name and name not in aggregate_by_name:
+                aggregate_by_name[name] = dict(topic)
+
+    if message_topics:
+        normalized["message_topics"] = message_topics
+        normalized["topics"] = list(aggregate_by_name.values())[:6]
+
     return normalized
 
 
@@ -653,7 +687,10 @@ def extract_intents(
         # Build numbered temporal message block
         message_char_limit = max(120, int(config.AI_MESSAGE_CHAR_LIMIT))
         messages_text = "\n\n".join([
-            f"[MSG {i+1} | {c.get('posted_at', '')[:16]}]\n{_trim_text(c.get('text', ''), message_char_limit)}"
+            (
+                f"[MSG {i+1} | COMMENT_ID {c.get('id')} | {c.get('posted_at', '')[:16]}]\n"
+                f"{_trim_text(c.get('text', ''), message_char_limit)}"
+            )
             for i, c in enumerate(user_comments[:config.AI_BATCH_SIZE])
         ])
 
@@ -694,7 +731,9 @@ def extract_intents(
             f"Channel: Telegram public channel\n"
             f"Post ID: {post_id or 'unknown'}\n"
             f"Messages analyzed: {min(len(user_comments), config.AI_BATCH_SIZE)}\n"
-            f"User ID: {telegram_user_id}"
+            f"User ID: {telegram_user_id}\n"
+            f"IMPORTANT: Return message_topics with one entry per message using the COMMENT_ID from each [MSG ...] header. "
+            f"Only assign a topic to a message when that specific message clearly mentions it."
             f"{profile_section}"
             f"{post_context_section}\n"
             f"--- MESSAGES ---\n{messages_text}"

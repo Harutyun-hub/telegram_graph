@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Sparkles, X, Send, RotateCcw, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { askAI } from '../services/api';
 
 interface Message {
   id: string;
@@ -23,29 +24,6 @@ const SUGGESTED_PROMPTS_RU = [
   'Кто самые влиятельные участники?',
   'Сводка настроений по жилью',
 ];
-
-const MOCK_RESPONSES_EN: Record<string, string> = {
-  default: `Based on the current data from **14,238 analyzed messages**, here's what stands out:\n\n• **Housing affordability** remains the #1 topic (+89% spike)\n• **Education inquiries** are up 125% — mostly international schools\n• **New member onboarding** questions repeat daily across 3 channels\n\nWould you like a deeper breakdown of any of these areas?`,
-  housing: `**Housing Sentiment Analysis** (last 7 days)\n\nOverall tone: 62% frustrated, 28% neutral, 10% positive\n\nTop pain points:\n1. Rental prices up 30% YoY near Cascade district\n2. Short-term vs long-term lease confusion\n3. Deposit disputes with landlords\n\nRecommendation: Pin a "Tenant Rights in Armenia" guide — it would reduce 40+ daily repetitive questions.`,
-  topics: `**Topics Requiring Urgent Attention** (by volume + urgency score)\n\n🔴 **Housing crisis** — 342 mentions, frustration index 8.2/10\n🟡 **Banking access** — 156 mentions, confusion index 7.8/10\n🟡 **School enrollment deadlines** — 89 mentions, anxiety index 7.1/10\n\nThe banking cluster has grown 95% this week — likely triggered by new Ameriabank policy changes.`,
-  voices: `**Key Community Voices** (by influence + helpfulness)\n\n1. **Алексей (IT_Alex_AM)** — Help score 95/100, 28 posts/week\n   Expertise: Tax optimization, IT jobs, coworking\n\n2. **Марина (Marina_Yerevan)** — Help score 92/100, 22 posts/week\n   Expertise: Schools, kids activities, pediatricians\n\n3. **Дима (relocate_dm)** — Help score 88/100, 35 posts/week\n   Expertise: Documents, banking, apartment hunting\n\nConsider featuring these members in a "Community Experts" pinned post.`,
-};
-
-const MOCK_RESPONSES_RU: Record<string, string> = {
-  default: `На основе текущих данных из **14 238 проанализированных сообщений**, вот ключевые выводы:\n\n• **Доступность жилья** остаётся темой №1 (рост +89%)\n• **Запросы по образованию** выросли на 125% — преимущественно международные школы\n• **Вопросы новичков** повторяются ежедневно в 3 каналах\n\nХотите более детальный анализ по любой из этих тем?`,
-  housing: `**Анализ настроений по жилью** (последние 7 дней)\n\nОбщий тон: 62% раздражённые, 28% нейтральные, 10% позитивные\n\nГлавные проблемы:\n1. Аренда выросла на 30% г/г в районе Каскада\n2. Путаница с краткосрочной и долгосрочной арендой\n3. Споры с арендодателями по залогу\n\nРекомендация: Закрепите руководство «Права арендатора в Армении» — это сократит 40+ ежедневных повторных вопросов.`,
-  topics: `**Темы, требующие срочного внимания** (по объёму + индексу срочности)\n\n🔴 **Жилищный кризис** — 342 упоминания, индекс раздражённости 8.2/10\n🟡 **Доступ к банкам** — 156 упоминаний, индекс растерянности 7.8/10\n🟡 **Дедлайны зачисления в школы** — 89 упоминаний, индекс тревожности 7.1/10\n\nБанковский кластер вырос на 95% за неделю — вероятно, из-за изменений в политике Ameriabank.`,
-  voices: `**Ключевые голоса сообщества** (по влиятельности + полезности)\n\n1. **Алексей (IT_Alex_AM)** — рейтинг помощи 95/100, 28 публ./нед.\n   Экспертиза: налоговая оптимизация, IT-вакансии, коворкинги\n\n2. **Марина (Marina_Yerevan)** — рейтинг помощи 92/100, 22 публ./нед.\n   Экспертиза: школы, детский досуг, педиатры\n\n3. **Дима (relocate_dm)** — рейтинг помощи 88/100, 35 публ./нед.\n   Экспертиза: документы, банки, поиск жилья\n\nРассмотрите возможность создания закреплённого поста «Эксперты сообщества» с этими участниками.`,
-};
-
-function getMockResponse(text: string, ru: boolean): string {
-  const lower = text.toLowerCase();
-  const responses = ru ? MOCK_RESPONSES_RU : MOCK_RESPONSES_EN;
-  if (lower.includes('hous') || lower.includes('жил') || lower.includes('аренд')) return responses.housing;
-  if (lower.includes('topic') || lower.includes('тем') || lower.includes('urgent') || lower.includes('сроч')) return responses.topics;
-  if (lower.includes('voice') || lower.includes('голос') || lower.includes('influenc') || lower.includes('влиятел')) return responses.voices;
-  return responses.default;
-}
 
 function renderMarkdown(text: string) {
   return text.split('\n').map((line, i) => {
@@ -86,7 +64,7 @@ function ChatContent({
             </p>
             <div className="flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-              <p className="text-purple-200 text-xs">{ru ? 'GPT-4o-mini · онлайн' : 'GPT-4o-mini · online'}</p>
+              <p className="text-purple-200 text-xs">{ru ? 'Живые данные · онлайн' : 'Live data · online'}</p>
             </div>
           </div>
         </div>
@@ -224,14 +202,26 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text: text.trim(), timestamp: new Date() }]);
     setInput('');
     setTyping(true);
-    await new Promise(r => setTimeout(r, 900 + Math.random() * 600));
-    setTyping(false);
-    setMessages(prev => [...prev, {
-      id: (Date.now() + 1).toString(),
-      role: 'assistant',
-      text: getMockResponse(text, ru),
-      timestamp: new Date(),
-    }]);
+    try {
+      const response = await askAI(text.trim());
+      setMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        text: String(response?.answer || (ru ? 'Не удалось получить ответ.' : 'No answer was returned.')),
+        timestamp: new Date(),
+      }]);
+    } catch (error: any) {
+      setMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        text: ru
+          ? `Не удалось получить ответ из аналитического API.\n\n${String(error?.message || 'Неизвестная ошибка.')}`
+          : `I couldn't reach the analytics API.\n\n${String(error?.message || 'Unknown error.')}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setTyping(false);
+    }
   };
 
   const handleReset = () => {

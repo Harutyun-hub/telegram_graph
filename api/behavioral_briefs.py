@@ -57,6 +57,122 @@ _ASK_HINTS = (
     "подскаж",
     "услуг",
 )
+_GENERIC_SERVICE_KEYWORDS = (
+    "service",
+    "services",
+    "help",
+    "support",
+    "assistance",
+    "guidance",
+    "consultation",
+    "referral",
+    "recommend",
+    "appointment",
+    "doctor",
+    "clinic",
+    "hospital",
+    "medicine",
+    "medication",
+    "therapy",
+    "therapist",
+    "psycholog",
+    "counsel",
+    "lawyer",
+    "legal",
+    "attorney",
+    "notary",
+    "document",
+    "documents",
+    "paperwork",
+    "passport",
+    "visa",
+    "residency",
+    "registration",
+    "translator",
+    "translation",
+    "housing",
+    "rent",
+    "apartment",
+    "landlord",
+    "shelter",
+    "repair",
+    "water",
+    "electric",
+    "utility",
+    "job",
+    "work",
+    "vacancy",
+    "resume",
+    "cv",
+    "interview",
+    "course",
+    "training",
+    "school",
+    "kindergarten",
+    "teacher",
+    "transport",
+    "bus",
+    "taxi",
+    "ticket",
+    "route",
+    "benefit",
+    "allowance",
+    "aid",
+    "subsidy",
+    "portal",
+    "website",
+    "application",
+    "license",
+    "permit",
+    "childcare",
+    "caregiver",
+    "врач",
+    "клиник",
+    "больниц",
+    "лекар",
+    "медицин",
+    "терап",
+    "психолог",
+    "юрист",
+    "адвокат",
+    "нотари",
+    "документ",
+    "бумаг",
+    "паспорт",
+    "виза",
+    "внж",
+    "регистрац",
+    "перевод",
+    "жиль",
+    "аренд",
+    "квартир",
+    "приют",
+    "ремонт",
+    "вода",
+    "свет",
+    "работ",
+    "ваканс",
+    "резюме",
+    "курс",
+    "обуч",
+    "школ",
+    "садик",
+    "транспорт",
+    "автобус",
+    "такси",
+    "билет",
+    "пособ",
+    "льгот",
+    "субсид",
+    "сайт",
+    "портал",
+    "заявлен",
+    "лиценз",
+    "разреш",
+    "уход",
+    "поддерж",
+    "помощ",
+)
 _SERVICE_KEYWORDS_BY_CATEGORY = {
     "Healthcare": (
         "doctor",
@@ -280,11 +396,16 @@ def _trend_pct(current: int, previous: int) -> int:
 
 
 def _service_keywords_for_cluster(topic: str, category: str) -> tuple[str, ...]:
-    base = list(_SERVICE_KEYWORDS_BY_CATEGORY.get(_as_str(category, ""), ()))
-    topic_tokens = [t for t in _tokenize(topic) if len(t) >= 4]
-    for token in topic_tokens[:8]:
-        if token not in base:
-            base.append(token)
+    base = list(_GENERIC_SERVICE_KEYWORDS)
+    for keyword in _SERVICE_KEYWORDS_BY_CATEGORY.get(_as_str(category, ""), ()):
+        if keyword not in base:
+            base.append(keyword)
+    topic_text = " ".join([_as_str(topic, ""), _as_str(category, "")]).lower()
+    if any(keyword in topic_text for keyword in _SERVICE_KEYWORDS_BY_CATEGORY.get(_as_str(category, ""), ())):
+        topic_tokens = [t for t in _tokenize(topic) if len(t) >= 4]
+        for token in topic_tokens[:6]:
+            if token not in base:
+                base.append(token)
     return tuple(base)
 
 
@@ -307,7 +428,33 @@ def _is_service_evidence_aligned(
         h in txt for h in ("need", "help", "looking", "нуж", "ищ", "подскаж", "помог")
     )
     ask_hit = int(support_intent) > 0 or ask_like_hit or any(h in txt for h in _ASK_HINTS)
-    return keyword_hit and ask_hit
+    concrete_need_hit = any(
+        marker in txt
+        for marker in (
+            "need ",
+            "help with",
+            "recommend",
+            "referral",
+            "appointment",
+            "apply",
+            "register",
+            "hire",
+            "consult",
+            "where can i",
+            "how do i",
+            "need a",
+            "need an",
+            "кто может",
+            "где найти",
+            "как получить",
+            "нужен",
+            "нужна",
+            "нужно",
+            "помощь с",
+            "подскаж",
+        )
+    )
+    return ask_hit and keyword_hit and concrete_need_hit
 
 
 def _get_runtime_store() -> SupabaseWriter | None:
@@ -635,7 +782,7 @@ def _support_gate(cluster: dict, kind: str) -> bool:
     trend = _as_int(cluster.get("trend7dPct"), 0)
 
     if kind == "service":
-        service_ok = messages >= max(3, min_messages - 3) and users >= 1 and channels >= 1
+        service_ok = messages >= 3 and users >= 1 and channels >= 1
         return service_ok and _as_int(cluster.get("unmetPct"), 0) >= 45
 
     base_ok = messages >= min_messages and users >= min_users and channels >= min_channels
@@ -803,21 +950,24 @@ def _synthesize_service_cards(clusters: list[dict]) -> list[dict]:
     if not clusters:
         return []
     if not _client or not config.FEATURE_BEHAVIORAL_BRIEFS_AI:
-        return _deterministic_service_cards(clusters)
+        return []
 
     system_prompt = """
-You generate Service Gap cards from evidence clusters.
+You identify hidden service-gap requests from evidence clusters.
 
 Rules:
 1) Use only provided evidence and IDs.
-2) Describe a concrete service need in plain language.
-3) Keep unmet reason factual and concise.
-4) Only use evidence that clearly matches the service topic/category.
-5) Do not output political slogans or abstract framing.
-6) If grounding is weak, set confidence to low.
+2) Infer a concrete service/help need from the messages, not a topic label.
+3) Service need must be actionable and specific, for example legal help with residency paperwork, mental health counseling, job placement help, housing repair support.
+4) Use the topic/category only as retrieval context; ignore them if the messages do not support a real service request.
+5) Reject abstract grievances, political dissatisfaction, slogans, identity statements, and broad complaints that are not service requests.
+6) Keep unmet reason factual, concise, and grounded in the evidence.
+7) If grounding is weak or there is no real service request, return {"card": null}.
 
 Return JSON only:
 {
+  "card": null
+  OR
   "card": {
     "clusterId": "string",
     "serviceNeedEn": "string",
@@ -870,8 +1020,6 @@ Return JSON only:
         except Exception as e:
             logger.warning(f"Service gap cards synthesis failed for {cluster.get('clusterId')}: {e}")
 
-    if not out:
-        return _deterministic_service_cards(clusters)
     return out
 
 
@@ -1169,8 +1317,6 @@ def _refresh_kind(
         else:
             ai_rows = _synthesize_service_cards(changed_clusters)
             new_cards = _materialize_service_cards(changed_clusters, ai_rows)
-            if not new_cards:
-                new_cards = _materialize_service_cards(changed_clusters, _deterministic_service_cards(changed_clusters))
 
     cards_by_cluster = {
         _as_str(card.get("clusterId"), ""): card

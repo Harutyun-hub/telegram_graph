@@ -20,6 +20,7 @@ from loguru import logger
 
 from api import behavioral_briefs
 from api import question_briefs
+from api import recommendation_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
 from buffer.supabase_writer import SupabaseWriter
 
@@ -219,20 +220,25 @@ def _tier_pulse() -> dict:
 
 
 def _tier_strategic() -> dict:
-    try:
-        trend_lines = strategic.get_trend_lines()
-        return {
-            "topicBubbles": strategic.get_topic_bubbles(),
-            "trendLines": trend_lines,
-            "trendData": trend_lines,
-            "heatmap": strategic.get_heatmap(),
-            "questionCategories": strategic.get_question_categories(),
-            "questionBriefs": question_briefs.get_question_briefs(),
-            "lifecycleStages": strategic.get_lifecycle_stages(),
-        }
-    except Exception as e:
-        logger.error(f"Tier strategic failed: {e}")
-        return _fallback_for_tier("strategic")
+    fallback = _fallback_for_tier("strategic")
+
+    def _safe(name: str, fn, default):
+        try:
+            return fn()
+        except Exception as e:
+            logger.error(f"Strategic widget {name} failed: {e}")
+            return default
+
+    trend_lines = _safe("trendLines", strategic.get_trend_lines, [])
+    return {
+        "topicBubbles": _safe("topicBubbles", strategic.get_topic_bubbles, fallback["topicBubbles"]),
+        "trendLines": trend_lines,
+        "trendData": trend_lines,
+        "heatmap": _safe("heatmap", strategic.get_heatmap, fallback["heatmap"]),
+        "questionCategories": _safe("questionCategories", strategic.get_question_categories, fallback["questionCategories"]),
+        "questionBriefs": _safe("questionBriefs", question_briefs.get_question_briefs, fallback["questionBriefs"]),
+        "lifecycleStages": _safe("lifecycleStages", strategic.get_lifecycle_stages, fallback["lifecycleStages"]),
+    }
 
 
 def _tier_behavioral() -> dict:
@@ -260,8 +266,8 @@ def _tier_network() -> dict:
             "keyVoices": network.get_key_voices(),
             "hourlyActivity": network.get_hourly_activity(),
             "weeklyActivity": network.get_weekly_activity(),
-            "recommendations": network.get_recommendations(),
-            "viralTopics": network.get_viral_topics(),
+            "recommendations": recommendation_briefs.get_recommendation_briefs(),  # Use AI-extracted recommendations
+            "viralTopics": network.get_information_velocity(),  # Use new temporal tracking
         }
     except Exception as e:
         logger.error(f"Tier network failed: {e}")

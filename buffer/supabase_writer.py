@@ -1224,6 +1224,28 @@ class SupabaseWriter:
             logger.debug(f"Count query failed for {table_name}: {e}")
             return None
 
+    def _count_rows_since(
+        self,
+        table_name: str,
+        time_column: str,
+        since_iso: str,
+        filters: dict | None = None,
+    ) -> int | None:
+        """Count rows newer than the given ISO timestamp, with optional equality filters."""
+        try:
+            query = self.client.table(table_name).select("id", count="exact").limit(1)  # type: ignore[arg-type]
+            query = query.gte(time_column, since_iso)
+            for key, value in (filters or {}).items():
+                query = query.eq(key, value)
+            res = query.execute()
+            count = getattr(res, "count", None)
+            if count is None and isinstance(res, dict):
+                count = res.get("count")
+            return int(count) if count is not None else None
+        except Exception as e:
+            logger.debug(f"Count-since query failed for {table_name}: {e}")
+            return None
+
     def _latest_timestamp(self, table_name: str, column: str, filters: dict | None = None) -> str | None:
         """Fetch latest non-null timestamp-like field from a table."""
         try:
@@ -1236,6 +1258,43 @@ class SupabaseWriter:
         except Exception as e:
             logger.debug(f"Latest timestamp query failed for {table_name}.{column}: {e}")
             return None
+
+    def _latest_timestamp_since(
+        self,
+        table_name: str,
+        column: str,
+        since_iso: str,
+        filters: dict | None = None,
+    ) -> str | None:
+        """Fetch latest non-null timestamp-like field newer than the given ISO timestamp."""
+        try:
+            query = self.client.table(table_name).select(column).not_.is_(column, "null").gte(column, since_iso)
+            for key, value in (filters or {}).items():
+                query = query.eq(key, value)
+            res = query.order(column, desc=True).limit(1).execute()
+            row = (res.data or [{}])[0]
+            return row.get(column)
+        except Exception as e:
+            logger.debug(f"Latest timestamp-since query failed for {table_name}.{column}: {e}")
+            return None
+
+    def _update_rows_since(
+        self,
+        table_name: str,
+        *,
+        time_column: str,
+        since_iso: str,
+        payload: dict,
+    ) -> None:
+        """Apply an update to rows newer than the given ISO timestamp."""
+        self.client.table(table_name) \
+            .update(payload) \
+            .gte(time_column, since_iso) \
+            .execute()
+
+    def _recent_cutoff_iso(self, retention_days: int | None = None) -> str:
+        days = max(1, int(retention_days or config.GRAPH_ANALYTICS_RETENTION_DAYS))
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     def get_backlog_counts(self) -> dict:
         """Return key pipeline queue counters used for runtime backpressure."""
@@ -1308,6 +1367,94 @@ class SupabaseWriter:
             "total_posts": self._count_rows("telegram_posts"),
             "total_comments": self._count_rows("telegram_comments"),
             "total_analysis": self._count_rows("ai_analysis"),
+        }
+
+    def get_recent_pipeline_snapshot(self, retention_days: int | None = None) -> dict:
+        """Return retention-window counts/timestamps for graph analytics monitoring."""
+        since_iso = self._recent_cutoff_iso(retention_days)
+        return {
+            "window_days": max(1, int(retention_days or config.GRAPH_ANALYTICS_RETENTION_DAYS)),
+            "window_start_at": since_iso,
+            "recent_posts": self._count_rows_since("telegram_posts", "posted_at", since_iso),
+            "recent_comments": self._count_rows_since("telegram_comments", "posted_at", since_iso),
+            "recent_unsynced_posts": self._count_rows_since(
+                "telegram_posts",
+                "posted_at",
+                since_iso,
+                {"neo4j_synced": False},
+            ),
+            "recent_last_post_at": self._latest_timestamp_since("telegram_posts", "posted_at", since_iso),
+            "recent_last_graph_sync_post_at": self._latest_timestamp_since(
+                "telegram_posts",
+                "posted_at",
+                since_iso,
+                {"neo4j_synced": True},
+            ),
+        }
+
+    def get_unprocessed_posts_since(self, since_iso: str, limit: int = 100) -> list[dict]:
+        """Fetch recent posts not yet sent to AI."""
+        res = self.client.table("telegram_posts") \
+            .select("id, channel_id, telegram_message_id, text, posted_at") \
+            .eq("is_processed", False) \
+            .gte("posted_at", since_iso) \
+            .not_.is_("text", "null") \
+            .order("posted_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        return res.data or []
+
+    def get_unprocessed_comments_since(self, since_iso: str, limit: int = 200) -> list[dict]:
+        """Fetch recent comments not yet sent to AI."""
+        res = self.client.table("telegram_comments") \
+            .select("id, post_id, channel_id, telegram_user_id, text, posted_at") \
+            .eq("is_processed", False) \
+            .gte("posted_at", since_iso) \
+            .not_.is_("text", "null") \
+            .order("posted_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        return res.data or []
+
+    def get_unsynced_posts_since(self, since_iso: str, limit: int = 100) -> list[dict]:
+        """Fetch recent posts not yet fully synced to Neo4j."""
+        res = self.client.table("telegram_posts") \
+            .select("*") \
+            .eq("neo4j_synced", False) \
+            .gte("posted_at", since_iso) \
+            .order("posted_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        return res.data or []
+
+    def reset_recent_graph_window(self, retention_days: int | None = None) -> dict:
+        """
+        Mark the recent retention window for reprocessing/re-sync without touching old history.
+        """
+        since_iso = self._recent_cutoff_iso(retention_days)
+        self._update_rows_since(
+            "telegram_posts",
+            time_column="posted_at",
+            since_iso=since_iso,
+            payload={"is_processed": False, "neo4j_synced": False},
+        )
+        self._update_rows_since(
+            "telegram_comments",
+            time_column="posted_at",
+            since_iso=since_iso,
+            payload={"is_processed": False},
+        )
+        self.client.table("ai_analysis") \
+            .update({"neo4j_synced": False}) \
+            .gte("created_at", since_iso) \
+            .execute()
+
+        snapshot = self.get_recent_pipeline_snapshot(retention_days)
+        return {
+            "window_days": snapshot.get("window_days"),
+            "window_start_at": since_iso,
+            "recent_posts": int(snapshot.get("recent_posts") or 0),
+            "recent_comments": int(snapshot.get("recent_comments") or 0),
         }
 
     # ── Neo4j Bundle Assembly ────────────────────────────────────────────────

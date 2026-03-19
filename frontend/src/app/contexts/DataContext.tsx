@@ -2,7 +2,7 @@
 // DATA CONTEXT — Production-ready single data entry point
 // ================================================================
 // Default mode fetches live dashboard data from backend /api/dashboard.
-// If request fails, stale data is preserved and safe mock defaults remain.
+// If request fails, stale data is preserved and safe empty defaults remain.
 //
 // Backend payload is normalized via dashboardAdapter so widget contracts stay stable.
 //
@@ -22,8 +22,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { AppData } from '../types/data';
-import { mockAppData } from '../data/mockData';
-import { adaptDashboardPayload } from '../services/dashboardAdapter';
+import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
 
 interface DataContextValue {
@@ -38,7 +37,7 @@ interface DataContextValue {
 // Provides safe defaults so useData() always returns a usable object,
 // even if called outside of DataProvider (e.g., during testing).
 const DataContext = createContext<DataContextValue>({
-  data: mockAppData,
+  data: createEmptyAppData(),
   loading: false,
   hasLiveData: false,
   error: null,
@@ -81,7 +80,7 @@ async function fetchData(signal?: AbortSignal): Promise<AppData> {
 
 export function DataProvider({ children }: { children: ReactNode }) {
   const initialSnapshot = loadSnapshot();
-  const [appData, setAppData] = useState<AppData>(initialSnapshot ?? mockAppData);
+  const [appData, setAppData] = useState<AppData>(initialSnapshot ?? createEmptyAppData());
   const [hasLiveData, setHasLiveData] = useState(Boolean(initialSnapshot));
   const [loading, setLoading] = useState(!initialSnapshot);
   const [error, setError] = useState<string | null>(null);
@@ -139,7 +138,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
 /**
  * useData — hook to access centralised app data.
- * Must be used inside <DataProvider>. Returns mockAppData as a safe fallback otherwise.
+ * Must be used inside <DataProvider>. Returns an empty-safe fallback otherwise.
  */
 export function useData() {
   return useContext(DataContext);

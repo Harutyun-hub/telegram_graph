@@ -135,7 +135,6 @@ type ServiceGapBarRow = {
   id: string;
   topic: string;
   sourceTopic?: string;
-  source: 'real_ai' | 'synthetic_qa' | 'legacy_debug';
   service: string;
   demand: number;
   supply: string;
@@ -145,99 +144,6 @@ type ServiceGapBarRow = {
   evidenceCount: number;
   supplyLevel: 'none' | 'very_low' | 'low' | 'moderate' | 'adequate';
   evidence: Array<{ id: string; quote: string; channel: string; timestamp: string; kind: string }>;
-};
-
-type ServiceGapMode = 'auto' | 'off' | 'force';
-
-const syntheticServiceGapBriefs = {
-  en: [
-    {
-      id: 'syn-healthcare-access',
-      topic: 'Healthcare Access',
-      sourceTopic: 'Healthcare Access',
-      category: 'Healthcare',
-      serviceNeed: 'People need affordable specialist appointments and medicine guidance.',
-      unmetReason: 'Families report long wait times and unclear pathways to low-cost care.',
-      unmetPct: 84,
-      demandSignals: { messages: 26, uniqueUsers: 14, channels: 5, trend7dPct: 23 },
-      evidence: [
-        { id: 'syn-ev-1', quote: 'Does anyone know a low-cost cardiologist in Yerevan?', channel: 'Community Health Chat', timestamp: '2026-03-12T09:40:00Z', kind: 'comment' },
-        { id: 'syn-ev-2', quote: 'We need help finding medicine support for my mother this week.', channel: 'Relocation Help', timestamp: '2026-03-11T17:12:00Z', kind: 'post' },
-      ],
-    },
-    {
-      id: 'syn-housing-rent',
-      topic: 'Housing & Infrastructure',
-      sourceTopic: 'Housing & Infrastructure',
-      category: 'Housing & Infrastructure',
-      serviceNeed: 'People need trusted rental support and landlord mediation.',
-      unmetReason: 'Rent negotiation support is requested, but users report little practical response.',
-      unmetPct: 77,
-      demandSignals: { messages: 19, uniqueUsers: 11, channels: 4, trend7dPct: 11 },
-      evidence: [
-        { id: 'syn-ev-3', quote: 'Can someone recommend a legal advisor for rental contract issues?', channel: 'Newcomers Armenia', timestamp: '2026-03-10T10:03:00Z', kind: 'comment' },
-        { id: 'syn-ev-4', quote: 'Need help finding a safe apartment under this budget.', channel: 'Housing Board', timestamp: '2026-03-09T20:45:00Z', kind: 'post' },
-      ],
-    },
-    {
-      id: 'syn-docs-migration',
-      topic: 'Immigration To Armenia',
-      sourceTopic: 'Immigration To Armenia',
-      category: 'Immigration To Armenia',
-      serviceNeed: 'People need step-by-step residency and document filing support.',
-      unmetReason: 'Requests are frequent, but many users still cannot complete paperwork correctly.',
-      unmetPct: 66,
-      demandSignals: { messages: 14, uniqueUsers: 9, channels: 3, trend7dPct: -8 },
-      evidence: [
-        { id: 'syn-ev-5', quote: 'Where can I get help to submit residency documents correctly?', channel: 'Migration Advice', timestamp: '2026-03-08T14:15:00Z', kind: 'comment' },
-        { id: 'syn-ev-6', quote: 'Please share a trusted checklist for visa extension in Armenia.', channel: 'Docs Support', timestamp: '2026-03-07T16:29:00Z', kind: 'post' },
-      ],
-    },
-  ],
-  ru: [
-    {
-      id: 'syn-healthcare-access',
-      topic: 'Доступ к медицине',
-      sourceTopic: 'Healthcare Access',
-      category: 'Здравоохранение',
-      serviceNeed: 'Людям нужны доступные приёмы у специалистов и помощь с лекарствами.',
-      unmetReason: 'Семьи пишут о долгом ожидании и непонятном пути к недорогой помощи.',
-      unmetPct: 84,
-      demandSignals: { messages: 26, uniqueUsers: 14, channels: 5, trend7dPct: 23 },
-      evidence: [
-        { id: 'syn-ev-1', quote: 'Кто знает недорогого кардиолога в Ереване?', channel: 'Community Health Chat', timestamp: '2026-03-12T09:40:00Z', kind: 'comment' },
-        { id: 'syn-ev-2', quote: 'Нужна помощь с поиском поддержки по лекарствам для мамы на этой неделе.', channel: 'Relocation Help', timestamp: '2026-03-11T17:12:00Z', kind: 'post' },
-      ],
-    },
-    {
-      id: 'syn-housing-rent',
-      topic: 'Жильё и инфраструктура',
-      sourceTopic: 'Housing & Infrastructure',
-      category: 'Жильё и инфраструктура',
-      serviceNeed: 'Людям нужна проверенная поддержка по аренде и спорам с арендодателями.',
-      unmetReason: 'Запросы на помощь с переговорами по аренде есть, но практического ответа мало.',
-      unmetPct: 77,
-      demandSignals: { messages: 19, uniqueUsers: 11, channels: 4, trend7dPct: 11 },
-      evidence: [
-        { id: 'syn-ev-3', quote: 'Подскажите юриста по проблемам с договором аренды.', channel: 'Newcomers Armenia', timestamp: '2026-03-10T10:03:00Z', kind: 'comment' },
-        { id: 'syn-ev-4', quote: 'Нужна помощь найти безопасную квартиру в этом бюджете.', channel: 'Housing Board', timestamp: '2026-03-09T20:45:00Z', kind: 'post' },
-      ],
-    },
-    {
-      id: 'syn-docs-migration',
-      topic: 'Иммиграция в Армению',
-      sourceTopic: 'Immigration To Armenia',
-      category: 'Иммиграция в Армению',
-      serviceNeed: 'Людям нужна пошаговая помощь по ВНЖ и подаче документов.',
-      unmetReason: 'Запросы частые, но многие всё равно не могут корректно завершить процесс.',
-      unmetPct: 66,
-      demandSignals: { messages: 14, uniqueUsers: 9, channels: 3, trend7dPct: -8 },
-      evidence: [
-        { id: 'syn-ev-5', quote: 'Где получить помощь, чтобы правильно подать документы на ВНЖ?', channel: 'Migration Advice', timestamp: '2026-03-08T14:15:00Z', kind: 'comment' },
-        { id: 'syn-ev-6', quote: 'Поделитесь, пожалуйста, чек-листом для продления визы в Армении.', channel: 'Docs Support', timestamp: '2026-03-07T16:29:00Z', kind: 'post' },
-      ],
-    },
-  ],
 };
 
 function supplyLevelFromGap(gap: number): 'none' | 'very_low' | 'low' | 'moderate' | 'adequate' {
@@ -263,35 +169,14 @@ function supplyLabel(ru: boolean, level: 'none' | 'very_low' | 'low' | 'moderate
   return 'Adequate';
 }
 
-function resolveW9SyntheticMode(): ServiceGapMode {
-  const raw = String(import.meta.env.VITE_W9_SYNTHETIC_MODE || '').trim().toLowerCase();
-  if (raw === 'auto' || raw === 'off' || raw === 'force') return raw;
-
-  const appEnv = String(import.meta.env.VITE_APP_ENV || import.meta.env.MODE || '').trim().toLowerCase();
-  if (appEnv === 'production' || appEnv === 'prod') return 'off';
-  if (appEnv === 'staging' || appEnv === 'stage' || appEnv === 'qa' || appEnv === 'test' || appEnv === 'development' || appEnv === 'dev' || appEnv === 'local') {
-    return 'auto';
-  }
-  return import.meta.env.PROD ? 'off' : 'auto';
-}
-
 export function ServiceGapDetector() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
   const [expandedEvidenceKey, setExpandedEvidenceKey] = useState('');
   const serviceGapBriefs = data.serviceGapBriefs?.[lang] ?? [];
-  const serviceGaps = data.serviceGaps[lang] ?? [];
 
-  const syntheticMode = resolveW9SyntheticMode();
-  const allowLegacyDebug = String(import.meta.env.VITE_W9_ENABLE_LEGACY_DEBUG || '').toLowerCase() === 'true';
-
-  const syntheticRows = (syntheticServiceGapBriefs as any)[lang] ?? [];
-  const activeBriefs = syntheticMode === 'force'
-    ? syntheticRows
-    : (serviceGapBriefs.length > 0 ? serviceGapBriefs : (syntheticMode === 'auto' ? syntheticRows : []));
-
-  const aiBarRows: ServiceGapBarRow[] = activeBriefs.map((brief: any) => {
+  const aiBarRows: ServiceGapBarRow[] = serviceGapBriefs.map((brief: any) => {
     const gap = Math.max(0, Math.min(100, Math.round(Number(brief.unmetPct ?? 0))));
     const level = supplyLevelFromGap(gap);
     const messages = Math.max(0, Number(brief?.demandSignals?.messages ?? 0));
@@ -300,7 +185,6 @@ export function ServiceGapDetector() {
       id: String(brief.id || brief.topic || Math.random()),
       topic: String(brief.topic || brief.serviceNeed || 'Service need'),
       sourceTopic: String(brief.sourceTopic || brief.topic || ''),
-      source: activeBriefs === serviceGapBriefs ? 'real_ai' : 'synthetic_qa',
       service: String(brief.serviceNeed || brief.topic || 'Service need'),
       demand: messages,
       supply: supplyLabel(ru, level),
@@ -312,34 +196,10 @@ export function ServiceGapDetector() {
       evidence: Array.isArray(brief.evidence) ? brief.evidence : [],
     };
   });
-
-  const legacyRows: ServiceGapBarRow[] = allowLegacyDebug
-    ? serviceGaps.map((item: any) => ({
-      id: String(item.service || Math.random()),
-      topic: String(item.service || ''),
-      sourceTopic: String(item.service || ''),
-      source: 'legacy_debug',
-      service: String(item.service || ''),
-      demand: Number(item.demand || 0),
-      supply: String(item.supply || ''),
-      gap: Number(item.gap || 0),
-      growth: Number(item.growth || 0),
-      growthReliable: Boolean(item.growthReliable),
-      evidenceCount: Number(item.evidenceCount || 0),
-      supplyLevel: (item.supplyLevel || 'moderate') as 'none' | 'very_low' | 'low' | 'moderate' | 'adequate',
-      evidence: [],
-    }))
-    : [];
-
-  const visibleRows = aiBarRows.length > 0 ? aiBarRows : (allowLegacyDebug ? legacyRows : []);
-  const hasRenderableRows = visibleRows.length > 0;
-  const topOpp = [...visibleRows]
+  const hasRenderableRows = aiBarRows.length > 0;
+  const topOpp = [...aiBarRows]
     .filter((s) => s.growthReliable)
     .sort((a, b) => b.growth - a.growth)[0];
-
-  if (!serviceGapBriefs.length && !serviceGaps.length && syntheticMode === 'off') {
-    return <EmptyWidget title={ru ? 'Детектор пробелов в услугах' : 'Service Gap Detector'} />;
-  }
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -347,9 +207,11 @@ export function ServiceGapDetector() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Детектор пробелов в услугах' : 'Service Gap Detector'}
         </h3>
-        <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
-          {visibleRows.filter((s) => s.gap >= 80).length} {ru ? 'критических пробелов' : 'critical gaps'}
-        </span>
+        {hasRenderableRows && (
+          <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
+            {aiBarRows.filter((s) => s.gap >= 80).length} {ru ? 'критических пробелов' : 'critical gaps'}
+          </span>
+        )}
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -357,33 +219,17 @@ export function ServiceGapDetector() {
           : 'People ask for these but remain dissatisfied — combining negative, urgent, and stress signals.'}
       </p>
 
-      {visibleRows.some((r) => r.source === 'synthetic_qa') && (
-        <p className="text-xs text-blue-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 mb-4">
-          {ru
-            ? 'Используются синтетические QA-данные: реальных согласованных AI-сигналов сейчас недостаточно.'
-            : 'Synthetic QA data is active: real aligned AI signals are currently insufficient.'}
-        </p>
-      )}
-
       {!hasRenderableRows && (
-        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-4">
-          {ru
-            ? 'AI-данные по сервисным запросам сейчас недостаточно надежны, поэтому виджет скрывает бары.'
-            : 'AI service-request evidence is not reliable enough right now, so the widget hides bars.'}
-        </p>
-      )}
-
-      {allowLegacyDebug && aiBarRows.length === 0 && hasRenderableRows && (
         <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-4">
           {ru
-            ? 'Включен debug-режим через env: показан старый детерминированный слой. Для обычных пользователей он скрыт.'
-            : 'Env debug mode is enabled: showing legacy deterministic rows. Hidden for normal users.'}
+            ? 'Пробелы в услугах не обнаружены.'
+            : 'No service gap detected.'}
         </p>
       )}
 
       {hasRenderableRows && (
         <div className="space-y-2.5">
-          {visibleRows.map((item) => {
+          {aiBarRows.map((item) => {
             const key = `service-bar-${item.id}`;
             const expanded = expandedEvidenceKey === key;
             return (
@@ -430,22 +276,18 @@ export function ServiceGapDetector() {
                         <p className="text-xs text-gray-700 leading-relaxed">&ldquo;{ev.quote}&rdquo;</p>
                         <div className="mt-1 flex items-center justify-between gap-2">
                           <span className="text-[11px] text-gray-500">{ev.channel}</span>
-                          {item.source === 'synthetic_qa' ? (
-                            <span className="text-[11px] text-gray-500">{ru ? 'Синтетический пример' : 'Synthetic sample'}</span>
-                          ) : (
-                            <Link
-                              to={(() => {
-                                const q = new URLSearchParams();
-                                q.set('topic', item.sourceTopic || item.topic);
-                                q.set('view', 'evidence');
-                                if (ev.id) q.set('evidenceId', ev.id);
-                                return `/topics?${q.toString()}`;
-                              })()}
-                              className="text-[11px] text-blue-700 hover:underline"
-                            >
-                              {ru ? 'Открыть →' : 'Open →'}
-                            </Link>
-                          )}
+                          <Link
+                            to={(() => {
+                              const q = new URLSearchParams();
+                              q.set('topic', item.sourceTopic || item.topic);
+                              q.set('view', 'evidence');
+                              if (ev.id) q.set('evidenceId', ev.id);
+                              return `/topics?${q.toString()}`;
+                            })()}
+                            className="text-[11px] text-blue-700 hover:underline"
+                          >
+                            {ru ? 'Открыть →' : 'Open →'}
+                          </Link>
                         </div>
                       </div>
                     ))}
@@ -473,8 +315,8 @@ export function ServiceGapDetector() {
       {hasRenderableRows && (
         <p className="text-xs text-gray-400 mt-2">
           {ru
-            ? `${visibleRows.filter((s) => !s.growthReliable).length} пунктов с недостаточными данными не участвуют в ранжировании роста.`
-            : `${visibleRows.filter((s) => !s.growthReliable).length} low-evidence items are excluded from growth ranking.`}
+            ? `${aiBarRows.filter((s) => !s.growthReliable).length} пунктов с недостаточными данными не участвуют в ранжировании роста.`
+            : `${aiBarRows.filter((s) => !s.growthReliable).length} low-evidence items are excluded from growth ranking.`}
         </p>
       )}
     </div>

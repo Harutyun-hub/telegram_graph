@@ -482,7 +482,7 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
     if ru:
         if "жил" in q or "аренд" in q or "housing" in q:
             return (
-                "**Сводка по жилью (синтетический датасет)**\n\n"
+                "**Сводка по жилью (живой срез дашборда)**\n\n"
                 f"- Основные связанные темы: {', '.join(top_topics) if top_topics else 'недостаточно данных'}\n"
                 f"- Самый активный канал: {top_channel.get('title', 'N/A')}\n"
                 "- Рекомендация: закрепить FAQ по аренде, депозиту и проверке договоров"
@@ -513,7 +513,7 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
 
     if "hous" in q or "rent" in q:
         return (
-            "**Housing Snapshot (synthetic dataset)**\n\n"
+            "**Housing Snapshot (live dashboard window)**\n\n"
             f"- Leading related topics: {', '.join(top_topics) if top_topics else 'insufficient data'}\n"
             f"- Most active channel: {top_channel.get('title', 'N/A')}\n"
             "- Recommendation: pin a renter FAQ (contracts, deposits, neighborhood trade-offs)."
@@ -572,7 +572,7 @@ async def dashboard():
 
 @app.post("/api/ai/query")
 async def ai_query(request: AIQueryRequest):
-    """Lightweight AI endpoint backed by synthetic dashboard data."""
+    """Lightweight AI endpoint backed by the live dashboard snapshot."""
     try:
         dashboard_data = get_dashboard_data()
         answer = _build_ai_answer(request.query, dashboard_data)
@@ -631,6 +631,7 @@ async def graph_data(payload: GraphRequest):
             "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
             "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
             "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
+            "analyticsWindowDays": freshness.get("drift", {}).get("analytics_window_days"),
             "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
         }
         graph["meta"] = meta_dict

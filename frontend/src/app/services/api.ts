@@ -1,11 +1,6 @@
 // ================================================================
 // API Service — Backend connectivity layer
 // ================================================================
-// Currently returns mock data. To connect to a real backend:
-//   1. Set API_BASE_URL to your backend endpoint
-//   2. Set getAuthToken() to return a valid Supabase/JWT token
-//   3. Uncomment the real fetch logic in each function
-//
 // NOTE: Graph-specific API functions have been REMOVED.
 // The Graph page now embeds a separate dedicated graph application.
 // Graph API calls (getGraphData, getNodeDetails, searchGraph, etc.)
@@ -96,11 +91,9 @@ export async function askAI(query: string): Promise<{
   answer: string;
   timestamp: string;
 }> {
-  // Real: return apiFetch('/ai/query', { method: 'POST', body: JSON.stringify({ query }) });
-  return Promise.resolve({
-    query,
-    answer: 'This is a mock AI response. Connect your backend to enable real GPT-4o-mini queries.',
-    timestamp: new Date().toISOString(),
+  return apiFetch('/ai/query', {
+    method: 'POST',
+    body: JSON.stringify({ query }),
   });
 }
 
@@ -109,6 +102,5 @@ export async function askAI(query: string): Promise<{
  * Use this to verify backend connectivity before loading the app.
  */
 export async function healthCheck(): Promise<{ status: string }> {
-  // Real: return apiFetch('/health');
-  return Promise.resolve({ status: 'mock-ok' });
+  return apiFetch('/health');
 }

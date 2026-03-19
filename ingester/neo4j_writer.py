@@ -54,6 +54,12 @@ class Neo4jWriter:
     def close(self):
         self.driver.close()
 
+    def clear_graph(self):
+        """Delete graph nodes/relationships while preserving constraints and indexes."""
+        with self.driver.session(database=config.NEO4J_DATABASE) as session:
+            session.run("MATCH (n) DETACH DELETE n").consume()
+        logger.warning("Neo4j graph data cleared")
+
     def _setup_indexes(self):
         """
         Create uniqueness constraints and performance indexes.
@@ -136,8 +142,8 @@ class Neo4jWriter:
                 params = _comment_params(comment, post, analysis, reply_to_user_id)
                 session.run(_CYPHER_COMMENT, params)
 
-            # 3. Topics — normalized union across all users in this post
-            topic_items = _collect_topic_items(analyses, post_analysis=post_analysis)
+            # 3. Topics — posts are tagged only from direct post analysis.
+            topic_items = _collect_post_topic_items(post_analysis)
             post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
             if topic_items or post_sentiment or post_social_sentiment_tags:
                 session.run(_CYPHER_POST_TOPICS, {
@@ -393,7 +399,18 @@ FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
                   rt.last_seen  = datetime($posted_at)
     ON MATCH  SET rt.count      = rt.count + 1,
                   rt.last_seen  = datetime($posted_at)
-    // Tag the comment itself
+  )
+
+  // Comment → Topics (direct message evidence only)
+  FOREACH (item IN $comment_topics |
+    MERGE (t:Topic {name: item.name})
+    ON CREATE SET t.proposed  = coalesce(item.proposed, false),
+                  t.created_at = datetime($posted_at)
+    ON MATCH  SET t.proposed  = coalesce(t.proposed, false) OR coalesce(item.proposed, false)
+    MERGE (cat:TopicCategory {name: item.category})
+    MERGE (dom:TopicDomain {name: item.domain})
+    MERGE (cat)-[:IN_DOMAIN]->(dom)
+    MERGE (t)-[:BELONGS_TO_CATEGORY]->(cat)
     MERGE (c)-[:TAGGED]->(t)
   )
 
@@ -699,6 +716,8 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         fallback_topics = [str(item) for item in (analysis.get("topics") or []) if item]
         canon_user_topics = normalize_topics(fallback_topics)
 
+    comment_topic_items = _extract_message_topic_items(raw, comment.get("id"))
+
     entities = _extract_entities(raw)
     primary_sentiment, social_sentiment_tags = _extract_sentiment_payload_from_analysis(analysis)
 
@@ -754,6 +773,7 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         "sentiment_score":              float(analysis.get("sentiment_score") or 0.0),
         # ── Normalized topics for this user ──
         "user_topics":                  canon_user_topics,
+        "comment_topics":               comment_topic_items,
         # ── Entity mentions for user/comment linking ──
         "entities":                     entities,
     }
@@ -783,13 +803,10 @@ def _extract_entities(raw_response: dict) -> list[dict]:
     return entities
 
 
-def _collect_topic_items(analyses: dict, post_analysis: dict | None = None) -> list[dict]:
-    """Collect canonical topic items with category, domain, and proposed flag."""
+def _collect_post_topic_items(post_analysis: dict | None = None) -> list[dict]:
+    """Collect canonical topic items for direct post tagging only."""
     items_by_name: dict[str, dict] = {}
-
-    analysis_rows = list(analyses.values())
-    if isinstance(post_analysis, dict):
-        analysis_rows.append(post_analysis)
+    analysis_rows = [post_analysis] if isinstance(post_analysis, dict) else []
 
     for analysis in analysis_rows:
         raw = analysis.get("raw_llm_response") or {}
@@ -824,9 +841,43 @@ def _collect_topic_items(analyses: dict, post_analysis: dict | None = None) -> l
     return list(items_by_name.values())
 
 
+def _extract_message_topic_items(raw_response: dict, comment_uuid: str | None) -> list[dict]:
+    """Return normalized topic items for a specific comment from batch message_topics."""
+    target_id = str(comment_uuid or "").strip()
+    if not target_id:
+        return []
+
+    for item in (raw_response.get("message_topics") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("comment_id") or "").strip() != target_id:
+            continue
+        candidate_topics = item.get("topics")
+        raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
+        return normalize_model_topics(raw_topics)
+
+    return []
+
+
 def _collect_raw_topics(analyses: dict) -> list[str]:
     """Collect topic names across all analyses for compatibility callers."""
-    return [item["name"] for item in _collect_topic_items(analyses)]
+    names: list[str] = []
+    seen: set[str] = set()
+    for analysis in analyses.values():
+        raw = analysis.get("raw_llm_response") or {}
+        candidate_topics = raw.get("topics")
+        raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
+        normalized_topics = normalize_model_topics(raw_topics)
+        if not normalized_topics:
+            normalized_topics = normalize_model_topics(
+                [str(topic) for topic in (analysis.get("topics") or []) if topic]
+            )
+        for topic_item in normalized_topics:
+            name = str(topic_item.get("name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
 
 
 # ── Re-export for main.py ─────────────────────────────────────────────────────

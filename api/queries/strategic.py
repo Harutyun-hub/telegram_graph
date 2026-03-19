@@ -5,7 +5,13 @@ Provides: topicBubbles, trendLines, heatmap, questionCategories,
 questionBriefCandidates, lifecycleStages
 """
 from __future__ import annotations
+import config
 from api.db import run_query
+
+
+RETENTION_DAYS = max(8, int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15)))
+COMPARE_DAYS = 7
+LIFECYCLE_BASELINE_DAYS = max(1, RETENTION_DAYS - COMPARE_DAYS)
 
 
 def get_topic_bubbles() -> list[dict]:
@@ -14,31 +20,43 @@ def get_topic_bubbles() -> list[dict]:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-        OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
-        WITH t, cat,
-             count(CASE WHEN p.posted_at > datetime() - duration('P14D') THEN 1 END) AS postMentions14d,
-             count(CASE WHEN p.posted_at > datetime() - duration('P7D') THEN 1 END) AS posts7d,
-             count(CASE WHEN p.posted_at > datetime() - duration('P14D')
-                         AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postsPrev7d
-        OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
-        WITH t, cat, postMentions14d, posts7d, postsPrev7d,
-             count(CASE WHEN c.posted_at > datetime() - duration('P14D') THEN 1 END) AS commentMentions14d,
-             count(CASE WHEN c.posted_at > datetime() - duration('P7D') THEN 1 END) AS comments7d,
-             count(CASE WHEN c.posted_at > datetime() - duration('P14D')
-                         AND c.posted_at <= datetime() - duration('P7D') THEN 1 END) AS commentsPrev7d
+        CALL (t) {
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            RETURN
+                count(DISTINCT p) AS postMentionsRecent,
+                count(DISTINCT CASE WHEN p.posted_at > datetime() - duration({days: $compare_days}) THEN p END) AS postsCurrent,
+                count(DISTINCT CASE
+                    WHEN p.posted_at > datetime() - duration({days: $retention_days})
+                     AND p.posted_at <= datetime() - duration({days: $compare_days})
+                    THEN p
+                END) AS postsPrevious
+        }
+        CALL (t) {
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            RETURN
+                count(DISTINCT c) AS commentMentionsRecent,
+                count(DISTINCT CASE WHEN c.posted_at > datetime() - duration({days: $compare_days}) THEN c END) AS commentsCurrent,
+                count(DISTINCT CASE
+                    WHEN c.posted_at > datetime() - duration({days: $retention_days})
+                     AND c.posted_at <= datetime() - duration({days: $compare_days})
+                    THEN c
+                END) AS commentsPrevious
+        }
         OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
         WITH t.name AS name, cat.name AS category,
-             postMentions14d, commentMentions14d,
+             postMentionsRecent, commentMentionsRecent,
              count(DISTINCT u) AS userInterest,
              coalesce(sum(i.count), 0) AS totalInteractions,
-             (posts7d + comments7d) AS mentions7d,
-             (postsPrev7d + commentsPrev7d) AS mentionsPrev7d,
-             (postMentions14d + commentMentions14d) AS mentionCount14d
-        WITH name, category, postMentions14d, commentMentions14d, mentionCount14d,
+             (postsCurrent + commentsCurrent) AS mentions7d,
+             (postsPrevious + commentsPrevious) AS mentionsPrev7d,
+             (postMentionsRecent + commentMentionsRecent) AS mentionCountRecent
+        WITH name, category, postMentionsRecent, commentMentionsRecent, mentionCountRecent,
              userInterest, totalInteractions, mentions7d, mentionsPrev7d
-        WHERE mentionCount14d > 0
-        RETURN name, category, postMentions14d AS postMentions, commentMentions14d AS commentMentions,
-               mentionCount14d AS mentionCount,
+        WHERE mentionCountRecent > 0
+        RETURN name, category, postMentionsRecent AS postMentions, commentMentionsRecent AS commentMentions,
+               mentionCountRecent AS mentionCount,
                userInterest, totalInteractions,
                mentions7d, mentionsPrev7d,
                (mentions7d + mentionsPrev7d) AS growthSupport,
@@ -47,35 +65,38 @@ def get_topic_bubbles() -> list[dict]:
                     ELSE round(100.0 * (mentions7d - mentionsPrev7d) / (mentionsPrev7d + 3), 1)
                 END AS growth7dPct
         ORDER BY mentionCount DESC
-    """)
+    """, {
+        "retention_days": RETENTION_DAYS,
+        "compare_days": COMPARE_DAYS,
+    })
 
 
 def get_trend_lines() -> list[dict]:
-    """Weekly conversation counts (posts + comments) per topic for the last 8 weeks."""
+    """Daily conversation counts (posts + comments) per topic for the clean retention window."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P56D')
-            WITH date(p.posted_at).year AS year,
-                 date(p.posted_at).week AS week,
-                 count(*) AS c
-            RETURN year, week, c
+            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WITH toString(date(p.posted_at)) AS bucket,
+                 count(DISTINCT p) AS c
+            RETURN bucket, c
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P56D')
-            WITH date(c.posted_at).year AS year,
-                 date(c.posted_at).week AS week,
-                 count(*) AS c
-            RETURN year, week, c
+            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WITH toString(date(c.posted_at)) AS bucket,
+                 count(DISTINCT c) AS c
+            RETURN bucket, c
         }
-        WITH t.name AS topic, year, week, sum(c) AS mentions
+        WITH t.name AS topic, bucket, sum(c) AS mentions
         WHERE mentions > 0
-        RETURN topic, year, week, mentions AS posts
-        ORDER BY topic, year, week
-    """)
+        RETURN topic, bucket, mentions AS posts
+        ORDER BY topic, bucket
+    """, {
+        "retention_days": RETENTION_DAYS,
+    })
 
 
 def get_heatmap() -> list[dict]:
@@ -98,7 +119,7 @@ def get_question_categories() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at > datetime() - duration({days: $retention_days})
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
@@ -108,7 +129,7 @@ def get_question_categories() -> list[dict]:
                    p.posted_at AS ts
             UNION
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at > datetime() - duration({days: $retention_days})
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -139,7 +160,7 @@ def get_question_categories() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at > datetime() - duration({days: $retention_days})
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
@@ -148,7 +169,7 @@ def get_question_categories() -> list[dict]:
                    p.posted_at AS ts
             UNION
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at > datetime() - duration({days: $retention_days})
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -210,12 +231,14 @@ def get_question_categories() -> list[dict]:
             coalesce(latest_sample, forms[0].sample) AS sampleQuestion,
             coalesce(latest_sample_id, forms[0].sample_id) AS sampleQuestionId
         ORDER BY seekers DESC, category, topic
-    """)
+    """, {
+        "retention_days": RETENTION_DAYS,
+    })
 
 
 def get_question_brief_candidates(
     *,
-    days: int = 30,
+    days: int = RETENTION_DAYS,
     limit_topics: int = 14,
     evidence_per_topic: int = 14,
 ) -> list[dict]:
@@ -350,7 +373,7 @@ def get_question_brief_candidates(
 
 
 def get_lifecycle_stages() -> list[dict]:
-    """Topic lifecycle using rolling weekly signals (posts + comments)."""
+    """Topic lifecycle using direct-message signals inside the clean retention window."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
@@ -358,84 +381,106 @@ def get_lifecycle_stages() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P84D')
-            WITH date(p.posted_at).year AS year,
-                 date(p.posted_at).week AS week,
-                 count(*) AS c
-            RETURN year, week, c
+            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            RETURN
+                collect({
+                    id: coalesce(p.uuid, elementId(p)),
+                    day: toString(date(p.posted_at)),
+                    ts: p.posted_at
+                }) AS postRows
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P84D')
-            WITH date(c.posted_at).year AS year,
-                 date(c.posted_at).week AS week,
-                 count(*) AS c
-            RETURN year, week, c
+            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            RETURN
+                collect({
+                    id: coalesce(c.uuid, elementId(c)),
+                    day: toString(date(c.posted_at)),
+                    ts: c.posted_at
+                }) AS postRows
         }
-        WITH t, year, week, sum(c) AS signals
-        ORDER BY year, week
         WITH t,
-             collect(signals) AS weekly,
-             sum(signals) AS totalSignals12w,
-             max(signals) AS peakWeek,
-             count(signals) AS activeWeeks
-
-        OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
-        WITH t, weekly, totalSignals12w, peakWeek, activeWeeks,
-             min(p.posted_at) AS firstSeen,
-             max(p.posted_at) AS lastSeen
-
+             reduce(allRows = [], chunk IN collect(postRows) | allRows + chunk) AS rows
+        WHERE size(rows) > 0
+        WITH t, rows,
+             size(rows) AS totalSignals,
+             size([r IN rows WHERE r.ts > datetime() - duration({days: $compare_days}) | 1]) AS recentSignals,
+             size([
+                r IN rows
+                WHERE r.ts > datetime() - duration({days: $retention_days})
+                  AND r.ts <= datetime() - duration({days: $compare_days})
+                | 1
+             ]) AS previousSignals,
+             reduce(minTs = null, r IN rows |
+                CASE
+                    WHEN minTs IS NULL OR r.ts < minTs THEN r.ts
+                    ELSE minTs
+                END
+             ) AS firstSeen,
+             reduce(maxTs = null, r IN rows |
+                CASE
+                    WHEN maxTs IS NULL OR r.ts > maxTs THEN r.ts
+                    ELSE maxTs
+                END
+             ) AS lastSeen
+        UNWIND rows AS row
+        WITH t, totalSignals, recentSignals, previousSignals, firstSeen, lastSeen,
+             row.day AS day, count(*) AS signalsPerDay
         WITH t.name AS topic,
-             weekly,
-             totalSignals12w,
-             peakWeek,
-             activeWeeks,
+             totalSignals,
+             count(day) AS activeDays,
+             max(signalsPerDay) AS peakDay,
              firstSeen,
              lastSeen,
-             CASE WHEN size(weekly) >= 1 THEN weekly[size(weekly)-1] ELSE 0 END AS w0,
-             CASE WHEN size(weekly) >= 2 THEN weekly[size(weekly)-2] ELSE 0 END AS w1,
-             CASE WHEN size(weekly) >= 3 THEN weekly[size(weekly)-3] ELSE 0 END AS w2,
-             CASE WHEN size(weekly) >= 4 THEN weekly[size(weekly)-4] ELSE 0 END AS w3,
-             CASE WHEN size(weekly) >= 5 THEN weekly[size(weekly)-5] ELSE 0 END AS w4,
-             CASE WHEN size(weekly) >= 6 THEN weekly[size(weekly)-6] ELSE 0 END AS w5,
-             CASE WHEN size(weekly) >= 7 THEN weekly[size(weekly)-7] ELSE 0 END AS w6,
-             CASE WHEN size(weekly) >= 8 THEN weekly[size(weekly)-8] ELSE 0 END AS w7
-
-        WITH topic, weekly, totalSignals12w, peakWeek, activeWeeks, firstSeen, lastSeen,
-             w0, w1, w2,
-             toFloat(w0 + w1) / 2.0 AS avg2w,
-             toFloat(w0 + w1 + w2 + w3) / 4.0 AS avg4w,
-             toFloat(w4 + w5 + w6 + w7) / 4.0 AS avgPrev4w,
+             recentSignals,
+             previousSignals
+        WITH topic, totalSignals, activeDays, peakDay, firstSeen, lastSeen, recentSignals, previousSignals,
              duration.between(coalesce(firstSeen, datetime()), datetime()).days AS ageDays,
-             CASE WHEN peakWeek > 0 THEN toFloat(w0) / toFloat(peakWeek) ELSE 0.0 END AS peakRatio,
+             round(
+                 100.0 * (
+                     toFloat(recentSignals) / toFloat(CASE WHEN peakDay > 0 THEN peakDay ELSE 1 END)
+                 ),
+                 1
+             ) AS peakRatioPct,
+             round(
+                 100.0 * (
+                     toFloat(activeDays) / toFloat($retention_days)
+                 ),
+                 1
+             ) AS persistencePct,
+             round(
+                 100.0 * (toFloat(recentSignals - previousSignals) / toFloat(previousSignals + 3)),
+                 1
+             ) AS rollingGrowthPct,
+             round(
+                 100.0 * (
+                     0.5 * CASE WHEN totalSignals >= 40 THEN 1.0 ELSE toFloat(totalSignals) / 40.0 END +
+                     0.3 * CASE WHEN activeDays >= 8 THEN 1.0 ELSE toFloat(activeDays) / 8.0 END +
+                     0.2 * CASE
+                         WHEN abs(toFloat(recentSignals - previousSignals)) >= 12 THEN 1.0
+                         ELSE abs(toFloat(recentSignals - previousSignals)) / 12.0
+                     END
+                 ),
+                 1
+             ) AS stageConfidence,
+             round(toFloat(recentSignals), 1) AS avg2w,
+             round(toFloat(totalSignals) / toFloat($retention_days), 1) AS avg4w,
+             round(toFloat(previousSignals) / toFloat($baseline_days), 1) AS avgPrev4w,
+             0.0 AS wowPct,
+             0.0 AS accelerationPct
+        WITH topic, totalSignals, activeDays, firstSeen, lastSeen, recentSignals, previousSignals,
+             ageDays, peakRatioPct, persistencePct, rollingGrowthPct, stageConfidence,
+             avg2w, avg4w, avgPrev4w, wowPct, accelerationPct,
              CASE
-               WHEN activeWeeks > 0 THEN toFloat(activeWeeks) / 12.0
-               ELSE 0.0
-             END AS persistence,
-             round(100.0 * (toFloat(w0 - w1) / toFloat(w1 + 3)), 1) AS wowPct,
-             round(100.0 * ((toFloat(w0 + w1 + w2 + w3) / 4.0) - (toFloat(w4 + w5 + w6 + w7) / 4.0))
-                         / ((toFloat(w4 + w5 + w6 + w7) / 4.0) + 3.0), 1) AS rollingGrowthPct,
-             round(100.0 * (toFloat((w0 - w1) - (w1 - w2)) / (abs(toFloat(w1 - w2)) + 3.0)), 1) AS accelerationPct
-
-        WITH topic, weekly, totalSignals12w, activeWeeks, firstSeen, lastSeen, ageDays,
-             w0, w1, avg2w, avg4w, avgPrev4w, wowPct, rollingGrowthPct, accelerationPct,
-             peakRatio, persistence,
-             CASE
-               WHEN totalSignals12w < 8 OR w0 = 0 THEN 'declining'
-               WHEN (w0 - w1) >= 0
+               WHEN totalSignals < 4 OR recentSignals = 0 THEN 'declining'
+               WHEN recentSignals >= previousSignals
                     AND (
-                      wowPct >= 10
-                      OR rollingGrowthPct >= 12
-                      OR (avg2w >= (avgPrev4w * 1.15) AND w0 >= 5)
+                        rollingGrowthPct >= 10
+                        OR (recentSignals - previousSignals) >= 3
+                        OR (previousSignals = 0 AND recentSignals >= 4)
                     )
                  THEN 'growing'
                ELSE 'declining'
-             END AS stage,
-             round(100.0 * (
-                 0.5 * CASE WHEN totalSignals12w >= 80 THEN 1.0 ELSE toFloat(totalSignals12w) / 80.0 END +
-                 0.3 * CASE WHEN activeWeeks >= 8 THEN 1.0 ELSE toFloat(activeWeeks) / 8.0 END +
-                 0.2 * CASE WHEN abs(rollingGrowthPct) >= 80 THEN 1.0 ELSE abs(rollingGrowthPct) / 80.0 END
-             ), 1) AS stageConfidence
-
+             END AS stage
         RETURN
             topic,
             stage,
@@ -443,19 +488,19 @@ def get_lifecycle_stages() -> list[dict]:
             toString(lastSeen) AS lastSeen,
             toInteger(ageDays) AS ageDays,
             toInteger(round(toFloat(ageDays) / 7.0)) AS ageWeeks,
-            toInteger(totalSignals12w) AS totalSignals12w,
-            toInteger(activeWeeks) AS activeWeeks,
-            toInteger(w0) AS weeklyCurrent,
-            toInteger(w1) AS weeklyPrev,
-            toInteger(w0 - w1) AS weeklyDelta,
+            toInteger(totalSignals) AS totalSignals12w,
+            toInteger(activeDays) AS activeWeeks,
+            toInteger(recentSignals) AS weeklyCurrent,
+            toInteger(previousSignals) AS weeklyPrev,
+            toInteger(recentSignals - previousSignals) AS weeklyDelta,
             round(avg2w, 1) AS avg2w,
             round(avg4w, 1) AS avg4w,
             round(avgPrev4w, 1) AS avgPrev4w,
             wowPct,
             rollingGrowthPct,
             accelerationPct,
-            round(100.0 * persistence, 1) AS persistencePct,
-            round(100.0 * peakRatio, 1) AS peakRatioPct,
+            persistencePct,
+            peakRatioPct,
             stageConfidence
         ORDER BY
             CASE stage
@@ -465,4 +510,8 @@ def get_lifecycle_stages() -> list[dict]:
             END,
             weeklyCurrent DESC,
             stageConfidence DESC
-    """)
+    """, {
+        "retention_days": RETENTION_DAYS,
+        "compare_days": COMPARE_DAYS,
+        "baseline_days": LIFECYCLE_BASELINE_DAYS,
+    })

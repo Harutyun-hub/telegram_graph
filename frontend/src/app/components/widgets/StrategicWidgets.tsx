@@ -108,8 +108,8 @@ export function TopicLandscape() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Площадь плитки = число упоминаний за 14 дней. Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.'
-          : 'Tile area = mentions in the last 14 days. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.'}
+          ? 'Площадь плитки = число прямых упоминаний за последние 15 дней. Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.'
+          : 'Tile area = direct message mentions in the last 15 days. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.'}
       </p>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -264,8 +264,8 @@ export function TopicLandscape() {
 
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalMentions.toLocaleString()} упоминаний за 14 дней по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
-          : `Evidence: ${totalMentions.toLocaleString()} mentions in the last 14 days across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
+          ? `Основа: ${totalMentions.toLocaleString()} прямых упоминаний за последние 15 дней по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
+          : `Evidence: ${totalMentions.toLocaleString()} direct mentions in the last 15 days across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
       </p>
     </div>
   );
@@ -295,7 +295,7 @@ export function ConversationTrends() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Динамика разговоров' : 'Conversation Trends'}
         </h3>
-        <span className="text-xs text-gray-500">{ru ? `${trendData.length}-недельная траектория` : `${trendData.length}-week trajectory`}</span>
+        <span className="text-xs text-gray-500">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru ? 'Какие темы растут? Что угасает? Следите за трендами.' : 'What topics are rising? What\'s fading? Follow the momentum.'}
@@ -499,7 +499,7 @@ export function QuestionCloud() {
                       {q.preview || (ru ? 'Нет зафиксированного вопроса в текущем срезе' : 'No captured question in current slice')}
                     </span>
                     <span className="text-xs text-gray-400 mt-0.5 block">
-                      {q.count.toLocaleString()} {ru ? 'сигналов вопроса (30д)' : 'question signals (30d)'}
+                      {q.count.toLocaleString()} {ru ? 'сигналов вопроса (15д)' : 'question signals (15d)'}
                     </span>
                   </Link>
                 ))}
@@ -510,8 +510,8 @@ export function QuestionCloud() {
 
         <p className="text-xs text-gray-400 mt-3">
           {ru
-            ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выборке за 30 дней.`
-            : `Evidence: ${totalSignals.toLocaleString()} question signals in the 30-day sample.`}
+            ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выборке за 15 дней.`
+            : `Evidence: ${totalSignals.toLocaleString()} question signals in the 15-day sample.`}
         </p>
       </div>
     );
@@ -744,13 +744,13 @@ export function TopicLifecycle() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Показывает, где внимание к теме растёт, а где снижается, на основе недельных сигналов (посты + комментарии).'
-          : 'Shows where attention is growing and where it is declining, based on weekly signals (posts + comments).'}
+          ? 'Показывает, где внимание к теме растёт, а где снижается, на основе прямых сигналов сообщений в пределах последних 15 дней.'
+          : 'Shows where attention is growing and where it is declining, based on direct message signals inside the last 15 days.'}
       </p>
       <p className="text-xs text-gray-400 mb-4">
         {ru
-          ? 'X/нед. — объём обсуждений за 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема активна.'
-          : 'X/wk = discussion volume in 7 days; Δ = change vs previous 7 days; d = how many days the topic has been active.'}
+          ? 'X/7д — объём обсуждений за последние 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема была активна в текущем 15-дневном окне.'
+          : 'X/7d = discussion volume in the last 7 days; Δ = change vs previous 7 days; d = how many days the topic was active in the current 15-day window.'}
       </p>
 
       <div className="grid grid-cols-2 gap-1 mb-4">
@@ -782,9 +782,9 @@ export function TopicLifecycle() {
                     }}
                     className={`w-full flex items-center justify-between px-3 py-2 rounded-lg ${stageGroup.bgColor} border ${stageGroup.borderColor} hover:brightness-[0.99] transition-colors`}
                   >
-                    <span className="text-xs text-gray-900 text-left" style={{ fontWeight: 500 }}>{topic.name}</span>
+                      <span className="text-xs text-gray-900 text-left" style={{ fontWeight: 500 }}>{topic.name}</span>
                     <div className="flex items-center gap-3 text-xs">
-                      <span className="text-gray-400">{topic.volume.toLocaleString()} {ru ? '/нед.' : '/wk'}</span>
+                      <span className="text-gray-400">{topic.volume.toLocaleString()} {ru ? '/7д' : '/7d'}</span>
                       <span className={topic.momentum > 0 ? 'text-emerald-600' : (topic.momentum < 0 ? 'text-red-500' : 'text-gray-500')} style={{ fontWeight: 600 }}>
                         Δ {topic.momentum > 0 ? '+' : ''}{topic.momentum}
                       </span>

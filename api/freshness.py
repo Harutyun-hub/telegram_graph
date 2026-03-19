@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import config
 from api import db
 
 _CACHE: dict | None = None
@@ -67,6 +68,7 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def _neo4j_snapshot() -> dict:
+    retention_days = max(1, int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15)))
     posts_row = db.run_single(
         """
         MATCH (p:Post)
@@ -77,10 +79,21 @@ def _neo4j_snapshot() -> dict:
 
     channels_row = db.run_single("MATCH (c:Channel) RETURN count(c) AS channelCount") or {}
     topics_row = db.run_single("MATCH (t:Topic) RETURN count(t) AS topicCount") or {}
+    recent_posts_row = db.run_single(
+        """
+        MATCH (p:Post)
+        WHERE p.posted_at >= datetime() - duration({days: $retention_days})
+        RETURN count(p) AS postCount,
+               toString(max(p.posted_at)) AS lastPostAt
+        """,
+        {"retention_days": retention_days},
+    ) or {}
 
     return {
         "post_count": _to_int(posts_row.get("postCount"), 0),
         "last_post_at": posts_row.get("lastPostAt"),
+        "recent_post_count": _to_int(recent_posts_row.get("postCount"), 0),
+        "recent_last_post_at": recent_posts_row.get("lastPostAt"),
         "channel_count": _to_int(channels_row.get("channelCount"), 0),
         "topic_count": _to_int(topics_row.get("topicCount"), 0),
     }
@@ -139,6 +152,35 @@ def _compute_health_score(snapshot: dict) -> int:
     score -= min(15, _to_int(drift.get("latest_post_delta_minutes"), 0) // 60)
 
     return max(0, min(100, score))
+
+
+def _compute_operational_health(*, scheduler: dict, snapshot_error: Optional[str] = None) -> dict:
+    """
+    Separate runtime health from freshness.
+
+    This answers "is the system currently operational?" instead of
+    "has new data arrived recently?"
+    """
+    if snapshot_error:
+        return {
+            "status": "critical",
+            "label": "System issue",
+            "reason": snapshot_error,
+        }
+
+    scheduler_error = str(scheduler.get("last_error") or "").strip()
+    if scheduler_error:
+        return {
+            "status": "critical",
+            "label": "System issue",
+            "reason": scheduler_error,
+        }
+
+    return {
+        "status": "healthy",
+        "label": "System operational",
+        "reason": None,
+    }
 
 
 def _safe_float(value: Any) -> float | None:
@@ -213,25 +255,27 @@ def get_freshness_snapshot(
     scheduler = scheduler_status or {}
     interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
     supa = supabase_writer.get_pipeline_freshness_snapshot()
+    recent = supabase_writer.get_recent_pipeline_snapshot()
     neo = _neo4j_snapshot()
+    retention_days = max(1, _to_int(recent.get("window_days"), int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15))))
 
     last_scrape_at = supa.get("last_scrape_at")
     last_process_at = supa.get("last_process_at")
     sync_source = "supabase_synced_content_timestamp"
     sync_estimated = True
-    last_graph_sync_at = supa.get("last_graph_sync_at")
+    last_graph_sync_at = recent.get("recent_last_graph_sync_post_at") or supa.get("last_graph_sync_at")
     if not last_graph_sync_at:
-        last_graph_sync_at = neo.get("last_post_at")
-        sync_source = "neo4j_max_posted_at"
+        last_graph_sync_at = neo.get("recent_last_post_at") or neo.get("last_post_at")
+        sync_source = "neo4j_recent_max_posted_at"
 
     scrape_age = _age_minutes(last_scrape_at, now)
     process_age = _age_minutes(last_process_at, now)
     sync_age = _age_minutes(last_graph_sync_at, now)
-    supa_latest_post_age = _age_minutes(supa.get("last_post_at"), now)
-    neo_latest_post_age = _age_minutes(neo.get("last_post_at"), now)
+    supa_latest_post_age = _age_minutes(recent.get("recent_last_post_at") or supa.get("last_post_at"), now)
+    neo_latest_post_age = _age_minutes(neo.get("recent_last_post_at") or neo.get("last_post_at"), now)
 
-    supa_last_post_dt = _parse_iso(supa.get("last_post_at"))
-    neo_last_post_dt = _parse_iso(neo.get("last_post_at"))
+    supa_last_post_dt = _parse_iso(recent.get("recent_last_post_at") or supa.get("last_post_at"))
+    neo_last_post_dt = _parse_iso(neo.get("recent_last_post_at") or neo.get("last_post_at"))
     latest_post_delta_minutes: Optional[int] = None
     if supa_last_post_dt and neo_last_post_dt:
         latest_post_delta_minutes = abs(int((supa_last_post_dt - neo_last_post_dt).total_seconds() // 60))
@@ -318,11 +362,13 @@ def get_freshness_snapshot(
             "retry_blocked_scopes": _to_int(supa.get("retry_blocked_scopes"), 0),
         },
         "drift": {
-            "supabase_total_posts": _to_int(supa.get("total_posts"), 0),
-            "neo4j_total_posts": _to_int(neo.get("post_count"), 0),
-            "post_count_gap": _to_int(supa.get("total_posts"), 0) - _to_int(neo.get("post_count"), 0),
-            "supabase_last_post_at": supa.get("last_post_at"),
-            "neo4j_last_post_at": neo.get("last_post_at"),
+            "analytics_window_days": retention_days,
+            "window_start_at": recent.get("window_start_at"),
+            "supabase_total_posts": _to_int(recent.get("recent_posts"), 0),
+            "neo4j_total_posts": _to_int(neo.get("recent_post_count"), 0),
+            "post_count_gap": _to_int(recent.get("recent_posts"), 0) - _to_int(neo.get("recent_post_count"), 0),
+            "supabase_last_post_at": recent.get("recent_last_post_at") or supa.get("last_post_at"),
+            "neo4j_last_post_at": neo.get("recent_last_post_at") or neo.get("last_post_at"),
             "supabase_last_post_age_minutes": supa_latest_post_age,
             "neo4j_last_post_age_minutes": neo_latest_post_age,
             "latest_post_delta_minutes": latest_post_delta_minutes,
@@ -362,6 +408,7 @@ def get_freshness_snapshot(
         "score": _compute_health_score(snapshot),
         "notes": _build_notes(snapshot),
     }
+    snapshot["operational"] = _compute_operational_health(scheduler=scheduler)
 
     _CACHE = snapshot
     _CACHE_TS = now

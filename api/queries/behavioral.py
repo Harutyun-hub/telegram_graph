@@ -10,18 +10,30 @@ from api.db import run_query
 _NOISY_TOPIC_KEYS = ["", "null", "unknown", "none", "n/a", "na"]
 _NEGATIVE_SENTIMENTS = ["Negative", "Urgent", "Sarcastic"]
 _DISTRESS_TAGS = ["Anxious", "Frustrated", "Angry", "Exhausted", "Grief", "Distrustful", "Confused"]
-_SERVICE_CATEGORIES = [
-    "Healthcare",
-    "Housing & Infrastructure",
-    "Education",
-    "Transportation",
-    "Employment",
-    "Cost Of Living",
-    "Social Services",
-    "Digital Services",
-    "Business & Enterprise",
-    "Family & Relationships",
-    "Immigration To Armenia",
+_SERVICE_REQUEST_HINTS = [
+    "need help",
+    "looking for",
+    "where can i",
+    "how to get",
+    "can anyone recommend",
+    "please help",
+    "need a",
+    "need an",
+    "recommend a",
+    "recommend an",
+    "where do i",
+    "how do i",
+    "нужна помощь",
+    "нужен совет",
+    "подскажите",
+    "где найти",
+    "как получить",
+    "кто может помочь",
+    "помогите",
+    "ищу",
+    "нужен",
+    "нужна",
+    "нужно",
 ]
 
 
@@ -345,7 +357,6 @@ def get_service_gap_brief_candidates(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
-          AND cat.name IN $service_categories
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
         CALL (t) {
@@ -356,6 +367,8 @@ def get_service_gap_brief_candidates(
               AND trim(p.text) <> ''
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
             OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH p, s, ch, collect(DISTINCT tag.name) AS tagNames,
+                 toLower(trim(p.text)) AS textLower
             RETURN
                 coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
                 'post' AS kind,
@@ -365,8 +378,13 @@ def get_service_gap_brief_candidates(
                 '' AS userId,
                 p.posted_at AS ts,
                 s.label AS label,
-                collect(DISTINCT tag.name) AS tagNames,
-                CASE WHEN p.text CONTAINS '?' THEN 1 ELSE 0 END AS askLike,
+                tagNames,
+                CASE
+                    WHEN p.text CONTAINS '?'
+                      OR any(h IN $ask_hints WHERE textLower CONTAINS h)
+                    THEN 1
+                    ELSE 0
+                END AS askLike,
                 0 AS supportIntent
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
@@ -378,8 +396,11 @@ def get_service_gap_brief_candidates(
             OPTIONAL MATCH (u:User)-[:WROTE]->(c)
             OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             OPTIONAL MATCH (u)-[:EXHIBITS]->(intent:Intent)
-            WITH c, p, u, ch, s, tag,
+            WITH c, p, u, ch, s, collect(DISTINCT tag.name) AS tagNames,
                  max(CASE WHEN intent.name IN ['Support / Help', 'Information Seeking'] THEN 1 ELSE 0 END) AS supportIntent
+            WITH c, p, u, ch, s, tagNames, supportIntent,
+                 toLower(trim(c.text)) AS textLower,
+                 toLower(trim(coalesce(p.text, ''))) AS contextLower
             RETURN
                 coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
                 'comment' AS kind,
@@ -389,8 +410,13 @@ def get_service_gap_brief_candidates(
                 coalesce(toString(u.telegram_user_id), '') AS userId,
                 c.posted_at AS ts,
                 s.label AS label,
-                collect(DISTINCT tag.name) AS tagNames,
-                CASE WHEN c.text CONTAINS '?' THEN 1 ELSE 0 END AS askLike,
+                tagNames,
+                CASE
+                    WHEN c.text CONTAINS '?'
+                      OR any(h IN $ask_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
+                    THEN 1
+                    ELSE 0
+                END AS askLike,
                 supportIntent
         }
 
@@ -421,16 +447,28 @@ def get_service_gap_brief_candidates(
              count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
                                   AND ts <= datetime() - duration('P7D')
                                   AND (askLike = 1 OR supportIntent = 1) THEN evidenceId END) AS asksPrev7d,
-             sum(CASE WHEN label IN $negative_labels THEN 1 ELSE 0 END) AS negCount,
-             sum(CASE WHEN label = 'Positive' THEN 1 ELSE 0 END) AS posCount,
-             sum(CASE WHEN label IN ['Neutral', 'Mixed'] THEN 1 ELSE 0 END) AS neutralCount,
-             sum(distressHit) AS distressTagCount,
+             count(DISTINCT CASE
+                 WHEN (askLike = 1 OR supportIntent = 1) AND label IN $negative_labels
+                 THEN evidenceId
+             END) AS negCount,
+             count(DISTINCT CASE
+                 WHEN (askLike = 1 OR supportIntent = 1) AND label = 'Positive'
+                 THEN evidenceId
+             END) AS posCount,
+             count(DISTINCT CASE
+                 WHEN (askLike = 1 OR supportIntent = 1) AND label IN ['Neutral', 'Mixed']
+                 THEN evidenceId
+             END) AS neutralCount,
+             count(DISTINCT CASE
+                 WHEN (askLike = 1 OR supportIntent = 1) AND distressHit = 1
+                 THEN evidenceId
+             END) AS distressTagCount,
              max(ts) AS latestTs
         WITH t, cat, rows, askSignals, uniqueUsers, channelCount, asks7d, asksPrev7d,
              negCount, posCount, neutralCount, distressTagCount, latestTs,
              (negCount + posCount + neutralCount) AS sentimentEvidence
         WHERE sentimentEvidence > 0
-          AND askSignals >= 3
+          AND askSignals >= 2
         WITH t, cat, rows, askSignals, uniqueUsers, channelCount, asks7d, asksPrev7d,
              negCount, distressTagCount, latestTs,
              round(100.0 * (negCount + distressTagCount) / (sentimentEvidence + distressTagCount + 1), 1) AS unmetPct,
@@ -477,10 +515,10 @@ def get_service_gap_brief_candidates(
             "days": safe_days,
             "limit_topics": safe_limit_topics,
             "evidence_per_topic": safe_evidence,
-            "service_categories": _SERVICE_CATEGORIES,
             "noise": _NOISY_TOPIC_KEYS,
             "negative_labels": _NEGATIVE_SENTIMENTS,
             "distress_tags": _DISTRESS_TAGS,
+            "ask_hints": _SERVICE_REQUEST_HINTS,
         },
     )
 
