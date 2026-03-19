@@ -285,12 +285,10 @@ export interface CommunityChannel {
 export interface KeyVoice {
   name: string;
   role: string;
-  followers: number;
-  helpScore: number;
   topics: string[];
   postsPerWeek: number;
   replyRate: number;
-  type: string;
+  topChannels?: string[];
 }
 
 export interface HourlyActivityPoint {

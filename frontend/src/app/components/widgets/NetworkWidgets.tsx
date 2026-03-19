@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Star, Users, TrendingUp, Award, Heart, Share2, Clock } from 'lucide-react';
+import { Star, TrendingUp, Clock } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
@@ -101,21 +101,8 @@ export function TopChannels() {
 
 
 // ============================================================
-// W13: KEY VOICES & INFLUENCERS
+// W13: KEY VOICES
 // ============================================================
-
-const typeIconsMap: Record<string, React.ReactNode> = {
-  Helper: <Heart className="w-3 h-3 text-pink-500" />,
-  Organizer: <Users className="w-3 h-3 text-blue-500" />,
-  'Content Creator': <Share2 className="w-3 h-3 text-purple-500" />,
-  Influencer: <Star className="w-3 h-3 text-amber-500" />,
-  Expert: <Award className="w-3 h-3 text-emerald-500" />,
-};
-
-const typeLabelsVoice = {
-  en: { Helper: 'Helper', Organizer: 'Organizer', 'Content Creator': 'Content Creator', Influencer: 'Influencer', Expert: 'Expert' },
-  ru: { Helper: 'Помощник', Organizer: 'Организатор', 'Content Creator': 'Автор контента', Influencer: 'Инфлюенсер', Expert: 'Эксперт' },
-};
 
 export function KeyVoices() {
   const { lang } = useLanguage();
@@ -123,9 +110,7 @@ export function KeyVoices() {
   const ru = lang === 'ru';
   const keyVoices = data.keyVoices[lang] ?? [];
 
-  if (!keyVoices.length) return <EmptyWidget title={ru ? 'Ключевые го��оса сообщества' : 'Key Community Voices'} />;
-
-  const typeLabelsV = typeLabelsVoice[lang];
+  if (!keyVoices.length) return <EmptyWidget title={ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -133,12 +118,12 @@ export function KeyVoices() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'}
         </h3>
-        <span className="text-xs text-gray-500">{ru ? 'Наиболее влиятельные участники' : 'Most influential members'}</span>
+        <span className="text-xs text-gray-500">{ru ? 'Активные комментаторы за 30 дней' : 'Active commenters in 30 days'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Эти люди формируют мнение сообщества — работайте с ними, а не против них'
-          : 'These people shape community opinion — partner with them, not against them'}
+          ? 'Участники, которые чаще других появляются в обсуждениях за последние 30 дней'
+          : 'Participants who appear most often in discussions over the last 30 days'}
       </p>
 
       <div className="space-y-3">
@@ -149,18 +134,14 @@ export function KeyVoices() {
                 <span className="text-white text-sm" style={{ fontWeight: 600 }}>{voice.name.charAt(0)}</span>
               </div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{voice.name}</span>
-                  <div className="flex items-center gap-1">
-                    {typeIconsMap[voice.type]}
-                    <span className="text-xs text-gray-500">{typeLabelsV[voice.type as keyof typeof typeLabelsV]}</span>
-                  </div>
                 </div>
                 <span className="text-xs text-gray-500">{voice.role}</span>
               </div>
               <div className="text-right flex-shrink-0">
-                <span className="text-xs text-gray-900 block" style={{ fontWeight: 600 }}>{(voice.followers / 1000).toFixed(1)}K</span>
-                <span className="text-xs text-gray-400">{ru ? 'подписч.' : 'followers'}</span>
+                <span className="text-xs text-gray-900 block" style={{ fontWeight: 600 }}>{voice.postsPerWeek}</span>
+                <span className="text-xs text-gray-400">{ru ? 'комм./нед.' : 'comments/wk'}</span>
               </div>
             </div>
 
@@ -170,10 +151,13 @@ export function KeyVoices() {
               ))}
             </div>
 
-            <div className="flex items-center gap-4 text-xs text-gray-400">
-              <span>{ru ? 'Рейтинг помощи:' : 'Help score:'} <span style={{ fontWeight: 600 }} className="text-emerald-600">{voice.helpScore}</span></span>
-              <span>{voice.postsPerWeek} {ru ? 'публ./нед.' : 'posts/wk'}</span>
-              <span>{ru ? 'Ответы:' : 'Reply rate:'} {voice.replyRate}%</span>
+            <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
+              <span>{ru ? 'Участие в ответах:' : 'Reply participation:'} <span className="text-gray-700" style={{ fontWeight: 600 }}>{voice.replyRate}%</span></span>
+              {voice.topChannels && voice.topChannels.length > 0 && (
+                <span>
+                  {ru ? 'Активен в:' : 'Active in:'} <span className="text-gray-700" style={{ fontWeight: 600 }}>{voice.topChannels.join(', ')}</span>
+                </span>
+              )}
             </div>
           </div>
         ))}

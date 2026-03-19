@@ -1200,12 +1200,14 @@ export function adaptDashboardPayload(payload: any): AppData {
       const mk = (r: any) => {
         const area = normalizeTopicLabel(r.category || r.topic || 'General');
         const satisfaction = clamp(Math.round(asNum(r.satisfactionPct, 0)), 0, 100);
+        const mentions = asNum(r.volume, asNum(r.pos, 0) + asNum(r.neg, 0) + asNum(r.neu, 0));
+        const trend = clamp(Math.round(asNum(r.trendPct, (asNum(r.pos, 0) - asNum(r.neg, 0)) / 8)), -50, 50);
         return {
           sourceArea: area,
           area,
           satisfaction,
-          mentions: asNum(r.pos, 0) + asNum(r.neg, 0) + asNum(r.neu, 0),
-          trend: clamp(Math.round((asNum(r.pos, 0) - asNum(r.neg, 0)) / 8), -50, 50),
+          mentions,
+          trend,
           emoji: satisfaction >= 60 ? '🙂' : satisfaction >= 40 ? '😐' : '😟',
         };
       };
@@ -1222,19 +1224,44 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     const moodRows = asArray(raw.moodData);
     if (moodRows.length > 0) {
+      const hasBucketShape = moodRows.some((r: any) =>
+        ['excited', 'satisfied', 'neutral', 'frustrated', 'anxious'].some((key) => r && Object.prototype.hasOwnProperty.call(r, key))
+      );
+
       const byWeek = new Map<string, any>();
-      moodRows.forEach((r: any) => {
-        const key = `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
-        if (!byWeek.has(key)) byWeek.set(key, { week: key, excited: 0, satisfied: 0, neutral: 0, frustrated: 0, anxious: 0 });
-        const sentiment = asStr(r.sentiment).toLowerCase();
-        const count = asNum(r.count, 0);
-        const row = byWeek.get(key);
-        if (sentiment.includes('positive')) row.satisfied += count;
-        else if (sentiment.includes('negative')) row.frustrated += count;
-        else if (sentiment.includes('urgent')) row.anxious += count;
-        else row.neutral += count; // Map 'mixed' purely to neutral, avoid data injection
-      });
-      const mood = Array.from(byWeek.values()).sort((a, b) => asStr(a.week).localeCompare(asStr(b.week))).slice(-10);
+      const ensureWeekRow = (weekKey: string) => {
+        if (!byWeek.has(weekKey)) {
+          byWeek.set(weekKey, { week: weekKey, excited: 0, satisfied: 0, neutral: 0, frustrated: 0, anxious: 0 });
+        }
+        return byWeek.get(weekKey);
+      };
+
+      if (hasBucketShape) {
+        moodRows.forEach((r: any) => {
+          const weekKey = asStr(r.week) || `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
+          const row = ensureWeekRow(weekKey);
+          row.excited += asNum(r.excited, 0);
+          row.satisfied += asNum(r.satisfied, 0);
+          row.neutral += asNum(r.neutral, 0);
+          row.frustrated += asNum(r.frustrated, 0);
+          row.anxious += asNum(r.anxious, 0);
+        });
+      } else {
+        moodRows.forEach((r: any) => {
+          const weekKey = `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
+          const row = ensureWeekRow(weekKey);
+          const sentiment = asStr(r.sentiment).toLowerCase();
+          const count = asNum(r.count, 0);
+          if (sentiment.includes('positive')) row.satisfied += count;
+          else if (sentiment.includes('negative')) row.frustrated += count;
+          else if (sentiment.includes('urgent')) row.anxious += count;
+          else row.neutral += count;
+        });
+      }
+
+      const mood = Array.from(byWeek.values())
+        .sort((a, b) => asStr(a.week).localeCompare(asStr(b.week)))
+        .slice(-10);
       app.moodData = mood;
     }
     app.moodConfig = {
@@ -1291,7 +1318,7 @@ export function adaptDashboardPayload(payload: any): AppData {
             type: asStr(c.type, 'General'),
             members: asNum(c.members || c.memberCount, 1000),
             dailyMessages: asNum(c.dailyMessages, 0),
-            engagement: clamp(Math.round(asNum(c.engagement, 0)), 1, 99),
+            engagement: clamp(asNum(c.engagement, 0), 0, 100),
             growth: asNum(c.growth, 0),
             topTopicEN: asStr(c.topTopicEN || asArray(c.topTopics)[0], 'General'),
             topTopicRU: asStr(c.topTopicRU || asArray(c.topTopics)[0], 'General'),
@@ -1353,12 +1380,6 @@ export function adaptDashboardPayload(payload: any): AppData {
         // Use real displayName from backend
         const displayName = asStr(r.displayName, asStr(r.username, `User_${asStr(r.userId, i + 1)}`));
 
-        // Calculate helpScore from backend data if available, otherwise derive it
-        const helpScore = r.helpScore ? asNum(r.helpScore, 50) : clamp(Math.round(asNum(r.influenceScore, 0) * 2), 20, 100);
-
-        // Determine type based on helpScore
-        const type = helpScore >= 85 ? 'Expert' : helpScore >= 70 ? 'Helper' : helpScore >= 55 ? 'Organizer' : 'Content Creator';
-
         // Use real topics from user's comments, fallback to trending if none
         const userTopics = asArray(r.topics).length > 0 ? asArray(r.topics) :
                           asArray(r.userTopics).length > 0 ? asArray(r.userTopics) :
@@ -1367,13 +1388,9 @@ export function adaptDashboardPayload(payload: any): AppData {
         return {
           name: displayName,
           role: ru ? (asStr(r.role, 'Member') || 'Участник') : asStr(r.role, 'Member'),
-          followers: Math.max(100, asNum(r.commentCount, 0) * 50 + asNum(r.replyCount, 0) * 100), // More realistic follower count
-          helpScore,
           topics: userTopics.slice(0, 3),
           postsPerWeek: r.postsPerWeek ? asNum(r.postsPerWeek, 1) : Math.max(1, asNum(r.commentCount, 0)),
           replyRate: r.replyRate ? asNum(r.replyRate, 20) : clamp(Math.round((asNum(r.replyCount, 0) / Math.max(1, asNum(r.commentCount, 1))) * 100), 5, 99),
-          type,
-          // Add channels where user is active (new field)
           topChannels: asArray(r.topChannels).slice(0, 3),
         };
       };

@@ -335,6 +335,17 @@ export async function getSentimentDistribution(): Promise<SentimentData[]> {
   try {
     const dashboard = await requestJson<any>('/api/dashboard');
     const mood = Array.isArray(dashboard?.moodData) ? dashboard.moodData : [];
+    if (mood.some((row: any) => row && typeof row === 'object' && 'excited' in row)) {
+      const totals = mood.reduce((acc: Record<string, number>, row: any) => {
+        acc.excited += Number(row?.excited || 0);
+        acc.satisfied += Number(row?.satisfied || 0);
+        acc.neutral += Number(row?.neutral || 0);
+        acc.frustrated += Number(row?.frustrated || 0);
+        acc.anxious += Number(row?.anxious || 0);
+        return acc;
+      }, { excited: 0, satisfied: 0, neutral: 0, frustrated: 0, anxious: 0 });
+      return Object.entries(totals).map(([label, count]) => ({ label, count }));
+    }
     return mood.map((row: any) => ({
       label: String(row.sentiment || row.label || 'Unknown'),
       count: Number(row.count || row.value || 0),

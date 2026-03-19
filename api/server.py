@@ -663,9 +663,9 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
         if "голос" in q or "influenc" in q or "влият" in q:
             return (
                 "**Ключевые голоса сообщества**\n\n"
-                f"- Топ-участник по влиянию: user {top_voice.get('userId', 'N/A')}\n"
+                f"- Самый активный комментатор: user {top_voice.get('userId', 'N/A')}\n"
                 f"- Роль: {top_voice.get('role', 'N/A')}\n"
-                "- Рекомендация: вовлекать ключевых участников в модерацию и weekly digest"
+                "- Рекомендация: вовлекать заметных комментаторов в модерацию и weekly digest"
             )
         if "сроч" in q or "urgent" in q or "криз" in q or "problem" in q:
             lines = [f"- {u.get('topic', 'N/A')}: {u.get('urgentUsers', 0)}" for u in top_urgency]
@@ -694,9 +694,9 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
     if "voice" in q or "influenc" in q:
         return (
             "**Key Community Voices**\n\n"
-            f"- Top influence profile: user {top_voice.get('userId', 'N/A')}\n"
+            f"- Most active commenter: user {top_voice.get('userId', 'N/A')}\n"
             f"- Role: {top_voice.get('role', 'N/A')}\n"
-            "- Recommendation: involve top contributors in moderation and weekly roundups."
+            "- Recommendation: involve visible commenters in moderation and weekly roundups."
         )
     if "urgent" in q or "problem" in q or "attention" in q:
         lines = [f"- {u.get('topic', 'N/A')}: {u.get('urgentUsers', 0)}" for u in top_urgency]

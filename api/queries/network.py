@@ -5,172 +5,377 @@ Provides: communityChannels, keyVoices, hourlyActivity, weeklyActivity,
           recommendations, viralTopics
 """
 from __future__ import annotations
+from collections import defaultdict
+from datetime import datetime, timezone
+import json
+from statistics import median
 from api.db import run_query
-try:
-    from utils.channel_classifier import classify_channel, calculate_engagement_score, calculate_growth_rate
-except ImportError:
-    # Fallback if classifier not available
-    def classify_channel(*args, **kwargs):
+
+LOOKBACK_DAYS = 30
+ACTIVITY_LOOKBACK_DAYS = 7
+MIN_POSTS_FOR_RANK = 5
+MIN_TOTAL_VIEWS_FOR_RANK = 1000
+SHRINKAGE_PRIOR_POSTS = 8
+DOMINANT_CATEGORY_MIN_SHARE = 0.40
+DOMINANT_CATEGORY_MIN_MENTIONS = 3
+DOMINANT_CATEGORY_MIN_MARGIN = 0.10
+
+_CATEGORY_TO_WIDGET_TYPE: dict[str, str] = {
+    'Employment': 'Work',
+    'Business & Enterprise': 'Business',
+    'Financial System': 'Business',
+    'Tech Economy': 'Business',
+    'Housing & Infrastructure': 'Housing',
+    'Family & Relationships': 'Family',
+    'Education': 'Family',
+    'Arts & Entertainment': 'Lifestyle',
+    'Community Life': 'Lifestyle',
+}
+
+_WIDGET_TYPE_METADATA_KEYWORDS: dict[str, tuple[str, ...]] = {
+    'Work': ('job', 'jobs', 'career', 'vacancy', 'hiring', 'work', 'работ', 'ваканс', 'карьер'),
+    'Business': ('business', 'startup', 'founder', 'entrepreneur', 'tax', 'finance', 'бизнес', 'стартап', 'налог', 'финанс'),
+    'Housing': ('rent', 'rental', 'housing', 'apartment', 'real estate', 'аренда', 'жиль', 'квартир', 'недвиж'),
+    'Family': ('family', 'kids', 'children', 'parents', 'school', 'kindergarten', 'сем', 'дет', 'школ', 'родител'),
+    'Legal': ('legal', 'visa', 'residency', 'residence', 'documents', 'passport', 'law', 'виза', 'документ', 'паспорт', 'легал'),
+    'Lifestyle': ('food', 'restaurant', 'events', 'culture', 'lifestyle', 'travel', 'еда', 'ресторан', 'событ', 'досуг'),
+}
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _reaction_total(payload: str | None) -> int:
+    if not payload:
+        return 0
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        return 0
+    if not isinstance(parsed, dict):
+        return 0
+    total = 0
+    for value in parsed.values():
+        try:
+            total += max(0, int(value))
+        except Exception:
+            continue
+    return total
+
+
+def _median(values: list[float]) -> float:
+    return float(median(values)) if values else 0.0
+
+
+def _map_topic_category_to_widget_type(category: str | None) -> str:
+    name = str(category or '').strip()
+    if not name:
         return 'General'
-    def calculate_engagement_score(*args, **kwargs):
-        return 50.0
-    def calculate_growth_rate(*args, **kwargs):
-        return 0.0
+    return _CATEGORY_TO_WIDGET_TYPE.get(name, 'General')
+
+
+def _normalize_source_key(username: str | None, name: str | None, channel_id: str | None) -> str:
+    normalized_username = str(username or '').strip().lower().lstrip('@')
+    if normalized_username:
+        return f'u:{normalized_username}'
+
+    normalized_name = str(name or '').strip().lower()
+    if normalized_name:
+        return f'n:{normalized_name}'
+
+    return f'id:{str(channel_id or "").strip()}'
+
+
+def _metadata_widget_type(name: str | None, description: str | None) -> str:
+    title_text = str(name or '').strip().lower()
+    description_text = str(description or '').strip().lower()
+    if not title_text and not description_text:
+        return 'General'
+
+    scores: dict[str, int] = defaultdict(int)
+    for widget_type, keywords in _WIDGET_TYPE_METADATA_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in title_text:
+                scores[widget_type] += 3
+            if keyword in description_text:
+                scores[widget_type] += 1
+
+    if not scores:
+        return 'General'
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_type, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    if best_score < 3 or (best_score - second_score) < 2:
+        return 'General'
+    return best_type
+
+
+def _dominant_widget_type(rows: list[dict]) -> tuple[str, str]:
+    totals: dict[str, int] = defaultdict(int)
+    raw_totals: dict[str, int] = defaultdict(int)
+    total_mentions = 0
+
+    for row in rows:
+        mentions = int(row.get('mentions') or 0)
+        if mentions <= 0:
+            continue
+        raw_category = str(row.get('category') or 'General')
+        widget_type = _map_topic_category_to_widget_type(raw_category)
+        totals[widget_type] += mentions
+        raw_totals[raw_category] += mentions
+        total_mentions += mentions
+
+    if total_mentions <= 0:
+        return 'General', 'General'
+
+    ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    top_type, top_mentions = ranked[0]
+    second_mentions = ranked[1][1] if len(ranked) > 1 else 0
+    share = top_mentions / total_mentions
+    second_share = second_mentions / total_mentions if total_mentions > 0 else 0.0
+
+    if (
+        top_type == 'General'
+        or top_mentions < DOMINANT_CATEGORY_MIN_MENTIONS
+        or share < DOMINANT_CATEGORY_MIN_SHARE
+        or (share - second_share) < DOMINANT_CATEGORY_MIN_MARGIN
+    ):
+        return 'General', 'General'
+
+    top_raw_category = max(
+        ((category, mentions) for category, mentions in raw_totals.items() if _map_topic_category_to_widget_type(category) == top_type),
+        key=lambda item: item[1],
+        default=('General', 0),
+    )[0]
+    return top_type, top_raw_category
 
 
 def get_community_channels() -> list[dict]:
-    """All channels with engagement metrics, growth rates, and activity stats."""
-    results = run_query("""
-        MATCH (all_p:Post)
-        WITH max(all_p.posted_at) AS globalLatest
+    """Active channels ranked by median recent post engagement with sample controls."""
+    post_rows = run_query(f"""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
-        WITH ch, globalLatest, count(p) AS postCount,
-             avg(coalesce(p.views, 0)) AS avgViews,
-             avg(coalesce(p.forwards, 0)) AS avgForwards,
-             avg(coalesce(p.comment_count, 0)) AS avgComments,
-             max(p.posted_at) AS lastPost,
-             sum(CASE WHEN p.posted_at >= globalLatest - duration('P30D') THEN 1 ELSE 0 END) AS posts30d,
-             sum(CASE WHEN p.posted_at >= globalLatest - duration('P7D') THEN 1 ELSE 0 END) AS posts7d,
-             sum(CASE WHEN p.posted_at >= globalLatest - duration('P14D') AND p.posted_at < globalLatest - duration('P7D') THEN 1 ELSE 0 END) AS posts14to7d
-        WHERE posts30d > 0  // Filter out inactive channels
-        OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p2:Post)-[:TAGGED]->(t:Topic)
-        WITH ch, postCount, avgViews, avgForwards, avgComments, lastPost, posts30d, posts7d, posts14to7d,
-             t.name AS topic, count(p2) AS topicPosts
-        ORDER BY topicPosts DESC
-        WITH ch, postCount, avgViews, avgForwards, avgComments, lastPost, posts30d, posts7d, posts14to7d,
-             collect(topic)[..5] AS topTopics
-        WITH ch.username AS username,
-             ch.title AS name,
-             ch.member_count AS members,
-             ch.description AS description,
-             postCount,
-             round(avgViews) AS avgViews,
-             round(avgForwards) AS avgForwards,
-             round(avgComments) AS avgComments,
-             posts7d, posts14to7d, posts30d,
-             toString(lastPost) AS lastPost,
-             topTopics,
-             // Calculate daily messages average
-             CASE WHEN posts7d > 0 THEN round(posts7d / 7.0, 1) ELSE 0 END AS dailyMessages,
-             // Calculate engagement rate (normalized to 0-100)
-             CASE
-                 WHEN ch.member_count > 0 THEN
-                     round(((avgViews + avgForwards * 2 + avgComments * 3) / ch.member_count) * 100, 1)
-                 ELSE 0
-             END AS engagement,
-             // Calculate growth percentage
-             CASE
-                 WHEN posts14to7d > 0 THEN
-                     round(((posts7d - posts14to7d) * 100.0 / posts14to7d), 1)
-                 ELSE
-                     CASE WHEN posts7d > 0 THEN 100 ELSE 0 END
-             END AS growth,
-             // Classify channel type based on description and topics
-             CASE
-                 WHEN ch.description =~ '(?i).*(work|job|career|employment|recruit).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(work|job|career|employment).*') THEN 'Work'
-                 WHEN ch.description =~ '(?i).*(family|children|parent|школ).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(family|children|parent).*') THEN 'Family'
-                 WHEN ch.description =~ '(?i).*(housing|rent|apartment|недвижимость|квартир).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(housing|rent|apartment|real estate).*') THEN 'Housing'
-                 WHEN ch.description =~ '(?i).*(business|entrepreneur|startup|бизнес).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(business|entrepreneur|startup).*') THEN 'Business'
-                 WHEN ch.description =~ '(?i).*(legal|law|visa|document|легал).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(legal|law|visa|immigration).*') THEN 'Legal'
-                 WHEN ch.description =~ '(?i).*(lifestyle|food|restaurant|entertainment|досуг).*' OR
-                      ANY(t IN topTopics WHERE t =~ '(?i).*(lifestyle|food|entertainment).*') THEN 'Lifestyle'
-                 ELSE 'General'
-             END AS type,
-             topTopics[0] AS topTopicEN,
-             topTopics[0] AS topTopicRU
-        RETURN username, name, type, members, dailyMessages, engagement, growth,
-               topTopicEN, topTopicRU, description, postCount, avgViews,
-               avgForwards, avgComments, posts7d, posts14to7d, lastPost, topTopics
-        ORDER BY engagement DESC
-        LIMIT 50
+        WHERE p.posted_at >= datetime() - duration('P{LOOKBACK_DAYS}D')
+        RETURN ch.uuid AS channelId,
+               ch.username AS username,
+               ch.title AS name,
+               ch.member_count AS members,
+               ch.description AS description,
+               p.uuid AS postId,
+               toString(p.posted_at) AS postedAt,
+               coalesce(p.views, 0) AS views,
+               coalesce(p.forwards, 0) AS forwards,
+               coalesce(p.comment_count, 0) AS comments,
+               coalesce(p.reactions, '') AS reactions
     """)
 
-    # Post-process results to ensure data quality and enhance classification
-    processed_results = []
-    for channel in results:
-        # Enhanced type classification using the utility
-        if channel.get('type') == 'General' or not channel.get('type'):
-            channel['type'] = classify_channel(
-                title=channel.get('name'),
-                description=channel.get('description'),
-                topics=channel.get('topTopics', []),
-                threshold=0.2  # Lower threshold for better matching
-            )
+    category_rows = run_query(f"""
+        MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
+        WHERE p.posted_at >= datetime() - duration('P{LOOKBACK_DAYS}D')
+        OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+        WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
+        RETURN ch.uuid AS channelId, category, mentions
+    """)
 
-        # Ensure engagement is within valid range
-        if channel.get('engagement'):
-            channel['engagement'] = min(max(channel['engagement'], 0), 100)
+    comment_rows = run_query(f"""
+        MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)<-[:REPLIES_TO]-(c:Comment)
+        WHERE c.posted_at >= datetime() - duration('P{ACTIVITY_LOOKBACK_DAYS}D')
+        RETURN ch.uuid AS channelId, count(c) AS comments7d
+    """)
 
-        # Ensure growth is a reasonable number
-        if channel.get('growth') is not None:
-            channel['growth'] = min(max(channel['growth'], -100), 1000)
+    activity_cutoff = datetime.now(timezone.utc).timestamp() - (ACTIVITY_LOOKBACK_DAYS * 86400)
+    channels: dict[str, dict] = {}
+    channel_to_source_key: dict[str, str] = {}
+    all_post_rates: list[float] = []
 
-        # Ensure required fields exist with defaults
-        channel.setdefault('name', f"Channel_{channel.get('username', 'Unknown')}")
-        channel.setdefault('type', 'General')
-        channel.setdefault('members', 0)
-        channel.setdefault('dailyMessages', 0)
-        channel.setdefault('engagement', 0)
-        channel.setdefault('growth', 0)
+    for row in post_rows:
+        channel_id = str(row.get('channelId') or '').strip()
+        if not channel_id:
+            continue
+        source_key = _normalize_source_key(row.get('username'), row.get('name'), channel_id)
+        channel_to_source_key[channel_id] = source_key
 
-        processed_results.append(channel)
+        entry = channels.setdefault(source_key, {
+            'username': row.get('username'),
+            'name': row.get('name'),
+            'members': row.get('members'),
+            'description': row.get('description'),
+            'lastPost': None,
+            'postRates': [],
+            'postCount': 0,
+            'posts7d': 0,
+            'totalViews30d': 0.0,
+            'totalForwards30d': 0.0,
+            'totalComments30d': 0.0,
+            'totalReactions30d': 0.0,
+        })
 
-    return processed_results
+        views = max(0.0, float(row.get('views') or 0))
+        forwards = max(0.0, float(row.get('forwards') or 0))
+        comments = max(0.0, float(row.get('comments') or 0))
+        reactions = float(_reaction_total(row.get('reactions')))
+        posted_at = _parse_iso_datetime(row.get('postedAt'))
+
+        entry['postCount'] += 1
+        entry['totalViews30d'] += views
+        entry['totalForwards30d'] += forwards
+        entry['totalComments30d'] += comments
+        entry['totalReactions30d'] += reactions
+
+        if posted_at:
+            if entry['lastPost'] is None or posted_at > entry['lastPost']:
+                entry['lastPost'] = posted_at
+                entry['username'] = row.get('username') or entry.get('username')
+                entry['name'] = row.get('name') or entry.get('name')
+                entry['members'] = row.get('members') or entry.get('members')
+                entry['description'] = row.get('description') or entry.get('description')
+            if posted_at.timestamp() >= activity_cutoff:
+                entry['posts7d'] += 1
+        elif not entry.get('name') and row.get('name'):
+            entry['name'] = row.get('name')
+
+        if views > 0:
+            rate = min((reactions + forwards + comments) / views, 1.0)
+            entry['postRates'].append(rate)
+            all_post_rates.append(rate)
+
+    global_median_rate = _median(all_post_rates)
+    comments7d_by_channel: dict[str, int] = defaultdict(int)
+    for row in comment_rows:
+        channel_id = str(row.get('channelId') or '').strip()
+        source_key = channel_to_source_key.get(channel_id)
+        if not source_key:
+            continue
+        comments7d_by_channel[source_key] += int(row.get('comments7d') or 0)
+
+    categories_by_channel: dict[str, list[dict]] = defaultdict(list)
+    for row in category_rows:
+        channel_id = str(row.get('channelId') or '').strip()
+        if channel_id not in channel_to_source_key:
+            continue
+        categories_by_channel[channel_to_source_key[channel_id]].append({
+            'category': row.get('category'),
+            'mentions': int(row.get('mentions') or 0),
+        })
+
+    processed_results: list[dict] = []
+    for source_key, channel in channels.items():
+        post_count = int(channel['postCount'])
+        total_views = float(channel['totalViews30d'])
+        valid_rate_count = len(channel['postRates'])
+
+        if post_count < MIN_POSTS_FOR_RANK or valid_rate_count < MIN_POSTS_FOR_RANK or total_views < MIN_TOTAL_VIEWS_FOR_RANK:
+            continue
+
+        channel_median = _median(channel['postRates'])
+        shrunk_rate = (
+            (channel_median * valid_rate_count) + (global_median_rate * SHRINKAGE_PRIOR_POSTS)
+        ) / (valid_rate_count + SHRINKAGE_PRIOR_POSTS)
+
+        widget_type, dominant_category = _dominant_widget_type(categories_by_channel.get(source_key, []))
+        if widget_type == 'General':
+            widget_type = _metadata_widget_type(channel.get('name'), channel.get('description'))
+        comments7d = comments7d_by_channel.get(source_key, 0)
+        recent_messages = int(channel['posts7d']) + comments7d
+
+        avg_views = round(total_views / post_count) if post_count > 0 else 0
+        avg_forwards = round(float(channel['totalForwards30d']) / post_count) if post_count > 0 else 0
+        avg_comments = round(float(channel['totalComments30d']) / post_count) if post_count > 0 else 0
+        last_post = channel['lastPost']
+
+        processed_results.append({
+            'username': channel.get('username'),
+            'name': str(channel.get('name') or channel.get('username') or f'Channel_{source_key}'),
+            'type': widget_type,
+            'members': int(channel.get('members') or 0),
+            'dailyMessages': round(recent_messages / float(ACTIVITY_LOOKBACK_DAYS), 1) if recent_messages > 0 else 0.0,
+            'engagement': round(min(max(shrunk_rate * 100, 0.0), 100.0), 1),
+            'topTopicEN': dominant_category,
+            'topTopicRU': dominant_category,
+            'description': channel.get('description'),
+            'postCount': post_count,
+            'avgViews': avg_views,
+            'avgForwards': avg_forwards,
+            'avgComments': avg_comments,
+            'posts7d': int(channel['posts7d']),
+            'posts30d': post_count,
+            'comments7d': comments7d,
+            'lastPost': last_post.isoformat() if isinstance(last_post, datetime) else None,
+        })
+
+    processed_results.sort(
+        key=lambda row: (row.get('engagement', 0), row.get('postCount', 0), row.get('dailyMessages', 0)),
+        reverse=True,
+    )
+    return processed_results[:50]
 
 
 def get_key_voices() -> list[dict]:
-    """Most active/influential users with real usernames, channels, and topics."""
+    """Most active recent commenters with real usernames, channels, and topics."""
     # First get data from Neo4j
     neo4j_results = run_query("""
-        MATCH (u:User)-[w:WROTE]->(c:Comment)
-        WITH u, count(c) AS commentCount, collect(DISTINCT c) AS comments
+        MATCH (cAll:Comment)
+        WITH max(cAll.posted_at) AS latestCommentAt
 
-        // Get channels where user is active
-        OPTIONAL MATCH (c2:Comment)<-[:WROTE]-(u)
-        OPTIONAL MATCH (c2)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
-        WITH u, commentCount, comments,
+        MATCH (u:User)-[:WROTE]->(c:Comment)
+        WHERE c.posted_at >= latestCommentAt - duration('P30D')
+        WITH latestCommentAt, u,
+             count(DISTINCT c) AS commentCount,
+             count(DISTINCT date(c.posted_at)) AS activeDays
+        WHERE commentCount >= 3
+
+        // Get channels where the user has been active in the same recent window
+        OPTIONAL MATCH (u)-[:WROTE]->(c2:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+        WHERE c2.posted_at >= latestCommentAt - duration('P30D')
+        WITH latestCommentAt, u, commentCount, activeDays,
              collect(DISTINCT ch.title)[..5] AS activeChannels
 
-        // Get topics user discusses
-        OPTIONAL MATCH (c3:Comment)<-[:WROTE]-(u)
-        OPTIONAL MATCH (c3)-[:TAGGED]->(t:Topic)
-        WITH u, commentCount, comments, activeChannels,
+        // Get topics from the user's recent comments
+        OPTIONAL MATCH (u)-[:WROTE]->(c3:Comment)-[:TAGGED]->(t:Topic)
+        WHERE c3.posted_at >= latestCommentAt - duration('P30D')
+        WITH latestCommentAt, u, commentCount, activeDays, activeChannels,
              collect(DISTINCT t.name)[..5] AS userTopics
 
-        // Get reply interactions
+        // Count active reply connections in the same window
         OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
-        WITH u, commentCount, comments, activeChannels, userTopics,
-             count(r) AS replyCount
+        WHERE coalesce(r.last_seen, r.first_seen) >= latestCommentAt - duration('P30D')
+        WITH u, commentCount, activeDays, activeChannels, userTopics,
+             count(DISTINCT r) AS replyCount
 
-        // Return user data
+        // Return recent activity profile
         WITH u.telegram_user_id AS userId,
              commentCount,
              replyCount,
+             activeDays,
              u.community_role AS role,
              u.communication_style AS style,
              u.inferred_gender AS gender,
              u.inferred_age_bracket AS age,
              activeChannels AS topChannels,
              userTopics AS topics,
-             commentCount + replyCount * 2 AS influenceScore,
-             // Calculate posts per week (approximate from comment frequency)
+             (commentCount + replyCount * 2 + activeDays) AS activityScore,
              CASE WHEN commentCount > 0 THEN
                   round(commentCount * 7.0 / 30.0)
              ELSE 0 END AS postsPerWeek,
-             // Reply rate percentage
              CASE WHEN commentCount > 0 THEN
                   round(100.0 * replyCount / commentCount)
              ELSE 0 END AS replyRate
 
-        RETURN userId, commentCount, replyCount, influenceScore,
+        RETURN userId, commentCount, replyCount, activeDays,
+               activityScore AS influenceScore,
                role, style, gender, age,
                topChannels, topics, postsPerWeek, replyRate
-        ORDER BY influenceScore DESC
+        ORDER BY activityScore DESC, commentCount DESC, activeDays DESC
         LIMIT 20
     """)
 

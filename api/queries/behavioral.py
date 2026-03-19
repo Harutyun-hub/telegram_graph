@@ -524,7 +524,7 @@ def get_service_gap_brief_candidates(
 
 
 def get_satisfaction_areas() -> list[dict]:
-    """Satisfaction scores per Topic from message-level sentiment."""
+    """Confidence-weighted satisfaction scores per Topic from message-level sentiment."""
     return run_query(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
@@ -532,23 +532,96 @@ def get_satisfaction_areas() -> list[dict]:
           AND coalesce(t.proposed, false) = false
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at > datetime() - duration('P30D')
-            RETURN s.label AS label, count(*) AS cnt
+            CALL (p) {
+                MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+                WITH s.label AS sentiment,
+                     coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
+                     CASE s.label
+                        WHEN 'Urgent' THEN 6
+                        WHEN 'Negative' THEN 5
+                        WHEN 'Sarcastic' THEN 4
+                        WHEN 'Mixed' THEN 3
+                        WHEN 'Positive' THEN 2
+                        WHEN 'Neutral' THEN 1
+                        ELSE 0
+                     END AS precedence
+                ORDER BY signalTs DESC, precedence DESC
+                RETURN head(collect(sentiment)) AS label
+            }
+            WITH p, label
+            WHERE label IS NOT NULL
+            RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
+                   p.posted_at AS ts,
+                   label
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE c.posted_at > datetime() - duration('P30D')
-            RETURN s.label AS label, count(*) AS cnt
+            CALL (c) {
+                MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+                WITH s.label AS sentiment,
+                     coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
+                     CASE s.label
+                        WHEN 'Urgent' THEN 6
+                        WHEN 'Negative' THEN 5
+                        WHEN 'Sarcastic' THEN 4
+                        WHEN 'Mixed' THEN 3
+                        WHEN 'Positive' THEN 2
+                        WHEN 'Neutral' THEN 1
+                        ELSE 0
+                     END AS precedence
+                ORDER BY signalTs DESC, precedence DESC
+                RETURN head(collect(sentiment)) AS label
+            }
+            WITH c, label
+            WHERE label IS NOT NULL
+            RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
+                   c.posted_at AS ts,
+                   label
         }
         WITH t.name AS category,
-             sum(CASE WHEN label = 'Positive' THEN cnt ELSE 0 END) AS pos,
-             sum(CASE WHEN label IN ['Negative', 'Urgent', 'Sarcastic'] THEN cnt ELSE 0 END) AS neg,
-             sum(CASE WHEN label IN ['Neutral', 'Mixed'] THEN cnt ELSE 0 END) AS neu
-        WITH category, pos, neg, neu, (pos + neg + neu) AS volume
-        WHERE volume > 2
-        WITH category, pos, neg, neu, volume, round(100.0 * pos / (volume + 0.001), 1) AS satisfactionPct
-        WITH collect({category: category, pos: pos, neg: neg, neu: neu, volume: volume, satisfactionPct: satisfactionPct}) AS allTopics
+             count(DISTINCT CASE WHEN label = 'Positive' THEN msgId END) AS pos,
+             count(DISTINCT CASE WHEN label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS neg,
+             count(DISTINCT CASE WHEN label IN ['Neutral', 'Mixed'] THEN msgId END) AS neu,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D') AND label = 'Positive' THEN msgId END) AS posCurrent,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
+                                   AND label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS negCurrent,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
+                                   AND label IN ['Neutral', 'Mixed'] THEN msgId END) AS neuCurrent,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
+                                   AND ts <= datetime() - duration('P14D')
+                                   AND label = 'Positive' THEN msgId END) AS posPrevious,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
+                                   AND ts <= datetime() - duration('P14D')
+                                   AND label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS negPrevious,
+             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
+                                   AND ts <= datetime() - duration('P14D')
+                                   AND label IN ['Neutral', 'Mixed'] THEN msgId END) AS neuPrevious
+        WITH category,
+             pos,
+             neg,
+             neu,
+             (pos + neg + neu) AS volume,
+             (posCurrent + negCurrent + neuCurrent) AS currentVolume,
+             (posPrevious + negPrevious + neuPrevious) AS previousVolume,
+             round(100.0 * (pos + 2.0) / ((pos + neg + neu) + 6.0), 1) AS satisfactionPct,
+             round(
+                (100.0 * (posCurrent + 2.0) / ((posCurrent + negCurrent + neuCurrent) + 6.0))
+                - (100.0 * (posPrevious + 2.0) / ((posPrevious + negPrevious + neuPrevious) + 6.0)),
+                1
+             ) AS trendPct
+        WHERE volume >= 8
+        WITH collect({
+            category: category,
+            pos: pos,
+            neg: neg,
+            neu: neu,
+            volume: volume,
+            currentVolume: currentVolume,
+            previousVolume: previousVolume,
+            satisfactionPct: satisfactionPct,
+            trendPct: trendPct
+        }) AS allTopics
         
         UNWIND allTopics AS tPos
         WITH allTopics, tPos ORDER BY tPos.satisfactionPct DESC, tPos.volume DESC
@@ -559,8 +632,16 @@ def get_satisfaction_areas() -> list[dict]:
         WITH topPos, collect(tNeg)[..8] AS topNeg
         
         UNWIND (topPos + topNeg) AS row
-        WITH DISTINCT row.category AS category, row.pos AS pos, row.neg AS neg, row.neu AS neu, row.satisfactionPct AS satisfactionPct, row.volume AS volume
-        RETURN category, pos, neg, neu, satisfactionPct
+        WITH DISTINCT row.category AS category,
+             row.pos AS pos,
+             row.neg AS neg,
+             row.neu AS neu,
+             row.satisfactionPct AS satisfactionPct,
+             row.trendPct AS trendPct,
+             row.currentVolume AS currentVolume,
+             row.previousVolume AS previousVolume,
+             row.volume AS volume
+        RETURN category, pos, neg, neu, volume, currentVolume, previousVolume, satisfactionPct, trendPct
         ORDER BY volume DESC
         """,
         {"noise": _NOISY_TOPIC_KEYS},
@@ -568,25 +649,200 @@ def get_satisfaction_areas() -> list[dict]:
 
 
 def get_mood_data() -> list[dict]:
-    """Weekly sentiment distribution for mood-over-time chart from message-level edges."""
+    """Weekly refined mood buckets for mood-over-time chart from message-level sentiment evidence."""
     return run_query(
         """
         CALL () {
-            MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
+            MATCH (p:Post)
             WHERE p.posted_at > datetime() - duration('P84D')
-            RETURN date(p.posted_at).year AS year,
-                   date(p.posted_at).week AS week,
-                   s.label AS sentiment,
-                   count(*) AS count
+            CALL (p) {
+                MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+                WITH s.label AS sentiment,
+                     coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
+                     CASE s.label
+                        WHEN 'Urgent' THEN 6
+                        WHEN 'Negative' THEN 5
+                        WHEN 'Sarcastic' THEN 4
+                        WHEN 'Mixed' THEN 3
+                        WHEN 'Positive' THEN 2
+                        WHEN 'Neutral' THEN 1
+                        ELSE 0
+                     END AS precedence
+                ORDER BY signalTs DESC, precedence DESC
+                RETURN head(collect(sentiment)) AS sentiment
+            }
+            OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH p,
+                 sentiment,
+                 collect(DISTINCT tag.name) AS tags
+            WHERE sentiment IS NOT NULL
+            WITH date(p.posted_at).year AS year,
+                 date(p.posted_at).week AS week,
+                 sentiment,
+                 [tagName IN tags WHERE tagName IS NOT NULL] AS tags
+            WITH year,
+                 week,
+                 sentiment,
+                 tags,
+                 any(tagName IN tags WHERE tagName IN ['Hopeful', 'Solidarity']) AS has_positive_energy,
+                 any(tagName IN tags WHERE tagName = 'Trusting') AS has_trusting_signal,
+                 any(tagName IN tags WHERE tagName IN ['Anxious', 'Confused', 'Exhausted', 'Grief']) AS has_anxiety_signal,
+                 any(tagName IN tags WHERE tagName IN ['Frustrated', 'Angry', 'Distrustful']) AS has_conflict_signal
+            RETURN
+                year,
+                week,
+                CASE
+                    WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.65
+                    WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.15
+                    ELSE 0.0
+                END AS excited,
+                CASE
+                    WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.35
+                    WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.80
+                    WHEN sentiment = 'Positive' THEN 1.0
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.25
+                    WHEN sentiment = 'Mixed' AND has_trusting_signal THEN 0.20
+                    ELSE 0.0
+                END AS satisfied,
+                CASE
+                    WHEN sentiment = 'Neutral' THEN 1.0
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.60
+                    WHEN sentiment = 'Mixed' AND has_trusting_signal THEN 0.80
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.55
+                    WHEN sentiment = 'Mixed' AND has_conflict_signal THEN 0.65
+                    WHEN sentiment = 'Mixed' THEN 1.0
+                    WHEN sentiment = 'Sarcastic' THEN 0.20
+                    ELSE 0.0
+                END AS neutral,
+                CASE
+                    WHEN sentiment = 'Negative' AND has_anxiety_signal THEN 0.35
+                    WHEN sentiment = 'Negative' THEN 0.80
+                    WHEN sentiment = 'Sarcastic' THEN 0.80
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_conflict_signal THEN 0.35
+                    ELSE 0.0
+                END AS frustrated,
+                CASE
+                    WHEN sentiment = 'Urgent' THEN 1.0
+                    WHEN sentiment = 'Negative' AND has_anxiety_signal THEN 0.65
+                    WHEN sentiment = 'Negative' THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.25
+                    ELSE 0.0
+                END AS anxious
             UNION ALL
-            MATCH (c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
+            MATCH (c:Comment)
             WHERE c.posted_at > datetime() - duration('P84D')
-            RETURN date(c.posted_at).year AS year,
-                   date(c.posted_at).week AS week,
-                   s.label AS sentiment,
-                   count(*) AS count
+            CALL (c) {
+                MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+                WITH s.label AS sentiment,
+                     coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
+                     CASE s.label
+                        WHEN 'Urgent' THEN 6
+                        WHEN 'Negative' THEN 5
+                        WHEN 'Sarcastic' THEN 4
+                        WHEN 'Mixed' THEN 3
+                        WHEN 'Positive' THEN 2
+                        WHEN 'Neutral' THEN 1
+                        ELSE 0
+                     END AS precedence
+                ORDER BY signalTs DESC, precedence DESC
+                RETURN head(collect(sentiment)) AS sentiment
+            }
+            OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH c,
+                 sentiment,
+                 collect(DISTINCT tag.name) AS tags
+            WHERE sentiment IS NOT NULL
+            WITH date(c.posted_at).year AS year,
+                 date(c.posted_at).week AS week,
+                 sentiment,
+                 [tagName IN tags WHERE tagName IS NOT NULL] AS tags
+            WITH year,
+                 week,
+                 sentiment,
+                 tags,
+                 any(tagName IN tags WHERE tagName IN ['Hopeful', 'Solidarity']) AS has_positive_energy,
+                 any(tagName IN tags WHERE tagName = 'Trusting') AS has_trusting_signal,
+                 any(tagName IN tags WHERE tagName IN ['Anxious', 'Confused', 'Exhausted', 'Grief']) AS has_anxiety_signal,
+                 any(tagName IN tags WHERE tagName IN ['Frustrated', 'Angry', 'Distrustful']) AS has_conflict_signal
+            RETURN
+                year,
+                week,
+                CASE
+                    WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.65
+                    WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.15
+                    ELSE 0.0
+                END AS excited,
+                CASE
+                    WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.35
+                    WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.80
+                    WHEN sentiment = 'Positive' THEN 1.0
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.25
+                    WHEN sentiment = 'Mixed' AND has_trusting_signal THEN 0.20
+                    ELSE 0.0
+                END AS satisfied,
+                CASE
+                    WHEN sentiment = 'Neutral' THEN 1.0
+                    WHEN sentiment = 'Mixed' AND has_positive_energy THEN 0.60
+                    WHEN sentiment = 'Mixed' AND has_trusting_signal THEN 0.80
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.55
+                    WHEN sentiment = 'Mixed' AND has_conflict_signal THEN 0.65
+                    WHEN sentiment = 'Mixed' THEN 1.0
+                    WHEN sentiment = 'Sarcastic' THEN 0.20
+                    ELSE 0.0
+                END AS neutral,
+                CASE
+                    WHEN sentiment = 'Negative' AND has_anxiety_signal THEN 0.35
+                    WHEN sentiment = 'Negative' THEN 0.80
+                    WHEN sentiment = 'Sarcastic' THEN 0.80
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_conflict_signal THEN 0.35
+                    ELSE 0.0
+                END AS frustrated,
+                CASE
+                    WHEN sentiment = 'Urgent' THEN 1.0
+                    WHEN sentiment = 'Negative' AND has_anxiety_signal THEN 0.65
+                    WHEN sentiment = 'Negative' THEN 0.20
+                    WHEN sentiment = 'Mixed' AND has_anxiety_signal THEN 0.25
+                    ELSE 0.0
+                END AS anxious
         }
-        RETURN year, week, sentiment, sum(count) AS count
+        WITH year,
+             week,
+             round(sum(excited), 2) AS excited_raw,
+             round(sum(satisfied), 2) AS satisfied_raw,
+             round(sum(neutral), 2) AS neutral_raw,
+             round(sum(frustrated), 2) AS frustrated_raw,
+             round(sum(anxious), 2) AS anxious_raw
+        WITH year,
+             week,
+             excited_raw,
+             satisfied_raw,
+             neutral_raw,
+             frustrated_raw,
+             anxious_raw,
+             (excited_raw + satisfied_raw + neutral_raw + frustrated_raw + anxious_raw) AS total_raw
+        WITH year,
+             week,
+             excited_raw,
+             satisfied_raw,
+             neutral_raw,
+             frustrated_raw,
+             anxious_raw,
+             CASE
+                 WHEN total_raw < 8 THEN 0.55
+                 WHEN total_raw < 20 THEN 0.80
+                 ELSE 1.00
+             END AS certainty
+        RETURN year,
+               week,
+               round(excited_raw * certainty, 2) AS excited,
+               round(satisfied_raw * certainty, 2) AS satisfied,
+               round(neutral_raw + ((1.0 - certainty) * (excited_raw + satisfied_raw + frustrated_raw + anxious_raw)), 2) AS neutral,
+               round(frustrated_raw * certainty, 2) AS frustrated,
+               round(anxious_raw * certainty, 2) AS anxious
         ORDER BY year, week
         """
     )
