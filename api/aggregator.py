@@ -20,7 +20,6 @@ from loguru import logger
 
 from api import behavioral_briefs
 from api import question_briefs
-from api import recommendation_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
 from buffer.supabase_writer import SupabaseWriter
 
@@ -266,7 +265,7 @@ def _tier_network() -> dict:
             "keyVoices": network.get_key_voices(),
             "hourlyActivity": network.get_hourly_activity(),
             "weeklyActivity": network.get_weekly_activity(),
-            "recommendations": recommendation_briefs.get_recommendation_briefs(),  # Use AI-extracted recommendations
+            "recommendations": network.get_recommendations(),
             "viralTopics": network.get_information_velocity(),  # Use new temporal tracking
         }
     except Exception as e:
