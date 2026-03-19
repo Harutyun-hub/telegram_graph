@@ -72,17 +72,12 @@ async def scrape_channel(client: TelegramClient, channel_record: dict, supabase_
         _disable_unsupported_source(supabase_writer, channel_uuid, username, reason)
         return 0
 
-    # Refresh channel metadata when key fields are missing
-    metadata_missing = any(
-        channel_record.get(field) in (None, "")
-        for field in ("telegram_channel_id", "member_count", "description")
-    )
-    if metadata_missing:
-        try:
-            metadata = await get_full_channel_metadata(client, username=username, entity=entity)
-            supabase_writer.update_channel_metadata(channel_uuid, metadata)
-        except Exception as e:
-            logger.warning(f"[{username}] Metadata refresh failed: {e}")
+    # Refresh metadata on each scrape so audience-relative metrics use current counts.
+    try:
+        metadata = await get_full_channel_metadata(client, username=username, entity=entity)
+        supabase_writer.update_channel_metadata(channel_uuid, metadata)
+    except Exception as e:
+        logger.warning(f"[{username}] Metadata refresh failed: {e}")
 
     posts_found = 0
     new_posts   = []
