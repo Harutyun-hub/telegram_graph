@@ -19,7 +19,7 @@ import hashlib
 import asyncio
 from datetime import datetime, timezone
 import re
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,9 +42,12 @@ from api.freshness import get_freshness_snapshot
 from api import insights
 from api import behavioral_briefs
 from api import question_briefs
+from api import recommendation_briefs
+from api.admin_runtime import load_admin_config_raw, save_admin_config_raw
 from api import db
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
+from processor import intent_extractor
 from scraper.channel_metadata import get_full_channel_metadata
 from utils.taxonomy import TAXONOMY_DOMAINS
 
@@ -89,6 +92,15 @@ class ScraperSchedulerUpdateRequest(BaseModel):
     interval_minutes: int = Field(..., ge=1, le=1440)
 
 
+class AdminConfigPatchRequest(BaseModel):
+    widgets: Optional[Dict[str, Dict[str, Any]]] = None
+    prompts: Optional[Dict[str, Any]] = None
+    runtime: Optional[Dict[str, Any]] = None
+
+    class Config:
+        extra = "forbid"
+
+
 class GraphRequest(BaseModel):
     mode: Optional[str] = Field(default=None, max_length=64)
     timeframe: Optional[str] = Field(default="Last 7 Days", max_length=64)
@@ -131,6 +143,167 @@ scraper_scheduler = ScraperSchedulerService(supabase_writer)
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
+ADMIN_WIDGET_IDS = (
+    "community_brief",
+    "community_health_score",
+    "trending_topics_feed",
+    "topic_landscape",
+    "conversation_trends",
+    "question_cloud",
+    "topic_lifecycle",
+    "problem_tracker",
+    "service_gap_detector",
+    "satisfaction_by_area",
+    "mood_over_time",
+    "emotional_urgency_index",
+    "top_channels",
+    "key_voices",
+    "recommendation_tracker",
+    "information_velocity",
+    "persona_gallery",
+    "interest_radar",
+    "community_growth_funnel",
+    "retention_risk_gauge",
+    "decision_stage_tracker",
+    "emerging_interests",
+    "new_vs_returning_voice",
+    "business_opportunity_tracker",
+    "job_market_pulse",
+    "week_over_week_shifts",
+    "sentiment_by_topic",
+    "content_performance",
+)
+ADMIN_RUNTIME_STRING_KEYS = {
+    "openaiModel",
+    "questionBriefsModel",
+    "behavioralBriefsModel",
+    "questionBriefsPromptVersion",
+    "behavioralBriefsPromptVersion",
+    "aiPostPromptStyle",
+}
+ADMIN_RUNTIME_BOOL_KEYS = {
+    "featureQuestionBriefsAi",
+    "featureBehavioralBriefsAi",
+}
+
+
+def _admin_prompt_defaults() -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for provider in (
+        intent_extractor.get_admin_prompt_defaults,
+        question_briefs.get_admin_prompt_defaults,
+        behavioral_briefs.get_admin_prompt_defaults,
+        recommendation_briefs.get_admin_prompt_defaults,
+    ):
+        defaults.update(provider())
+    return defaults
+
+
+def _default_admin_config() -> dict[str, Any]:
+    prompt_defaults = _admin_prompt_defaults()
+    return {
+        "widgets": {widget_id: {"enabled": True} for widget_id in ADMIN_WIDGET_IDS},
+        "prompts": dict(prompt_defaults),
+        "promptDefaults": dict(prompt_defaults),
+        "runtime": {
+            "openaiModel": config.OPENAI_MODEL,
+            "questionBriefsModel": config.QUESTION_BRIEFS_MODEL,
+            "behavioralBriefsModel": config.BEHAVIORAL_BRIEFS_MODEL,
+            "questionBriefsPromptVersion": config.QUESTION_BRIEFS_PROMPT_VERSION,
+            "behavioralBriefsPromptVersion": config.BEHAVIORAL_BRIEFS_PROMPT_VERSION,
+            "aiPostPromptStyle": config.AI_POST_PROMPT_STYLE,
+            "featureQuestionBriefsAi": bool(config.FEATURE_QUESTION_BRIEFS_AI),
+            "featureBehavioralBriefsAi": bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI),
+        },
+    }
+
+
+def _validate_admin_widgets(raw_widgets: Any) -> dict[str, dict[str, bool]]:
+    if raw_widgets is None:
+        return {}
+    if not isinstance(raw_widgets, dict):
+        raise HTTPException(status_code=400, detail="widgets must be an object")
+
+    validated: dict[str, dict[str, bool]] = {}
+    for widget_id, value in raw_widgets.items():
+        if widget_id not in ADMIN_WIDGET_IDS:
+            raise HTTPException(status_code=400, detail=f"Unknown widget id: {widget_id}")
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail=f"Widget config for {widget_id} must be an object")
+        enabled = value.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=f"Widget {widget_id} requires boolean enabled")
+        validated[widget_id] = {"enabled": enabled}
+    return validated
+
+
+def _validate_admin_prompts(raw_prompts: Any) -> dict[str, str]:
+    if raw_prompts is None:
+        return {}
+    if not isinstance(raw_prompts, dict):
+        raise HTTPException(status_code=400, detail="prompts must be an object")
+
+    defaults = _admin_prompt_defaults()
+    validated: dict[str, str] = {}
+    for key, value in raw_prompts.items():
+        if key not in defaults:
+            raise HTTPException(status_code=400, detail=f"Unknown prompt key: {key}")
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"Prompt {key} must be a string")
+        text = value.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail=f"Prompt {key} cannot be empty")
+        validated[key] = text
+    return validated
+
+
+def _validate_admin_runtime(raw_runtime: Any) -> dict[str, Any]:
+    if raw_runtime is None:
+        return {}
+    if not isinstance(raw_runtime, dict):
+        raise HTTPException(status_code=400, detail="runtime must be an object")
+
+    validated: dict[str, Any] = {}
+    allowed_keys = ADMIN_RUNTIME_STRING_KEYS.union(ADMIN_RUNTIME_BOOL_KEYS)
+    for key, value in raw_runtime.items():
+        if key not in allowed_keys:
+            raise HTTPException(status_code=400, detail=f"Unknown runtime key: {key}")
+        if key in ADMIN_RUNTIME_BOOL_KEYS:
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=400, detail=f"Runtime field {key} must be boolean")
+            validated[key] = value
+            continue
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"Runtime field {key} must be a string")
+        text = value.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail=f"Runtime field {key} cannot be empty")
+        if key == "aiPostPromptStyle" and text.lower() not in {"compact", "full"}:
+            raise HTTPException(status_code=400, detail="aiPostPromptStyle must be compact or full")
+        validated[key] = text.lower() if key == "aiPostPromptStyle" else text
+    return validated
+
+
+def _sanitize_admin_config(raw_config: Any) -> dict[str, Any]:
+    defaults = _default_admin_config()
+    payload = raw_config if isinstance(raw_config, dict) else {}
+
+    widgets = payload.get("widgets") if isinstance(payload.get("widgets"), dict) else {}
+    prompts = payload.get("prompts") if isinstance(payload.get("prompts"), dict) else {}
+    runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+
+    defaults["widgets"].update(_validate_admin_widgets(widgets))
+    defaults["prompts"].update(_validate_admin_prompts(prompts))
+    defaults["runtime"].update(_validate_admin_runtime(runtime))
+    return defaults
+
+
+def _load_admin_config() -> dict[str, Any]:
+    try:
+        return _sanitize_admin_config(load_admin_config_raw())
+    except HTTPException:
+        logger.warning("Admin config contains invalid values; falling back to defaults")
+        return _default_admin_config()
 
 
 async def _warm_dashboard_cache() -> None:
@@ -766,6 +939,44 @@ async def insight_cards(payload: InsightCardsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/admin/config")
+async def get_admin_config():
+    """Return merged Admin config with defaults and runtime overrides."""
+    try:
+        return _load_admin_config()
+    except Exception as e:
+        logger.error(f"Get admin config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/admin/config")
+async def update_admin_config(payload: AdminConfigPatchRequest):
+    """Persist lightweight Admin page config in runtime storage."""
+    try:
+        current = _load_admin_config()
+        widgets = _validate_admin_widgets(payload.widgets)
+        prompts = _validate_admin_prompts(payload.prompts)
+        runtime = _validate_admin_runtime(payload.runtime)
+
+        if not widgets and not prompts and not runtime:
+            raise HTTPException(status_code=400, detail="No update fields provided")
+
+        next_config = {
+            "widgets": {**current["widgets"], **widgets},
+            "prompts": {**current["prompts"], **prompts},
+            "runtime": {**current["runtime"], **runtime},
+        }
+
+        if not save_admin_config_raw(next_config):
+            raise HTTPException(status_code=500, detail="Failed to persist admin config")
+        return _load_admin_config()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update admin config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/sources/channels")
 async def list_channel_sources():
     """List configured Telegram channel sources from Supabase."""
@@ -1135,6 +1346,26 @@ async def clear_cache():
     question_briefs.invalidate_question_briefs_cache()
     behavioral_briefs.invalidate_behavioral_briefs_cache()
     return {"success": True, "message": "Cache cleared"}
+
+
+@app.post("/api/question-briefs/debug/refresh")
+async def debug_refresh_question_briefs():
+    """Force-refresh question cards and return stage diagnostics."""
+    try:
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
+            lambda: question_briefs.refresh_question_briefs_with_diagnostics(force=True),
+        )
+        return {
+            "success": True,
+            "cardsProduced": diagnostics.get("cardsProduced", 0),
+            "firstRejectionBucket": diagnostics.get("firstRejectionBucket", ""),
+            "diagnostics": diagnostics,
+        }
+    except Exception as e:
+        logger.error(f"Question briefs debug refresh endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Shutdown hook ────────────────────────────────────────────────────────────

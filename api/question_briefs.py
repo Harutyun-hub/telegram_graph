@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import re
@@ -14,6 +15,7 @@ from typing import Any
 from loguru import logger
 
 import config
+from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import strategic
 from buffer.supabase_writer import SupabaseWriter
 
@@ -27,6 +29,7 @@ _cache_lock = threading.Lock()
 _cached_cards: list[dict] = []
 _cache_ts: float = 0.0
 _state_cache: dict = {}
+_last_refresh_diagnostics: dict = {}
 
 _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
@@ -38,6 +41,63 @@ _SCHEMA_VERSION = 1
 _INSTANCE_ID = f"{os.getpid()}-{int(time.time())}"
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY) if (OpenAI and config.OPENAI_API_KEY) else None
+
+QUESTION_BRIEFS_TRIAGE_PROMPT = """
+You triage candidate societal question clusters for Question Cards.
+
+Rules:
+1) Use only provided evidence snippets and IDs.
+2) Accept only if the cluster reflects a combined societal ask.
+3) Reject rhetorical, emotional, mixed-topic, and low-grounded clusters.
+4) Return JSON only; no extra keys.
+
+Return schema:
+{
+  "decisions": [
+    {
+      "clusterId": "string",
+      "status": "accepted|rejected",
+      "confidence": "high|medium|low",
+      "evidenceIds": ["id1", "id2"],
+      "rejectionReason": "low_signal|rhetorical_or_emotional|single_user_or_non_societal|mixed_topics|insufficient_grounding|contradictory_evidence"
+    }
+  ]
+}
+""".strip()
+
+QUESTION_BRIEFS_SYNTHESIS_PROMPT = """
+You generate high-quality Question Cards from evidence clusters.
+
+Rules:
+1) Primary output MUST be a societal, cluster-level question in question form.
+2) canonicalQuestionEn and canonicalQuestionRu must end with '?'.
+3) Do NOT output statement headlines.
+4) Do not summarize a single individual anecdote as a societal card.
+5) Use only provided evidence text and IDs.
+6) If grounding is weak, set confidence to low and omit the card from accepted output.
+7) Russian text must be professional and natural.
+
+Return JSON only:
+{
+  "card": {
+    "clusterId": "string",
+    "canonicalQuestionEn": "string?",
+    "canonicalQuestionRu": "string?",
+    "summaryEn": "string",
+    "summaryRu": "string",
+    "confidence": "high|medium|low",
+    "confidenceScore": 0.0,
+    "status": "needs_guide|partially_answered|well_covered",
+    "resolvedPct": 0,
+    "evidenceIds": ["id1", "id2"]
+  }
+}
+""".strip()
+
+ADMIN_PROMPT_DEFAULTS = {
+    "question_briefs.triage_prompt": QUESTION_BRIEFS_TRIAGE_PROMPT,
+    "question_briefs.synthesis_prompt": QUESTION_BRIEFS_SYNTHESIS_PROMPT,
+}
 
 _INTERROGATIVE_HINTS = (
     "how",
@@ -83,6 +143,69 @@ _NOISE_MARKERS = (
 )
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9а-яА-ЯёЁ]+")
+
+
+def _new_refresh_diagnostics(*, force: bool = False) -> dict:
+    return {
+        "force": bool(force),
+        "exitReason": "",
+        "error": "",
+        "runtime": {
+            "hasOpenAIClient": bool(_client),
+            "featureEnabled": bool(_runtime_question_briefs_feature_enabled()),
+            "aiTriageEnabled": bool(config.QUESTION_BRIEFS_USE_AI_TRIAGE),
+        },
+        "config": {
+            "minClusterMessages": int(config.QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES),
+            "minClusterUsers": int(config.QUESTION_BRIEFS_MIN_CLUSTER_USERS),
+            "minClusterChannels": int(config.QUESTION_BRIEFS_MIN_CLUSTER_CHANNELS),
+            "minConfidence": float(config.QUESTION_BRIEFS_MIN_CONFIDENCE),
+            "maxBriefs": int(config.QUESTION_BRIEFS_MAX_BRIEFS),
+            "windowDays": int(config.QUESTION_BRIEFS_WINDOW_DAYS),
+        },
+        "stages": {
+            "candidateRows": 0,
+            "signalCount": 0,
+            "clustersBeforeGate": 0,
+            "clustersAfterGate": 0,
+            "changedClusters": 0,
+            "acceptedClusters": 0,
+            "synthesisEligibleClusters": 0,
+            "synthesizedRows": 0,
+            "cardsBeforeFilter": 0,
+            "finalCards": 0,
+            "reusedClusters": 0,
+        },
+        "rejections": {
+            "triage": {},
+            "materialization": {},
+        },
+        "snapshot": {
+            "loadedCards": 0,
+            "writeAttempted": False,
+            "writeSucceeded": False,
+            "readbackCards": 0,
+        },
+    }
+
+
+def _store_refresh_diagnostics(diagnostics: dict) -> None:
+    global _last_refresh_diagnostics
+    _last_refresh_diagnostics = copy.deepcopy(diagnostics)
+
+
+def _increment_bucket(target: dict, key: str, count: int = 1) -> None:
+    bucket = str(key or "unknown")
+    target[bucket] = int(target.get(bucket, 0)) + int(count)
+
+
+def _first_bucket(buckets: dict) -> str:
+    if not isinstance(buckets, dict) or not buckets:
+        return ""
+    return sorted(
+        ((str(name), int(count)) for name, count in buckets.items()),
+        key=lambda item: (-item[1], item[0]),
+    )[0][0]
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -141,6 +264,33 @@ def _save_runtime_json(path: str, payload: dict) -> bool:
     if not store:
         return False
     return store.save_runtime_json(path, payload)
+
+
+def get_admin_prompt_defaults() -> dict[str, str]:
+    return dict(ADMIN_PROMPT_DEFAULTS)
+
+
+def _runtime_prompt(key: str, default: str) -> str:
+    return get_admin_prompt(key, default)
+
+
+def _runtime_question_briefs_model(default: str) -> str:
+    value = get_admin_runtime_value("questionBriefsModel", default)
+    text = _as_str(value, "").strip()
+    return text or default
+
+
+def _runtime_question_briefs_prompt_version() -> str:
+    value = get_admin_runtime_value("questionBriefsPromptVersion", getattr(config, "QUESTION_BRIEFS_PROMPT_VERSION", "qcards-v1"))
+    text = _as_str(value, "").strip()
+    return text or _as_str(getattr(config, "QUESTION_BRIEFS_PROMPT_VERSION", "qcards-v1"))
+
+
+def _runtime_question_briefs_feature_enabled() -> bool:
+    value = get_admin_runtime_value("featureQuestionBriefsAi", config.FEATURE_QUESTION_BRIEFS_AI)
+    if isinstance(value, bool):
+        return value
+    return bool(config.FEATURE_QUESTION_BRIEFS_AI)
 
 
 def _slugify(value: str) -> str:
@@ -254,9 +404,9 @@ def _cluster_fingerprint(cluster: dict) -> str:
         "channels": _as_int(cluster.get("channels"), 0),
         "trend7dPct": _as_int(cluster.get("trend7dPct"), 0),
         "latestAt": _as_str(cluster.get("latestAt")),
-        "promptVersion": _as_str(getattr(config, "QUESTION_BRIEFS_PROMPT_VERSION", "qcards-v1")),
-        "triageModel": _as_str(config.QUESTION_BRIEFS_TRIAGE_MODEL),
-        "synthesisModel": _as_str(config.QUESTION_BRIEFS_SYNTHESIS_MODEL),
+        "promptVersion": _runtime_question_briefs_prompt_version(),
+        "triageModel": _runtime_question_briefs_model(_as_str(config.QUESTION_BRIEFS_TRIAGE_MODEL)),
+        "synthesisModel": _runtime_question_briefs_model(_as_str(config.QUESTION_BRIEFS_SYNTHESIS_MODEL)),
         "signals": [
             {
                 "id": _as_str(s.get("id")),
@@ -303,13 +453,16 @@ def _save_state(state: dict) -> None:
     _state_cache = state
 
 
-def _load_snapshot_cards() -> list[dict]:
+def _load_snapshot_cards(*, diagnostics: dict | None = None, stage: str = "loadedCards") -> list[dict]:
     snapshot = _read_latest_runtime_json(_SNAPSHOT_FOLDER, default={"cards": []})
     cards = snapshot.get("cards") if isinstance(snapshot, dict) else []
-    return cards if isinstance(cards, list) else []
+    parsed = cards if isinstance(cards, list) else []
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("snapshot", {})[stage] = len(parsed)
+    return parsed
 
 
-def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None) -> None:
+def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
     payload = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -317,7 +470,12 @@ def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None) -> Non
     }
     if isinstance(metadata, dict) and metadata:
         payload["meta"] = metadata
-    _write_versioned_runtime_json(_SNAPSHOT_FOLDER, payload)
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
+    saved = _write_versioned_runtime_json(_SNAPSHOT_FOLDER, payload)
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("snapshot", {})["writeSucceeded"] = bool(saved)
+    return saved
 
 
 def _read_latest_runtime_json(folder: str, default: dict | None = None) -> dict:
@@ -422,7 +580,7 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     return False
 
 
-def _build_signals(candidates: list[dict]) -> list[dict]:
+def _build_signals(candidates: list[dict], diagnostics: dict | None = None) -> list[dict]:
     signals: list[dict] = []
     for row in candidates[: config.QUESTION_BRIEFS_MAX_TOPICS]:
         topic = _as_str(row.get("topic"), "").strip()
@@ -457,6 +615,8 @@ def _build_signals(candidates: list[dict]) -> list[dict]:
                     "tokens": set(_tokenize(question)),
                 }
             )
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["signalCount"] = len(signals)
     return signals
 
 
@@ -498,8 +658,8 @@ def _support_gate(cluster: dict) -> bool:
     return False
 
 
-def _build_clusters(candidates: list[dict]) -> list[dict]:
-    signals = _build_signals(candidates)
+def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> list[dict]:
+    signals = _build_signals(candidates, diagnostics=diagnostics)
     by_topic: dict[str, list[dict]] = {}
     topic_meta: dict[str, dict] = {}
 
@@ -550,7 +710,11 @@ def _build_clusters(candidates: list[dict]) -> list[dict]:
             }
         )
 
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["clustersBeforeGate"] = len(clusters)
     clusters = [c for c in clusters if _support_gate(c)]
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["clustersAfterGate"] = len(clusters)
     clusters.sort(key=lambda c: (c["messages"], c["uniqueUsers"], c["channels"]), reverse=True)
     return clusters[: int(config.QUESTION_BRIEFS_MAX_CLUSTER_CANDIDATES)]
 
@@ -565,15 +729,14 @@ def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
         response_format={"type": "json_object"},
-        temperature=0.1,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
     )
     raw = _as_str(response.choices[0].message.content)
     return json.loads(raw) if raw else {}
 
 
-def _triage_clusters(clusters: list[dict]) -> dict[str, dict]:
+def _triage_clusters(clusters: list[dict], diagnostics: dict | None = None) -> dict[str, dict]:
     if not clusters:
         return {}
 
@@ -616,9 +779,16 @@ def _triage_clusters(clusters: list[dict]) -> dict[str, dict]:
                     "evidenceIds": evidence_ids[:1],
                     "rejectionReason": "low_signal",
                 }
+        if isinstance(diagnostics, dict):
+            accepted = sum(1 for row in out.values() if _as_str(row.get("status")) == "accepted")
+            diagnostics.setdefault("stages", {})["acceptedClusters"] = accepted
+            rejected = diagnostics.setdefault("rejections", {}).setdefault("triage", {})
+            for row in out.values():
+                if _as_str(row.get("status")) == "rejected":
+                    _increment_bucket(rejected, _as_str(row.get("rejectionReason"), "low_signal"))
         return out
 
-    if not _client or not config.FEATURE_QUESTION_BRIEFS_AI or not config.QUESTION_BRIEFS_USE_AI_TRIAGE:
+    if not _client or not _runtime_question_briefs_feature_enabled() or not config.QUESTION_BRIEFS_USE_AI_TRIAGE:
         return deterministic()
 
     payload = {
@@ -644,32 +814,11 @@ def _triage_clusters(clusters: list[dict]) -> dict[str, dict]:
         ]
     }
 
-    system_prompt = """
-You triage candidate societal question clusters for Question Cards.
-
-Rules:
-1) Use only provided evidence snippets and IDs.
-2) Accept only if the cluster reflects a combined societal ask.
-3) Reject rhetorical, emotional, mixed-topic, and low-grounded clusters.
-4) Return JSON only; no extra keys.
-
-Return schema:
-{
-  "decisions": [
-    {
-      "clusterId": "string",
-      "status": "accepted|rejected",
-      "confidence": "high|medium|low",
-      "evidenceIds": ["id1", "id2"],
-      "rejectionReason": "low_signal|rhetorical_or_emotional|single_user_or_non_societal|mixed_topics|insufficient_grounding|contradictory_evidence"
-    }
-  ]
-}
-""".strip()
+    system_prompt = _runtime_prompt("question_briefs.triage_prompt", QUESTION_BRIEFS_TRIAGE_PROMPT)
 
     try:
         parsed = _chat_json(
-            model=config.QUESTION_BRIEFS_TRIAGE_MODEL,
+            model=_runtime_question_briefs_model(_as_str(config.QUESTION_BRIEFS_TRIAGE_MODEL)),
             max_tokens=int(config.QUESTION_BRIEFS_TRIAGE_MAX_TOKENS),
             system_prompt=system_prompt,
             user_payload=payload,
@@ -718,19 +867,28 @@ Return schema:
                 if accepted_count >= min_accept:
                     break
 
+        if isinstance(diagnostics, dict):
+            accepted = sum(1 for row in out.values() if _as_str(row.get("status")) == "accepted")
+            diagnostics.setdefault("stages", {})["acceptedClusters"] = accepted
+            rejected = diagnostics.setdefault("rejections", {}).setdefault("triage", {})
+            for row in out.values():
+                if _as_str(row.get("status")) == "rejected":
+                    _increment_bucket(rejected, _as_str(row.get("rejectionReason"), "rejected"))
         return out
     except Exception as e:
         logger.warning(f"Question cards triage failed: {e}")
         return deterministic()
 
 
-def _synthesize_cards(clusters: list[dict], triage: dict[str, dict]) -> list[dict]:
+def _synthesize_cards(clusters: list[dict], triage: dict[str, dict], diagnostics: dict | None = None) -> list[dict]:
     accepted = []
     for c in clusters:
         decision = triage.get(_as_str(c.get("clusterId"), ""), {})
         if _as_str(decision.get("status"), "") != "accepted":
             continue
         accepted.append((c, decision))
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["synthesisEligibleClusters"] = len(accepted)
 
     if not accepted:
         return []
@@ -738,7 +896,7 @@ def _synthesize_cards(clusters: list[dict], triage: dict[str, dict]) -> list[dic
     max_cards = int(config.QUESTION_BRIEFS_MAX_BRIEFS)
     accepted = accepted[: max_cards * 2]
 
-    if not _client or not config.FEATURE_QUESTION_BRIEFS_AI:
+    if not _client or not _runtime_question_briefs_feature_enabled():
         # Deterministic fallback with seed questions only.
         fallback: list[dict] = []
         for c, decision in accepted[:max_cards]:
@@ -759,6 +917,8 @@ def _synthesize_cards(clusters: list[dict], triage: dict[str, dict]) -> list[dic
                     "evidenceIds": [_as_str(ev.get("id")) for ev in evidence if _as_str(ev.get("id"))],
                 }
             )
+        if isinstance(diagnostics, dict):
+            diagnostics.setdefault("stages", {})["synthesizedRows"] = len(fallback)
         return fallback
 
     payload_clusters = []
@@ -802,42 +962,17 @@ def _synthesize_cards(clusters: list[dict], triage: dict[str, dict]) -> list[dic
         )
 
     if not payload_clusters:
+        if isinstance(diagnostics, dict):
+            diagnostics.setdefault("stages", {})["synthesizedRows"] = 0
         return []
 
-    system_prompt = """
-You generate high-quality Question Cards from evidence clusters.
-
-Rules:
-1) Primary output MUST be a societal, cluster-level question in question form.
-2) canonicalQuestionEn and canonicalQuestionRu must end with '?'.
-3) Do NOT output statement headlines.
-4) Do not summarize a single individual anecdote as a societal card.
-5) Use only provided evidence text and IDs.
-6) If grounding is weak, set confidence to low and omit the card from accepted output.
-7) Russian text must be professional and natural.
-
-Return JSON only:
-{
-  "card": {
-    "clusterId": "string",
-    "canonicalQuestionEn": "string?",
-    "canonicalQuestionRu": "string?",
-    "summaryEn": "string",
-    "summaryRu": "string",
-    "confidence": "high|medium|low",
-    "confidenceScore": 0.0,
-    "status": "needs_guide|partially_answered|well_covered",
-    "resolvedPct": 0,
-    "evidenceIds": ["id1", "id2"]
-  }
-}
-""".strip()
+    system_prompt = _runtime_prompt("question_briefs.synthesis_prompt", QUESTION_BRIEFS_SYNTHESIS_PROMPT)
 
     rows: list[dict] = []
     for cluster_payload in payload_clusters[:max_cards]:
         try:
             parsed = _chat_json(
-                model=config.QUESTION_BRIEFS_SYNTHESIS_MODEL,
+                model=_runtime_question_briefs_model(_as_str(config.QUESTION_BRIEFS_SYNTHESIS_MODEL)),
                 max_tokens=int(config.QUESTION_BRIEFS_SYNTHESIS_MAX_TOKENS),
                 system_prompt=system_prompt,
                 user_payload={"cluster": cluster_payload},
@@ -848,6 +983,8 @@ Return JSON only:
         except Exception as e:
             logger.warning(f"Question cards synthesis failed for {cluster_payload.get('clusterId')}: {e}")
 
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["synthesizedRows"] = len(rows)
     return rows
 
 
@@ -875,9 +1012,10 @@ def _force_question_form(text: str) -> str:
     return value
 
 
-def _materialize_cards(clusters: list[dict], ai_rows: list[dict]) -> list[dict]:
+def _materialize_cards(clusters: list[dict], ai_rows: list[dict], diagnostics: dict | None = None) -> list[dict]:
     by_id = {_as_str(c.get("clusterId")): c for c in clusters}
     cards: list[dict] = []
+    rejection_buckets = diagnostics.setdefault("rejections", {}).setdefault("materialization", {}) if isinstance(diagnostics, dict) else None
 
     for row in ai_rows:
         if not isinstance(row, dict):
@@ -885,11 +1023,15 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict]) -> list[dict]:
         cluster_id = _as_str(row.get("clusterId"), "").strip()
         cluster = by_id.get(cluster_id)
         if not cluster:
+            if isinstance(rejection_buckets, dict):
+                _increment_bucket(rejection_buckets, "unknown_cluster")
             continue
 
         q_en = _force_question_form(_trim_text(row.get("canonicalQuestionEn"), 180))
         q_ru = _force_question_form(_trim_text(row.get("canonicalQuestionRu"), 220))
         if not _validate_question(q_en) or not _validate_question(q_ru):
+            if isinstance(rejection_buckets, dict):
+                _increment_bucket(rejection_buckets, "invalid_question_form")
             continue
 
         confidence_score = _clamp(_as_float(row.get("confidenceScore"), 0.0), 0.0, 1.0)
@@ -897,6 +1039,8 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict]) -> list[dict]:
         if confidence not in {"high", "medium", "low"}:
             confidence = _confidence_label(confidence_score)
         if confidence == "low":
+            if isinstance(rejection_buckets, dict):
+                _increment_bucket(rejection_buckets, "low_confidence_label")
             continue
 
         evidence_by_id = {_as_str(s.get("id")): s for s in cluster.get("signals", [])}
@@ -916,6 +1060,8 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict]) -> list[dict]:
                     break
 
         if len(selected_ids) < 2:
+            if isinstance(rejection_buckets, dict):
+                _increment_bucket(rejection_buckets, "insufficient_evidence")
             continue
 
         status = _as_str(row.get("status"), "partially_answered").strip().lower()
@@ -965,12 +1111,18 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict]) -> list[dict]:
             }
         )
 
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("stages", {})["cardsBeforeFilter"] = len(cards)
     cards = [
         c
         for c in cards
         if _as_float(c.get("confidenceScore"), 0.0) >= float(config.QUESTION_BRIEFS_MIN_CONFIDENCE)
         and c.get("confidence") in {"high", "medium"}
     ]
+    if isinstance(rejection_buckets, dict):
+        filtered_out = max(0, diagnostics.get("stages", {}).get("cardsBeforeFilter", 0) - len(cards))
+        if filtered_out:
+            _increment_bucket(rejection_buckets, "below_confidence_threshold", filtered_out)
     cards.sort(
         key=lambda c: (
             _as_int(((c.get("demandSignals") or {}).get("messages")), 0),
@@ -993,14 +1145,50 @@ def invalidate_question_briefs_cache() -> None:
         _cache_ts = 0.0
 
 
+def get_question_briefs_diagnostics() -> dict:
+    """Return the last materialization diagnostics snapshot."""
+    if not _last_refresh_diagnostics:
+        return _new_refresh_diagnostics(force=False)
+
+    diagnostics = copy.deepcopy(_last_refresh_diagnostics)
+    diagnostics["firstRejectionBucket"] = _first_bucket(
+        diagnostics.get("rejections", {}).get("materialization", {})
+    ) or _first_bucket(diagnostics.get("rejections", {}).get("triage", {}))
+    return diagnostics
+
+
+def refresh_question_briefs_with_diagnostics(*, force: bool = False) -> dict:
+    """Run refresh and return compact diagnostics for debugging."""
+    cards = refresh_question_briefs(force=force)
+    diagnostics = get_question_briefs_diagnostics()
+    diagnostics["stages"]["finalCards"] = len(cards)
+    diagnostics["cardsProduced"] = len(cards)
+    return diagnostics
+
+
 def refresh_question_briefs(*, force: bool = False) -> list[dict]:
     """Materialize question cards and persist snapshot/state for request-time reads."""
     global _cached_cards, _cache_ts
+    diagnostics = _new_refresh_diagnostics(force=force)
+    logger.info(
+        "Question cards refresh start | force={} ai_enabled={} ai_triage={} min_messages={} min_users={} min_channels={} min_confidence={}".format(
+            force,
+            diagnostics["runtime"]["featureEnabled"],
+            diagnostics["runtime"]["aiTriageEnabled"],
+            diagnostics["config"]["minClusterMessages"],
+            diagnostics["config"]["minClusterUsers"],
+            diagnostics["config"]["minClusterChannels"],
+            diagnostics["config"]["minConfidence"],
+        )
+    )
 
     lease_ttl = max(300, int(config.QUESTION_BRIEFS_REFRESH_MINUTES) * 60)
     if not force and not _acquire_refresh_lease(lease_ttl):
         logger.info("Question cards materialization skipped: another instance holds active lease")
-        cards = _load_snapshot_cards()
+        diagnostics["exitReason"] = "lease_skipped"
+        cards = _load_snapshot_cards(diagnostics=diagnostics)
+        diagnostics["stages"]["finalCards"] = len(cards)
+        _store_refresh_diagnostics(diagnostics)
         if cards:
             with _cache_lock:
                 _cached_cards = cards
@@ -1016,18 +1204,35 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
         )
     except Exception as e:
         logger.warning(f"Question cards candidate retrieval failed: {e}")
-        cards = _load_snapshot_cards()
+        diagnostics["exitReason"] = "candidate_error"
+        diagnostics["error"] = str(e)
+        cards = _load_snapshot_cards(diagnostics=diagnostics)
+        diagnostics["stages"]["finalCards"] = len(cards)
+        _store_refresh_diagnostics(diagnostics)
         if cards:
             with _cache_lock:
                 _cached_cards = cards
                 _cache_ts = time.time()
             return cards
         return []
+    diagnostics["stages"]["candidateRows"] = len(candidates)
+    logger.info(f"Question cards candidates fetched | count={len(candidates)}")
     if not candidates:
+        diagnostics["exitReason"] = "no_candidates"
+        _store_refresh_diagnostics(diagnostics)
         return []
 
-    clusters = _build_clusters(candidates)
+    clusters = _build_clusters(candidates, diagnostics=diagnostics)
+    logger.info(
+        "Question cards clustering | signals={} clusters_before_gate={} clusters_after_gate={}".format(
+            diagnostics["stages"]["signalCount"],
+            diagnostics["stages"]["clustersBeforeGate"],
+            diagnostics["stages"]["clustersAfterGate"],
+        )
+    )
     if not clusters:
+        diagnostics["exitReason"] = "no_clusters_after_support_gate"
+        _store_refresh_diagnostics(diagnostics)
         return []
 
     state = _load_state()
@@ -1049,14 +1254,20 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
             continue
 
         changed_clusters.append(cluster)
+    diagnostics["stages"]["changedClusters"] = len(changed_clusters)
 
     triage: dict[str, dict] = {}
     ai_rows: list[dict] = []
     new_cards: list[dict] = []
     if changed_clusters:
-        triage = _triage_clusters(changed_clusters)
-        ai_rows = _synthesize_cards(changed_clusters, triage)
-        new_cards = _materialize_cards(changed_clusters, ai_rows)
+        triage = _triage_clusters(changed_clusters, diagnostics=diagnostics)
+        ai_rows = _synthesize_cards(changed_clusters, triage, diagnostics=diagnostics)
+        new_cards = _materialize_cards(changed_clusters, ai_rows, diagnostics=diagnostics)
+    else:
+        diagnostics["stages"]["acceptedClusters"] = 0
+        diagnostics["stages"]["synthesisEligibleClusters"] = 0
+        diagnostics["stages"]["synthesizedRows"] = 0
+        diagnostics["stages"]["cardsBeforeFilter"] = 0
 
     cards_by_cluster = {
         _as_str(card.get("clusterId"), ""): card
@@ -1129,6 +1340,8 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
         reverse=True,
     )
     final_cards = final_cards[: int(config.QUESTION_BRIEFS_MAX_BRIEFS)]
+    diagnostics["stages"]["finalCards"] = len(final_cards)
+    diagnostics["stages"]["reusedClusters"] = len(clusters) - len(changed_clusters)
 
     state["clusters"] = next_cluster_state
     _save_state(state)
@@ -1140,18 +1353,25 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
             "reusedClusters": len(clusters) - len(changed_clusters),
             "cards": len(final_cards),
         },
+        diagnostics=diagnostics,
     )
+    diagnostics["snapshot"]["readbackCards"] = len(_load_snapshot_cards())
 
     with _cache_lock:
         _cached_cards = final_cards
         _cache_ts = time.time()
 
+    diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
+    _store_refresh_diagnostics(diagnostics)
     logger.info(
-        "Question cards materialized | cards={} active_clusters={} changed_clusters={} reused_clusters={}".format(
+        "Question cards materialized | cards={} active_clusters={} changed_clusters={} reused_clusters={} accepted_clusters={} synthesized_rows={} first_rejection_bucket={}".format(
             len(final_cards),
             len(clusters),
             len(changed_clusters),
             len(clusters) - len(changed_clusters),
+            diagnostics["stages"]["acceptedClusters"],
+            diagnostics["stages"]["synthesizedRows"],
+            _first_bucket(diagnostics["rejections"]["materialization"]) or _first_bucket(diagnostics["rejections"]["triage"]) or "none",
         )
     )
     return final_cards

@@ -22,6 +22,7 @@ from collections import defaultdict
 import json
 import time
 import config
+from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from utils.taxonomy import TAXONOMY_VERSION, compact_taxonomy_prompt
 from utils.topic_normalizer import normalize_model_topics
 
@@ -499,6 +500,7 @@ def _extract_topic_names(parsed: dict) -> list[str]:
 def _request_json(*, system_prompt: str, user_context: str, max_tokens: int, request_label: str) -> dict:
     retry_limit = max(0, int(config.AI_REQUEST_MAX_RETRIES))
     retry_backoff_seconds = max(0.0, float(getattr(config, "AI_REQUEST_RETRY_BACKOFF_SECONDS", 0.0)))
+    model_name = _runtime_openai_model()
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_context},
@@ -506,16 +508,16 @@ def _request_json(*, system_prompt: str, user_context: str, max_tokens: int, req
 
     for attempt in range(retry_limit + 1):
         try:
+            attempt_max_tokens = max_tokens + (attempt * 400)
             response = client.chat.completions.create(
-                model=config.OPENAI_MODEL,
+                model=model_name,
                 messages=messages,  # pyright: ignore[reportArgumentType]
                 response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=max_tokens,
+                max_completion_tokens=attempt_max_tokens,
                 timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
             )
             logger.debug(
-                f"{request_label}: AI response received id={getattr(response, 'id', 'unknown')} model={config.OPENAI_MODEL}"
+                f"{request_label}: AI response received id={getattr(response, 'id', 'unknown')} model={model_name}"
             )
             raw = response.choices[0].message.content
             return _safe_json_object(raw)
@@ -596,12 +598,14 @@ def _analyze_comment_group_payload(payload: dict) -> dict:
     telegram_user_id = payload.get("telegram_user_id")
     post_id = payload.get("post_id")
     user_context = payload.get("user_context") or ""
+    system_prompt = _runtime_prompt("extraction.system_prompt", SYSTEM_PROMPT)
+    strict_taxonomy_prompt = _runtime_prompt("extraction.strict_taxonomy_prompt", STRICT_TAXONOMY_PROMPT)
 
-    prompt_candidates = [SYSTEM_PROMPT]
+    prompt_candidates = [system_prompt]
     if config.FEATURE_EXTRACTION_V2:
         prompt_candidates = [
-            f"{SYSTEM_PROMPT}\n\n{STRICT_TAXONOMY_PROMPT}",
-            SYSTEM_PROMPT,
+            f"{system_prompt}\n\n{strict_taxonomy_prompt}",
+            system_prompt,
         ]
 
     parsed = None
@@ -1041,6 +1045,34 @@ Rules:
 3) Keep each item scoped to its own post text only.
 """
 
+ADMIN_PROMPT_DEFAULTS = {
+    "extraction.system_prompt": SYSTEM_PROMPT,
+    "extraction.strict_taxonomy_prompt": STRICT_TAXONOMY_PROMPT,
+    "extraction.post_system_prompt": POST_SYSTEM_PROMPT,
+    "extraction.post_system_prompt_compact": POST_SYSTEM_PROMPT_COMPACT,
+    "extraction.post_batch_system_prompt_compact": POST_BATCH_SYSTEM_PROMPT_COMPACT,
+}
+
+
+def get_admin_prompt_defaults() -> dict[str, str]:
+    return dict(ADMIN_PROMPT_DEFAULTS)
+
+
+def _runtime_prompt(key: str, default: str) -> str:
+    return get_admin_prompt(key, default)
+
+
+def _runtime_openai_model() -> str:
+    value = get_admin_runtime_value("openaiModel", config.OPENAI_MODEL)
+    text = str(value).strip() if value is not None else ""
+    return text or config.OPENAI_MODEL
+
+
+def _runtime_ai_post_prompt_style() -> str:
+    value = get_admin_runtime_value("aiPostPromptStyle", config.AI_POST_PROMPT_STYLE)
+    style = str(value).strip().lower() if value is not None else ""
+    return style if style in {"compact", "full"} else str(config.AI_POST_PROMPT_STYLE or "compact").strip().lower()
+
 
 def _build_post_analysis_row(post: dict, parsed: dict) -> dict:
     demographics = parsed.get("demographics") or {}
@@ -1072,11 +1104,14 @@ def _persist_post_analysis(post: dict, parsed: dict, supabase_writer) -> None:
 
 
 def _analyze_single_post_payload(post: dict) -> dict:
-    prompt_style = (config.AI_POST_PROMPT_STYLE or "compact").strip().lower()
-    base_prompt = POST_SYSTEM_PROMPT_COMPACT if prompt_style == "compact" else POST_SYSTEM_PROMPT
+    prompt_style = _runtime_ai_post_prompt_style()
+    compact_prompt = _runtime_prompt("extraction.post_system_prompt_compact", POST_SYSTEM_PROMPT_COMPACT)
+    full_prompt = _runtime_prompt("extraction.post_system_prompt", POST_SYSTEM_PROMPT)
+    strict_taxonomy_prompt = _runtime_prompt("extraction.strict_taxonomy_prompt", STRICT_TAXONOMY_PROMPT)
+    base_prompt = compact_prompt if prompt_style == "compact" else full_prompt
     prompt_candidates = [base_prompt]
-    if base_prompt != POST_SYSTEM_PROMPT_COMPACT:
-        prompt_candidates.append(POST_SYSTEM_PROMPT_COMPACT)
+    if base_prompt != compact_prompt:
+        prompt_candidates.append(compact_prompt)
 
     text = post.get("text", "")
     post_text = _trim_text(text, max(200, int(config.AI_MESSAGE_CHAR_LIMIT) * 3))
@@ -1086,7 +1121,7 @@ def _analyze_single_post_payload(post: dict) -> dict:
     for index, candidate_prompt in enumerate(prompt_candidates, start=1):
         system_prompt = candidate_prompt
         if config.FEATURE_EXTRACTION_V2:
-            system_prompt = f"{candidate_prompt}\n\n{STRICT_TAXONOMY_PROMPT}"
+            system_prompt = f"{candidate_prompt}\n\n{strict_taxonomy_prompt}"
 
         try:
             parsed = _normalize_payload(
@@ -1164,9 +1199,11 @@ def _analyze_post_batch_payload(posts: list[dict]) -> dict[str, dict]:
             f"text:\n{_trim_text(post.get('text', ''), item_char_limit)}"
         )
 
-    system_prompt = POST_BATCH_SYSTEM_PROMPT_COMPACT
+    batch_prompt = _runtime_prompt("extraction.post_batch_system_prompt_compact", POST_BATCH_SYSTEM_PROMPT_COMPACT)
+    strict_taxonomy_prompt = _runtime_prompt("extraction.strict_taxonomy_prompt", STRICT_TAXONOMY_PROMPT)
+    system_prompt = batch_prompt
     if config.FEATURE_EXTRACTION_V2:
-        system_prompt = f"{POST_BATCH_SYSTEM_PROMPT_COMPACT}\n\n{STRICT_TAXONOMY_PROMPT}"
+        system_prompt = f"{batch_prompt}\n\n{strict_taxonomy_prompt}"
 
     parsed = _request_json(
         system_prompt=system_prompt,

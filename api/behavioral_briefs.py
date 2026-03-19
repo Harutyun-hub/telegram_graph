@@ -14,6 +14,7 @@ from typing import Any
 from loguru import logger
 
 import config
+from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import behavioral
 from buffer.supabase_writer import SupabaseWriter
 
@@ -38,6 +39,93 @@ _SCHEMA_VERSION = 1
 _INSTANCE_ID = f"{os.getpid()}-{int(time.time())}"
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY) if (OpenAI and config.OPENAI_API_KEY) else None
+
+BEHAVIORAL_PROBLEM_PROMPT = """
+You generate Problem Tracker cards from evidence clusters.
+
+Rules:
+1) Use only the provided evidence text and evidence IDs.
+2) Write one societal problem statement (not taxonomy title).
+3) Keep wording concrete and human-readable for non-experts.
+4) Do not invent causes, actors, or numbers.
+5) If grounding is weak, set confidence to low.
+
+Return JSON only:
+{
+  "card": {
+    "clusterId": "string",
+    "problemEn": "string",
+    "problemRu": "string",
+    "summaryEn": "string",
+    "summaryRu": "string",
+    "severity": "critical|high|medium|low",
+    "confidence": "high|medium|low",
+    "confidenceScore": 0.0,
+    "evidenceIds": ["id1", "id2"]
+  }
+}
+""".strip()
+
+BEHAVIORAL_SERVICE_GAP_PROMPT = """
+You identify hidden service-gap requests from evidence clusters.
+
+Rules:
+1) Use only provided evidence and IDs.
+2) Infer a concrete service/help need from the messages, not a topic label.
+3) Service need must be actionable and specific, for example legal help with residency paperwork, mental health counseling, job placement help, housing repair support.
+4) Use the topic/category only as retrieval context; ignore them if the messages do not support a real service request.
+5) Reject abstract grievances, political dissatisfaction, slogans, identity statements, and broad complaints that are not service requests.
+6) Keep unmet reason factual, concise, and grounded in the evidence.
+7) If grounding is weak or there is no real service request, return {"card": null}.
+
+Return JSON only:
+{
+  "card": null
+  OR
+  "card": {
+    "clusterId": "string",
+    "serviceNeedEn": "string",
+    "serviceNeedRu": "string",
+    "unmetReasonEn": "string",
+    "unmetReasonRu": "string",
+    "urgency": "critical|high|medium|low",
+    "unmetPct": 0,
+    "confidence": "high|medium|low",
+    "confidenceScore": 0.0,
+    "evidenceIds": ["id1", "id2"]
+  }
+}
+""".strip()
+
+BEHAVIORAL_URGENCY_PROMPT = """
+You analyze urgent community messages and generate Emotional Urgency cards.
+
+Rules:
+1) Summarize the specific crisis accurately based ONLY on the evidence.
+2) Propose a concrete, actionable step for a community manager or moderator.
+3) Keep wording concise (1 short sentence for message, 1 short action).
+4) Do not invent details not present in the text.
+5) Determine urgency as 'critical' (life/safety/immediate risk) or 'high'.
+
+Return JSON only:
+{
+  "card": {
+    "topicEn": "string",
+    "topicRu": "string",
+    "messageEn": "string",
+    "messageRu": "string",
+    "actionEn": "string",
+    "actionRu": "string",
+    "urgency": "critical|high"
+  }
+}
+""".strip()
+
+ADMIN_PROMPT_DEFAULTS = {
+    "behavioral_briefs.problem_prompt": BEHAVIORAL_PROBLEM_PROMPT,
+    "behavioral_briefs.service_gap_prompt": BEHAVIORAL_SERVICE_GAP_PROMPT,
+    "behavioral_briefs.urgency_prompt": BEHAVIORAL_URGENCY_PROMPT,
+}
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9а-яА-ЯёЁ]+")
 _ASK_HINTS = (
@@ -509,6 +597,33 @@ def _write_versioned_runtime_json(folder: str, payload: dict) -> bool:
     return saved
 
 
+def get_admin_prompt_defaults() -> dict[str, str]:
+    return dict(ADMIN_PROMPT_DEFAULTS)
+
+
+def _runtime_prompt(key: str, default: str) -> str:
+    return get_admin_prompt(key, default)
+
+
+def _runtime_behavioral_briefs_model() -> str:
+    value = get_admin_runtime_value("behavioralBriefsModel", config.BEHAVIORAL_BRIEFS_MODEL)
+    text = _as_str(value, "").strip()
+    return text or _as_str(config.BEHAVIORAL_BRIEFS_MODEL)
+
+
+def _runtime_behavioral_prompt_version() -> str:
+    value = get_admin_runtime_value("behavioralBriefsPromptVersion", getattr(config, "BEHAVIORAL_BRIEFS_PROMPT_VERSION", "behavior-v1"))
+    text = _as_str(value, "").strip()
+    return text or _as_str(getattr(config, "BEHAVIORAL_BRIEFS_PROMPT_VERSION", "behavior-v1"))
+
+
+def _runtime_behavioral_feature_enabled() -> bool:
+    value = get_admin_runtime_value("featureBehavioralBriefsAi", config.FEATURE_BEHAVIORAL_BRIEFS_AI)
+    if isinstance(value, bool):
+        return value
+    return bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI)
+
+
 def _prune_runtime_folder(folder: str, keep: int = 12) -> None:
     store = _get_runtime_store()
     if not store:
@@ -658,8 +773,8 @@ def _cluster_fingerprint(kind: str, cluster: dict) -> str:
         "latestAt": _as_str(cluster.get("latestAt")),
         "severity": _as_str(cluster.get("severity")),
         "unmetPct": _as_int(cluster.get("unmetPct"), 0),
-        "promptVersion": _as_str(getattr(config, "BEHAVIORAL_BRIEFS_PROMPT_VERSION", "behavior-v1")),
-        "model": _as_str(config.BEHAVIORAL_BRIEFS_MODEL),
+        "promptVersion": _runtime_behavioral_prompt_version(),
+        "model": _runtime_behavioral_briefs_model(),
         "signals": [
             {
                 "id": _as_str(s.get("id")),
@@ -802,8 +917,7 @@ def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
         response_format={"type": "json_object"},
-        temperature=0.1,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
     )
     raw = _as_str(response.choices[0].message.content)
@@ -875,34 +989,9 @@ def _deterministic_service_cards(clusters: list[dict]) -> list[dict]:
 def _synthesize_problem_cards(clusters: list[dict]) -> list[dict]:
     if not clusters:
         return []
-    if not _client or not config.FEATURE_BEHAVIORAL_BRIEFS_AI:
+    if not _client or not _runtime_behavioral_feature_enabled():
         return _deterministic_problem_cards(clusters)
-
-    system_prompt = """
-You generate Problem Tracker cards from evidence clusters.
-
-Rules:
-1) Use only the provided evidence text and evidence IDs.
-2) Write one societal problem statement (not taxonomy title).
-3) Keep wording concrete and human-readable for non-experts.
-4) Do not invent causes, actors, or numbers.
-5) If grounding is weak, set confidence to low.
-
-Return JSON only:
-{
-  "card": {
-    "clusterId": "string",
-    "problemEn": "string",
-    "problemRu": "string",
-    "summaryEn": "string",
-    "summaryRu": "string",
-    "severity": "critical|high|medium|low",
-    "confidence": "high|medium|low",
-    "confidenceScore": 0.0,
-    "evidenceIds": ["id1", "id2"]
-  }
-}
-""".strip()
+    system_prompt = _runtime_prompt("behavioral_briefs.problem_prompt", BEHAVIORAL_PROBLEM_PROMPT)
 
     out: list[dict] = []
     for cluster in clusters[: int(config.BEHAVIORAL_BRIEFS_MAX_CARDS) * 2]:
@@ -930,7 +1019,7 @@ Return JSON only:
         }
         try:
             parsed = _chat_json(
-                model=config.BEHAVIORAL_BRIEFS_MODEL,
+                model=_runtime_behavioral_briefs_model(),
                 max_tokens=int(config.BEHAVIORAL_BRIEFS_MAX_TOKENS),
                 system_prompt=system_prompt,
                 user_payload=payload,
@@ -949,39 +1038,9 @@ Return JSON only:
 def _synthesize_service_cards(clusters: list[dict]) -> list[dict]:
     if not clusters:
         return []
-    if not _client or not config.FEATURE_BEHAVIORAL_BRIEFS_AI:
+    if not _client or not _runtime_behavioral_feature_enabled():
         return []
-
-    system_prompt = """
-You identify hidden service-gap requests from evidence clusters.
-
-Rules:
-1) Use only provided evidence and IDs.
-2) Infer a concrete service/help need from the messages, not a topic label.
-3) Service need must be actionable and specific, for example legal help with residency paperwork, mental health counseling, job placement help, housing repair support.
-4) Use the topic/category only as retrieval context; ignore them if the messages do not support a real service request.
-5) Reject abstract grievances, political dissatisfaction, slogans, identity statements, and broad complaints that are not service requests.
-6) Keep unmet reason factual, concise, and grounded in the evidence.
-7) If grounding is weak or there is no real service request, return {"card": null}.
-
-Return JSON only:
-{
-  "card": null
-  OR
-  "card": {
-    "clusterId": "string",
-    "serviceNeedEn": "string",
-    "serviceNeedRu": "string",
-    "unmetReasonEn": "string",
-    "unmetReasonRu": "string",
-    "urgency": "critical|high|medium|low",
-    "unmetPct": 0,
-    "confidence": "high|medium|low",
-    "confidenceScore": 0.0,
-    "evidenceIds": ["id1", "id2"]
-  }
-}
-""".strip()
+    system_prompt = _runtime_prompt("behavioral_briefs.service_gap_prompt", BEHAVIORAL_SERVICE_GAP_PROMPT)
 
     out: list[dict] = []
     for cluster in clusters[: int(config.BEHAVIORAL_BRIEFS_MAX_CARDS) * 2]:
@@ -1009,7 +1068,7 @@ Return JSON only:
         }
         try:
             parsed = _chat_json(
-                model=config.BEHAVIORAL_BRIEFS_MODEL,
+                model=_runtime_behavioral_briefs_model(),
                 max_tokens=int(config.BEHAVIORAL_BRIEFS_MAX_TOKENS),
                 system_prompt=system_prompt,
                 user_payload=payload,
@@ -1026,32 +1085,9 @@ Return JSON only:
 def _synthesize_urgency_cards(clusters: list[dict]) -> list[dict]:
     if not clusters:
         return []
-    if not _client or not config.FEATURE_BEHAVIORAL_BRIEFS_AI:
+    if not _client or not _runtime_behavioral_feature_enabled():
         return []
-
-    system_prompt = """
-You analyze urgent community messages and generate Emotional Urgency cards.
-
-Rules:
-1) Summarize the specific crisis accurately based ONLY on the evidence.
-2) Propose a concrete, actionable step for a community manager or moderator.
-3) Keep wording concise (1 short sentence for message, 1 short action).
-4) Do not invent details not present in the text.
-5) Determine urgency as 'critical' (life/safety/immediate risk) or 'high'.
-
-Return JSON only:
-{
-  "card": {
-    "topicEn": "string",
-    "topicRu": "string",
-    "messageEn": "string",
-    "messageRu": "string",
-    "actionEn": "string",
-    "actionRu": "string",
-    "urgency": "critical|high"
-  }
-}
-""".strip()
+    system_prompt = _runtime_prompt("behavioral_briefs.urgency_prompt", BEHAVIORAL_URGENCY_PROMPT)
 
     out: list[dict] = []
     for cluster in clusters[:4]:
@@ -1073,7 +1109,7 @@ Return JSON only:
         }
         try:
             parsed = _chat_json(
-                model=config.BEHAVIORAL_BRIEFS_MODEL,
+                model=_runtime_behavioral_briefs_model(),
                 max_tokens=int(config.BEHAVIORAL_BRIEFS_MAX_TOKENS),
                 system_prompt=system_prompt,
                 user_payload=payload,

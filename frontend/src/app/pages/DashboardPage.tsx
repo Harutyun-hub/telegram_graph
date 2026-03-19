@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Eye, Brain, Target, Users, BarChart3, GitBranch, Heart, ChevronDown, ChevronUp, Briefcase } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
+import { useAdminConfig } from '../contexts/AdminConfigContext';
+import { ADMIN_WIDGET_DEFINITIONS } from '../admin/catalog';
 
 // Tier 1: Community Pulse
 import { CommunityHealthScore, TrendingTopicsFeed, CommunityBrief } from '../components/widgets/ExecutiveGlance';
@@ -64,6 +66,7 @@ function TierHeader({ tier, isOpen, onToggle }: { tier: TierConfig; isOpen: bool
 export function DashboardPage() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { isWidgetEnabled } = useAdminConfig();
   const ru = lang === 'ru';
 
   const tiers: TierConfig[] = [
@@ -126,6 +129,11 @@ export function DashboardPage() {
     setOpenTiers((prev) => ({ ...prev, [tierId]: !prev[tierId] }));
   };
 
+  const showWidget = (widgetId: string) => isWidgetEnabled(widgetId);
+  const tierHasVisibleWidgets = (tierId: string) =>
+    ADMIN_WIDGET_DEFINITIONS.some((widget) => widget.tierId === tierId && showWidget(widget.id));
+  const visibleWidgetCount = ADMIN_WIDGET_DEFINITIONS.filter((widget) => showWidget(widget.id)).length;
+
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-6 max-w-[1600px] mx-auto">
       {/* Dashboard Header */}
@@ -136,8 +144,8 @@ export function DashboardPage() {
           </h1>
           <p className="text-xs text-gray-500 mt-0.5">
             {ru
-              ? `30 виджетов · ${data.communityBrief.messagesAnalyzed.toLocaleString('ru-RU')} сообщений · ${data.communityBrief.updatedMinutesAgo} мин назад`
-              : `30 widgets · ${data.communityBrief.messagesAnalyzed.toLocaleString()} analyzed · ${data.communityBrief.updatedMinutesAgo} min ago`}
+              ? `${visibleWidgetCount} виджетов · ${data.communityBrief.messagesAnalyzed.toLocaleString('ru-RU')} сообщений · ${data.communityBrief.updatedMinutesAgo} мин назад`
+              : `${visibleWidgetCount} widgets · ${data.communityBrief.messagesAnalyzed.toLocaleString()} analyzed · ${data.communityBrief.updatedMinutesAgo} min ago`}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -157,105 +165,155 @@ export function DashboardPage() {
       </div>
 
       {/* ═══ TIER 1 ═══ */}
-      <TierHeader tier={tiers[0]} isOpen={openTiers.pulse} onToggle={() => toggleTier('pulse')} />
-      {openTiers.pulse && (
-        <div className="space-y-4 md:space-y-6">
-          <CommunityBrief />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <CommunityHealthScore />
-            <TrendingTopicsFeed />
-          </div>
-        </div>
+      {tierHasVisibleWidgets('pulse') && (
+        <>
+          <TierHeader tier={tiers[0]} isOpen={openTiers.pulse} onToggle={() => toggleTier('pulse')} />
+          {openTiers.pulse && (
+            <div className="space-y-4 md:space-y-6">
+              {showWidget('community_brief') && <CommunityBrief />}
+              {(showWidget('community_health_score') || showWidget('trending_topics_feed')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('community_health_score') && <CommunityHealthScore />}
+                  {showWidget('trending_topics_feed') && <TrendingTopicsFeed />}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 2 ═══ */}
-      <TierHeader tier={tiers[1]} isOpen={openTiers.topics} onToggle={() => toggleTier('topics')} />
-      {openTiers.topics && (
-        <div className="space-y-4 md:space-y-6">
-          <TopicLandscape />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <ConversationTrends />
-            <QuestionCloud />
-          </div>
-          <TopicLifecycle />
-        </div>
+      {tierHasVisibleWidgets('topics') && (
+        <>
+          <TierHeader tier={tiers[1]} isOpen={openTiers.topics} onToggle={() => toggleTier('topics')} />
+          {openTiers.topics && (
+            <div className="space-y-4 md:space-y-6">
+              {showWidget('topic_landscape') && <TopicLandscape />}
+              {(showWidget('conversation_trends') || showWidget('question_cloud')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('conversation_trends') && <ConversationTrends />}
+                  {showWidget('question_cloud') && <QuestionCloud />}
+                </div>
+              )}
+              {showWidget('topic_lifecycle') && <TopicLifecycle />}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 3 ═══ */}
-      <TierHeader tier={tiers[2]} isOpen={openTiers.problems} onToggle={() => toggleTier('problems')} />
-      {openTiers.problems && (
-        <div className="space-y-4 md:space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <ProblemTracker />
-            <ServiceGapDetector />
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <SatisfactionByArea />
-            <MoodOverTime />
-          </div>
-          <EmotionalUrgencyIndex />
-        </div>
+      {tierHasVisibleWidgets('problems') && (
+        <>
+          <TierHeader tier={tiers[2]} isOpen={openTiers.problems} onToggle={() => toggleTier('problems')} />
+          {openTiers.problems && (
+            <div className="space-y-4 md:space-y-6">
+              {(showWidget('problem_tracker') || showWidget('service_gap_detector')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('problem_tracker') && <ProblemTracker />}
+                  {showWidget('service_gap_detector') && <ServiceGapDetector />}
+                </div>
+              )}
+              {(showWidget('satisfaction_by_area') || showWidget('mood_over_time')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('satisfaction_by_area') && <SatisfactionByArea />}
+                  {showWidget('mood_over_time') && <MoodOverTime />}
+                </div>
+              )}
+              {showWidget('emotional_urgency_index') && <EmotionalUrgencyIndex />}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 4 ═══ */}
-      <TierHeader tier={tiers[3]} isOpen={openTiers.channels} onToggle={() => toggleTier('channels')} />
-      {openTiers.channels && (
-        <div className="space-y-4 md:space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <TopChannels />
-            <KeyVoices />
-          </div>
-          <RecommendationTracker />
-          <InformationVelocity />
-        </div>
+      {tierHasVisibleWidgets('channels') && (
+        <>
+          <TierHeader tier={tiers[3]} isOpen={openTiers.channels} onToggle={() => toggleTier('channels')} />
+          {openTiers.channels && (
+            <div className="space-y-4 md:space-y-6">
+              {(showWidget('top_channels') || showWidget('key_voices')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('top_channels') && <TopChannels />}
+                  {showWidget('key_voices') && <KeyVoices />}
+                </div>
+              )}
+              {showWidget('recommendation_tracker') && <RecommendationTracker />}
+              {showWidget('information_velocity') && <InformationVelocity />}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 5 ═══ */}
-      <TierHeader tier={tiers[4]} isOpen={openTiers.who} onToggle={() => toggleTier('who')} />
-      {openTiers.who && (
-        <div className="space-y-4 md:space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <PersonaGallery />
-            <InterestRadar />
-          </div>
-        </div>
+      {tierHasVisibleWidgets('who') && (
+        <>
+          <TierHeader tier={tiers[4]} isOpen={openTiers.who} onToggle={() => toggleTier('who')} />
+          {openTiers.who && (
+            <div className="space-y-4 md:space-y-6">
+              {(showWidget('persona_gallery') || showWidget('interest_radar')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('persona_gallery') && <PersonaGallery />}
+                  {showWidget('interest_radar') && <InterestRadar />}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 6 ═══ */}
-      <TierHeader tier={tiers[5]} isOpen={openTiers.growth} onToggle={() => toggleTier('growth')} />
-      {openTiers.growth && (
-        <div className="space-y-4 md:space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <CommunityGrowthFunnel />
-            <RetentionRiskGauge />
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <DecisionStageTracker />
-            <EmergingInterests />
-          </div>
-          <NewVsReturningVoice />
-        </div>
+      {tierHasVisibleWidgets('growth') && (
+        <>
+          <TierHeader tier={tiers[5]} isOpen={openTiers.growth} onToggle={() => toggleTier('growth')} />
+          {openTiers.growth && (
+            <div className="space-y-4 md:space-y-6">
+              {(showWidget('community_growth_funnel') || showWidget('retention_risk_gauge')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('community_growth_funnel') && <CommunityGrowthFunnel />}
+                  {showWidget('retention_risk_gauge') && <RetentionRiskGauge />}
+                </div>
+              )}
+              {(showWidget('decision_stage_tracker') || showWidget('emerging_interests')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('decision_stage_tracker') && <DecisionStageTracker />}
+                  {showWidget('emerging_interests') && <EmergingInterests />}
+                </div>
+              )}
+              {showWidget('new_vs_returning_voice') && <NewVsReturningVoice />}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 7 ═══ */}
-      <TierHeader tier={tiers[6]} isOpen={openTiers.business} onToggle={() => toggleTier('business')} />
-      {openTiers.business && (
-        <div className="space-y-4 md:space-y-6">
-          <BusinessOpportunityTracker />
-          <JobMarketPulse />
-        </div>
+      {tierHasVisibleWidgets('business') && (
+        <>
+          <TierHeader tier={tiers[6]} isOpen={openTiers.business} onToggle={() => toggleTier('business')} />
+          {openTiers.business && (
+            <div className="space-y-4 md:space-y-6">
+              {showWidget('business_opportunity_tracker') && <BusinessOpportunityTracker />}
+              {showWidget('job_market_pulse') && <JobMarketPulse />}
+            </div>
+          )}
+        </>
       )}
 
       {/* ═══ TIER 8 ═══ */}
-      <TierHeader tier={tiers[7]} isOpen={openTiers.analytics} onToggle={() => toggleTier('analytics')} />
-      {openTiers.analytics && (
-        <div className="space-y-4 md:space-y-6">
-          <WeekOverWeekShifts />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            <SentimentByTopic />
-            <ContentPerformance />
-          </div>
-        </div>
+      {tierHasVisibleWidgets('analytics') && (
+        <>
+          <TierHeader tier={tiers[7]} isOpen={openTiers.analytics} onToggle={() => toggleTier('analytics')} />
+          {openTiers.analytics && (
+            <div className="space-y-4 md:space-y-6">
+              {showWidget('week_over_week_shifts') && <WeekOverWeekShifts />}
+              {(showWidget('sentiment_by_topic') || showWidget('content_performance')) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  {showWidget('sentiment_by_topic') && <SentimentByTopic />}
+                  {showWidget('content_performance') && <ContentPerformance />}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       <div className="h-4" />
