@@ -302,6 +302,7 @@ def _tier_predictive(_ctx: DashboardDateContext) -> dict:
             "churnSignals": predictive.get_churn_signals(_ctx),
             "growthFunnel": predictive.get_growth_funnel(_ctx),
             "decisionStages": predictive.get_decision_stages(_ctx),
+            "newVsReturningVoiceWidget": predictive.get_new_vs_returning_voice_widget(_ctx),
         }
     except Exception as e:
         logger.error(f"Tier predictive failed: {e}")

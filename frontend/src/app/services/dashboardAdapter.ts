@@ -40,6 +40,16 @@ const CATEGORY_RU: Record<string, string> = {
   'Community Life': 'Жизнь сообщества',
   'Housing & Infrastructure': 'Жилье и инфраструктура',
 };
+const WORK_SIGNAL_LABELS_EN: Record<string, string> = {
+  Job_Seeking: 'Job seeking',
+  Hiring: 'Hiring',
+  Partnership_Request: 'Partnership requests',
+};
+const WORK_SIGNAL_LABELS_RU: Record<string, string> = {
+  Job_Seeking: 'Поиск работы',
+  Hiring: 'Найм',
+  Partnership_Request: 'Поиск партнерства',
+};
 
 const TOPIC_RU: Record<string, string> = {
   'Political Protest': 'Политические протесты',
@@ -261,6 +271,14 @@ function pct(part: number, total: number): number {
   return Math.round((part / total) * 100);
 }
 
+function formatWorkSignalLabel(signalRaw: any, ru = false): string {
+  const signal = asStr(signalRaw, '').trim();
+  if (!signal) return ru ? 'Рабочий сигнал' : 'Work signal';
+  return ru
+    ? (WORK_SIGNAL_LABELS_RU[signal] ?? signal)
+    : (WORK_SIGNAL_LABELS_EN[signal] ?? signal);
+}
+
 function boundedTrend(current: number, previous: number, minSupport = MIN_SUPPORT_FOR_TREND) {
   const support = Math.max(0, current) + Math.max(0, previous);
   if (support < minSupport) {
@@ -331,6 +349,9 @@ export function adaptDashboardPayload(payload: any): AppData {
   const rawChannels = asArray(raw.communityChannels);
   const rawKeyVoices = asArray(raw.keyVoices);
   const rawEmerging = asArray(raw.emergingInterests);
+  const rawNewVsReturningWidget = raw && typeof raw.newVsReturningVoiceWidget === 'object' && raw.newVsReturningVoiceWidget
+    ? raw.newVsReturningVoiceWidget
+    : null;
   const rawTopPosts = asArray(raw.topPosts);
   const rawSentimentByTopic = asArray(raw.sentimentByTopic);
   const rawAllTopics = asArray(raw.allTopics);
@@ -1685,28 +1706,49 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawEmerging.length > 0) {
+      const moodLabel = (value: string, ru: boolean) => {
+        const normalized = value.toLowerCase();
+        if (normalized.includes('negative') || normalized.includes('urgent') || normalized.includes('sarcastic')) {
+          return ru ? 'Напряженный' : 'negative';
+        }
+        if (normalized.includes('positive')) {
+          return ru ? 'Позитивный' : 'positive';
+        }
+        return ru ? 'Нейтральный' : 'neutral';
+      };
       const mk = (r: any, ru: boolean) => {
-        const current = asNum(r.currentPosts, asNum(r.recentPosts, 0));
+        const current = asNum(r.currentMentions, asNum(r.currentPosts, asNum(r.recentPosts, 0)));
         const previous = asNum(r.previousPosts, 0);
         const computedGrowth = boundedTrend(current, previous);
         const support = asNum(r.growthSupport, computedGrowth.support);
         const backendGrowth = asNum(r.momentum, Number.NaN);
         const growthReliable = Number.isFinite(backendGrowth) && support >= MIN_SUPPORT_FOR_TREND;
+        const emergenceScore = clamp(Math.round(asNum(r.emergenceScore, growthReliable ? backendGrowth : computedGrowth.value)), 0, 100);
+        const backendOpportunity = asStr(r.opportunity, '').toLowerCase();
+        const opportunity = backendOpportunity === 'high' || backendOpportunity === 'medium' || backendOpportunity === 'low'
+          ? backendOpportunity
+          : emergenceScore >= 75 ? 'high' : emergenceScore >= 55 ? 'medium' : 'low';
         return {
-        topic: asStr(r.topic),
-        firstSeen: asStr(r.firstSeen).slice(0, 10),
-        growthRate: growthReliable
-          ? clamp(Math.round(backendGrowth), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
-          : computedGrowth.value,
-        currentVolume: current,
-        originChannel: asStr(r.originChannel, app.communityChannels[0]?.name || (ru ? 'Канал сообщества' : 'Community channel')),
-        mood: current > previous ? (ru ? 'Позитивный' : 'positive') : (ru ? 'Нейтральный' : 'neutral'),
-        opportunity: current >= 20 ? 'high' : current >= 10 ? 'medium' : 'low',
+          topic: asStr(r.topic),
+          firstSeen: asStr(r.firstSeen).slice(0, 10),
+          growthRate: growthReliable
+            ? clamp(Math.round(backendGrowth), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
+            : computedGrowth.value,
+          currentVolume: current,
+          originChannel: asStr(r.originChannel, app.communityChannels[0]?.name || (ru ? 'Канал сообщества' : 'Community channel')),
+          mood: moodLabel(asStr(r.mood, ''), ru),
+          opportunity,
+          emergenceScore,
+        };
       };
-      };
+      const rank = (a: any, b: any) => (
+        asNum(b.emergenceScore, 0) - asNum(a.emergenceScore, 0)
+        || b.growthRate - a.growthRate
+        || b.currentVolume - a.currentVolume
+      );
       app.emergingInterests = {
-        en: rawEmerging.slice(0, 12).map((r: any) => mk(r, false)),
-        ru: rawEmerging.slice(0, 12).map((r: any) => mk(r, true)),
+        en: rawEmerging.slice(0, 12).map((r: any) => mk(r, false)).sort(rank),
+        ru: rawEmerging.slice(0, 12).map((r: any) => mk(r, true)).sort(rank),
       };
     }
   } catch {
@@ -1716,13 +1758,22 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     const retentionRows = asArray(raw.retentionFactors);
     if (retentionRows.length > 0) {
-      const total = Math.max(1, retentionRows.reduce((s: number, r: any) => s + asNum(r.retainedUsers, 0), 0));
-      const mk = (r: any) => ({
-        factor: `${asStr(r.topic)} participation`,
-        score: clamp(Math.round(asNum(r.avgComments, 0) * 12), 10, 95),
-        weight: clamp(Math.round((asNum(r.retainedUsers, 0) / total) * 100), 5, 60),
-      });
-      app.retentionFactors = { en: retentionRows.map(mk).slice(0, 8), ru: retentionRows.map(mk).slice(0, 8) };
+      const overallScore = clamp(Math.round(asNum(retentionRows[0]?.baselineContinuityPct, 0)), 0, 100);
+      const mk = (r: any, ru: boolean) => {
+        const topic = normalizeTopicLabel(r.topic) || asStr(r.factor, ru ? 'Общие темы' : 'General topics');
+        return {
+          factor: ru ? (translateTopicRu(topic) || topic) : topic,
+          score: clamp(Math.round(asNum(r.continuityPct, overallScore)), 0, 100),
+          weight: clamp(Math.round(asNum(r.topicSharePct, 0)), 5, 60),
+          overallScore,
+          support: Math.max(0, asNum(r.previousUsers, 0)),
+          lift: Math.round(asNum(r.liftPct, 0)),
+        };
+      };
+      app.retentionFactors = {
+        en: retentionRows.slice(0, 8).map((r: any) => mk(r, false)),
+        ru: retentionRows.slice(0, 8).map((r: any) => mk(r, true)),
+      };
     }
   } catch {
     // Keep mock defaults.
@@ -1734,18 +1785,17 @@ export function adaptDashboardPayload(payload: any): AppData {
       const mk = (r: any, ru: boolean) => {
         const lostUsers = asNum(r.lostUsers, asNum(r.count, 0));
         const previousUsers = asNum(r.previousUsers, 0);
-        const computedTrend = boundedTrend(lostUsers, previousUsers);
-        const support = asNum(r.growthSupport, computedTrend.support);
-        const backendTrend = asNum(r.trendPct, Number.NaN);
-        const trend = Number.isFinite(backendTrend) && support >= MIN_SUPPORT_FOR_TREND
-          ? clamp(Math.round(backendTrend), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
-          : computedTrend.value;
+        const baseline = clamp(Math.round(asNum(r.baselineDropoffPct, 0)), 0, 100);
+        const rate = clamp(Math.round(asNum(r.dropoffPct, lostUsers > 0 && previousUsers > 0 ? (lostUsers / previousUsers) * 100 : 0)), 0, 100);
+        const trend = clamp(Math.round(asNum(r.excessRiskPct, Math.max(0, rate - baseline))), 0, MAX_ABS_TREND_PCT);
         const topic = normalizeTopicLabel(r.topic) || asStr(r.signal, ru ? 'Общие темы' : 'General topics');
         return {
-          signal: ru ? `Потеря активности: ${translateTopicRu(topic) || topic}` : `Activity loss: ${topic}`,
+          signal: ru ? (translateTopicRu(topic) || topic) : topic,
           count: lostUsers,
           trend,
-          severity: trend >= 20 ? 'rising' : trend >= 10 ? 'watch' : 'stable',
+          severity: trend >= 15 ? 'rising' : trend >= 8 ? 'watch' : 'stable',
+          baseline,
+          rate,
         };
       };
       app.churnSignals = { en: churnRows.slice(0, 10).map((r: any) => mk(r, false)), ru: churnRows.slice(0, 10).map((r: any) => mk(r, true)) };
@@ -1758,12 +1808,26 @@ export function adaptDashboardPayload(payload: any): AppData {
     const funnelRows = asArray(raw.growthFunnel);
     if (funnelRows.length > 0) {
       const byStage = Object.fromEntries(funnelRows.map((r: any) => [asStr(r.stage).toLowerCase(), asNum(r.users, 0)]));
-      const all = Math.max(1, Object.values(byStage).reduce((s: number, n: any) => s + asNum(n, 0), 0));
-      const reads = asNum(byStage.lurker, 0) + asNum(byStage.newcomer, 0);
-      const asks = asNum(byStage.participant, 0);
-      const helps = asNum(byStage.regular, 0);
-      const contributes = Math.round(helps * 0.6);
-      const leads = Math.max(1, Math.round(helps * 0.25));
+      const hasDirectStages = ['all', 'reads', 'asks', 'helps', 'contributes', 'leads']
+        .some((key) => Object.prototype.hasOwnProperty.call(byStage, key));
+      const all = hasDirectStages
+        ? Math.max(1, asNum(byStage.all, 0))
+        : Math.max(1, Object.values(byStage).reduce((s: number, n: any) => s + asNum(n, 0), 0));
+      const reads = hasDirectStages
+        ? asNum(byStage.reads, 0)
+        : asNum(byStage.lurker, 0) + asNum(byStage.newcomer, 0);
+      const asks = hasDirectStages
+        ? asNum(byStage.asks, 0)
+        : asNum(byStage.participant, 0);
+      const helps = hasDirectStages
+        ? asNum(byStage.helps, 0)
+        : asNum(byStage.regular, 0);
+      const contributes = hasDirectStages
+        ? asNum(byStage.contributes, 0)
+        : Math.round(helps * 0.6);
+      const leads = hasDirectStages
+        ? asNum(byStage.leads, 0)
+        : Math.max(1, Math.round(helps * 0.25));
       const mk = (ru: boolean) => [
         { stage: ru ? 'Все участники' : 'All Members', count: all, pct: 100, color: '#64748b', role: 'all' as const },
         { stage: ru ? 'Читает' : 'Reads', count: reads, pct: pct(reads, all), color: '#94a3b8', role: 'reads' as const },
@@ -1798,19 +1862,41 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
-    const base = app.trendData.slice(-8);
-    if (base.length > 0) {
-      app.voiceData = base.map((row: any, i: number) => {
-        const sum = Object.entries(row).reduce((s, [k, v]) => (k === 'week' ? s : s + asNum(v, 0)), 0);
-        return {
-          week: asStr(row.week, `W${i + 1}`),
-          newVoices: Math.max(5, Math.round(sum * 0.12)),
-          returning: Math.max(12, Math.round(sum * 0.28)),
-        };
-      });
+    const widgetBuckets = asArray(rawNewVsReturningWidget?.buckets);
+    const widgetTopTopics = asArray(rawNewVsReturningWidget?.topTopics);
+
+    if (widgetBuckets.length > 0) {
+      app.voiceData = widgetBuckets.map((row: any, i: number) => ({
+        week: formatTrendBucketLabel(asStr(row.week || row.bucketStart, `W${i + 1}`)),
+        newVoices: Math.max(0, asNum(row.newVoices, 0)),
+        returning: Math.max(0, asNum(row.returning, 0)),
+      }));
+    } else {
+      const base = app.trendData.slice(-8);
+      if (base.length > 0) {
+        app.voiceData = base.map((row: any, i: number) => {
+          const sum = Object.entries(row).reduce((s, [k, v]) => (k === 'week' ? s : s + asNum(v, 0)), 0);
+          return {
+            week: asStr(row.week, `W${i + 1}`),
+            newVoices: Math.max(5, Math.round(sum * 0.12)),
+            returning: Math.max(12, Math.round(sum * 0.28)),
+          };
+        });
+      }
     }
-    app.topNewTopics.en = app.emergingInterests.en.slice(0, 6).map((e) => ({ topic: e.topic, newVoices: Math.max(5, Math.round(e.currentVolume / 2)), pct: clamp(Math.round(e.growthRate / 2), 1, 100) }));
-    app.topNewTopics.ru = app.topNewTopics.en.map((e) => ({ ...e }));
+
+    if (widgetTopTopics.length > 0) {
+      const mapped = widgetTopTopics.map((row: any) => ({
+        topic: asStr(row.topic, 'Topic'),
+        newVoices: Math.max(0, asNum(row.newVoices, 0)),
+        pct: clamp(Math.round(asNum(row.pct, 0)), 0, 100),
+      }));
+      app.topNewTopics.en = mapped;
+      app.topNewTopics.ru = mapped.map((item) => ({ ...item }));
+    } else {
+      app.topNewTopics.en = app.emergingInterests.en.slice(0, 6).map((e) => ({ topic: e.topic, newVoices: Math.max(5, Math.round(e.currentVolume / 2)), pct: clamp(Math.round(e.growthRate / 2), 1, 100) }));
+      app.topNewTopics.ru = app.topNewTopics.en.map((e) => ({ ...e }));
+    }
   } catch {
     // Keep mock defaults.
   }
@@ -1848,26 +1934,40 @@ export function adaptDashboardPayload(payload: any): AppData {
         bySignal.set(signal, (bySignal.get(signal) || 0) + 1);
       });
       const total = Math.max(1, Array.from(bySignal.values()).reduce((s, n) => s + n, 0));
-      const items = Array.from(bySignal.entries()).map(([role, count]) => ({ role, count, pct: pct(count, total) })).sort((a, b) => b.count - a.count);
-      app.jobSeeking = { en: items, ru: items.map((i) => ({ ...i })) };
+      const buildItems = (ru: boolean) => Array.from(bySignal.entries())
+        .map(([signal, count]) => ({ role: formatWorkSignalLabel(signal, ru), count, pct: pct(count, total) }))
+        .sort((a, b) => b.count - a.count);
+      app.jobSeeking = { en: buildItems(false), ru: buildItems(true) };
     }
     const jtRows = asArray(raw.jobTrends);
     if (jtRows.length > 0) {
+      const maxCurrentUsers = jtRows.reduce((max: number, r: any) => Math.max(max, asNum(r.currentUsers, 0)), 0);
       const trends = jtRows
         .slice(0, 5)
-        .map((r: any, i: number) => {
-          const topic = asStr(r.topic, 'Work');
+        .map((r: any) => {
+          const topic = asStr(r.topic, 'Job_Seeking');
           const currentUsers = asNum(r.currentUsers, 0);
           const previousUsers = asNum(r.previousUsers, 0);
           const trend = boundedTrend(currentUsers, previousUsers).value;
+          const labelEn = formatWorkSignalLabel(topic, false);
+          const labelRu = formatWorkSignalLabel(topic, true);
+          const type = trend > 0
+            ? (currentUsers >= maxCurrentUsers ? 'hot' : 'growing')
+            : trend < 0 ? 'concern' : 'stable';
           return {
-            trend: `Demand around ${topic} is ${trend > 0 ? 'up' : trend < 0 ? 'down' : 'stable'} ${trend > 0 ? '+' : ''}${trend}% (${currentUsers} active users)`,
-            type: i === 0 ? 'hot' : trend > 0 ? 'growing' : trend < 0 ? 'concern' : 'stable',
+            en: {
+              trend: `${labelEn} signals are ${trend > 0 ? 'up' : trend < 0 ? 'down' : 'stable'} ${trend > 0 ? '+' : ''}${trend}% (${currentUsers} users)`,
+              type,
+            },
+            ru: {
+              trend: `Сигналы «${labelRu}» ${trend > 0 ? 'выросли' : trend < 0 ? 'снизились' : 'стабильны'} ${trend > 0 ? '+' : ''}${trend}% (${currentUsers} пользователей)`,
+              type,
+            },
           };
         });
       app.jobTrends = {
-        en: trends,
-        ru: trends.map((t) => ({ trend: `Спрос по теме ${t.trend.replace('Demand around ', '').replace(' shows', ':')}`, type: t.type })),
+        en: trends.map((t) => t.en),
+        ru: trends.map((t) => t.ru),
       };
     }
   } catch {
