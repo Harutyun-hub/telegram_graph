@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ _cache_lock = threading.Lock()
 _cached_payload: dict = {"problemBriefs": [], "serviceGapBriefs": []}
 _cache_ts: float = 0.0
 _state_cache: dict = {}
+_last_refresh_diagnostics: dict = {}
 
 _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
@@ -409,6 +411,45 @@ _SERVICE_KEYWORDS_BY_CATEGORY = {
 }
 
 
+def _new_refresh_diagnostics(*, force: bool = False) -> dict:
+    return {
+        "force": bool(force),
+        "exitReason": "",
+        "error": "",
+        "runtime": {
+            "hasOpenAIClient": bool(_client),
+            "featureEnabled": bool(_runtime_behavioral_feature_enabled()),
+        },
+        "stages": {
+            "problemCandidateRows": 0,
+            "serviceCandidateRows": 0,
+            "urgencyCandidateRows": 0,
+            "problemClusters": 0,
+            "serviceClusters": 0,
+            "changedProblemClusters": 0,
+            "changedServiceClusters": 0,
+            "problemCards": 0,
+            "serviceCards": 0,
+            "urgencyCards": 0,
+        },
+        "snapshot": {
+            "loadedProblemCards": 0,
+            "loadedServiceCards": 0,
+            "loadedUrgencyCards": 0,
+            "writeAttempted": False,
+            "writeSucceeded": False,
+            "readbackProblemCards": 0,
+            "readbackServiceCards": 0,
+            "readbackUrgencyCards": 0,
+        },
+    }
+
+
+def _store_refresh_diagnostics(diagnostics: dict) -> None:
+    global _last_refresh_diagnostics
+    _last_refresh_diagnostics = copy.deepcopy(diagnostics)
+
+
 def _as_str(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value
@@ -719,15 +760,19 @@ def _load_state() -> dict:
     return state
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict) -> bool:
     global _state_cache
     state["schemaVersion"] = _SCHEMA_VERSION
     state["updatedAt"] = _now_iso()
-    _write_versioned_runtime_json(_STATE_FOLDER, state)
-    _state_cache = state
+    saved = _write_versioned_runtime_json(_STATE_FOLDER, state)
+    if saved:
+        _state_cache = state
+        return True
+    logger.error("Behavioral cards state persistence failed verification")
+    return False
 
 
-def _load_snapshot_payload() -> dict:
+def _load_snapshot_payload(*, diagnostics: dict | None = None) -> dict:
     payload = _read_latest_runtime_json(
         _SNAPSHOT_FOLDER,
         default={"problemBriefs": [], "serviceGapBriefs": []},
@@ -737,10 +782,15 @@ def _load_snapshot_payload() -> dict:
     problems = payload.get("problemBriefs") if isinstance(payload.get("problemBriefs"), list) else []
     services = payload.get("serviceGapBriefs") if isinstance(payload.get("serviceGapBriefs"), list) else []
     urgency = payload.get("urgencyBriefs") if isinstance(payload.get("urgencyBriefs"), list) else []
+    if isinstance(diagnostics, dict):
+        snapshot = diagnostics.setdefault("snapshot", {})
+        snapshot["loadedProblemCards"] = len(problems)
+        snapshot["loadedServiceCards"] = len(services)
+        snapshot["loadedUrgencyCards"] = len(urgency)
     return {"problemBriefs": problems, "serviceGapBriefs": services, "urgencyBriefs": urgency}
 
 
-def _save_snapshot_payload(payload: dict, metadata: dict | None = None) -> None:
+def _save_snapshot_payload(payload: dict, metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
     out = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -750,7 +800,32 @@ def _save_snapshot_payload(payload: dict, metadata: dict | None = None) -> None:
     }
     if isinstance(metadata, dict) and metadata:
         out["meta"] = metadata
-    _write_versioned_runtime_json(_SNAPSHOT_FOLDER, out)
+    if isinstance(diagnostics, dict):
+        diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
+    saved = _write_versioned_runtime_json(_SNAPSHOT_FOLDER, out)
+    readback = _load_snapshot_payload(diagnostics=diagnostics) if saved else {}
+    readback_ok = (
+        len(readback.get("problemBriefs") or []) == len(out["problemBriefs"])
+        and len(readback.get("serviceGapBriefs") or []) == len(out["serviceGapBriefs"])
+        and len(readback.get("urgencyBriefs") or []) == len(out["urgencyBriefs"])
+    )
+    if saved and not readback_ok:
+        logger.error(
+            "Behavioral cards snapshot write verified key but latest snapshot readback mismatched | expected_problems={} readback_problems={} expected_services={} readback_services={} expected_urgency={} readback_urgency={}",
+            len(out["problemBriefs"]),
+            len(readback.get("problemBriefs") or []),
+            len(out["serviceGapBriefs"]),
+            len(readback.get("serviceGapBriefs") or []),
+            len(out["urgencyBriefs"]),
+            len(readback.get("urgencyBriefs") or []),
+        )
+    if isinstance(diagnostics, dict):
+        snapshot = diagnostics.setdefault("snapshot", {})
+        snapshot["readbackProblemCards"] = len(readback.get("problemBriefs") or [])
+        snapshot["readbackServiceCards"] = len(readback.get("serviceGapBriefs") or [])
+        snapshot["readbackUrgencyCards"] = len(readback.get("urgencyBriefs") or [])
+        snapshot["writeSucceeded"] = bool(saved and readback_ok)
+    return bool(saved and readback_ok)
 
 
 def _confidence_label(score: float) -> str:
@@ -1434,17 +1509,39 @@ def invalidate_behavioral_briefs_cache() -> None:
         _cache_ts = 0.0
 
 
+def get_behavioral_briefs_diagnostics() -> dict:
+    """Return the last behavioral materialization diagnostics snapshot."""
+    if not _last_refresh_diagnostics:
+        return _new_refresh_diagnostics(force=False)
+    return copy.deepcopy(_last_refresh_diagnostics)
+
+
+def refresh_behavioral_briefs_with_diagnostics(*, force: bool = False) -> dict:
+    """Run refresh and return diagnostics for debugging."""
+    refresh_behavioral_briefs(force=force)
+    return get_behavioral_briefs_diagnostics()
+
+
 def refresh_behavioral_briefs(*, force: bool = False) -> dict:
     """Materialize W8/W9 AI cards and persist snapshot/state for request-time reads."""
     global _cached_payload, _cache_ts
+    with _cache_lock:
+        last_good_payload = {
+            "problemBriefs": list(_cached_payload.get("problemBriefs") or []),
+            "serviceGapBriefs": list(_cached_payload.get("serviceGapBriefs") or []),
+            "urgencyBriefs": list(_cached_payload.get("urgencyBriefs") or []),
+        }
+    diagnostics = _new_refresh_diagnostics(force=force)
 
     lease_ttl = max(300, int(config.BEHAVIORAL_BRIEFS_REFRESH_MINUTES) * 60)
     if not force and not _acquire_refresh_lease(lease_ttl):
         logger.info("Behavioral cards materialization skipped: another instance holds active lease")
-        payload = _load_snapshot_payload()
+        diagnostics["exitReason"] = "lease_skipped"
+        payload = _load_snapshot_payload(diagnostics=diagnostics)
         with _cache_lock:
             _cached_payload = payload
             _cache_ts = time.time()
+        _store_refresh_diagnostics(diagnostics)
         return payload
 
     try:
@@ -1461,14 +1558,22 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
         urgency_candidates = behavioral.get_urgency_brief_candidates()
     except Exception as e:
         logger.warning(f"Behavioral cards candidate retrieval failed: {e}")
-        payload = _load_snapshot_payload()
+        diagnostics["exitReason"] = "candidate_error"
+        diagnostics["error"] = str(e)
+        payload = _load_snapshot_payload(diagnostics=diagnostics)
         with _cache_lock:
             _cached_payload = payload
             _cache_ts = time.time()
+        _store_refresh_diagnostics(diagnostics)
         return payload
+    diagnostics["stages"]["problemCandidateRows"] = len(problem_candidates)
+    diagnostics["stages"]["serviceCandidateRows"] = len(service_candidates)
+    diagnostics["stages"]["urgencyCandidateRows"] = len(urgency_candidates)
 
     problem_clusters = [c for c in _normalize_candidates(problem_candidates, "problem") if _support_gate(c, "problem")]
     service_clusters = [c for c in _normalize_candidates(service_candidates, "service") if _support_gate(c, "service")]
+    diagnostics["stages"]["problemClusters"] = len(problem_clusters)
+    diagnostics["stages"]["serviceClusters"] = len(service_clusters)
 
     state = _load_state()
     raw_problem_state = state.get("problemClusters")
@@ -1488,8 +1593,13 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
         state_clusters=service_state,
         force=force,
     )
+    diagnostics["stages"]["changedProblemClusters"] = changed_problem
+    diagnostics["stages"]["changedServiceClusters"] = changed_service
 
     urgency_cards = _synthesize_urgency_cards(urgency_candidates)
+    diagnostics["stages"]["problemCards"] = len(problem_cards)
+    diagnostics["stages"]["serviceCards"] = len(service_cards)
+    diagnostics["stages"]["urgencyCards"] = len(urgency_cards)
 
     payload = {
         "problemBriefs": problem_cards,
@@ -1499,32 +1609,50 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
 
     state["problemClusters"] = next_problem_state
     state["serviceClusters"] = next_service_state
-    _save_state(state)
-    _save_snapshot_payload(
-        payload,
-        metadata={
-            "activeProblemClusters": len(problem_clusters),
-            "changedProblemClusters": changed_problem,
-            "activeServiceClusters": len(service_clusters),
-            "changedServiceClusters": changed_service,
-            "problemCards": len(problem_cards),
-            "serviceCards": len(service_cards),
-        },
-    )
+    state_saved = _save_state(state)
+    snapshot_saved = False
+    if state_saved:
+        snapshot_saved = _save_snapshot_payload(
+            payload,
+            metadata={
+                "activeProblemClusters": len(problem_clusters),
+                "changedProblemClusters": changed_problem,
+                "activeServiceClusters": len(service_clusters),
+                "changedServiceClusters": changed_service,
+                "problemCards": len(problem_cards),
+                "serviceCards": len(service_cards),
+            },
+            diagnostics=diagnostics,
+        )
+    if not state_saved:
+        diagnostics["error"] = "Behavioral cards state could not be persisted and verified"
+    elif not snapshot_saved:
+        diagnostics["error"] = "Behavioral cards snapshot could not be persisted and verified"
 
-    with _cache_lock:
-        _cached_payload = payload
-        _cache_ts = time.time()
+    if state_saved and snapshot_saved:
+        with _cache_lock:
+            _cached_payload = payload
+            _cache_ts = time.time()
+        diagnostics["exitReason"] = "ok"
+        result_payload = payload
+    else:
+        diagnostics["exitReason"] = "persistence_verification_failed"
+        result_payload = last_good_payload
+        if any(result_payload.values()):
+            logger.warning("Behavioral cards refresh kept last known good in-memory cache after persistence verification failed")
+        else:
+            logger.warning("Behavioral cards refresh produced data but did not replace cache because persistence verification failed")
+    _store_refresh_diagnostics(diagnostics)
 
     logger.info(
         "Behavioral cards materialized | problems={} services={} active_problem_clusters={} active_service_clusters={}".format(
-            len(problem_cards),
-            len(service_cards),
+            len(result_payload.get("problemBriefs") or []),
+            len(result_payload.get("serviceGapBriefs") or []),
             len(problem_clusters),
             len(service_clusters),
         )
     )
-    return payload
+    return result_payload
 
 
 def get_behavioral_briefs(*, force_refresh: bool = False) -> dict:

@@ -445,12 +445,16 @@ def _load_state() -> dict:
     return state
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state: dict) -> bool:
     global _state_cache
     state["schemaVersion"] = _SCHEMA_VERSION
     state["updatedAt"] = _now_iso()
-    _write_versioned_runtime_json(_STATE_FOLDER, state)
-    _state_cache = state
+    saved = _write_versioned_runtime_json(_STATE_FOLDER, state)
+    if saved:
+        _state_cache = state
+        return True
+    logger.error("Question cards state persistence failed verification")
+    return False
 
 
 def _load_snapshot_cards(*, diagnostics: dict | None = None, stage: str = "loadedCards") -> list[dict]:
@@ -473,9 +477,17 @@ def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None, diagno
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
     saved = _write_versioned_runtime_json(_SNAPSHOT_FOLDER, payload)
+    readback_cards = _load_snapshot_cards(diagnostics=diagnostics, stage="readbackCards") if saved else []
+    readback_ok = len(readback_cards) == len(cards)
+    if saved and not readback_ok:
+        logger.error(
+            "Question cards snapshot write verified key but latest snapshot readback mismatched | expected_cards={} readback_cards={}",
+            len(cards),
+            len(readback_cards),
+        )
     if isinstance(diagnostics, dict):
-        diagnostics.setdefault("snapshot", {})["writeSucceeded"] = bool(saved)
-    return saved
+        diagnostics.setdefault("snapshot", {})["writeSucceeded"] = bool(saved and readback_ok)
+    return bool(saved and readback_ok)
 
 
 def _read_latest_runtime_json(folder: str, default: dict | None = None) -> dict:
@@ -1159,16 +1171,17 @@ def get_question_briefs_diagnostics() -> dict:
 
 def refresh_question_briefs_with_diagnostics(*, force: bool = False) -> dict:
     """Run refresh and return compact diagnostics for debugging."""
-    cards = refresh_question_briefs(force=force)
+    refresh_question_briefs(force=force)
     diagnostics = get_question_briefs_diagnostics()
-    diagnostics["stages"]["finalCards"] = len(cards)
-    diagnostics["cardsProduced"] = len(cards)
+    diagnostics["cardsProduced"] = diagnostics.get("stages", {}).get("finalCards", 0)
     return diagnostics
 
 
 def refresh_question_briefs(*, force: bool = False) -> list[dict]:
     """Materialize question cards and persist snapshot/state for request-time reads."""
     global _cached_cards, _cache_ts
+    with _cache_lock:
+        last_good_cards = list(_cached_cards)
     diagnostics = _new_refresh_diagnostics(force=force)
     logger.info(
         "Question cards refresh start | force={} ai_enabled={} ai_triage={} min_messages={} min_users={} min_channels={} min_confidence={}".format(
@@ -1344,8 +1357,10 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
     diagnostics["stages"]["reusedClusters"] = len(clusters) - len(changed_clusters)
 
     state["clusters"] = next_cluster_state
-    _save_state(state)
-    _save_snapshot_cards(
+    state_saved = _save_state(state)
+    snapshot_saved = False
+    if state_saved:
+        snapshot_saved = _save_snapshot_cards(
         final_cards,
         metadata={
             "activeClusters": len(clusters),
@@ -1355,17 +1370,32 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
         },
         diagnostics=diagnostics,
     )
-    diagnostics["snapshot"]["readbackCards"] = len(_load_snapshot_cards())
+    if not state_saved:
+        diagnostics["error"] = "Question cards state could not be persisted and verified"
+    elif not snapshot_saved:
+        diagnostics["error"] = "Question cards snapshot could not be persisted and verified"
 
-    with _cache_lock:
-        _cached_cards = final_cards
-        _cache_ts = time.time()
+    if state_saved and snapshot_saved:
+        with _cache_lock:
+            _cached_cards = final_cards
+            _cache_ts = time.time()
+        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
+        result_cards = final_cards
+    else:
+        diagnostics["exitReason"] = "persistence_verification_failed"
+        result_cards = last_good_cards
+        if last_good_cards:
+            logger.warning(
+                "Question cards refresh kept last known good in-memory cache after persistence verification failed | cached_cards={}",
+                len(last_good_cards),
+            )
+        else:
+            logger.warning("Question cards refresh produced data but did not replace cache because persistence verification failed")
 
-    diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
     _store_refresh_diagnostics(diagnostics)
     logger.info(
         "Question cards materialized | cards={} active_clusters={} changed_clusters={} reused_clusters={} accepted_clusters={} synthesized_rows={} first_rejection_bucket={}".format(
-            len(final_cards),
+            len(result_cards),
             len(clusters),
             len(changed_clusters),
             len(clusters) - len(changed_clusters),
@@ -1374,7 +1404,7 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
             _first_bucket(diagnostics["rejections"]["materialization"]) or _first_bucket(diagnostics["rejections"]["triage"]) or "none",
         )
     )
-    return final_cards
+    return result_cards
 
 
 def get_question_briefs(*, force_refresh: bool = False) -> list[dict]:
