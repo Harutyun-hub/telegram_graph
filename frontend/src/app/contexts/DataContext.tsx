@@ -24,12 +24,19 @@ import type { ReactNode } from 'react';
 import type { AppData } from '../types/data';
 import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
+import { useDashboardDateRange } from './DashboardDateRangeContext';
 
 interface DataContextValue {
   data: AppData;
   loading: boolean;
+  isRefreshing: boolean;
   hasLiveData: boolean;
   error: string | null;
+  dashboardMeta: {
+    trustedEndDate?: string;
+    freshnessStatus?: string;
+    rangeLabel?: string;
+  } | null;
   /** Call this to manually refresh data from the API */
   refresh: () => void;
 }
@@ -39,17 +46,21 @@ interface DataContextValue {
 const DataContext = createContext<DataContextValue>({
   data: createEmptyAppData(),
   loading: false,
+  isRefreshing: false,
   hasLiveData: false,
   error: null,
+  dashboardMeta: null,
   refresh: () => {},
 });
 
-const SNAPSHOT_KEY = 'radar.dashboard.snapshot.v2';
+function snapshotKeyForRange(from: string, to: string): string {
+  return `radar.dashboard.snapshot.v3:${from}:${to}`;
+}
 
-function loadSnapshot(): AppData | null {
+function loadSnapshot(from: string, to: string): AppData | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.sessionStorage.getItem(SNAPSHOT_KEY);
+    const raw = window.sessionStorage.getItem(snapshotKeyForRange(from, to));
     if (!raw) return null;
     return JSON.parse(raw) as AppData;
   } catch {
@@ -57,10 +68,10 @@ function loadSnapshot(): AppData | null {
   }
 }
 
-function saveSnapshot(data: AppData): void {
+function saveSnapshot(from: string, to: string, data: AppData): void {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify(data));
+    window.sessionStorage.setItem(snapshotKeyForRange(from, to), JSON.stringify(data));
   } catch {
     // ignore storage errors
   }
@@ -68,25 +79,36 @@ function saveSnapshot(data: AppData): void {
 
 // ── Data fetching logic ───────────────────────────────────────
 // Live backend mode: fetch dashboard payload and normalize with adapter.
-async function fetchData(signal?: AbortSignal): Promise<AppData> {
-  const payload = await apiFetch<any>('/dashboard', {
+async function fetchData(from: string, to: string, signal?: AbortSignal): Promise<{ data: AppData; meta: DataContextValue['dashboardMeta'] }> {
+  const params = new URLSearchParams({ from, to });
+  const payload = await apiFetch<any>(`/dashboard?${params.toString()}`, {
     method: 'GET',
     signal,
     headers: { Accept: 'application/json' },
     cache: 'no-store',
   });
-  return adaptDashboardPayload(payload);
+  return {
+    data: adaptDashboardPayload(payload),
+    meta: {
+      trustedEndDate: payload?.meta?.trustedEndDate,
+      freshnessStatus: payload?.meta?.freshness?.status,
+      rangeLabel: payload?.meta?.rangeLabel,
+    },
+  };
 }
 
 export function DataProvider({ children }: { children: ReactNode }) {
-  const initialSnapshot = loadSnapshot();
+  const { range, ready } = useDashboardDateRange();
+  const initialSnapshot = loadSnapshot(range.from, range.to);
   const [appData, setAppData] = useState<AppData>(initialSnapshot ?? createEmptyAppData());
   const [hasLiveData, setHasLiveData] = useState(Boolean(initialSnapshot));
-  const [loading, setLoading] = useState(!initialSnapshot);
+  const [loading, setLoading] = useState(!initialSnapshot || !ready);
   const [error, setError] = useState<string | null>(null);
+  const [dashboardMeta, setDashboardMeta] = useState<DataContextValue['dashboardMeta']>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const doFetch = useCallback(async () => {
+    if (!ready) return;
     // Cancel any in-flight request
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -96,12 +118,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const data = await fetchData(controller.signal);
+      const payload = await fetchData(range.from, range.to, controller.signal);
       // Only update if this request wasn't aborted
       if (!controller.signal.aborted) {
-        setAppData(data);
+        setAppData(payload.data);
+        setDashboardMeta(payload.meta);
         setHasLiveData(true);
-        saveSnapshot(data);
+        saveSnapshot(range.from, range.to, payload.data);
         setLoading(false);
       }
     } catch (err: any) {
@@ -113,19 +136,30 @@ export function DataProvider({ children }: { children: ReactNode }) {
         // Keep stale data visible — don't clear appData
       }
     }
-  }, []);
+  }, [range.from, range.to, ready]);
+
+  useEffect(() => {
+    const snapshot = loadSnapshot(range.from, range.to);
+    if (snapshot) {
+      setAppData(snapshot);
+      setHasLiveData(true);
+    }
+  }, [range.from, range.to]);
 
   // Initial fetch on mount
   useEffect(() => {
+    if (!ready) return undefined;
     doFetch();
     return () => { abortRef.current?.abort(); };
-  }, [doFetch]);
+  }, [doFetch, ready]);
 
   const value: DataContextValue = {
     data: appData,
-    loading,
+    loading: ready ? loading : true,
+    isRefreshing: ready && loading && hasLiveData,
     hasLiveData,
     error,
+    dashboardMeta,
     refresh: doFetch,
   };
 

@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
+import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 
 // ============================================================
@@ -59,6 +60,7 @@ function topicTileSpec(value: number, minValue: number, maxValue: number) {
 export function TopicLandscape() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const topicBubbles = data.topicBubbles[lang] ?? [];
   const [activeCategory, setActiveCategory] = useState<string>('__all__');
@@ -108,8 +110,8 @@ export function TopicLandscape() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Площадь плитки = число прямых упоминаний за последние 15 дней. Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.'
-          : 'Tile area = direct message mentions in the last 15 days. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.'}
+          ? `Площадь плитки = число прямых упоминаний в выбранном окне (${range.days} дн.). Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.`
+          : `Tile area = direct message mentions in the selected ${range.days}-day window. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.`}
       </p>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -264,8 +266,8 @@ export function TopicLandscape() {
 
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalMentions.toLocaleString()} прямых упоминаний за последние 15 дней по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
-          : `Evidence: ${totalMentions.toLocaleString()} direct mentions in the last 15 days across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
+          ? `Основа: ${totalMentions.toLocaleString()} прямых упоминаний в окне ${range.days} дн. по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
+          : `Evidence: ${totalMentions.toLocaleString()} direct mentions in the ${range.days}-day window across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
       </p>
     </div>
   );
@@ -279,6 +281,7 @@ export function TopicLandscape() {
 export function ConversationTrends() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const trendLines = data.trendLines[lang] ?? [];
   const trendData = data.trendData;
@@ -298,7 +301,7 @@ export function ConversationTrends() {
         <span className="text-xs text-gray-500">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
-        {ru ? 'Какие темы растут? Что угасает? Следите за трендами.' : 'What topics are rising? What\'s fading? Follow the momentum.'}
+        {ru ? `Какие темы растут? Что угасает? Траектория строится по выбранному окну (${range.days} дн.).` : `What topics are rising? What's fading? The trajectory follows the selected ${range.days}-day window.`}
       </p>
 
       <ResponsiveContainer width="100%" height={220}>
@@ -445,6 +448,7 @@ export function ContentEngagementHeatmap() {
 export function QuestionCloud() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const questionBriefs = data.questionBriefs[lang] ?? [];
   const questionCategories = data.questionCategories[lang] ?? [];
@@ -453,10 +457,30 @@ export function QuestionCloud() {
     return <EmptyWidget title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
   }
 
-  if (!questionBriefs.length) {
-    const totalSignals = questionCategories.reduce(
-      (sum, cat) => sum + cat.questions.reduce((inner, q) => inner + q.count, 0), 0,
-    );
+  if (questionBriefs.length) {
+    const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
+    const totalSignals = questionBriefs.reduce((sum, b) => sum + (b.demandSignals?.messages || 0), 0);
+    const avgConfidence = questionBriefs.length
+      ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
+      : 0;
+
+    const statusLabel = (status: string) => {
+      if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
+      if (status === 'well_covered') return ru ? 'Тема в целом покрыта' : 'Mostly covered';
+      return ru ? 'Частично покрыта' : 'Partially covered';
+    };
+
+    const statusClass = (status: string) => {
+      if (status === 'needs_guide') return 'bg-amber-50 border-amber-200 text-amber-900';
+      if (status === 'well_covered') return 'bg-emerald-50 border-emerald-200 text-emerald-900';
+      return 'bg-blue-50 border-blue-200 text-blue-900';
+    };
+
+    const confidenceLabel = (value: string) => {
+      if (value === 'high') return ru ? 'Высокая' : 'High';
+      if (value === 'medium') return ru ? 'Средняя' : 'Medium';
+      return ru ? 'Низкая' : 'Low';
+    };
 
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -464,82 +488,86 @@ export function QuestionCloud() {
           <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
             {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
           </h3>
-          <span className="text-xs text-gray-500">{ru ? 'Резервный режим' : 'Fallback mode'}</span>
+          <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
         </div>
         <p className="text-xs text-gray-500 mb-4">
           {ru
-            ? 'Пока AI-карточки недоступны, показываем сигналы вопросов по темам. Это не число повторов одной и той же формулировки.'
-            : 'AI question cards are unavailable, so this view shows topic-level question signals. This is not an exact repeat count of one phrasing.'}
+            ? 'Показываем AI-сводку вопросов: похожие запросы объединяются, формулируются в виде понятного вопроса и привязываются к реальным сообщениям.'
+            : 'Shows the AI question overview: similar asks are grouped, rewritten as a clear question, and tied back to real source messages.'}
         </p>
 
-        <div className="space-y-4">
-          {questionCategories.map((cat) => (
-            <div key={cat.category}>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-                <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{cat.category}</span>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+          {questionBriefs.map((brief) => (
+            <Link
+              key={brief.id}
+              to={(() => {
+                const params = new URLSearchParams();
+                params.set('topic', brief.sourceTopic || brief.topic);
+                params.set('view', 'questions');
+                if (brief.sampleEvidenceId) params.set('evidenceId', brief.sampleEvidenceId);
+                return `/topics?${params.toString()}`;
+              })()}
+              className={`rounded-xl border p-3 transition-colors hover:shadow-sm ${statusClass(brief.status)}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] opacity-80">{brief.category}</div>
+                  <div className="text-sm leading-snug" style={{ fontWeight: 700 }}>{brief.question}</div>
+                </div>
+                <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20" style={{ fontWeight: 600 }}>
+                  {confidenceLabel(brief.confidence)} {ru ? 'уверенность' : 'confidence'}
+                </span>
               </div>
-              <div className="grid grid-cols-2 gap-1.5">
-                {cat.questions.map((q) => (
-                  <Link
-                    key={`${cat.category}-${q.topic || q.q}`}
-                    to={(() => {
-                      const params = new URLSearchParams();
-                      params.set('topic', q.topic || q.q);
-                      params.set('view', 'questions');
-                      if (q.evidenceId) params.set('evidenceId', q.evidenceId);
-                      return `/topics?${params.toString()}`;
-                    })()}
-                    className="px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors bg-gray-50 border-gray-100 text-gray-700 hover:bg-gray-100"
-                  >
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="truncate" style={{ fontWeight: 600 }}>{q.topic || q.q}</span>
-                    </div>
-                    <span className="text-xs text-gray-500 mt-0.5 block truncate">
-                      {q.preview || (ru ? 'Нет зафиксированного вопроса в текущем срезе' : 'No captured question in current slice')}
-                    </span>
-                    <span className="text-xs text-gray-400 mt-0.5 block">
-                      {q.count.toLocaleString()} {ru ? 'сигналов вопроса (15д)' : 'question signals (15d)'}
-                    </span>
-                  </Link>
-                ))}
+
+              <p className="text-xs leading-relaxed mt-1.5 opacity-90">{brief.summary}</p>
+
+              <div className="text-[11px] mt-2 opacity-85">
+                {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
               </div>
-            </div>
+              <div className="text-[11px] mt-0.5 opacity-85">
+                {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}% · {statusLabel(brief.status)}
+              </div>
+            </Link>
           ))}
         </div>
 
-        <p className="text-xs text-gray-400 mt-3">
+        <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-amber-50 border border-amber-200" />
+            <span className="text-xs text-gray-500">{ru ? 'Нужен чёткий ответ/гайд' : 'Needs clear response/guide'}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-blue-50 border border-blue-200" />
+            <span className="text-xs text-gray-500">{ru ? 'Частично покрыто' : 'Partially covered'}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-emerald-50 border border-emerald-200" />
+            <span className="text-xs text-gray-500">{ru ? 'В целом покрыто' : 'Mostly covered'}</span>
+          </div>
+          <span className="text-xs text-amber-600 ml-auto" style={{ fontWeight: 500 }}>
+            {needsGuideCount} {ru ? 'карточек требуют гайд' : 'cards need guides'}
+          </span>
+        </div>
+        <p className="text-xs text-gray-400 mt-2">
           {ru
-            ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выборке за 15 дней.`
-            : `Evidence: ${totalSignals.toLocaleString()} question signals in the 15-day sample.`}
+            ? `AI-сводка: ${totalSignals.toLocaleString()} сигналов в выборке. Показаны карточки со средней/высокой уверенностью (средняя уверенность ${avgConfidence}%).`
+            : `AI overview: ${totalSignals.toLocaleString()} signals in sample. Showing medium/high-confidence cards (avg confidence ${avgConfidence}%).`}
         </p>
       </div>
     );
   }
 
-  const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
-  const totalSignals = questionBriefs.reduce((sum, b) => sum + (b.demandSignals?.messages || 0), 0);
-  const avgConfidence = questionBriefs.length
-    ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
-    : 0;
-
-  const statusLabel = (status: string) => {
-    if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
-    if (status === 'well_covered') return ru ? 'Тема в целом покрыта' : 'Mostly covered';
-    return ru ? 'Частично покрыта' : 'Partially covered';
-  };
-
-  const statusClass = (status: string) => {
-    if (status === 'needs_guide') return 'bg-amber-50 border-amber-200 text-amber-900';
-    if (status === 'well_covered') return 'bg-emerald-50 border-emerald-200 text-emerald-900';
-    return 'bg-blue-50 border-blue-200 text-blue-900';
-  };
-
-  const confidenceLabel = (value: string) => {
-    if (value === 'high') return ru ? 'Высокая' : 'High';
-    if (value === 'medium') return ru ? 'Средняя' : 'Medium';
-    return ru ? 'Низкая' : 'Low';
-  };
+  const totalSignals = questionCategories.reduce(
+    (sum, cat) => sum + cat.questions.reduce((inner, q) => inner + q.count, 0), 0,
+  );
+  const answeredCount = questionCategories.reduce(
+    (sum, cat) => sum + cat.questions.filter((q) => q.answered).length,
+    0,
+  );
+  const lowEvidenceCount = questionCategories.reduce(
+    (sum, cat) => sum + cat.questions.filter((q) => q.lowEvidence).length,
+    0,
+  );
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -547,70 +575,102 @@ export function QuestionCloud() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
         </h3>
-        <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
+        <span className="text-xs text-gray-500">
+          {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
+        </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Показываем общественные вопросы в форме вопроса: объединяем похожие запросы и привязываем каждую карточку к реальным сообщениям-источникам.'
-          : 'Shows societal questions in question form: similar asks are combined, and each card is tied to real source evidence.'}
+          ? 'Показываем живые сигналы вопросов из выбранного диапазона: объединяем похожие запросы по темам и оставляем привязку к реальным сообщениям.'
+          : 'Shows live question signals from the selected range: similar asks are grouped by topic and tied back to real source messages.'}
       </p>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
-        {questionBriefs.map((brief) => (
-          <Link
-            key={brief.id}
-            to={(() => {
-              const params = new URLSearchParams();
-              params.set('topic', brief.sourceTopic || brief.topic);
-              params.set('view', 'questions');
-              if (brief.sampleEvidenceId) params.set('evidenceId', brief.sampleEvidenceId);
-              return `/topics?${params.toString()}`;
-            })()}
-            className={`rounded-xl border p-3 transition-colors hover:shadow-sm ${statusClass(brief.status)}`}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[11px] opacity-80">{brief.category}</div>
-                <div className="text-sm leading-snug" style={{ fontWeight: 700 }}>{brief.question}</div>
-              </div>
-              <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20" style={{ fontWeight: 600 }}>
-                {confidenceLabel(brief.confidence)} {ru ? 'уверенность' : 'confidence'}
-              </span>
+      <div className="space-y-4">
+        {questionCategories.map((cat) => (
+          <div key={cat.category}>
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+              <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{cat.category}</span>
             </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+              {cat.questions.map((q) => (
+                (() => {
+                  const mainQuestion = q.preview || (ru ? 'В текущем окне вопрос не зафиксирован дословно.' : 'No verbatim question was captured in the current window.');
+                  const topicLabel = q.topic || q.q;
+                  return (
+                    <Link
+                      key={`${cat.category}-${topicLabel}`}
+                      to={(() => {
+                        const params = new URLSearchParams();
+                        params.set('topic', topicLabel);
+                        params.set('view', 'questions');
+                        if (q.evidenceId) params.set('evidenceId', q.evidenceId);
+                        return `/topics?${params.toString()}`;
+                      })()}
+                      className={`rounded-xl border p-3 transition-colors hover:shadow-sm ${
+                        q.lowEvidence
+                          ? 'bg-gray-50 border-gray-200 text-gray-700'
+                          : q.answered
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                            : 'bg-amber-50 border-amber-200 text-amber-900'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[11px] opacity-80">{cat.category}</div>
+                          <div className="text-[11px] opacity-80 mt-0.5">{topicLabel}</div>
+                        </div>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20 whitespace-nowrap" style={{ fontWeight: 600 }}>
+                          {q.lowEvidence
+                            ? (ru ? 'Мало данных' : 'Low evidence')
+                            : q.answered
+                              ? (ru ? 'Есть ответы' : 'Answered')
+                              : (ru ? 'Нужен ответ' : 'Needs answer')}
+                        </span>
+                      </div>
 
-            <p className="text-xs leading-relaxed mt-1.5 opacity-90">{brief.summary}</p>
+                      <p className="text-sm leading-snug mt-1.5" style={{ fontWeight: 700 }}>
+                        {mainQuestion}
+                      </p>
 
-            <div className="text-[11px] mt-2 opacity-85">
-              {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
+                      <div className="text-[11px] mt-2 opacity-85">
+                        {q.count.toLocaleString()} {ru ? 'сигналов вопроса' : 'question signals'}
+                      </div>
+                      <div className="text-[11px] mt-0.5 opacity-85">
+                        {q.lowEvidence
+                          ? (ru ? 'Метрика покрытия скрыта до накопления достаточной выборки.' : 'Coverage stays hidden until enough evidence accumulates.')
+                          : `${ru ? 'Покрытие ответа' : 'Response coverage'}: ${Math.round(q.coveragePct || 0)}%`}
+                      </div>
+                    </Link>
+                  );
+                })()
+              ))}
             </div>
-            <div className="text-[11px] mt-0.5 opacity-85">
-              {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}% · {statusLabel(brief.status)}
-            </div>
-          </Link>
+          </div>
         ))}
       </div>
 
       <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
         <div className="flex items-center gap-1.5">
           <div className="w-3 h-3 rounded bg-amber-50 border border-amber-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Нужен чёткий ответ/гайд' : 'Needs clear response/guide'}</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-blue-50 border border-blue-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Частично покрыто' : 'Partially covered'}</span>
+          <span className="text-xs text-gray-500">{ru ? 'Нужен чёткий ответ' : 'Needs clear response'}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <div className="w-3 h-3 rounded bg-emerald-50 border border-emerald-200" />
-          <span className="text-xs text-gray-500">{ru ? 'В целом покрыто' : 'Mostly covered'}</span>
+          <span className="text-xs text-gray-500">{ru ? 'Есть ответы в текущем окне' : 'Answered in the current window'}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-3 h-3 rounded bg-gray-50 border border-gray-200" />
+          <span className="text-xs text-gray-500">{ru ? 'Недостаточно данных' : 'Low evidence'}</span>
         </div>
         <span className="text-xs text-amber-600 ml-auto" style={{ fontWeight: 500 }}>
-          {needsGuideCount} {ru ? 'карточек требуют гайд' : 'cards need guides'}
+          {answeredCount} {ru ? 'тем с ответами' : 'topics already answered'}
         </span>
       </div>
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalSignals.toLocaleString()} сигналов в выборке. Показаны только карточки со средней/высокой уверенностью (средняя уверенность ${avgConfidence}%).`
-          : `Evidence: ${totalSignals.toLocaleString()} signals in sample. Only medium/high confidence cards are shown (avg confidence ${avgConfidence}%).`}
+          ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выбранном окне за ${range.days} дней. ${lowEvidenceCount.toLocaleString()} тем с малой выборкой не участвуют в покрытии.`
+          : `Evidence: ${totalSignals.toLocaleString()} question signals in the selected ${range.days}-day window. ${lowEvidenceCount.toLocaleString()} low-evidence topics are excluded from coverage scoring.`}
       </p>
     </div>
   );
@@ -726,6 +786,7 @@ export function QuestionAnswerGap() {
 export function TopicLifecycle() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const lifecycleStages = data.lifecycleStages[lang] ?? [];
   const [expandedKey, setExpandedKey] = useState('');
@@ -744,13 +805,13 @@ export function TopicLifecycle() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Показывает, где внимание к теме растёт, а где снижается, на основе прямых сигналов сообщений в пределах последних 15 дней.'
-          : 'Shows where attention is growing and where it is declining, based on direct message signals inside the last 15 days.'}
+          ? `Показывает, где внимание к теме растёт, а где снижается, на основе прямых сигналов сообщений в выбранном окне (${range.days} дн.).`
+          : `Shows where attention is growing and where it is declining, based on direct message signals in the selected ${range.days}-day window.`}
       </p>
       <p className="text-xs text-gray-400 mb-4">
         {ru
-          ? 'X/7д — объём обсуждений за последние 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема была активна в текущем 15-дневном окне.'
-          : 'X/7d = discussion volume in the last 7 days; Δ = change vs previous 7 days; d = how many days the topic was active in the current 15-day window.'}
+          ? `X/7д — объём обсуждений за последние 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема была активна в текущем окне (${range.days} дн.).`
+          : `X/7d = discussion volume in the last 7 days; Δ = change vs previous 7 days; d = how many days the topic was active in the current ${range.days}-day window.`}
       </p>
 
       <div className="grid grid-cols-2 gap-1 mb-4">

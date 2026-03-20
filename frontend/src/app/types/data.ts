@@ -41,6 +41,9 @@ export interface TrendingTopic {
   sourceTopic?: string;
   mentions: number;
   trend: number;
+  deltaMentions?: number;
+  trendReliable?: boolean;
+  growthSupport?: number;
   category: string;
   sentiment: string;
   sampleQuote: string;
@@ -207,6 +210,7 @@ export interface HeatmapData {
 
 export interface Problem {
   name: string;
+  sourceTopic?: string;
   mentions: number;
   severity: string;
   trend: number;
@@ -222,6 +226,7 @@ export interface ProblemCategory {
 
 export interface ServiceGap {
   service: string;
+  sourceTopic?: string;
   demand: number;
   supply: string;
   gap: number;

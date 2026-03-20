@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys, os
 import hashlib
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +37,7 @@ from api.aggregator import (
     get_dashboard_data, get_topics_page, get_channels_page,
     get_audience_page, invalidate_cache
 )
+from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard
 from api.freshness import get_freshness_snapshot
 from api import insights
@@ -306,11 +307,72 @@ def _load_admin_config() -> dict[str, Any]:
         return _default_admin_config()
 
 
+def _parse_snapshot_date(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _trusted_end_date_from_freshness(snapshot: dict) -> datetime.date:
+    now = datetime.now(timezone.utc)
+    sync = snapshot.get("pipeline", {}).get("sync", {})
+    process = snapshot.get("pipeline", {}).get("process", {})
+    drift = snapshot.get("drift", {})
+
+    candidate = _parse_snapshot_date(
+        sync.get("last_graph_sync_at")
+        or drift.get("neo4j_last_post_at")
+        or drift.get("supabase_last_post_at")
+        or snapshot.get("generated_at")
+    )
+    trusted_end = (candidate or (now - timedelta(days=1))).date()
+
+    sync_status = str(sync.get("status") or "unknown").lower()
+    process_status = str(process.get("status") or "unknown").lower()
+    sync_age_minutes = sync.get("age_minutes")
+    process_age_minutes = process.get("age_minutes")
+
+    if (
+        trusted_end == now.date() and (
+            sync_status != "healthy"
+            or process_status in {"warning", "stale"}
+            or (isinstance(sync_age_minutes, (int, float)) and sync_age_minutes > 180)
+            or (isinstance(process_age_minutes, (int, float)) and process_age_minutes > 180)
+        )
+    ):
+        trusted_end = trusted_end - timedelta(days=1)
+
+    return trusted_end
+
+
+def _dashboard_freshness_snapshot(force_refresh: bool = False) -> dict:
+    return get_freshness_snapshot(
+        supabase_writer,
+        scheduler_status=scraper_scheduler.status(),
+        force_refresh=force_refresh,
+    )
+
+
+def _default_dashboard_context(snapshot: Optional[dict] = None):
+    freshness_snapshot = snapshot or _dashboard_freshness_snapshot(force_refresh=False)
+    trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
+    from_date = (trusted_end - timedelta(days=14)).isoformat()
+    return build_dashboard_date_context(from_date, trusted_end.isoformat())
+
+
 async def _warm_dashboard_cache() -> None:
     """Warm dashboard cache in background after startup."""
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, get_dashboard_data)
+        freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+        ctx = _default_dashboard_context(freshness_snapshot)
+        await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")
@@ -730,14 +792,38 @@ async def health():
 
 
 @app.get("/api/dashboard")
-async def dashboard():
+async def dashboard(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """
     Full dashboard data — matches the frontend's AppData interface.
     Cached for 5 minutes. Call POST /api/cache/clear to refresh.
     """
     try:
+        freshness = _dashboard_freshness_snapshot(force_refresh=False)
+        trusted_end = _trusted_end_date_from_freshness(freshness)
+        if not from_date or not to_date:
+            ctx = _default_dashboard_context(freshness)
+        else:
+            ctx = build_dashboard_date_context(from_date, to_date)
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, get_dashboard_data)
+        dashboard_data = await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
+        return {
+            "data": dashboard_data,
+            "meta": {
+                "from": ctx.from_date.isoformat(),
+                "to": ctx.to_date.isoformat(),
+                "days": ctx.days,
+                "mode": "operational" if ctx.is_operational else "intelligence",
+                "rangeLabel": ctx.range_label,
+                "trustedEndDate": trusted_end.isoformat(),
+                "freshness": {
+                    "status": freshness.get("health", {}).get("status"),
+                    "generatedAt": freshness.get("generated_at"),
+                },
+            },
+        }
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -747,7 +833,8 @@ async def dashboard():
 async def ai_query(request: AIQueryRequest):
     """Lightweight AI endpoint backed by the live dashboard snapshot."""
     try:
-        dashboard_data = get_dashboard_data()
+        freshness = _dashboard_freshness_snapshot(force_refresh=False)
+        dashboard_data = get_dashboard_data(_default_dashboard_context(freshness))
         answer = _build_ai_answer(request.query, dashboard_data)
         return {
             "query": request.query,

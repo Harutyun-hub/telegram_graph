@@ -320,6 +320,7 @@ function stageStyle(stageRaw: string) {
 
 export function adaptDashboardPayload(payload: any): AppData {
   const raw = unwrapPayload(payload) || {};
+  const selectedRangeDays = Math.max(1, asNum(payload?.meta?.days, 1));
   const app = createEmptyAppData();
 
   const rawTrending = asArray(raw.trendingTopics);
@@ -447,21 +448,24 @@ export function adaptDashboardPayload(payload: any): AppData {
         const key = topicKey(topic);
         const category = asStr(row.category, 'General');
         const mentions = asNum(row.mentions || row.postMentions || row.totalPosts, 0);
-      const trend = asNum(
-        row.trendPct,
-        Number.isFinite(asNum(row.currentMentions, Number.NaN)) && Number.isFinite(asNum(row.previousMentions, Number.NaN))
-          ? (asNum(row.previousMentions, 0) > 0
-              ? Math.round(((asNum(row.currentMentions, 0) - asNum(row.previousMentions, 0)) / asNum(row.previousMentions, 1)) * 100)
-              : (asNum(row.currentMentions, 0) > 0 ? 100 : 0))
-          : asNum(row.trend, 0),
-      );
+        const currentMentions = asNum(row.currentMentions, mentions);
+        const previousMentions = asNum(row.previousMentions, 0);
+        const computedTrend = boundedTrend(currentMentions, previousMentions);
+        const growthSupport = asNum(row.growthSupport, computedTrend.support);
+        const backendTrend = asNum(row.trendPct, Number.NaN);
+        const backendReliable = Boolean(row.trendReliable) && Number.isFinite(backendTrend) && growthSupport >= MIN_SUPPORT_FOR_TREND;
         const quoteFromEvidence = snippet(row.sampleQuote, 180) || topicEvidenceTextByTopic.get(key) || topicQuestionEvidenceByTopic.get(key)?.[0] || '';
         return {
           id: i + 1,
           topic: ru ? translateTopicRu(topic) : topic,
           sourceTopic: topic,
-        mentions,
-        trend,
+          mentions,
+          deltaMentions: currentMentions - previousMentions,
+          trend: backendReliable
+            ? clamp(Math.round(backendTrend), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
+            : computedTrend.value,
+          trendReliable: backendReliable || computedTrend.reliable,
+          growthSupport,
           category: translateCategory(category, ru),
           sentiment: sentiments[i % sentiments.length],
           sampleQuote: quoteFromEvidence,
@@ -506,8 +510,8 @@ export function adaptDashboardPayload(payload: any): AppData {
     app.communityBrief.positiveIntentPct24h = positiveIntentPct;
     app.communityBrief.negativeIntentPct24h = negativeIntentPct;
 
-    app.communityBrief.mainBrief.en = `Last 24h snapshot: ${posts24h} posts and ${commentScopes24h} analyzed comment scopes. People talk mostly about ${topTopics.join(', ') || 'core community topics'}.`;
-    app.communityBrief.mainBrief.ru = `Снимок за 24 часа: ${posts24h} постов и ${commentScopes24h} контекстных групп комментариев. Чаще всего обсуждают: ${topTopicsRu.join(', ') || 'ключевые темы сообщества'}.`;
+    app.communityBrief.mainBrief.en = `Selected window snapshot (${selectedRangeDays}d): ${posts24h} posts and ${commentScopes24h} analyzed comment scopes. People talk mostly about ${topTopics.join(', ') || 'core community topics'}.`;
+    app.communityBrief.mainBrief.ru = `Снимок выбранного окна (${selectedRangeDays} дн.): ${posts24h} постов и ${commentScopes24h} контекстных групп комментариев. Чаще всего обсуждают: ${topTopicsRu.join(', ') || 'ключевые темы сообщества'}.`;
     app.communityBrief.expandedBrief.en = [
       `Intent split: ${positiveIntentPct}% positive, ${negativeIntentPct}% negative, ${neutralIntentPct}% neutral.`,
       'Every top topic can be opened with real post/comment evidence snippets.',
@@ -1116,6 +1120,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const trendReliable = Number.isFinite(backendTrend) && trendSupport >= MIN_SUPPORT_FOR_TREND;
         const entry = {
           name: topic,
+          sourceTopic: topic,
           mentions: asNum(r.affectedUsers, 0),
           severity: sev,
           trend: trendReliable
@@ -1132,6 +1137,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         }
         grouped.get(category)?.set(key, {
           ...existing,
+          sourceTopic: asStr(existing.sourceTopic, '') || asStr(entry.sourceTopic, ''),
           mentions: asNum(existing.mentions, 0) + asNum(entry.mentions, 0),
           evidenceCount: asNum(existing.evidenceCount, 0) + asNum(entry.evidenceCount, 0),
           trend: Math.abs(entry.trend) > Math.abs(existing.trend) ? entry.trend : existing.trend,
@@ -1146,7 +1152,10 @@ export function adaptDashboardPayload(payload: any): AppData {
       }));
       const ru = Array.from(grouped.entries()).map(([category, problemMap]) => ({
         category: CATEGORY_RU[category] || category,
-        problems: Array.from(problemMap.values()).sort((a, b) => b.mentions - a.mentions).slice(0, 5).map((p) => ({ ...p })),
+        problems: Array.from(problemMap.values()).sort((a, b) => b.mentions - a.mentions).slice(0, 5).map((p) => ({
+          ...p,
+          name: translateTopicRu(p.sourceTopic || p.name) || p.name,
+        })),
       }));
       app.problems = { en, ru };
     }
@@ -1172,6 +1181,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const topic = normalizeTopicLabel(r.topic);
         return {
           service: ru ? translateTopicRu(topic) : topic,
+          sourceTopic: topic,
           demand: asNum(r.demand, 0),
           supply,
           gap: clamp(Math.round(dissatisfaction), 0, 100),
@@ -1238,7 +1248,7 @@ export function adaptDashboardPayload(payload: any): AppData {
 
       if (hasBucketShape) {
         moodRows.forEach((r: any) => {
-          const weekKey = asStr(r.week) || `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
+          const weekKey = asStr(r.bucket || r.week) || `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
           const row = ensureWeekRow(weekKey);
           row.excited += asNum(r.excited, 0);
           row.satisfied += asNum(r.satisfied, 0);
@@ -1567,11 +1577,38 @@ export function adaptDashboardPayload(payload: any): AppData {
   try {
     const interestRows = asArray(raw.interests);
     if (interestRows.length > 0) {
-      const sorted = interestRows
-        .map((r: any) => ({ interest: asStr(r.topic), score: clamp(Math.round(asNum(r.users, 0) * 4), 5, 100) }))
-        .sort((a: any, b: any) => b.score - a.score)
-        .slice(0, 10);
-      app.interests = { en: sorted, ru: sorted.map((s: any) => ({ ...s })) };
+      const maxUsers = Math.max(...interestRows.map((r: any) => asNum(r.users, 0)), 1);
+      const deduped = new Map<string, { interestEn: string; interestRu: string; score: number; users: number }>();
+
+      interestRows.forEach((r: any) => {
+        const category = asStr(r.category, '').trim();
+        const topic = normalizeTopicLabel(r.topic);
+        const labelEn = category || topic;
+        if (!labelEn) return;
+        if (['general', 'null', 'none', 'unknown'].includes(labelEn.toLowerCase())) return;
+
+        const users = asNum(r.users, 0);
+        const explicitPct = Number(asNum(r.penetrationPct, Number.NaN));
+        const fallbackPct = pct(users, maxUsers);
+        const score = clamp(Math.round(Number.isFinite(explicitPct) ? explicitPct : fallbackPct), 0, 100);
+        const interestRu = category ? translateCategory(category, true) : translateTopicRu(topic);
+        const existing = deduped.get(labelEn.toLowerCase());
+
+        if (!existing || score > existing.score || (score === existing.score && users > existing.users)) {
+          deduped.set(labelEn.toLowerCase(), { interestEn: labelEn, interestRu, score, users });
+        }
+      });
+
+      const sorted = Array.from(deduped.values())
+        .sort((a, b) => (b.score - a.score) || (b.users - a.users) || a.interestEn.localeCompare(b.interestEn))
+        .slice(0, 8);
+
+      if (sorted.length > 0) {
+        app.interests = {
+          en: sorted.map(({ interestEn, score }) => ({ interest: interestEn, score })),
+          ru: sorted.map(({ interestRu, score }) => ({ interest: interestRu, score })),
+        };
+      }
     }
   } catch {
     // Keep mock defaults.
@@ -1648,15 +1685,25 @@ export function adaptDashboardPayload(payload: any): AppData {
 
   try {
     if (rawEmerging.length > 0) {
-      const mk = (r: any, ru: boolean) => ({
+      const mk = (r: any, ru: boolean) => {
+        const current = asNum(r.currentPosts, asNum(r.recentPosts, 0));
+        const previous = asNum(r.previousPosts, 0);
+        const computedGrowth = boundedTrend(current, previous);
+        const support = asNum(r.growthSupport, computedGrowth.support);
+        const backendGrowth = asNum(r.momentum, Number.NaN);
+        const growthReliable = Number.isFinite(backendGrowth) && support >= MIN_SUPPORT_FOR_TREND;
+        return {
         topic: asStr(r.topic),
         firstSeen: asStr(r.firstSeen).slice(0, 10),
-        growthRate: clamp(Math.round(asNum(r.momentum, 0)), -50, 300),
-        currentVolume: asNum(r.recentPosts, 0),
-        originChannel: app.communityChannels[0]?.name || (ru ? 'Канал сообщества' : 'Community channel'),
-        mood: asNum(r.momentum, 0) > 40 ? (ru ? 'Позитивный' : 'positive') : (ru ? 'Нейтральный' : 'neutral'),
-        opportunity: asNum(r.momentum, 0) > 60 ? 'high' : asNum(r.momentum, 0) > 30 ? 'medium' : 'low',
-      });
+        growthRate: growthReliable
+          ? clamp(Math.round(backendGrowth), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
+          : computedGrowth.value,
+        currentVolume: current,
+        originChannel: asStr(r.originChannel, app.communityChannels[0]?.name || (ru ? 'Канал сообщества' : 'Community channel')),
+        mood: current > previous ? (ru ? 'Позитивный' : 'positive') : (ru ? 'Нейтральный' : 'neutral'),
+        opportunity: current >= 20 ? 'high' : current >= 10 ? 'medium' : 'low',
+      };
+      };
       app.emergingInterests = {
         en: rawEmerging.slice(0, 12).map((r: any) => mk(r, false)),
         ru: rawEmerging.slice(0, 12).map((r: any) => mk(r, true)),
@@ -1685,11 +1732,18 @@ export function adaptDashboardPayload(payload: any): AppData {
     const churnRows = asArray(raw.churnSignals);
     if (churnRows.length > 0) {
       const mk = (r: any, ru: boolean) => {
-        const comments = asNum(r.totalComments, 0);
-        const trend = clamp(Math.round(comments / 2), 1, 40);
+        const lostUsers = asNum(r.lostUsers, asNum(r.count, 0));
+        const previousUsers = asNum(r.previousUsers, 0);
+        const computedTrend = boundedTrend(lostUsers, previousUsers);
+        const support = asNum(r.growthSupport, computedTrend.support);
+        const backendTrend = asNum(r.trendPct, Number.NaN);
+        const trend = Number.isFinite(backendTrend) && support >= MIN_SUPPORT_FOR_TREND
+          ? clamp(Math.round(backendTrend), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT)
+          : computedTrend.value;
+        const topic = normalizeTopicLabel(r.topic) || asStr(r.signal, ru ? 'Общие темы' : 'General topics');
         return {
-          signal: ru ? `Снижение активности в темах: ${asArray(r.topics).join(', ') || 'общие темы'}` : `Activity drop in: ${asArray(r.topics).join(', ') || 'general topics'}`,
-          count: comments,
+          signal: ru ? `Потеря активности: ${translateTopicRu(topic) || topic}` : `Activity loss: ${topic}`,
+          count: lostUsers,
           trend,
           severity: trend >= 20 ? 'rising' : trend >= 10 ? 'watch' : 'stable',
         };
@@ -1733,7 +1787,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         stage: asStr(r.intent),
         count: asNum(r.users, 0),
         pct: pct(asNum(r.users, 0), total),
-        trend: clamp(Math.round(asNum(r.users, 0) / 6), -20, 40),
+        trend: boundedTrend(asNum(r.users, 0), asNum(r.previousUsers, 0)).value,
         color: colors[i % colors.length],
         needs: ru ? 'Ясные инструкции и поддержка' : 'Clear guidance and support',
       });
@@ -1767,10 +1821,12 @@ export function adaptDashboardPayload(payload: any): AppData {
       const mk = (r: any, ru: boolean) => {
         const type = asStr(r.type, 'Opportunity');
         const signals = asNum(r.signals, 0);
+        const previousSignals = asNum(r.previousSignals, 0);
+        const trend = boundedTrend(signals, previousSignals).value;
         return {
           need: type,
           mentions: signals,
-          growth: clamp(Math.round(signals * 1.2), -20, 120),
+          growth: trend,
           sector: asStr(asArray(r.relatedTopics)[0], ru ? 'Общий' : 'General'),
           readiness: ru ? 'Подтверждено сообществом' : 'Community validated demand',
           sampleQuote: ru ? `Запрос на ${type} регулярно повторяется.` : `Requests for ${type} recur consistently.`,
@@ -1797,12 +1853,18 @@ export function adaptDashboardPayload(payload: any): AppData {
     }
     const jtRows = asArray(raw.jobTrends);
     if (jtRows.length > 0) {
-      const byTopic = new Map<string, number>();
-      jtRows.forEach((r: any) => byTopic.set(asStr(r.topic, 'Work'), (byTopic.get(asStr(r.topic, 'Work')) || 0) + asNum(r.posts, 0)));
-      const trends = Array.from(byTopic.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([topic, posts], i) => ({
-        trend: `Demand around ${topic} shows ${posts} tracked signals`,
-        type: i === 0 ? 'hot' : i < 3 ? 'growing' : 'stable',
-      }));
+      const trends = jtRows
+        .slice(0, 5)
+        .map((r: any, i: number) => {
+          const topic = asStr(r.topic, 'Work');
+          const currentUsers = asNum(r.currentUsers, 0);
+          const previousUsers = asNum(r.previousUsers, 0);
+          const trend = boundedTrend(currentUsers, previousUsers).value;
+          return {
+            trend: `Demand around ${topic} is ${trend > 0 ? 'up' : trend < 0 ? 'down' : 'stable'} ${trend > 0 ? '+' : ''}${trend}% (${currentUsers} active users)`,
+            type: i === 0 ? 'hot' : trend > 0 ? 'growing' : trend < 0 ? 'concern' : 'stable',
+          };
+        });
       app.jobTrends = {
         en: trends,
         ru: trends.map((t) => ({ trend: `Спрос по теме ${t.trend.replace('Demand around ', '').replace(' shows', ':')}`, type: t.type })),

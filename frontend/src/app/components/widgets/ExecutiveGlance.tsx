@@ -3,7 +3,15 @@ import { Link } from 'react-router';
 import { TrendingUp, Clock, ChevronRight, MessageCircle, Heart, Zap, BarChart3 } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
+import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+
+function selectedWindowLabel(days: number, ru: boolean): string {
+  if (days === 1) {
+    return ru ? '1 день' : '1-day window';
+  }
+  return ru ? `${days} дней` : `${days}-day window`;
+}
 
 // ============================================================
 // W1: COMMUNITY HEALTH SCORE
@@ -19,6 +27,7 @@ function getHealthColor(score: number) {
 export function CommunityHealthScore() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [animatedScore, setAnimatedScore] = useState(0);
   const healthData = data.communityHealth;
@@ -107,7 +116,7 @@ export function CommunityHealthScore() {
             {/* ✅ FIX: conditional icon and color based on delta direction */}
             <TrendingUp className={`w-3.5 h-3.5 ${delta >= 0 ? 'text-emerald-500' : 'text-red-500'}`} />
               <span className={`text-xs ${delta >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-               {ru ? `${delta > 0 ? '+' : ''}${delta} пунктов к предыдущим 24ч` : `${delta > 0 ? '+' : ''}${delta} pts vs previous 24h`}
+               {ru ? `${delta > 0 ? '+' : ''}${delta} пунктов к предыдущему такому же окну` : `${delta > 0 ? '+' : ''}${delta} pts vs previous matching window`}
               </span>
             </div>
           <div className="flex items-center gap-1">
@@ -185,6 +194,7 @@ const sentimentEmoji: Record<string, string> = {
 export function TrendingTopicsFeed() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [mode, setMode] = useState<'trending' | 'new'>('trending');
   const trendingTopics = data.trendingTopics[lang] ?? [];
@@ -197,6 +207,18 @@ export function TrendingTopicsFeed() {
   }, [mode, trendingNewTopics.length, trendingTopics.length]);
 
   const visibleTopics = mode === 'new' ? trendingNewTopics : trendingTopics;
+
+  const trendDeltaLabel = (delta?: number) => {
+    const safeDelta = Number.isFinite(delta) ? Math.round(delta as number) : 0;
+    if (ru) {
+      if (safeDelta > 0) return `+${safeDelta} к прошлому окну`;
+      if (safeDelta < 0) return `${safeDelta} к прошлому окну`;
+      return 'Без изменений';
+    }
+    if (safeDelta > 0) return `+${safeDelta} vs prev.`;
+    if (safeDelta < 0) return `${safeDelta} vs prev.`;
+    return 'No change';
+  };
 
   if (!visibleTopics.length) return <EmptyWidget title={ru ? 'Тренды прямо сейчас' : 'Trending Now'} />;
 
@@ -226,7 +248,11 @@ export function TrendingTopicsFeed() {
             </button>
           </div>
         </div>
-        <span className="text-xs text-gray-500">{ru ? (mode === 'new' ? 'Новые сигналы' : 'Последние 24 ч') : (mode === 'new' ? 'Emerging signals' : 'Last 24h')}</span>
+        <span className="text-xs text-gray-500">
+          {mode === 'new'
+            ? (ru ? 'Новые сигналы' : 'Emerging signals')
+            : selectedWindowLabel(range.days, ru)}
+        </span>
       </div>
 
       <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
@@ -259,7 +285,15 @@ export function TrendingTopicsFeed() {
                   <span className="text-xs text-gray-500">
                     {topic.mentions} {ru ? 'упоминаний' : 'mentions'}
                   </span>
-                  <span className={`text-xs ${topic.trend >= 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>{topic.trend > 0 ? '+' : ''}{topic.trend}%</span>
+                  {topic.trendReliable ? (
+                    <span className={`text-xs ${topic.trend >= 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>
+                      {trendDeltaLabel(topic.deltaMentions)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-400" style={{ fontWeight: 500 }}>
+                      {ru ? 'Мало данных' : 'Low evidence'}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -278,6 +312,7 @@ export function TrendingTopicsFeed() {
 export function CommunityBrief() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [expanded, setExpanded] = useState(false);
   const brief = data.communityBrief;
@@ -317,7 +352,7 @@ export function CommunityBrief() {
           <div className="flex items-center gap-1.5 mb-2">
             <BarChart3 className="w-3 h-3 text-sky-500" />
             <span className="text-xs text-sky-600" style={{ fontWeight: 600, letterSpacing: '0.03em' }}>
-              {ru ? 'Данные за последние 24 часа' : 'Last 24h data snapshot'}
+              {ru ? `Снимок за ${selectedWindowLabel(range.days, ru)}` : `Snapshot for the ${selectedWindowLabel(range.days, ru)}`}
             </span>
           </div>
           <p className="text-sm text-gray-800 leading-relaxed">

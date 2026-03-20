@@ -4,17 +4,21 @@ import {
   LayoutDashboard, Share2, Settings, Search, Bell, User, Hash, Radio,
   Calendar, Users, LogOut, ChevronRight, AlertTriangle, TrendingUp,
   Newspaper, CheckCheck, X, Shield, Menu, Globe, Sparkles, ChevronUp,
-  PlusCircle,
+  PlusCircle, Loader2,
 } from 'lucide-react';
 import { LogoIcon } from '@/app/components/Logo';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { Lang } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
+import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 import { AIAssistant } from '../components/AIAssistant';
+import {
+  differenceInDaysInclusive,
+  type DashboardDatePresetId,
+} from '../utils/dashboardDateRange';
 
 // ─── Helpers ─────────────────────────────────────────────────────
-function formatDate(date: Date) { return date.toISOString().split('T')[0]; }
 function formatDisplayDate(dateStr: string, lang: Lang) {
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -182,16 +186,10 @@ export function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { lang, setLang } = useLanguage();
-  const { loading, hasLiveData, error, refresh } = useData();
+  const { loading, isRefreshing, hasLiveData, error, refresh } = useData();
+  const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
   const ru = lang === 'ru';
   const isMobile = useIsMobile();
-
-  const today = formatDate(new Date());
-  const sevenDaysAgo = formatDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
-
-  // Date state
-  const [dateFrom, setDateFrom] = useState(sevenDaysAgo);
-  const [dateTo, setDateTo] = useState(today);
   // UI state
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showMobileDatePicker, setShowMobileDatePicker] = useState(false);
@@ -200,6 +198,8 @@ export function AdminLayout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showAI, setShowAI] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [draftFrom, setDraftFrom] = useState(range.from);
+  const [draftTo, setDraftTo] = useState(range.to);
 
   const [notifications, setNotifications] = useState<Notification[]>(INITIAL_NOTIFS);
 
@@ -208,14 +208,21 @@ export function AdminLayout() {
   const accountRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
 
-  const QUICK_RANGES = [
-    { label: ru ? 'Сегодня' : 'Today', getDates: () => { const t = new Date(); return { from: formatDate(t), to: formatDate(t) }; } },
-    { label: ru ? 'Последние 7 дней' : 'Last 7 days', getDates: () => { const t = new Date(); const f = new Date(t); f.setDate(f.getDate() - 7); return { from: formatDate(f), to: formatDate(t) }; } },
-    { label: ru ? 'Последние 30 дней' : 'Last 30 days', getDates: () => { const t = new Date(); const f = new Date(t); f.setDate(f.getDate() - 30); return { from: formatDate(f), to: formatDate(t) }; } },
-    { label: ru ? '3 месяца' : 'Last 3 months', getDates: () => { const t = new Date(); const f = new Date(t); f.setMonth(f.getMonth() - 3); return { from: formatDate(f), to: formatDate(t) }; } },
-    { label: ru ? '6 месяцев' : 'Last 6 months', getDates: () => { const t = new Date(); const f = new Date(t); f.setMonth(f.getMonth() - 6); return { from: formatDate(f), to: formatDate(t) }; } },
-    { label: ru ? 'За всё время' : 'All time', getDates: () => ({ from: '2024-01-01', to: formatDate(new Date()) }) },
+  const QUICK_RANGES: Array<{ id: Exclude<DashboardDatePresetId, 'custom'>; label: string }> = [
+    { id: 'today', label: ru ? 'Сегодня' : 'Today' },
+    { id: 'yesterday', label: ru ? 'Вчера' : 'Yesterday' },
+    { id: 'last_3_days', label: ru ? 'Последние 3 дня' : 'Last 3 days' },
+    { id: 'last_7_days', label: ru ? 'Последние 7 дней' : 'Last 7 days' },
+    { id: 'last_15_days', label: ru ? 'Последние 15 дней' : 'Last 15 days' },
+    { id: 'last_30_days', label: ru ? 'Последние 30 дней' : 'Last 30 days' },
+    { id: 'last_3_months', label: ru ? 'Последние 3 месяца' : 'Last 3 months' },
+    { id: 'last_6_months', label: ru ? 'Последние 6 месяцев' : 'Last 6 months' },
   ];
+
+  useEffect(() => {
+    setDraftFrom(range.from);
+    setDraftTo(range.to);
+  }, [range.from, range.to]);
 
   // All nav items (for drawer + desktop sidebar)
   const navItems = [
@@ -283,23 +290,28 @@ export function AdminLayout() {
   const handleLogout = useCallback(() => { setShowAccount(false); setDrawerOpen(false); navigate('/'); }, [navigate]);
   const goSettings = useCallback(() => navigate('/settings'), [navigate]);
 
-  const activeRange = QUICK_RANGES.find(r => { const d = r.getDates(); return d.from === dateFrom && d.to === dateTo; });
-  const daysDiff = Math.ceil((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / (1000 * 60 * 60 * 24));
+  const activeRange = QUICK_RANGES.find((preset) => preset.id === range.presetId);
+  const draftDays = differenceInDaysInclusive(draftFrom, draftTo);
   const springConfig = { type: 'spring', damping: 30, stiffness: 300 };
+
+  const applyCustomRange = useCallback(() => {
+    setCustomRange(draftFrom, draftTo);
+    setShowDatePicker(false);
+    setShowMobileDatePicker(false);
+  }, [draftFrom, draftTo, setCustomRange]);
 
   // Date picker content (shared between desktop dropdown and mobile sheet)
   const DatePickerContent = () => (
     <div className="flex gap-4 p-4">
       <div className="w-[140px] border-r border-gray-100 pr-4 space-y-1">
         <p className="text-xs text-gray-400 mb-2" style={{ fontWeight: 600 }}>{ru ? 'Быстрый выбор' : 'Quick Select'}</p>
-        {QUICK_RANGES.map(range => {
-          const d = range.getDates();
-          const isA = d.from === dateFrom && d.to === dateTo;
+        {QUICK_RANGES.map((preset) => {
+          const isA = preset.id === range.presetId;
           return (
-            <button key={range.label} onClick={() => { setDateFrom(d.from); setDateTo(d.to); }}
+            <button key={preset.id} onClick={() => setPreset(preset.id)}
               className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors ${isA ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-50'}`}
               style={isA ? { fontWeight: 500 } : {}}>
-              {range.label}
+              {preset.label}
             </button>
           );
         })}
@@ -309,22 +321,27 @@ export function AdminLayout() {
         <div className="space-y-2">
           <div>
             <label className="text-xs text-gray-500 mb-1 block">{ru ? 'С' : 'From'}</label>
-            <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} max={dateTo}
+            <input type="date" value={draftFrom} onChange={e => setDraftFrom(e.target.value)} max={draftTo}
               className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
           <div>
             <label className="text-xs text-gray-500 mb-1 block">{ru ? 'По' : 'To'}</label>
-            <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} min={dateFrom} max={today}
+            <input type="date" value={draftTo} onChange={e => setDraftTo(e.target.value)} min={draftFrom} max={trustedEndDate}
               className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
         </div>
         <div className="flex items-center justify-between pt-2 border-t border-gray-100">
-          <span className="text-xs text-gray-400">{ru ? `${daysDiff} дней` : `${daysDiff} days`}</span>
-          <button onClick={() => { setShowDatePicker(false); setShowMobileDatePicker(false); }}
+          <span className="text-xs text-gray-400">{ru ? `${draftDays} дней` : `${draftDays} days`}</span>
+          <button onClick={applyCustomRange}
             className="px-4 py-1.5 text-white text-xs rounded-lg transition-colors" style={{ fontWeight: 500, background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}>
             {ru ? 'Применить' : 'Apply'}
           </button>
         </div>
+        <p className="text-[11px] text-gray-400">
+          {ru
+            ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}`
+            : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`}
+        </p>
       </div>
     </div>
   );
@@ -394,15 +411,25 @@ export function AdminLayout() {
           {/* Date picker */}
           <div className="relative ml-4" ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)}
+              title={isRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
               className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-colors ${showDatePicker ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
               <Calendar className="w-4 h-4" />
-              {activeRange ? activeRange.label : `${formatDisplayDate(dateFrom, lang)} — ${formatDisplayDate(dateTo, lang)}`}
+              {activeRange ? activeRange.label : `${formatDisplayDate(range.from, lang)} — ${formatDisplayDate(range.to, lang)}`}
+              {isRefreshing && (
+                <Loader2
+                  className="w-4 h-4 animate-spin text-blue-600"
+                  aria-label={ru ? 'Обновление дашборда' : 'Updating dashboard'}
+                />
+              )}
             </button>
             {showDatePicker && (
               <div className="absolute right-0 top-full mt-2 w-[420px] bg-white border border-gray-200 rounded-xl shadow-xl z-50 overflow-hidden">
                 <DatePickerContent />
               </div>
             )}
+            <p className="mt-1 text-[11px] text-gray-400 text-right">
+              {freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`)}
+            </p>
           </div>
 
           {/* Right controls */}
@@ -487,11 +514,16 @@ export function AdminLayout() {
             {/* Date filter */}
             <button
               onClick={() => { setShowMobileDatePicker(v => !v); setShowNotifications(false); setShowAccount(false); }}
+              title={isRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
               className={`relative p-2 rounded-xl transition-colors ${showMobileDatePicker ? 'bg-blue-50' : 'hover:bg-gray-100 active:bg-gray-200'}`}
             >
               <Calendar className={`w-5 h-5 ${showMobileDatePicker ? 'text-blue-600' : 'text-gray-600'}`} />
-              {/* Dot when non-default range */}
-              {activeRange && activeRange.label !== (ru ? 'Последние 7 дней' : 'Last 7 days') && (
+              {isRefreshing ? (
+                <Loader2
+                  className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 animate-spin text-blue-600 bg-white rounded-full"
+                  aria-label={ru ? 'Обновление дашборда' : 'Updating dashboard'}
+                />
+              ) : ready && range.presetId !== 'last_15_days' && (
                 <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full" />
               )}
             </button>
@@ -727,7 +759,7 @@ export function AdminLayout() {
                   </span>
                 </div>
                 <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full" style={{ fontWeight: 500 }}>
-                  {activeRange ? activeRange.label : `${daysDiff}d`}
+                  {activeRange ? activeRange.label : `${range.days}d`}
                 </span>
               </div>
               <DatePickerContent />

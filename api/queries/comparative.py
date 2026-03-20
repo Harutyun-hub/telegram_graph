@@ -5,27 +5,33 @@ Provides: weeklyShifts, sentimentByTopic, topPosts, contentTypePerformance,
           vitalityIndicators, allTopics, allChannels, allAudience
 """
 from __future__ import annotations
+from api.dashboard_dates import DashboardDateContext
 from api.db import run_query, run_single
 
 
-def get_weekly_shifts() -> list[dict]:
+def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
     """Week-over-week changes in key metrics."""
     return run_query("""
         // This week's activity
-        MATCH (p:Post) WHERE p.posted_at > datetime() - duration('P7D')
+        MATCH (p:Post)
+        WHERE p.posted_at >= datetime($current_start) AND p.posted_at < datetime($current_end)
         WITH count(p) AS thisWeekPosts
-        OPTIONAL MATCH (c:Comment) WHERE c.posted_at > datetime() - duration('P7D')
+        OPTIONAL MATCH (c:Comment)
+        WHERE c.posted_at >= datetime($current_start) AND c.posted_at < datetime($current_end)
         WITH thisWeekPosts, count(c) AS thisWeekComments
-        OPTIONAL MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
+        OPTIONAL MATCH (u:User)
+        WHERE u.last_seen >= datetime($current_start) AND u.last_seen < datetime($current_end)
         WITH thisWeekPosts, thisWeekComments, count(u) AS thisWeekUsers
 
         // Last week's activity
-        OPTIONAL MATCH (p2:Post) WHERE p2.posted_at > datetime() - duration('P14D')
-                                  AND p2.posted_at <= datetime() - duration('P7D')
+        OPTIONAL MATCH (p2:Post)
+        WHERE p2.posted_at >= datetime($previous_start)
+          AND p2.posted_at < datetime($previous_end)
         WITH thisWeekPosts, thisWeekComments, thisWeekUsers,
              count(p2) AS lastWeekPosts
-        OPTIONAL MATCH (c2:Comment) WHERE c2.posted_at > datetime() - duration('P14D')
-                                     AND c2.posted_at <= datetime() - duration('P7D')
+        OPTIONAL MATCH (c2:Comment)
+        WHERE c2.posted_at >= datetime($previous_start)
+          AND c2.posted_at < datetime($previous_end)
         WITH thisWeekPosts, thisWeekComments, thisWeekUsers, lastWeekPosts,
              count(c2) AS lastWeekComments
 
@@ -38,32 +44,42 @@ def get_weekly_shifts() -> list[dict]:
                CASE WHEN lastWeekComments > 0
                     THEN round(100.0 * (thisWeekComments - lastWeekComments) / lastWeekComments, 1)
                     ELSE 0 END AS commentChange
-    """)
+    """, {
+        "current_start": ctx.start_at.isoformat(),
+        "current_end": ctx.end_at.isoformat(),
+        "previous_start": ctx.previous_start_at.isoformat(),
+        "previous_end": ctx.previous_end_at.isoformat(),
+    })
 
 
-def get_sentiment_by_topic() -> list[dict]:
+def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
     """Sentiment breakdown per topic."""
     return run_query("""
         CALL () {
             MATCH (p:Post)-[:TAGGED]->(t:Topic)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+              AND p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t:Topic)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+              AND c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
         }
         RETURN topic, sentiment, sum(count) AS count
         ORDER BY topic, count DESC
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
 
-def get_top_posts() -> list[dict]:
+def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
     """Highest-engagement posts."""
     return run_query("""
         MATCH (p:Post)-[:IN_CHANNEL]->(ch:Channel)
+        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         OPTIONAL MATCH (p)-[:TAGGED]->(t:Topic)
         WITH p, ch, collect(t.name)[..3] AS topics
         RETURN p.uuid AS uuid,
@@ -75,13 +91,14 @@ def get_top_posts() -> list[dict]:
                topics
         ORDER BY p.views DESC
         LIMIT 20
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
 
-def get_content_type_performance() -> list[dict]:
+def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     """Average engagement by content/media type."""
     return run_query("""
         MATCH (p:Post)
+        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         WITH coalesce(p.media_type, 'text') AS mediaType,
              count(p) AS count,
              avg(p.views) AS avgViews,
@@ -90,7 +107,7 @@ def get_content_type_performance() -> list[dict]:
                round(avgViews) AS avgViews,
                round(avgForwards) AS avgForwards
         ORDER BY avgViews DESC
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
 
 def get_vitality_indicators() -> dict:

@@ -3,6 +3,7 @@ import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadius
 import { User, MapPin } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
+import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 
 // ============================================================
@@ -101,6 +102,7 @@ export function PersonaGallery() {
 export function InterestRadar() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const interestData = data.interests[lang] ?? [];
 
@@ -109,6 +111,33 @@ export function InterestRadar() {
   // ✅ GENERIC: compute top 2 interests dynamically
   const sorted = [...interestData].sort((a, b) => b.score - a.score);
   const top2 = sorted.slice(0, 2);
+  const chartData = interestData.map((item) => ({
+    ...item,
+    interestLabel: item.interest.replace(/\s*&\s*/g, ' & ').split(' ').reduce<string[]>((lines, word) => {
+      const current = lines[lines.length - 1] || '';
+      if (!current || `${current} ${word}`.trim().length <= 18) {
+        if (current) {
+          lines[lines.length - 1] = `${current} ${word}`;
+        } else {
+          lines.push(word);
+        }
+      } else if (lines.length < 3) {
+        lines.push(word);
+      } else {
+        lines[lines.length - 1] = `${lines[lines.length - 1]} ${word}`;
+      }
+      return lines;
+    }, []),
+  }));
+  const maxScore = Math.max(...interestData.map((item) => item.score), 0);
+  const radialMax = Math.min(100, Math.max(25, Math.ceil((maxScore + 10) / 10) * 10));
+  const radialTicks = Array.from(new Set([
+    0,
+    Math.round(radialMax * 0.25),
+    Math.round(radialMax * 0.5),
+    Math.round(radialMax * 0.75),
+    radialMax,
+  ])).sort((a, b) => a - b);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -116,21 +145,68 @@ export function InterestRadar() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Интересы сообщества' : 'Community Interests'}
         </h3>
+        <span className="text-xs text-gray-500">
+          {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
+        </span>
       </div>
       <p className="text-xs text-gray-500 mb-3">
         {ru
-          ? 'Что вдохновляет сообщество за пределами повседневных потребностей — стройте контент и события здесь'
-          : 'What excites your community beyond daily needs — build content & events here'}
+          ? `Доля активных участников, обсуждавших каждую тему интереса в выбранном ${range.days}-дневном окне`
+          : `Share of active members discussing each interest area in the selected ${range.days}-day window`}
       </p>
 
-      <ResponsiveContainer width="100%" height={280}>
-        <RadarChart data={interestData}>
-          <PolarGrid stroke="#e5e7eb" />
-          <PolarAngleAxis dataKey="interest" tick={{ fontSize: 10 }} />
-          <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9 }} />
-          <Radar name={ru ? 'Уровень интереса' : 'Interest Level'} dataKey="score" stroke="#0d9488" fill="#0d9488" fillOpacity={0.2} strokeWidth={2} />
-        </RadarChart>
-      </ResponsiveContainer>
+      <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50/70 px-2 py-4">
+        <ResponsiveContainer width="100%" height={360}>
+          <RadarChart data={chartData} cx="50%" cy="50%" outerRadius="74%">
+            <PolarGrid stroke="#dbe3ee" radialLines={true} />
+            <PolarAngleAxis
+              dataKey="interest"
+              tick={({ x, y, payload, textAnchor }) => {
+                const entry = chartData.find((item) => item.interest === payload.value);
+                const lines = entry?.interestLabel || [String(payload.value)];
+                const lineHeight = 14;
+                const startY = y - ((lines.length - 1) * lineHeight) / 2;
+
+                return (
+                  <text x={x} y={startY} textAnchor={textAnchor} fill="#6b7280" fontSize={11} fontWeight={500}>
+                    {lines.map((line, index) => (
+                      <tspan key={`${payload.value}-${line}-${index}`} x={x} dy={index === 0 ? 0 : lineHeight}>
+                        {line}
+                      </tspan>
+                    ))}
+                  </text>
+                );
+              }}
+            />
+            <PolarRadiusAxis
+              angle={18}
+              domain={[0, radialMax]}
+              ticks={radialTicks}
+              tick={{ fontSize: 10, fill: '#94a3b8' }}
+              axisLine={false}
+              tickFormatter={(value) => `${value}%`}
+            />
+            <Radar
+              name={ru ? 'Доля активных участников' : 'Active-member share'}
+              dataKey="score"
+              stroke="#0f766e"
+              fill="#14b8a6"
+              fillOpacity={0.24}
+              strokeWidth={3}
+              dot={{ r: 3, fill: '#0f766e', strokeWidth: 0 }}
+            />
+          </RadarChart>
+        </ResponsiveContainer>
+
+        <div className="mt-2 flex items-center justify-between px-2">
+          <span className="text-[11px] text-slate-500">
+            {ru ? `Шкала отображения: 0-${radialMax}%` : `Display scale: 0-${radialMax}%`}
+          </span>
+          <span className="text-[11px] text-slate-500">
+            {ru ? `Пик окна: ${maxScore}%` : `Window peak: ${maxScore}%`}
+          </span>
+        </div>
+      </div>
 
       <div className="grid grid-cols-2 gap-2 mt-2">
         {[...interestData].sort((a, b) => b.score - a.score).slice(0, 4).map((item) => (
@@ -145,8 +221,8 @@ export function InterestRadar() {
       <div className="mt-3 bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
         <p className="text-xs text-teal-800">
           {top2.length >= 2 && (ru
-            ? <><span style={{ fontWeight: 600 }}>Совет по контенту:</span> {top2[0].interest} ({top2[0].score}%) и {top2[1].interest} ({top2[1].score}%) — главные драйверы ввлечённости. Организуйте события и обсуждения вокруг этих тем для максимального сплочения сообщества.</>
-            : <><span style={{ fontWeight: 600 }}>Content tip:</span> {top2[0].interest} ({top2[0].score}%) and {top2[1].interest} ({top2[1].score}%) are the top engagement drivers. Organize events and discussion threads here for maximum community bonding.</>
+            ? <><span style={{ fontWeight: 600 }}>Приоритет:</span> {top2[0].interest} ({top2[0].score}%) и {top2[1].interest} ({top2[1].score}%) имеют наибольший охват среди активных участников в текущем выбранном окне. Ставьте эти темы в приоритет для контента, событий и экспертных обсуждений.</>
+            : <><span style={{ fontWeight: 600 }}>Priority signal:</span> {top2[0].interest} ({top2[0].score}%) and {top2[1].interest} ({top2[1].score}%) have the highest active-member penetration in the current selected window. Prioritize these areas for content, events, and expert participation.</>
           )}
         </p>
       </div>

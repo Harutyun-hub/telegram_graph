@@ -5,7 +5,10 @@ Provides: topicBubbles, trendLines, heatmap, questionCategories,
 questionBriefCandidates, lifecycleStages
 """
 from __future__ import annotations
+from datetime import timedelta
+
 import config
+from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
 
@@ -13,8 +16,25 @@ RETENTION_DAYS = max(8, int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15
 COMPARE_DAYS = 7
 LIFECYCLE_BASELINE_DAYS = max(1, RETENTION_DAYS - COMPARE_DAYS)
 
+def _strategic_window_params(ctx: DashboardDateContext) -> dict[str, object]:
+    compare_days = min(COMPARE_DAYS, max(1, ctx.days - 1))
+    current_start = max(ctx.start_at, ctx.end_at - timedelta(days=compare_days))
+    previous_end = current_start
+    previous_start = max(ctx.start_at, previous_end - timedelta(days=compare_days))
+    baseline_days = max(1, int((previous_end - previous_start).total_seconds() // 86400))
+    return {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+        "current_start": current_start.isoformat(),
+        "previous_start": previous_start.isoformat(),
+        "previous_end": previous_end.isoformat(),
+        "compare_days": compare_days,
+        "baseline_days": baseline_days,
+        "total_days": ctx.days,
+    }
 
-def get_topic_bubbles() -> list[dict]:
+
+def get_topic_bubbles(ctx: DashboardDateContext) -> list[dict]:
     """Topic bubble chart: recent topic prominence + reliable short-term growth."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -22,25 +42,35 @@ def get_topic_bubbles() -> list[dict]:
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             RETURN
                 count(DISTINCT p) AS postMentionsRecent,
-                count(DISTINCT CASE WHEN p.posted_at > datetime() - duration({days: $compare_days}) THEN p END) AS postsCurrent,
                 count(DISTINCT CASE
-                    WHEN p.posted_at > datetime() - duration({days: $retention_days})
-                     AND p.posted_at <= datetime() - duration({days: $compare_days})
+                    WHEN p.posted_at >= datetime($current_start)
+                     AND p.posted_at < datetime($end)
+                    THEN p
+                END) AS postsCurrent,
+                count(DISTINCT CASE
+                    WHEN p.posted_at >= datetime($previous_start)
+                     AND p.posted_at < datetime($previous_end)
                     THEN p
                 END) AS postsPrevious
         }
         CALL (t) {
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             RETURN
                 count(DISTINCT c) AS commentMentionsRecent,
-                count(DISTINCT CASE WHEN c.posted_at > datetime() - duration({days: $compare_days}) THEN c END) AS commentsCurrent,
                 count(DISTINCT CASE
-                    WHEN c.posted_at > datetime() - duration({days: $retention_days})
-                     AND c.posted_at <= datetime() - duration({days: $compare_days})
+                    WHEN c.posted_at >= datetime($current_start)
+                     AND c.posted_at < datetime($end)
+                    THEN c
+                END) AS commentsCurrent,
+                count(DISTINCT CASE
+                    WHEN c.posted_at >= datetime($previous_start)
+                     AND c.posted_at < datetime($previous_end)
                     THEN c
                 END) AS commentsPrevious
         }
@@ -65,13 +95,10 @@ def get_topic_bubbles() -> list[dict]:
                     ELSE round(100.0 * (mentions7d - mentionsPrev7d) / (mentionsPrev7d + 3), 1)
                 END AS growth7dPct
         ORDER BY mentionCount DESC
-    """, {
-        "retention_days": RETENTION_DAYS,
-        "compare_days": COMPARE_DAYS,
-    })
+    """, _strategic_window_params(ctx))
 
 
-def get_trend_lines() -> list[dict]:
+def get_trend_lines(ctx: DashboardDateContext) -> list[dict]:
     """Daily conversation counts (posts + comments) per topic for the clean retention window."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
@@ -79,13 +106,15 @@ def get_trend_lines() -> list[dict]:
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             WITH toString(date(p.posted_at)) AS bucket,
                  count(DISTINCT p) AS c
             RETURN bucket, c
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             WITH toString(date(c.posted_at)) AS bucket,
                  count(DISTINCT c) AS c
             RETURN bucket, c
@@ -94,9 +123,7 @@ def get_trend_lines() -> list[dict]:
         WHERE mentions > 0
         RETURN topic, bucket, mentions AS posts
         ORDER BY topic, bucket
-    """, {
-        "retention_days": RETENTION_DAYS,
-    })
+    """, _strategic_window_params(ctx))
 
 
 def get_heatmap() -> list[dict]:
@@ -110,7 +137,7 @@ def get_heatmap() -> list[dict]:
     """)
 
 
-def get_question_categories() -> list[dict]:
+def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
     """Real question messages by topic with deduplication and response proxy."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -119,7 +146,8 @@ def get_question_categories() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
@@ -129,7 +157,8 @@ def get_question_categories() -> list[dict]:
                    p.posted_at AS ts
             UNION
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -160,7 +189,8 @@ def get_question_categories() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
@@ -169,7 +199,8 @@ def get_question_categories() -> list[dict]:
                    p.posted_at AS ts
             UNION
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -190,7 +221,7 @@ def get_question_categories() -> list[dict]:
             RETURN
                 count(DISTINCT u) AS intent_seekers,
                 count(DISTINCT CASE
-                    WHEN r.last_seen > datetime() - duration('P14D') THEN u
+                    WHEN r.last_seen >= datetime($previous_start) THEN u
                 END) AS responded_intent_seekers
         }
 
@@ -231,9 +262,7 @@ def get_question_categories() -> list[dict]:
             coalesce(latest_sample, forms[0].sample) AS sampleQuestion,
             coalesce(latest_sample_id, forms[0].sample_id) AS sampleQuestionId
         ORDER BY seekers DESC, category, topic
-    """, {
-        "retention_days": RETENTION_DAYS,
-    })
+    """, _strategic_window_params(ctx))
 
 
 def get_question_brief_candidates(
@@ -372,7 +401,7 @@ def get_question_brief_candidates(
     )
 
 
-def get_lifecycle_stages() -> list[dict]:
+def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
     """Topic lifecycle using direct-message signals inside the clean retention window."""
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
@@ -381,7 +410,8 @@ def get_lifecycle_stages() -> list[dict]:
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $retention_days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             RETURN
                 collect({
                     id: coalesce(p.uuid, elementId(p)),
@@ -390,7 +420,8 @@ def get_lifecycle_stages() -> list[dict]:
                 }) AS postRows
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $retention_days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             RETURN
                 collect({
                     id: coalesce(c.uuid, elementId(c)),
@@ -403,11 +434,11 @@ def get_lifecycle_stages() -> list[dict]:
         WHERE size(rows) > 0
         WITH t, rows,
              size(rows) AS totalSignals,
-             size([r IN rows WHERE r.ts > datetime() - duration({days: $compare_days}) | 1]) AS recentSignals,
+             size([r IN rows WHERE r.ts >= datetime($current_start) AND r.ts < datetime($end) | 1]) AS recentSignals,
              size([
                 r IN rows
-                WHERE r.ts > datetime() - duration({days: $retention_days})
-                  AND r.ts <= datetime() - duration({days: $compare_days})
+                WHERE r.ts >= datetime($previous_start)
+                  AND r.ts < datetime($previous_end)
                 | 1
              ]) AS previousSignals,
              reduce(minTs = null, r IN rows |
@@ -434,7 +465,7 @@ def get_lifecycle_stages() -> list[dict]:
              recentSignals,
              previousSignals
         WITH topic, totalSignals, activeDays, peakDay, firstSeen, lastSeen, recentSignals, previousSignals,
-             duration.between(coalesce(firstSeen, datetime()), datetime()).days AS ageDays,
+             duration.between(coalesce(firstSeen, datetime($end)), datetime($end)).days AS ageDays,
              round(
                  100.0 * (
                      toFloat(recentSignals) / toFloat(CASE WHEN peakDay > 0 THEN peakDay ELSE 1 END)
@@ -443,7 +474,7 @@ def get_lifecycle_stages() -> list[dict]:
              ) AS peakRatioPct,
              round(
                  100.0 * (
-                     toFloat(activeDays) / toFloat($retention_days)
+                     toFloat(activeDays) / toFloat($total_days)
                  ),
                  1
              ) AS persistencePct,
@@ -463,7 +494,7 @@ def get_lifecycle_stages() -> list[dict]:
                  1
              ) AS stageConfidence,
              round(toFloat(recentSignals), 1) AS avg2w,
-             round(toFloat(totalSignals) / toFloat($retention_days), 1) AS avg4w,
+             round(toFloat(totalSignals) / toFloat($total_days), 1) AS avg4w,
              round(toFloat(previousSignals) / toFloat($baseline_days), 1) AS avgPrev4w,
              0.0 AS wowPct,
              0.0 AS accelerationPct
@@ -510,8 +541,4 @@ def get_lifecycle_stages() -> list[dict]:
             END,
             weeklyCurrent DESC,
             stageConfidence DESC
-    """, {
-        "retention_days": RETENTION_DAYS,
-        "compare_days": COMPARE_DAYS,
-        "baseline_days": LIFECYCLE_BASELINE_DAYS,
-    })
+    """, _strategic_window_params(ctx))

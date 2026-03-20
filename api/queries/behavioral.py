@@ -4,6 +4,7 @@ behavioral.py — Tier 3: Problems & Satisfaction (pain point monitoring)
 Provides: problems, serviceGaps, satisfactionAreas, moodData, urgencySignals
 """
 from __future__ import annotations
+from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
 
@@ -37,7 +38,16 @@ _SERVICE_REQUEST_HINTS = [
 ]
 
 
-def get_problems() -> list[dict]:
+def _window_params(ctx: DashboardDateContext) -> dict[str, object]:
+    return {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+        "previous_start": ctx.previous_start_at.isoformat(),
+        "previous_end": ctx.previous_end_at.isoformat(),
+    }
+
+
+def get_problems(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level problem signals from message-level sentiment evidence."""
     return run_query(
         """
@@ -48,7 +58,8 @@ def get_problems() -> list[dict]:
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND s.label IN $negative_labels
             OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
@@ -59,7 +70,8 @@ def get_problems() -> list[dict]:
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND s.label IN $negative_labels
             OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
@@ -75,9 +87,9 @@ def get_problems() -> list[dict]:
              count(DISTINCT msgId) AS affectedSignals,
              count(DISTINCT CASE WHEN primaryLabel = 'Urgent' THEN msgId END) AS urgentSignals,
              count(DISTINCT CASE WHEN distressHit = 1 THEN msgId END) AS distressSignals,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P7D') THEN msgId END) AS affectedThisWeek,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
-                                   AND ts <= datetime() - duration('P7D') THEN msgId END) AS affectedPrevWeek,
+             count(DISTINCT CASE WHEN ts >= datetime($start) AND ts < datetime($end) THEN msgId END) AS affectedThisWeek,
+             count(DISTINCT CASE WHEN ts >= datetime($previous_start)
+                                   AND ts < datetime($previous_end) THEN msgId END) AS affectedPrevWeek,
              collect(CASE WHEN txt <> '' THEN txt END)[0] AS sampleText
         WHERE affectedSignals >= 3
         WITH t, cat, affectedSignals, urgentSignals, distressSignals, affectedThisWeek, affectedPrevWeek,
@@ -110,11 +122,12 @@ def get_problems() -> list[dict]:
             "noise": _NOISY_TOPIC_KEYS,
             "negative_labels": _NEGATIVE_SENTIMENTS,
             "distress_tags": _DISTRESS_TAGS,
+            **_window_params(ctx),
         },
     )
 
 
-def get_service_gaps() -> list[dict]:
+def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
     """Topics with strong demand and high dissatisfaction from message-level evidence."""
     return run_query(
         """
@@ -124,35 +137,46 @@ def get_service_gaps() -> list[dict]:
 
         CALL (t) {
             OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
-            WHERE i.last_seen > datetime() - duration('P30D')
+            WHERE i.last_seen >= datetime($start)
+              AND i.last_seen < datetime($end)
             RETURN count(DISTINCT u) AS demand,
-                   count(DISTINCT CASE WHEN i.last_seen > datetime() - duration('P7D') THEN u END) AS demandThisWeek,
-                   count(DISTINCT CASE WHEN i.last_seen > datetime() - duration('P14D')
-                                         AND i.last_seen <= datetime() - duration('P7D') THEN u END) AS demandPrevWeek
+                   count(DISTINCT CASE WHEN i.last_seen >= datetime($start) AND i.last_seen < datetime($end) THEN u END) AS demandThisWeek,
+                   0 AS demandPrevWeek
+        }
+
+        CALL (t) {
+            OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
+            WHERE i.last_seen >= datetime($previous_start)
+              AND i.last_seen < datetime($previous_end)
+            RETURN count(DISTINCT u) AS demandPrevWindow
         }
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             RETURN s.label AS label, count(*) AS cnt
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             RETURN s.label AS label, count(*) AS cnt
         }
 
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND tag.name IN $distress_tags
             RETURN count(*) AS distressCnt
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND tag.name IN $distress_tags
             RETURN count(*) AS distressCnt
         }
@@ -160,7 +184,7 @@ def get_service_gaps() -> list[dict]:
         WITH t.name AS topic,
              demand,
              demandThisWeek,
-             demandPrevWeek,
+             demandPrevWindow AS demandPrevWeek,
              sum(CASE WHEN label IN $negative_labels THEN cnt ELSE 0 END) AS negCount,
              sum(CASE WHEN label = 'Positive' THEN cnt ELSE 0 END) AS posCount,
              sum(CASE WHEN label IN ['Neutral', 'Mixed'] THEN cnt ELSE 0 END) AS neutralCount,
@@ -196,6 +220,7 @@ def get_service_gaps() -> list[dict]:
             "noise": _NOISY_TOPIC_KEYS,
             "negative_labels": _NEGATIVE_SENTIMENTS,
             "distress_tags": _DISTRESS_TAGS,
+            **_window_params(ctx),
         },
     )
 
@@ -523,7 +548,7 @@ def get_service_gap_brief_candidates(
     )
 
 
-def get_satisfaction_areas() -> list[dict]:
+def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
     """Confidence-weighted satisfaction scores per Topic from message-level sentiment."""
     return run_query(
         """
@@ -532,7 +557,8 @@ def get_satisfaction_areas() -> list[dict]:
           AND coalesce(t.proposed, false) = false
         CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P30D')
+            WHERE p.posted_at >= datetime($previous_start)
+              AND p.posted_at < datetime($end)
             CALL (p) {
                 MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
@@ -556,7 +582,8 @@ def get_satisfaction_areas() -> list[dict]:
                    label
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P30D')
+            WHERE c.posted_at >= datetime($previous_start)
+              AND c.posted_at < datetime($end)
             CALL (c) {
                 MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
@@ -583,19 +610,21 @@ def get_satisfaction_areas() -> list[dict]:
              count(DISTINCT CASE WHEN label = 'Positive' THEN msgId END) AS pos,
              count(DISTINCT CASE WHEN label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS neg,
              count(DISTINCT CASE WHEN label IN ['Neutral', 'Mixed'] THEN msgId END) AS neu,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D') AND label = 'Positive' THEN msgId END) AS posCurrent,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
+             count(DISTINCT CASE WHEN ts >= datetime($start) AND ts < datetime($end) AND label = 'Positive' THEN msgId END) AS posCurrent,
+             count(DISTINCT CASE WHEN ts >= datetime($start)
+                                   AND ts < datetime($end)
                                    AND label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS negCurrent,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P14D')
+             count(DISTINCT CASE WHEN ts >= datetime($start)
+                                   AND ts < datetime($end)
                                    AND label IN ['Neutral', 'Mixed'] THEN msgId END) AS neuCurrent,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
-                                   AND ts <= datetime() - duration('P14D')
+             count(DISTINCT CASE WHEN ts >= datetime($previous_start)
+                                   AND ts < datetime($previous_end)
                                    AND label = 'Positive' THEN msgId END) AS posPrevious,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
-                                   AND ts <= datetime() - duration('P14D')
+             count(DISTINCT CASE WHEN ts >= datetime($previous_start)
+                                   AND ts < datetime($previous_end)
                                    AND label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS negPrevious,
-             count(DISTINCT CASE WHEN ts > datetime() - duration('P28D')
-                                   AND ts <= datetime() - duration('P14D')
+             count(DISTINCT CASE WHEN ts >= datetime($previous_start)
+                                   AND ts < datetime($previous_end)
                                    AND label IN ['Neutral', 'Mixed'] THEN msgId END) AS neuPrevious
         WITH category,
              pos,
@@ -644,17 +673,18 @@ def get_satisfaction_areas() -> list[dict]:
         RETURN category, pos, neg, neu, volume, currentVolume, previousVolume, satisfactionPct, trendPct
         ORDER BY volume DESC
         """,
-        {"noise": _NOISY_TOPIC_KEYS},
+        {"noise": _NOISY_TOPIC_KEYS, **_window_params(ctx)},
     )
 
 
-def get_mood_data() -> list[dict]:
-    """Weekly refined mood buckets for mood-over-time chart from message-level sentiment evidence."""
+def get_mood_data(ctx: DashboardDateContext) -> list[dict]:
+    """Selected-window refined mood buckets for mood-over-time chart."""
     return run_query(
         """
         CALL () {
             MATCH (p:Post)
-            WHERE p.posted_at > datetime() - duration('P84D')
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
             CALL (p) {
                 MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
@@ -672,16 +702,14 @@ def get_mood_data() -> list[dict]:
                 RETURN head(collect(sentiment)) AS sentiment
             }
             OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH p,
+            WITH toString(date(p.posted_at)) AS bucket,
                  sentiment,
                  collect(DISTINCT tag.name) AS tags
             WHERE sentiment IS NOT NULL
-            WITH date(p.posted_at).year AS year,
-                 date(p.posted_at).week AS week,
+            WITH bucket,
                  sentiment,
                  [tagName IN tags WHERE tagName IS NOT NULL] AS tags
-            WITH year,
-                 week,
+            WITH bucket,
                  sentiment,
                  tags,
                  any(tagName IN tags WHERE tagName IN ['Hopeful', 'Solidarity']) AS has_positive_energy,
@@ -689,8 +717,7 @@ def get_mood_data() -> list[dict]:
                  any(tagName IN tags WHERE tagName IN ['Anxious', 'Confused', 'Exhausted', 'Grief']) AS has_anxiety_signal,
                  any(tagName IN tags WHERE tagName IN ['Frustrated', 'Angry', 'Distrustful']) AS has_conflict_signal
             RETURN
-                year,
-                week,
+                bucket,
                 CASE
                     WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.65
                     WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.20
@@ -732,7 +759,8 @@ def get_mood_data() -> list[dict]:
                 END AS anxious
             UNION ALL
             MATCH (c:Comment)
-            WHERE c.posted_at > datetime() - duration('P84D')
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
             CALL (c) {
                 MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
@@ -750,16 +778,14 @@ def get_mood_data() -> list[dict]:
                 RETURN head(collect(sentiment)) AS sentiment
             }
             OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH c,
+            WITH toString(date(c.posted_at)) AS bucket,
                  sentiment,
                  collect(DISTINCT tag.name) AS tags
             WHERE sentiment IS NOT NULL
-            WITH date(c.posted_at).year AS year,
-                 date(c.posted_at).week AS week,
+            WITH bucket,
                  sentiment,
                  [tagName IN tags WHERE tagName IS NOT NULL] AS tags
-            WITH year,
-                 week,
+            WITH bucket,
                  sentiment,
                  tags,
                  any(tagName IN tags WHERE tagName IN ['Hopeful', 'Solidarity']) AS has_positive_energy,
@@ -767,8 +793,7 @@ def get_mood_data() -> list[dict]:
                  any(tagName IN tags WHERE tagName IN ['Anxious', 'Confused', 'Exhausted', 'Grief']) AS has_anxiety_signal,
                  any(tagName IN tags WHERE tagName IN ['Frustrated', 'Angry', 'Distrustful']) AS has_conflict_signal
             RETURN
-                year,
-                week,
+                bucket,
                 CASE
                     WHEN sentiment = 'Positive' AND has_positive_energy THEN 0.65
                     WHEN sentiment = 'Positive' AND has_trusting_signal THEN 0.20
@@ -809,23 +834,20 @@ def get_mood_data() -> list[dict]:
                     ELSE 0.0
                 END AS anxious
         }
-        WITH year,
-             week,
+        WITH bucket,
              round(sum(excited), 2) AS excited_raw,
              round(sum(satisfied), 2) AS satisfied_raw,
              round(sum(neutral), 2) AS neutral_raw,
              round(sum(frustrated), 2) AS frustrated_raw,
              round(sum(anxious), 2) AS anxious_raw
-        WITH year,
-             week,
+        WITH bucket,
              excited_raw,
              satisfied_raw,
              neutral_raw,
              frustrated_raw,
              anxious_raw,
              (excited_raw + satisfied_raw + neutral_raw + frustrated_raw + anxious_raw) AS total_raw
-        WITH year,
-             week,
+        WITH bucket,
              excited_raw,
              satisfied_raw,
              neutral_raw,
@@ -836,15 +858,15 @@ def get_mood_data() -> list[dict]:
                  WHEN total_raw < 20 THEN 0.80
                  ELSE 1.00
              END AS certainty
-        RETURN year,
-               week,
+        RETURN bucket,
                round(excited_raw * certainty, 2) AS excited,
                round(satisfied_raw * certainty, 2) AS satisfied,
                round(neutral_raw + ((1.0 - certainty) * (excited_raw + satisfied_raw + frustrated_raw + anxious_raw)), 2) AS neutral,
                round(frustrated_raw * certainty, 2) AS frustrated,
                round(anxious_raw * certainty, 2) AS anxious
-        ORDER BY year, week
-        """
+        ORDER BY bucket
+        """,
+        _window_params(ctx),
     )
 
 

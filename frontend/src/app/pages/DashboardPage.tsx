@@ -4,6 +4,9 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
 import { useAdminConfig } from '../contexts/AdminConfigContext';
 import { ADMIN_WIDGET_DEFINITIONS } from '../admin/catalog';
+import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { WIDGET_TIMEFRAME_POLICY } from '../dashboard/widgetTimeframePolicy';
+import { LockedWidget } from '../components/ui/LockedWidget';
 
 // Tier 1: Community Pulse
 import { CommunityHealthScore, TrendingTopicsFeed, CommunityBrief } from '../components/widgets/ExecutiveGlance';
@@ -67,7 +70,11 @@ export function DashboardPage() {
   const { lang } = useLanguage();
   const { data } = useData();
   const { isWidgetEnabled } = useAdminConfig();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
+  const widgetLabels = Object.fromEntries(
+    ADMIN_WIDGET_DEFINITIONS.map((widget) => [widget.id, ru ? widget.labelRu : widget.labelEn]),
+  ) as Record<string, string>;
 
   const tiers: TierConfig[] = [
     {
@@ -130,6 +137,18 @@ export function DashboardPage() {
   };
 
   const showWidget = (widgetId: string) => isWidgetEnabled(widgetId);
+  const renderWidget = (widgetId: string, node: React.ReactNode) => {
+    if (!showWidget(widgetId)) return null;
+    const policy = WIDGET_TIMEFRAME_POLICY[widgetId];
+    if (!policy) return node;
+    if (!policy.rangeAware) {
+      return <LockedWidget title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason={policy.lockedReason} />;
+    }
+    if (range.days < policy.minDays) {
+      return <LockedWidget title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason="minimum_window" />;
+    }
+    return node;
+  };
   const tierHasVisibleWidgets = (tierId: string) =>
     ADMIN_WIDGET_DEFINITIONS.some((widget) => widget.tierId === tierId && showWidget(widget.id));
   const visibleWidgetCount = ADMIN_WIDGET_DEFINITIONS.filter((widget) => showWidget(widget.id)).length;
@@ -170,11 +189,11 @@ export function DashboardPage() {
           <TierHeader tier={tiers[0]} isOpen={openTiers.pulse} onToggle={() => toggleTier('pulse')} />
           {openTiers.pulse && (
             <div className="space-y-4 md:space-y-6">
-              {showWidget('community_brief') && <CommunityBrief />}
+              {renderWidget('community_brief', <CommunityBrief />)}
               {(showWidget('community_health_score') || showWidget('trending_topics_feed')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('community_health_score') && <CommunityHealthScore />}
-                  {showWidget('trending_topics_feed') && <TrendingTopicsFeed />}
+                  {renderWidget('community_health_score', <CommunityHealthScore />)}
+                  {renderWidget('trending_topics_feed', <TrendingTopicsFeed />)}
                 </div>
               )}
             </div>
@@ -188,14 +207,14 @@ export function DashboardPage() {
           <TierHeader tier={tiers[1]} isOpen={openTiers.topics} onToggle={() => toggleTier('topics')} />
           {openTiers.topics && (
             <div className="space-y-4 md:space-y-6">
-              {showWidget('topic_landscape') && <TopicLandscape />}
+              {renderWidget('topic_landscape', <TopicLandscape />)}
               {(showWidget('conversation_trends') || showWidget('question_cloud')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('conversation_trends') && <ConversationTrends />}
-                  {showWidget('question_cloud') && <QuestionCloud />}
+                  {renderWidget('conversation_trends', <ConversationTrends />)}
+                  {renderWidget('question_cloud', <QuestionCloud />)}
                 </div>
               )}
-              {showWidget('topic_lifecycle') && <TopicLifecycle />}
+              {renderWidget('topic_lifecycle', <TopicLifecycle />)}
             </div>
           )}
         </>
@@ -209,17 +228,17 @@ export function DashboardPage() {
             <div className="space-y-4 md:space-y-6">
               {(showWidget('problem_tracker') || showWidget('service_gap_detector')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('problem_tracker') && <ProblemTracker />}
-                  {showWidget('service_gap_detector') && <ServiceGapDetector />}
+                  {renderWidget('problem_tracker', <ProblemTracker />)}
+                  {renderWidget('service_gap_detector', <ServiceGapDetector />)}
                 </div>
               )}
               {(showWidget('satisfaction_by_area') || showWidget('mood_over_time')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('satisfaction_by_area') && <SatisfactionByArea />}
-                  {showWidget('mood_over_time') && <MoodOverTime />}
+                  {renderWidget('satisfaction_by_area', <SatisfactionByArea />)}
+                  {renderWidget('mood_over_time', <MoodOverTime />)}
                 </div>
               )}
-              {showWidget('emotional_urgency_index') && <EmotionalUrgencyIndex />}
+              {renderWidget('emotional_urgency_index', <EmotionalUrgencyIndex />)}
             </div>
           )}
         </>
@@ -233,12 +252,12 @@ export function DashboardPage() {
             <div className="space-y-4 md:space-y-6">
               {(showWidget('top_channels') || showWidget('key_voices')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('top_channels') && <TopChannels />}
-                  {showWidget('key_voices') && <KeyVoices />}
+                  {renderWidget('top_channels', <TopChannels />)}
+                  {renderWidget('key_voices', <KeyVoices />)}
                 </div>
               )}
-              {showWidget('recommendation_tracker') && <RecommendationTracker />}
-              {showWidget('information_velocity') && <InformationVelocity />}
+              {renderWidget('recommendation_tracker', <RecommendationTracker />)}
+              {renderWidget('information_velocity', <InformationVelocity />)}
             </div>
           )}
         </>
@@ -252,8 +271,8 @@ export function DashboardPage() {
             <div className="space-y-4 md:space-y-6">
               {(showWidget('persona_gallery') || showWidget('interest_radar')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('persona_gallery') && <PersonaGallery />}
-                  {showWidget('interest_radar') && <InterestRadar />}
+                  {renderWidget('persona_gallery', <PersonaGallery />)}
+                  {renderWidget('interest_radar', <InterestRadar />)}
                 </div>
               )}
             </div>
@@ -269,17 +288,17 @@ export function DashboardPage() {
             <div className="space-y-4 md:space-y-6">
               {(showWidget('community_growth_funnel') || showWidget('retention_risk_gauge')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('community_growth_funnel') && <CommunityGrowthFunnel />}
-                  {showWidget('retention_risk_gauge') && <RetentionRiskGauge />}
+                  {renderWidget('community_growth_funnel', <CommunityGrowthFunnel />)}
+                  {renderWidget('retention_risk_gauge', <RetentionRiskGauge />)}
                 </div>
               )}
               {(showWidget('decision_stage_tracker') || showWidget('emerging_interests')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('decision_stage_tracker') && <DecisionStageTracker />}
-                  {showWidget('emerging_interests') && <EmergingInterests />}
+                  {renderWidget('decision_stage_tracker', <DecisionStageTracker />)}
+                  {renderWidget('emerging_interests', <EmergingInterests />)}
                 </div>
               )}
-              {showWidget('new_vs_returning_voice') && <NewVsReturningVoice />}
+              {renderWidget('new_vs_returning_voice', <NewVsReturningVoice />)}
             </div>
           )}
         </>
@@ -291,8 +310,8 @@ export function DashboardPage() {
           <TierHeader tier={tiers[6]} isOpen={openTiers.business} onToggle={() => toggleTier('business')} />
           {openTiers.business && (
             <div className="space-y-4 md:space-y-6">
-              {showWidget('business_opportunity_tracker') && <BusinessOpportunityTracker />}
-              {showWidget('job_market_pulse') && <JobMarketPulse />}
+              {renderWidget('business_opportunity_tracker', <BusinessOpportunityTracker />)}
+              {renderWidget('job_market_pulse', <JobMarketPulse />)}
             </div>
           )}
         </>
@@ -304,11 +323,11 @@ export function DashboardPage() {
           <TierHeader tier={tiers[7]} isOpen={openTiers.analytics} onToggle={() => toggleTier('analytics')} />
           {openTiers.analytics && (
             <div className="space-y-4 md:space-y-6">
-              {showWidget('week_over_week_shifts') && <WeekOverWeekShifts />}
+              {renderWidget('week_over_week_shifts', <WeekOverWeekShifts />)}
               {(showWidget('sentiment_by_topic') || showWidget('content_performance')) && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-                  {showWidget('sentiment_by_topic') && <SentimentByTopic />}
-                  {showWidget('content_performance') && <ContentPerformance />}
+                  {renderWidget('sentiment_by_topic', <SentimentByTopic />)}
+                  {renderWidget('content_performance', <ContentPerformance />)}
                 </div>
               )}
             </div>

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from api.db import run_query, run_single
+from api.dashboard_dates import DashboardDateContext
 from buffer.supabase_writer import SupabaseWriter
 
 
@@ -302,17 +303,17 @@ def _confidence_label(analysis_units: int) -> str:
     return "low"
 
 
-def _history_points(current_score: int, previous_score: int) -> list[dict]:
+def _history_points(current_score: int, previous_score: int, label_suffix: str) -> list[dict]:
     points = []
     for idx in range(7):
         ratio = idx / 6 if 6 else 1
         score = int(round(previous_score + (current_score - previous_score) * ratio))
-        label = "Now" if idx == 6 else f"{6 - idx}h ago"
+        label = "Now" if idx == 6 else f"{6 - idx}{label_suffix}"
         points.append({"time": label, "score": int(_clamp(score, 0, 100))})
     return points
 
 
-def get_community_health() -> dict:
+def get_community_health(ctx: DashboardDateContext) -> dict:
     """
     Explainable community climate score (0-100) based on:
     - constructive intent share,
@@ -320,13 +321,8 @@ def get_community_health() -> dict:
     - discussion diversity,
     - conversation depth.
     """
-    now = _utc_now()
-    current_start = now - timedelta(hours=24)
-    previous_start = now - timedelta(hours=48)
-    previous_end = current_start
-
-    current_rows = _fetch_analysis_rows(start=current_start, end=now)
-    previous_rows = _fetch_analysis_rows(start=previous_start, end=previous_end)
+    current_rows = _fetch_analysis_rows(start=ctx.start_at, end=ctx.end_at)
+    previous_rows = _fetch_analysis_rows(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
     current_intent = _window_intent_stats(current_rows)
     previous_intent = _window_intent_stats(previous_rows)
@@ -334,8 +330,8 @@ def get_community_health() -> dict:
     current_volume = _analysis_volume(current_rows)
     previous_volume = _analysis_volume(previous_rows)
 
-    current_diversity = _topic_diversity_score(start=current_start, end=now)
-    previous_diversity = _topic_diversity_score(start=previous_start, end=previous_end)
+    current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
+    previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
     current_constructive = int(round(current_intent["positive_share"] * 100.0))
     previous_constructive = int(round(previous_intent["positive_share"] * 100.0))
@@ -406,20 +402,21 @@ def get_community_health() -> dict:
         "score": current_score,
         "trend": trend,
         "previousScore": previous_score,
-        "windowHours": 24,
+        "windowHours": ctx.days * 24,
         "components": components,
-        "history": _history_points(current_score, previous_score),
+        "history": _history_points(current_score, previous_score, "d ago" if ctx.days > 1 else "h ago"),
         "confidence": {
             "label": _confidence_label(current_volume["analysis_units"]),
             "analysisUnits": current_volume["analysis_units"],
         },
         "dominantTopic": current_diversity["dominant_topic"],
         "dominantTopicSharePct": round(current_diversity["dominant_share"] * 100.0, 1),
+        "windowDays": ctx.days,
     }
 
 
-def get_trending_topics(limit: int = 10) -> list[dict]:
-    """Evidence-backed top topics by mentions in the last 24h with 24h-over-24h trend."""
+def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+    """Evidence-backed top topics by mentions in the selected window with same-length comparison."""
     rows = run_query(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -427,16 +424,17 @@ def get_trending_topics(limit: int = 10) -> list[dict]:
           AND NOT toLower(trim(coalesce(t.name,''))) IN $noise
         CALL (t) {
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration('P2D')
+            WHERE p.posted_at >= datetime($previous_start) AND p.posted_at < datetime($end)
             WITH p
             RETURN
-                count(CASE WHEN p.posted_at > datetime() - duration('P1D') THEN 1 END) AS postCurrent,
-                count(CASE WHEN p.posted_at > datetime() - duration('P2D')
-                             AND p.posted_at <= datetime() - duration('P1D') THEN 1 END) AS postPrev,
+                count(CASE WHEN p.posted_at >= datetime($start) AND p.posted_at < datetime($end) THEN 1 END) AS postCurrent,
+                count(CASE WHEN p.posted_at >= datetime($previous_start)
+                             AND p.posted_at < datetime($previous_end) THEN 1 END) AS postPrev,
                 head([
                     txt IN collect(
                         CASE
-                            WHEN p.posted_at > datetime() - duration('P1D')
+                            WHEN p.posted_at >= datetime($start)
+                             AND p.posted_at < datetime($end)
                              AND p.text IS NOT NULL
                              AND trim(p.text) <> ''
                             THEN left(trim(p.text), 180)
@@ -448,16 +446,17 @@ def get_trending_topics(limit: int = 10) -> list[dict]:
         }
         CALL (t) {
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration('P2D')
+            WHERE c.posted_at >= datetime($previous_start) AND c.posted_at < datetime($end)
             WITH c
             RETURN
-                count(CASE WHEN c.posted_at > datetime() - duration('P1D') THEN 1 END) AS commentCurrent,
-                count(CASE WHEN c.posted_at > datetime() - duration('P2D')
-                             AND c.posted_at <= datetime() - duration('P1D') THEN 1 END) AS commentPrev,
+                count(CASE WHEN c.posted_at >= datetime($start) AND c.posted_at < datetime($end) THEN 1 END) AS commentCurrent,
+                count(CASE WHEN c.posted_at >= datetime($previous_start)
+                             AND c.posted_at < datetime($previous_end) THEN 1 END) AS commentPrev,
                 head([
                     txt IN collect(
                         CASE
-                            WHEN c.posted_at > datetime() - duration('P1D')
+                            WHEN c.posted_at >= datetime($start)
+                             AND c.posted_at < datetime($end)
                              AND c.text IS NOT NULL
                              AND trim(c.text) <> ''
                             THEN left(trim(c.text), 180)
@@ -477,11 +476,14 @@ def get_trending_topics(limit: int = 10) -> list[dict]:
                mentions,
                mentions AS currentMentions,
                previousMentions,
+               (mentions + previousMentions) AS growthSupport,
                CASE
-                   WHEN previousMentions > 0
-                   THEN round(100.0 * (mentions - previousMentions) / previousMentions, 1)
-                   WHEN mentions > 0 THEN 100.0
-                   ELSE 0.0
+                   WHEN (mentions + previousMentions) >= 8 THEN true
+                   ELSE false
+               END AS trendReliable,
+               CASE
+                   WHEN (mentions + previousMentions) < 8 THEN null
+                   ELSE round(100.0 * (mentions - previousMentions) / (previousMentions + 3), 1)
                END AS trendPct,
                sampleQuote
         ORDER BY mentions DESC
@@ -490,6 +492,10 @@ def get_trending_topics(limit: int = 10) -> list[dict]:
         {
             "noise": list(_NOISY_TOPIC_NAMES),
             "limit": limit,
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+            "previous_start": ctx.previous_start_at.isoformat(),
+            "previous_end": ctx.previous_end_at.isoformat(),
         },
     )
 
@@ -503,6 +509,8 @@ def get_trending_topics(limit: int = 10) -> list[dict]:
                 "trendPct": _to_float(row.get("trendPct"), 0.0),
                 "currentMentions": int(row.get("currentMentions") or 0),
                 "previousMentions": int(row.get("previousMentions") or 0),
+                "growthSupport": int(row.get("growthSupport") or 0),
+                "trendReliable": bool(row.get("trendReliable")),
                 "sampleQuote": str(row.get("sampleQuote") or "").strip(),
             }
         )
@@ -522,19 +530,23 @@ def _latest_analysis_minutes_ago() -> int:
         return 0
 
 
-def _neo4j_brief_fallback() -> dict:
+def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
     stats = run_single(
         """
-        MATCH (p:Post) WHERE p.posted_at > datetime() - duration('P1D')
-        WITH count(p) AS posts24h
-        OPTIONAL MATCH (c:Comment) WHERE c.posted_at > datetime() - duration('P1D')
-        WITH posts24h, count(c) AS comments24h
-        OPTIONAL MATCH (u:User) WHERE u.last_seen > datetime() - duration('P1D')
-        RETURN posts24h, comments24h, count(u) AS activeUsers24h
-        """
+        MATCH (p:Post)
+        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+        WITH count(p) AS postsCount
+        OPTIONAL MATCH (c:Comment)
+        WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
+        WITH postsCount, count(c) AS commentsCount
+        OPTIONAL MATCH (u:User)
+        WHERE u.last_seen >= datetime($start) AND u.last_seen < datetime($end)
+        RETURN postsCount, commentsCount, count(u) AS activeUsersCount
+        """,
+        {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
     ) or {}
-    posts = int(stats.get("posts24h") or 0)
-    comments = int(stats.get("comments24h") or 0)
+    posts = int(stats.get("postsCount") or 0)
+    comments = int(stats.get("commentsCount") or 0)
     return {
         "postsAnalyzed24h": posts,
         "commentScopesAnalyzed24h": comments,
@@ -542,29 +554,28 @@ def _neo4j_brief_fallback() -> dict:
         "negativeIntentPct24h": 0,
         "neutralIntentPct24h": 100 if (posts + comments) > 0 else 0,
         "totalAnalyses24h": posts + comments,
-        "uniqueUsers24h": int(stats.get("activeUsers24h") or 0),
+        "uniqueUsers24h": int(stats.get("activeUsersCount") or 0),
         "refreshedMinutesAgo": 0,
-        "topTopics": [t.get("name") for t in get_trending_topics(5) if t.get("name")],
-        "topTopicRows": get_trending_topics(5),
+        "topTopics": [t.get("name") for t in get_trending_topics(ctx, 5) if t.get("name")],
+        "topTopicRows": get_trending_topics(ctx, 5),
         # Backward compatibility keys
         "postsLast24h": posts,
         "commentsLast24h": comments,
-        "activeUsersLast24h": int(stats.get("activeUsers24h") or 0),
+        "activeUsersLast24h": int(stats.get("activeUsersCount") or 0),
+        "windowDays": ctx.days,
     }
 
 
-def get_community_brief() -> dict:
+def get_community_brief(ctx: DashboardDateContext) -> dict:
     """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
-    now = _utc_now()
-    start = now - timedelta(hours=24)
-    rows = _fetch_analysis_rows(start=start, end=now)
+    rows = _fetch_analysis_rows(start=ctx.start_at, end=ctx.end_at)
 
     if not rows:
-        return _neo4j_brief_fallback()
+        return _neo4j_brief_fallback(ctx)
 
     volume = _analysis_volume(rows)
     intent = _window_intent_stats(rows)
-    top_topic_rows = get_trending_topics(5)
+    top_topic_rows = get_trending_topics(ctx, 5)
     top_topic_names = [str(item.get("name") or "").strip() for item in top_topic_rows if item.get("name")]
 
     positive_pct = int(round(intent["positive_share"] * 100.0))
@@ -586,4 +597,5 @@ def get_community_brief() -> dict:
         "postsLast24h": volume["posts_analyzed"],
         "commentsLast24h": volume["comment_scopes_analyzed"],
         "activeUsersLast24h": volume["unique_users"],
+        "windowDays": ctx.days,
     }

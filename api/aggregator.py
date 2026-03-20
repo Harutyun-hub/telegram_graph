@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
 
 from api import behavioral_briefs
+from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
 from buffer.supabase_writer import SupabaseWriter
@@ -48,13 +49,9 @@ DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "18
 CRITICAL_TIERS = {"pulse", "strategic"}
 
 
-_cache: dict = {}
-_cache_ts: float = 0.0
-_refresh_in_progress: bool = False
-_last_refresh_error: Optional[str] = None
+_cache_entries: Dict[str, Tuple[float, dict]] = {}
 
 _cache_lock = threading.Lock()
-_cache_cond = threading.Condition(_cache_lock)
 
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, list[dict]]] = {}
@@ -114,17 +111,18 @@ def _should_preserve_existing_cache(
     return True, fallback
 
 
-def _is_cache_valid(now: Optional[float] = None) -> bool:
+def _is_cache_valid(cache_key: str, now: Optional[float] = None) -> bool:
     t = now if now is not None else time.time()
-    return bool(_cache) and (t - _cache_ts) < CACHE_TTL_SECONDS
+    entry = _cache_entries.get(cache_key)
+    if entry is None:
+        return False
+    ts, payload = entry
+    return bool(payload) and (t - ts) < CACHE_TTL_SECONDS
 
 
 def invalidate_cache() -> None:
-    global _cache, _cache_ts
-    with _cache_cond:
-        _cache = {}
-        _cache_ts = 0.0
-        _cache_cond.notify_all()
+    with _cache_lock:
+        _cache_entries.clear()
     with _detail_cache_lock:
         _detail_cache.clear()
 
@@ -184,7 +182,7 @@ def _fallback_for_tier(name: str) -> dict:
 
 # ── Tier builders ────────────────────────────────────────────────────────────
 
-def _tier_pulse() -> dict:
+def _tier_pulse(ctx: DashboardDateContext) -> dict:
     def _trending_new_topics() -> list[dict]:
         try:
             rows = _supabase_writer.list_emerging_topic_candidates(status="pending", limit=12)
@@ -208,17 +206,17 @@ def _tier_pulse() -> dict:
 
     try:
         return {
-            "communityHealth": pulse.get_community_health(),
-            "trendingTopics": pulse.get_trending_topics(),
+            "communityHealth": pulse.get_community_health(ctx),
+            "trendingTopics": pulse.get_trending_topics(ctx),
             "trendingNewTopics": _trending_new_topics(),
-            "communityBrief": pulse.get_community_brief(),
+            "communityBrief": pulse.get_community_brief(ctx),
         }
     except Exception as e:
         logger.error(f"Tier pulse failed: {e}")
         return _fallback_for_tier("pulse")
 
 
-def _tier_strategic() -> dict:
+def _tier_strategic(_ctx: DashboardDateContext) -> dict:
     fallback = _fallback_for_tier("strategic")
 
     def _safe(name: str, fn, default):
@@ -228,28 +226,28 @@ def _tier_strategic() -> dict:
             logger.error(f"Strategic widget {name} failed: {e}")
             return default
 
-    trend_lines = _safe("trendLines", strategic.get_trend_lines, [])
+    trend_lines = _safe("trendLines", lambda: strategic.get_trend_lines(_ctx), [])
     return {
-        "topicBubbles": _safe("topicBubbles", strategic.get_topic_bubbles, fallback["topicBubbles"]),
+        "topicBubbles": _safe("topicBubbles", lambda: strategic.get_topic_bubbles(_ctx), fallback["topicBubbles"]),
         "trendLines": trend_lines,
         "trendData": trend_lines,
         "heatmap": _safe("heatmap", strategic.get_heatmap, fallback["heatmap"]),
-        "questionCategories": _safe("questionCategories", strategic.get_question_categories, fallback["questionCategories"]),
+        "questionCategories": _safe("questionCategories", lambda: strategic.get_question_categories(_ctx), fallback["questionCategories"]),
         "questionBriefs": _safe("questionBriefs", question_briefs.get_question_briefs, fallback["questionBriefs"]),
-        "lifecycleStages": _safe("lifecycleStages", strategic.get_lifecycle_stages, fallback["lifecycleStages"]),
+        "lifecycleStages": _safe("lifecycleStages", lambda: strategic.get_lifecycle_stages(_ctx), fallback["lifecycleStages"]),
     }
 
 
-def _tier_behavioral() -> dict:
+def _tier_behavioral(_ctx: DashboardDateContext) -> dict:
     try:
         briefs = behavioral_briefs.get_behavioral_briefs()
         return {
             "problemBriefs": briefs.get("problemBriefs", []),
             "serviceGapBriefs": briefs.get("serviceGapBriefs", []),
-            "problems": behavioral.get_problems(),
-            "serviceGaps": behavioral.get_service_gaps(),
-            "satisfactionAreas": behavioral.get_satisfaction_areas(),
-            "moodData": behavioral.get_mood_data(),
+            "problems": behavioral.get_problems(_ctx),
+            "serviceGaps": behavioral.get_service_gaps(_ctx),
+            "satisfactionAreas": behavioral.get_satisfaction_areas(_ctx),
+            "moodData": behavioral.get_mood_data(_ctx),
             "moodConfig": {"sentiments": ["Positive", "Negative", "Neutral", "Mixed", "Urgent", "Sarcastic"]},
             "urgencySignals": briefs.get("urgencyBriefs", []),
         }
@@ -258,27 +256,27 @@ def _tier_behavioral() -> dict:
         return _fallback_for_tier("behavioral")
 
 
-def _tier_network() -> dict:
+def _tier_network(ctx: DashboardDateContext) -> dict:
     try:
         return {
-            "communityChannels": network.get_community_channels(),
-            "keyVoices": network.get_key_voices(),
+            "communityChannels": network.get_community_channels(ctx),
+            "keyVoices": network.get_key_voices(ctx),
             "hourlyActivity": network.get_hourly_activity(),
             "weeklyActivity": network.get_weekly_activity(),
             "recommendations": network.get_recommendations(),
-            "viralTopics": network.get_information_velocity(),  # Use new temporal tracking
+            "viralTopics": network.get_information_velocity(ctx),  # Use new temporal tracking
         }
     except Exception as e:
         logger.error(f"Tier network failed: {e}")
         return _fallback_for_tier("network")
 
 
-def _tier_psychographic() -> dict:
+def _tier_psychographic(_ctx: DashboardDateContext) -> dict:
     try:
         integration_data = psychographic.get_integration_data()
         return {
-            "personas": psychographic.get_personas(),
-            "interests": psychographic.get_interests(),
+            "personas": psychographic.get_personas(_ctx),
+            "interests": psychographic.get_interests(_ctx),
             "origins": psychographic.get_origins(),
             "integrationData": integration_data,
             "integrationLevels": integration_data,
@@ -296,27 +294,27 @@ def _tier_psychographic() -> dict:
         return _fallback_for_tier("psychographic")
 
 
-def _tier_predictive() -> dict:
+def _tier_predictive(_ctx: DashboardDateContext) -> dict:
     try:
         return {
-            "emergingInterests": predictive.get_emerging_interests(),
-            "retentionFactors": predictive.get_retention_factors(),
-            "churnSignals": predictive.get_churn_signals(),
-            "growthFunnel": predictive.get_growth_funnel(),
-            "decisionStages": predictive.get_decision_stages(),
+            "emergingInterests": predictive.get_emerging_interests(_ctx),
+            "retentionFactors": predictive.get_retention_factors(_ctx),
+            "churnSignals": predictive.get_churn_signals(_ctx),
+            "growthFunnel": predictive.get_growth_funnel(_ctx),
+            "decisionStages": predictive.get_decision_stages(_ctx),
         }
     except Exception as e:
         logger.error(f"Tier predictive failed: {e}")
         return _fallback_for_tier("predictive")
 
 
-def _tier_actionable() -> dict:
+def _tier_actionable(_ctx: DashboardDateContext) -> dict:
     try:
         housing_data = actionable.get_housing_data()
         return {
-            "businessOpportunities": actionable.get_business_opportunities(),
-            "jobSeeking": actionable.get_job_seeking(),
-            "jobTrends": actionable.get_job_trends(),
+            "businessOpportunities": actionable.get_business_opportunities(_ctx),
+            "jobSeeking": actionable.get_job_seeking(_ctx),
+            "jobTrends": actionable.get_job_trends(_ctx),
             "housingData": housing_data,
             "housingHotTopics": housing_data,
         }
@@ -325,13 +323,13 @@ def _tier_actionable() -> dict:
         return _fallback_for_tier("actionable")
 
 
-def _tier_comparative() -> dict:
+def _tier_comparative(ctx: DashboardDateContext) -> dict:
     try:
         return {
-            "weeklyShifts": comparative.get_weekly_shifts(),
-            "sentimentByTopic": comparative.get_sentiment_by_topic(),
-            "topPosts": comparative.get_top_posts(),
-            "contentTypePerformance": comparative.get_content_type_performance(),
+            "weeklyShifts": comparative.get_weekly_shifts(ctx),
+            "sentimentByTopic": comparative.get_sentiment_by_topic(ctx),
+            "topPosts": comparative.get_top_posts(ctx),
+            "contentTypePerformance": comparative.get_content_type_performance(ctx),
             "vitalityIndicators": comparative.get_vitality_indicators(),
         }
     except Exception as e:
@@ -365,16 +363,16 @@ def _tier_derived(data: dict) -> dict:
         return {}
 
 
-def _ordered_tiers() -> List[Tuple[str, Callable[[], dict]]]:
+def _ordered_tiers(ctx: DashboardDateContext) -> List[Tuple[str, Callable[[], dict]]]:
     return [
-        ("pulse", _tier_pulse),
-        ("strategic", _tier_strategic),
-        ("behavioral", _tier_behavioral),
-        ("network", _tier_network),
-        ("psychographic", _tier_psychographic),
-        ("predictive", _tier_predictive),
-        ("actionable", _tier_actionable),
-        ("comparative", _tier_comparative),
+        ("pulse", lambda: _tier_pulse(ctx)),
+        ("strategic", lambda: _tier_strategic(ctx)),
+        ("behavioral", lambda: _tier_behavioral(ctx)),
+        ("network", lambda: _tier_network(ctx)),
+        ("psychographic", lambda: _tier_psychographic(ctx)),
+        ("predictive", lambda: _tier_predictive(ctx)),
+        ("actionable", lambda: _tier_actionable(ctx)),
+        ("comparative", lambda: _tier_comparative(ctx)),
     ]
 
 
@@ -384,11 +382,11 @@ def _run_tier_builder(fn: Callable[[], dict]) -> Tuple[dict, float]:
     return payload, round(time.time() - t0, 3)
 
 
-def _build_snapshot_sequential() -> Tuple[dict, Dict[str, Optional[float]]]:
+def _build_snapshot_sequential(ctx: DashboardDateContext) -> Tuple[dict, Dict[str, Optional[float]]]:
     data: dict = {}
     tier_times: Dict[str, Optional[float]] = {}
 
-    for name, builder in _ordered_tiers():
+    for name, builder in _ordered_tiers(ctx):
         t0 = time.time()
         payload = builder()
         tier_times[name] = round(time.time() - t0, 3)
@@ -400,8 +398,8 @@ def _build_snapshot_sequential() -> Tuple[dict, Dict[str, Optional[float]]]:
     return data, tier_times
 
 
-def _build_snapshot_parallel(use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]]]:
-    ordered = _ordered_tiers()
+def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]]]:
+    ordered = _ordered_tiers(ctx)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
 
@@ -439,158 +437,71 @@ def _build_snapshot_parallel(use_timeouts: bool = True) -> Tuple[dict, Dict[str,
     return data, tier_times
 
 
-def _build_snapshot(use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
+def _build_snapshot(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
     mode = "parallel" if PARALLEL_ENABLED else "sequential"
     t0 = time.time()
 
     if PARALLEL_ENABLED:
-        data, tier_times = _build_snapshot_parallel(use_timeouts=use_timeouts)
+        data, tier_times = _build_snapshot_parallel(ctx, use_timeouts=use_timeouts)
     else:
-        data, tier_times = _build_snapshot_sequential()
+        data, tier_times = _build_snapshot_sequential(ctx)
 
     elapsed = round(time.time() - t0, 3)
     return data, tier_times, elapsed, mode
 
 
-def _start_background_refresh_locked() -> None:
-    global _refresh_in_progress
-    if _refresh_in_progress:
-        return
-    _refresh_in_progress = True
+# ── Main aggregation API ─────────────────────────────────────────────────────
 
-    def _worker() -> None:
-        global _refresh_in_progress, _last_refresh_error, _cache, _cache_ts
-        try:
-            data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=True)
+def _default_dashboard_context() -> DashboardDateContext:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    end_date = build_dashboard_date_context(today, today).to_date
+    start_date = end_date.fromordinal(end_date.toordinal() - 14)
+    return build_dashboard_date_context(start_date.isoformat(), end_date.isoformat())
 
+
+def get_dashboard_data(
+    ctx: Optional[DashboardDateContext] = None,
+    force_refresh: bool = False,
+) -> dict:
+    """Assemble full AppData snapshot with simple per-range caching."""
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+        if entry is not None and not force_refresh and _is_cache_valid(cache_key, now):
+            logger.debug(f"Serving dashboard data from range cache | key={cache_key}")
+            return entry[1]
+        stale_snapshot = entry[1] if entry is not None else None
+
+    try:
+        data, tier_times, elapsed, mode = _build_snapshot(resolved_ctx, use_timeouts=stale_snapshot is not None)
+        with _cache_lock:
             preserve_existing = False
             fallback_tiers: list[str] = []
-            with _cache_cond:
+            if stale_snapshot is not None:
                 preserve_existing, fallback_tiers = _should_preserve_existing_cache(
-                    existing_cache=_cache,
+                    existing_cache=stale_snapshot,
                     new_snapshot=data,
                     tier_times=tier_times,
                 )
-                if preserve_existing:
-                    _refresh_in_progress = False
-                    _last_refresh_error = (
-                        "Refresh produced degraded snapshot; preserved previous cache "
-                        f"(fallback_tiers={fallback_tiers})"
-                    )
-                    _cache_cond.notify_all()
-                else:
-                    _cache = data
-                    _cache_ts = time.time()
-                    _refresh_in_progress = False
-                    _last_refresh_error = None
-                    _cache_cond.notify_all()
-
-            if preserve_existing:
+            if preserve_existing and stale_snapshot is not None:
                 logger.warning(
-                    "Dashboard refresh kept previous cache because critical tiers fell back "
-                    f"({fallback_tiers}); elapsed={elapsed}s mode={mode} tiers={tier_times}"
+                    "Dashboard rebuild preserved previous range cache because critical tiers fell back "
+                    f"({fallback_tiers}); key={cache_key} elapsed={elapsed}s mode={mode}"
                 )
-            else:
-                logger.success(f"Dashboard refresh completed in {elapsed}s ({mode}) | tiers={tier_times}")
-        except Exception as e:
-            with _cache_cond:
-                _refresh_in_progress = False
-                _last_refresh_error = str(e)
-                _cache_cond.notify_all()
-            logger.error(f"Dashboard refresh failed: {e}")
+                return stale_snapshot
 
-    threading.Thread(target=_worker, name="dashboard-refresh", daemon=True).start()
+            _cache_entries[cache_key] = (time.time(), data)
 
-
-# ── Main aggregation API ─────────────────────────────────────────────────────
-
-def get_dashboard_data(force_refresh: bool = False) -> dict:
-    """Assemble full AppData snapshot with cache, SWR, and single-flight refresh."""
-    global _cache, _cache_ts, _refresh_in_progress, _last_refresh_error
-
-    now = time.time()
-    with _cache_cond:
-        has_cache = bool(_cache)
-        had_cache_before_build = has_cache
-        is_fresh = _is_cache_valid(now)
-        stale_snapshot = _cache if has_cache else None
-
-        if is_fresh and not force_refresh:
-            logger.debug("Serving dashboard data from fresh cache")
-            return _cache
-
-        if has_cache and STALE_WHILE_REVALIDATE and not force_refresh:
-            _start_background_refresh_locked()
-            logger.debug("Serving stale dashboard cache while background refresh runs")
-            return _cache
-
-        if _refresh_in_progress:
-            deadline = time.time() + WAIT_FOR_REFRESH_SECONDS
-            while _refresh_in_progress and time.time() < deadline:
-                _cache_cond.wait(timeout=0.1)
-
-            if _cache and not force_refresh:
-                logger.debug("Serving dashboard cache after waiting for in-flight refresh")
-                return _cache
-
-            # If refresh is still running and no cache available, wait until complete
-            while _refresh_in_progress and not _cache:
-                _cache_cond.wait(timeout=0.1)
-
-            if _cache and not force_refresh:
-                return _cache
-
-        _refresh_in_progress = True
-
-    # Build outside lock
-    try:
-        data, tier_times, elapsed, mode = _build_snapshot(use_timeouts=had_cache_before_build)
-
-        preserve_existing = False
-        fallback_tiers: list[str] = []
-        with _cache_cond:
-            preserve_existing, fallback_tiers = _should_preserve_existing_cache(
-                existing_cache=_cache,
-                new_snapshot=data,
-                tier_times=tier_times,
-            )
-            if preserve_existing:
-                _refresh_in_progress = False
-                _last_refresh_error = (
-                    "Synchronous rebuild produced degraded snapshot; preserved previous cache "
-                    f"(fallback_tiers={fallback_tiers})"
-                )
-                preserved = _cache
-                _cache_cond.notify_all()
-            else:
-                _cache = data
-                _cache_ts = time.time()
-                _refresh_in_progress = False
-                _last_refresh_error = None
-                preserved = None
-                _cache_cond.notify_all()
-
-        if preserve_existing and preserved is not None:
-            logger.warning(
-                "Dashboard rebuild preserved previous cache because critical tiers fell back "
-                f"({fallback_tiers}); elapsed={elapsed}s mode={mode} tiers={tier_times}"
-            )
-            return preserved
-
-        logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | tiers={tier_times}")
+        logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
         return data
     except Exception as e:
-        with _cache_cond:
-            _refresh_in_progress = False
-            _last_refresh_error = str(e)
-            fallback: Optional[dict] = _cache if _cache else stale_snapshot
-            _cache_cond.notify_all()
-
-        if fallback is not None:
-            logger.warning(f"Dashboard rebuild failed; serving stale cache instead: {e}")
-            return fallback
-
-        logger.error(f"Dashboard rebuild failed with no fallback cache: {e}")
+        if stale_snapshot is not None:
+            logger.warning(f"Dashboard rebuild failed for range {cache_key}; serving stale cache instead: {e}")
+            return stale_snapshot
+        logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {e}")
         raise
 
 

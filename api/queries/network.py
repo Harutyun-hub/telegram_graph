@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import json
 from statistics import median
+from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
 LOOKBACK_DAYS = 30
@@ -161,11 +162,11 @@ def _dominant_widget_type(rows: list[dict]) -> tuple[str, str]:
     return top_type, top_raw_category
 
 
-def get_community_channels() -> list[dict]:
+def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     """Active channels ranked by median recent post engagement with sample controls."""
-    post_rows = run_query(f"""
+    post_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
-        WHERE p.posted_at >= datetime() - duration('P{LOOKBACK_DAYS}D')
+        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         RETURN ch.uuid AS channelId,
                ch.username AS username,
                ch.title AS name,
@@ -177,23 +178,23 @@ def get_community_channels() -> list[dict]:
                coalesce(p.forwards, 0) AS forwards,
                coalesce(p.comment_count, 0) AS comments,
                coalesce(p.reactions, '') AS reactions
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
-    category_rows = run_query(f"""
+    category_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
-        WHERE p.posted_at >= datetime() - duration('P{LOOKBACK_DAYS}D')
+        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
         RETURN ch.uuid AS channelId, category, mentions
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
-    comment_rows = run_query(f"""
+    comment_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)<-[:REPLIES_TO]-(c:Comment)
-        WHERE c.posted_at >= datetime() - duration('P{ACTIVITY_LOOKBACK_DAYS}D')
+        WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
         RETURN ch.uuid AS channelId, count(c) AS comments7d
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
-    activity_cutoff = datetime.now(timezone.utc).timestamp() - (ACTIVITY_LOOKBACK_DAYS * 86400)
+    activity_cutoff = ctx.start_at.timestamp()
     channels: dict[str, dict] = {}
     channel_to_source_key: dict[str, str] = {}
     all_post_rates: list[float] = []
@@ -298,7 +299,7 @@ def get_community_channels() -> list[dict]:
             'name': str(channel.get('name') or channel.get('username') or f'Channel_{source_key}'),
             'type': widget_type,
             'members': int(channel.get('members') or 0),
-            'dailyMessages': round(recent_messages / float(ACTIVITY_LOOKBACK_DAYS), 1) if recent_messages > 0 else 0.0,
+            'dailyMessages': round(recent_messages / float(max(1, ctx.days)), 1) if recent_messages > 0 else 0.0,
             'engagement': round(min(max(shrunk_rate * 100, 0.0), 100.0), 1),
             'topTopicEN': dominant_category,
             'topTopicRU': dominant_category,
@@ -320,35 +321,33 @@ def get_community_channels() -> list[dict]:
     return processed_results[:50]
 
 
-def get_key_voices() -> list[dict]:
+def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
     """Most active recent commenters with real usernames, channels, and topics."""
     # First get data from Neo4j
     neo4j_results = run_query("""
-        MATCH (cAll:Comment)
-        WITH max(cAll.posted_at) AS latestCommentAt
-
         MATCH (u:User)-[:WROTE]->(c:Comment)
-        WHERE c.posted_at >= latestCommentAt - duration('P30D')
-        WITH latestCommentAt, u,
+        WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
+        WITH u,
              count(DISTINCT c) AS commentCount,
              count(DISTINCT date(c.posted_at)) AS activeDays
         WHERE commentCount >= 3
 
         // Get channels where the user has been active in the same recent window
         OPTIONAL MATCH (u)-[:WROTE]->(c2:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-        WHERE c2.posted_at >= latestCommentAt - duration('P30D')
-        WITH latestCommentAt, u, commentCount, activeDays,
+        WHERE c2.posted_at >= datetime($start) AND c2.posted_at < datetime($end)
+        WITH u, commentCount, activeDays,
              collect(DISTINCT ch.title)[..5] AS activeChannels
 
         // Get topics from the user's recent comments
         OPTIONAL MATCH (u)-[:WROTE]->(c3:Comment)-[:TAGGED]->(t:Topic)
-        WHERE c3.posted_at >= latestCommentAt - duration('P30D')
-        WITH latestCommentAt, u, commentCount, activeDays, activeChannels,
+        WHERE c3.posted_at >= datetime($start) AND c3.posted_at < datetime($end)
+        WITH u, commentCount, activeDays, activeChannels,
              collect(DISTINCT t.name)[..5] AS userTopics
 
         // Count active reply connections in the same window
         OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
-        WHERE coalesce(r.last_seen, r.first_seen) >= latestCommentAt - duration('P30D')
+        WHERE coalesce(r.last_seen, r.first_seen) >= datetime($start)
+          AND coalesce(r.last_seen, r.first_seen) < datetime($end)
         WITH u, commentCount, activeDays, activeChannels, userTopics,
              count(DISTINCT r) AS replyCount
 
@@ -377,7 +376,7 @@ def get_key_voices() -> list[dict]:
                topChannels, topics, postsPerWeek, replyRate
         ORDER BY activityScore DESC, commentCount DESC, activeDays DESC
         LIMIT 20
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
     # Fetch usernames from Supabase
     try:
@@ -481,13 +480,15 @@ def get_viral_topics() -> list[dict]:
     """)
 
 
-def get_information_velocity() -> list[dict]:
+def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:
     """Track how topics spread across channels with real timestamps."""
     return run_query("""
         // Find topics that appear in multiple channels
         MATCH (p:Post)-[:TAGGED]->(t:Topic)
         MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
         WHERE p.posted_at IS NOT NULL
+          AND p.posted_at >= datetime($start)
+          AND p.posted_at < datetime($end)
         WITH t, ch, min(p.posted_at) AS firstSeen,
              count(p) AS postCount,
              sum(p.views) AS totalViews
@@ -539,4 +540,4 @@ def get_information_velocity() -> list[dict]:
                velocity
         ORDER BY totalReach DESC
         LIMIT 15
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})

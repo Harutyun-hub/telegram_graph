@@ -4,6 +4,7 @@ import { Star, TrendingUp, Clock } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
+import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 
 // ============================================================
@@ -107,6 +108,7 @@ export function TopChannels() {
 export function KeyVoices() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const keyVoices = data.keyVoices[lang] ?? [];
 
@@ -118,12 +120,14 @@ export function KeyVoices() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'}
         </h3>
-        <span className="text-xs text-gray-500">{ru ? 'Активные комментаторы за 30 дней' : 'Active commenters in 30 days'}</span>
+        <span className="text-xs text-gray-500">
+          {ru ? `Активные комментаторы за ${range.days} дн.` : `Active commenters in the selected ${range.days}-day window`}
+        </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Участники, которые чаще других появляются в обсуждениях за последние 30 дней'
-          : 'Participants who appear most often in discussions over the last 30 days'}
+          ? 'Участники, которые чаще других появляются в обсуждениях в выбранном окне'
+          : 'Participants who appear most often in discussions during the selected window'}
       </p>
 
       <div className="space-y-3">

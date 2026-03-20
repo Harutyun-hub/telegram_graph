@@ -1,6 +1,7 @@
 import { ArrowUpRight, ArrowDownRight, Star } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
+import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 
 // ============================================================
@@ -10,6 +11,7 @@ import { EmptyWidget } from '../ui/EmptyWidget';
 export function WeekOverWeekShifts() {
   const { lang } = useLanguage();
   const { data } = useData();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const weeklyShifts = data.weeklyShifts[lang] ?? [];
 
@@ -26,7 +28,7 @@ export function WeekOverWeekShifts() {
           {ru ? 'Динамика за неделю' : 'Week-over-Week Shifts'}
         </h3>
         <span className="text-xs text-gray-500">
-          {ru ? 'Что изменилось с прошлого понедельника?' : 'What changed since last Monday?'}
+          {ru ? `Сравнение с предыдущим окном (${range.days} дн.)` : `Compared with the previous ${range.days}-day window`}
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
