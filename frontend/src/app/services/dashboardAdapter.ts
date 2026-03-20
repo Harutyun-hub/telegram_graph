@@ -50,6 +50,26 @@ const WORK_SIGNAL_LABELS_RU: Record<string, string> = {
   Hiring: 'Найм',
   Partnership_Request: 'Поиск партнерства',
 };
+const WEEKLY_SHIFT_LABELS_EN: Record<string, string> = {
+  community_health_score: 'Community Health Score',
+  active_members: 'Active Members',
+  new_voices: 'New Voices',
+  posts: 'Posts',
+  comments: 'Comments',
+  questions_asked: 'Questions Asked',
+  positive_sentiment: 'Positive Sentiment',
+  churn_signals: 'Churn Signals',
+};
+const WEEKLY_SHIFT_LABELS_RU: Record<string, string> = {
+  community_health_score: 'Индекс здоровья сообщества',
+  active_members: 'Активные участники',
+  new_voices: 'Новые голоса',
+  posts: 'Посты',
+  comments: 'Комментарии',
+  questions_asked: 'Задано вопросов',
+  positive_sentiment: 'Позитивный настрой',
+  churn_signals: 'Сигналы оттока',
+};
 
 const TOPIC_RU: Record<string, string> = {
   'Political Protest': 'Политические протесты',
@@ -277,6 +297,44 @@ function formatWorkSignalLabel(signalRaw: any, ru = false): string {
   return ru
     ? (WORK_SIGNAL_LABELS_RU[signal] ?? signal)
     : (WORK_SIGNAL_LABELS_EN[signal] ?? signal);
+}
+
+function normalizeWeeklyShiftItem(row: any, ru = false) {
+  const current = asNum(row?.current, Number.NaN);
+  const previous = asNum(row?.previous, Number.NaN);
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
+
+  const metricKey = asStr(row?.metricKey, '').trim();
+  const translatedMetric = ru ? WEEKLY_SHIFT_LABELS_RU[metricKey] : WEEKLY_SHIFT_LABELS_EN[metricKey];
+  const metric = translatedMetric
+    || asStr(row?.metric, '').trim()
+    || metricKey;
+  if (!metric) return null;
+
+  return {
+    metricKey,
+    metric,
+    current,
+    previous,
+    unit: asStr(row?.unit, ''),
+    category: asStr(row?.category, 'general'),
+    isInverse: Boolean(row?.isInverse),
+  };
+}
+
+function normalizeJobEvidenceItem(item: any) {
+  const text = asStr(item?.text, '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const sourceTopic = normalizeTopicLabel(item?.sourceTopic || item?.topic || 'Job Market Condition') || 'Job Market Condition';
+  return {
+    id: asStr(item?.id, `${slugify(sourceTopic)}-${slugify(text.slice(0, 24))}`),
+    text,
+    kind: asStr(item?.kind, 'comment') === 'post' ? 'post' : 'comment',
+    topic: sourceTopic,
+    sourceTopic,
+    channel: asStr(item?.channel, ''),
+    postedAt: asStr(item?.postedAt, ''),
+  };
 }
 
 function boundedTrend(current: number, previous: number, minSupport = MIN_SUPPORT_FOR_TREND) {
@@ -1902,6 +1960,95 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
+    const oppBriefRows = asArray(raw.businessOpportunityBriefs);
+    if (oppBriefRows.length > 0) {
+      const merged = new Map<string, any>();
+      oppBriefRows.forEach((r: any) => {
+        const topic = normalizeTopicLabel(r.topic);
+        if (!topic) return;
+        const key = asStr(r.id, '').trim() || `bo-${topicKey(topic)}`;
+        if (merged.has(key)) return;
+
+        const evidenceRows = asArray(r.evidence)
+          .map((ev: any) => ({
+            id: asStr(ev.id, ''),
+            quote: snippet(ev.quote, 500),
+            channel: asStr(ev.channel, 'unknown'),
+            timestamp: asStr(ev.timestamp, ''),
+            kind: asStr(ev.kind, 'message'),
+          }))
+          .filter((ev: any) => ev.id && ev.quote)
+          .slice(0, 4);
+
+        const deliveryModel = asStr(r.deliveryModel, 'service').toLowerCase();
+        const readiness = asStr(r.readiness, 'validate_now').toLowerCase();
+        const confidence = asStr(r.confidence, 'medium').toLowerCase();
+        merged.set(key, {
+          id: key,
+          topic,
+          category: asStr(r.category, 'General'),
+          opportunityEn: asStr(r.opportunityEn, asStr(r.opportunity, topic)),
+          opportunityRu: asStr(r.opportunityRu, asStr(r.opportunityEn, asStr(r.opportunity, topic))),
+          summaryEn: asStr(r.summaryEn, asStr(r.summary, '')),
+          summaryRu: asStr(r.summaryRu, asStr(r.summaryEn, asStr(r.summary, ''))),
+          deliveryModel: (['service', 'product', 'marketplace', 'content', 'community_program'].includes(deliveryModel) ? deliveryModel : 'service') as 'service' | 'product' | 'marketplace' | 'content' | 'community_program',
+          readiness: (['pilot_ready', 'validate_now', 'watchlist'].includes(readiness) ? readiness : 'validate_now') as 'pilot_ready' | 'validate_now' | 'watchlist',
+          confidence: (['high', 'medium', 'low'].includes(confidence) ? confidence : 'medium') as 'high' | 'medium' | 'low',
+          confidenceScore: clamp(asNum(r.confidenceScore, 0.6), 0, 1),
+          demandSignals: {
+            messages: Math.max(0, asNum(r?.demandSignals?.messages, asNum(r.signalCount, 0))),
+            uniqueUsers: Math.max(0, asNum(r?.demandSignals?.uniqueUsers, asNum(r.uniqueUsers, 0))),
+            channels: Math.max(0, asNum(r?.demandSignals?.channels, asNum(r.channelCount, 0))),
+            trend7dPct: clamp(asNum(r?.demandSignals?.trend7dPct, asNum(r.trend7dPct, 0)), -100, 100),
+          },
+          sampleEvidenceId: asStr(r.sampleEvidenceId, evidenceRows[0]?.id || ''),
+          latestAt: asStr(r.latestAt, ''),
+          evidence: evidenceRows,
+        });
+      });
+
+      const en = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: r.topic,
+        sourceTopic: r.topic,
+        category: r.category,
+        opportunity: r.opportunityEn || r.topic,
+        summary: r.summaryEn || r.opportunityEn || r.topic,
+        deliveryModel: r.deliveryModel,
+        readiness: r.readiness,
+        confidence: r.confidence,
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+
+      const ruRows = Array.from(merged.values()).map((r: any) => ({
+        id: r.id,
+        topic: translateTopicRu(r.topic),
+        sourceTopic: r.topic,
+        category: translateCategory(r.category, true),
+        opportunity: r.opportunityRu || r.opportunityEn || translateTopicRu(r.topic),
+        summary: r.summaryRu || r.summaryEn || r.opportunityRu || r.opportunityEn || translateTopicRu(r.topic),
+        deliveryModel: r.deliveryModel,
+        readiness: r.readiness,
+        confidence: r.confidence,
+        confidenceScore: r.confidenceScore,
+        demandSignals: r.demandSignals,
+        sampleEvidenceId: r.sampleEvidenceId,
+        latestAt: r.latestAt,
+        evidence: r.evidence,
+      }));
+
+      app.businessOpportunityBriefs.en = en.slice(0, 8);
+      app.businessOpportunityBriefs.ru = ruRows.slice(0, 8);
+    }
+  } catch {
+    // Keep mock defaults.
+  }
+
+  try {
     const bizRows = asArray(raw.businessOpportunities);
     if (bizRows.length > 0) {
       const mk = (r: any, ru: boolean) => {
@@ -1929,13 +2076,29 @@ export function adaptDashboardPayload(payload: any): AppData {
     const jsRows = asArray(raw.jobSeeking);
     if (jsRows.length > 0) {
       const bySignal = new Map<string, number>();
+      const evidenceBySignal = new Map<string, Array<{ id: string; text: string; kind: 'post' | 'comment'; topic: string; sourceTopic: string; channel: string; postedAt: string }>>();
       jsRows.forEach((r: any) => {
         const signal = asStr(r.signalType, 'Job_Seeking');
         bySignal.set(signal, (bySignal.get(signal) || 0) + 1);
+        const evidence = asArray(r.evidence)
+          .map((item: any) => normalizeJobEvidenceItem(item))
+          .filter(Boolean) as Array<{ id: string; text: string; kind: 'post' | 'comment'; topic: string; sourceTopic: string; channel: string; postedAt: string }>;
+        if (evidence.length > 0 && !evidenceBySignal.has(signal)) {
+          const deduped = Array.from(new Map(evidence.map((item) => [`${item.sourceTopic}:${item.id}:${item.text}`, item])).values()).slice(0, 3);
+          evidenceBySignal.set(signal, deduped);
+        }
       });
       const total = Math.max(1, Array.from(bySignal.values()).reduce((s, n) => s + n, 0));
       const buildItems = (ru: boolean) => Array.from(bySignal.entries())
-        .map(([signal, count]) => ({ role: formatWorkSignalLabel(signal, ru), count, pct: pct(count, total) }))
+        .map(([signal, count]) => ({
+          role: formatWorkSignalLabel(signal, ru),
+          count,
+          pct: pct(count, total),
+          evidence: (evidenceBySignal.get(signal) ?? []).map((item) => ({
+            ...item,
+            topic: ru ? (translateTopicRu(item.sourceTopic || item.topic) || item.topic) : item.topic,
+          })),
+        }))
         .sort((a, b) => b.count - a.count);
       app.jobSeeking = { en: buildItems(false), ru: buildItems(true) };
     }
@@ -2002,15 +2165,81 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
-    const ws = asArray(raw.weeklyShifts)[0];
-    if (ws) {
-      const rows = [
-        { metric: 'Posts', current: asNum(ws.thisWeekPosts, 0), previous: asNum(ws.lastWeekPosts, 0), unit: '', category: 'content' },
-        { metric: 'Comments', current: asNum(ws.thisWeekComments, 0), previous: asNum(ws.lastWeekComments, 0), unit: '', category: 'content' },
-        { metric: 'Active Users', current: asNum(ws.thisWeekUsers, 0), previous: Math.max(1, asNum(ws.thisWeekUsers, 0) - 5), unit: '', category: 'audience' },
-        { metric: 'Churn Signals', current: app.churnSignals.en.length, previous: Math.max(1, app.churnSignals.en.length + 2), unit: '', category: 'risk', isInverse: true },
-      ];
-      app.weeklyShifts = { en: rows, ru: rows.map((r) => ({ ...r, metric: r.metric === 'Posts' ? 'Посты' : r.metric === 'Comments' ? 'Комментарии' : r.metric === 'Active Users' ? 'Активные пользователи' : 'Сигналы оттока' })) };
+    const rawWeeklyShifts = asArray(raw.weeklyShifts);
+    const directRowsEn = rawWeeklyShifts
+      .map((row: any) => normalizeWeeklyShiftItem(row, false))
+      .filter(Boolean);
+
+    if (directRowsEn.length > 0) {
+      app.weeklyShifts = {
+        en: directRowsEn,
+        ru: rawWeeklyShifts
+          .map((row: any) => normalizeWeeklyShiftItem(row, true))
+          .filter(Boolean),
+      };
+    } else {
+      const ws = rawWeeklyShifts[0];
+      const fallbackRowsEn = [
+        normalizeWeeklyShiftItem({
+          metricKey: 'community_health_score',
+          current: raw?.communityHealth?.score,
+          previous: raw?.communityHealth?.previousScore ?? raw?.communityHealth?.weekAgoScore,
+          unit: '/100',
+          category: 'health',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'posts',
+          current: ws?.thisWeekPosts,
+          previous: ws?.lastWeekPosts,
+          unit: '',
+          category: 'content',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'comments',
+          current: ws?.thisWeekComments,
+          previous: ws?.lastWeekComments,
+          unit: '',
+          category: 'content',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'active_members',
+          current: ws?.thisWeekUsers,
+          previous: ws?.lastWeekUsers,
+          unit: '',
+          category: 'audience',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'questions_asked',
+          current: ws?.thisWeekQuestionsAsked,
+          previous: ws?.lastWeekQuestionsAsked,
+          unit: '',
+          category: 'engagement',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'positive_sentiment',
+          current: ws?.thisWeekPositiveSentimentPct,
+          previous: ws?.lastWeekPositiveSentimentPct,
+          unit: '%',
+          category: 'mood',
+        }, false),
+        normalizeWeeklyShiftItem({
+          metricKey: 'churn_signals',
+          current: ws?.thisWeekChurnSignals,
+          previous: ws?.lastWeekChurnSignals,
+          unit: '',
+          category: 'risk',
+          isInverse: true,
+        }, false),
+      ].filter(Boolean);
+
+      if (fallbackRowsEn.length > 0) {
+        app.weeklyShifts = {
+          en: fallbackRowsEn,
+          ru: fallbackRowsEn
+            .map((row) => normalizeWeeklyShiftItem(row, true))
+            .filter(Boolean),
+        };
+      }
     }
   } catch {
     // Keep mock defaults.

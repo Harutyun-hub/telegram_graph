@@ -74,6 +74,7 @@ export const ADMIN_PROMPT_GROUPS: AdminPromptGroup[] = [
   { id: 'extraction', labelEn: 'Extraction', labelRu: 'Извлечение' },
   { id: 'question_briefs', labelEn: 'Question Briefs', labelRu: 'Карточки вопросов' },
   { id: 'behavioral_briefs', labelEn: 'Behavioral Briefs', labelRu: 'Поведенческие карточки' },
+  { id: 'opportunity_briefs', labelEn: 'Opportunity Briefs', labelRu: 'Карточки возможностей' },
   { id: 'recommendation_briefs', labelEn: 'Recommendations', labelRu: 'Рекомендации' },
 ];
 
@@ -159,6 +160,22 @@ export const ADMIN_PROMPT_DEFINITIONS: AdminPromptDefinition[] = [
     descriptionRu: 'Создаёт карточки срочности.',
   },
   {
+    key: 'opportunity_briefs.triage_prompt',
+    groupId: 'opportunity_briefs',
+    labelEn: 'Opportunity triage prompt',
+    labelRu: 'Промпт триажа возможностей',
+    descriptionEn: 'Accepts or rejects demand-led opportunity clusters.',
+    descriptionRu: 'Принимает или отклоняет кластеры возможностей на основе спроса.',
+  },
+  {
+    key: 'opportunity_briefs.synthesis_prompt',
+    groupId: 'opportunity_briefs',
+    labelEn: 'Opportunity synthesis prompt',
+    labelRu: 'Промпт синтеза возможностей',
+    descriptionEn: 'Builds the final business opportunity cards.',
+    descriptionRu: 'Формирует финальные карточки бизнес-возможностей.',
+  },
+  {
     key: 'recommendation_briefs.extraction_prompt',
     groupId: 'recommendation_briefs',
     labelEn: 'Recommendation extraction prompt',
@@ -172,11 +189,14 @@ export const DEFAULT_ADMIN_RUNTIME: AdminRuntimeConfig = {
   openaiModel: 'gpt-5.4-mini',
   questionBriefsModel: 'gpt-5.4-mini',
   behavioralBriefsModel: 'gpt-5.4-mini',
+  opportunityBriefsModel: 'gpt-5.4-mini',
   questionBriefsPromptVersion: 'qcards-v2',
   behavioralBriefsPromptVersion: 'behavior-v2',
+  opportunityBriefsPromptVersion: 'opportunity-v1',
   aiPostPromptStyle: 'compact',
   featureQuestionBriefsAi: true,
   featureBehavioralBriefsAi: true,
+  featureOpportunityBriefsAi: true,
 };
 
 export function createDefaultAdminConfig(): AdminConfig {

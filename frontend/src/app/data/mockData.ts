@@ -812,6 +812,49 @@ export const mockAppData: AppData = {
   // TIER 7: ACTIONABLE
   // ════════════════════════════════════════════════════════
 
+  businessOpportunityBriefs: {
+    en: [
+      {
+        id: 'bo-family-friendly-coworking',
+        topic: 'Workspace',
+        category: 'Business & Enterprise',
+        opportunity: 'Family-friendly coworking with reliable childcare support',
+        summary: 'Parents repeatedly describe the same friction: they need a quiet place to work but cannot find dependable childcare-aware coworking options, which makes a pilot service offer immediately testable.',
+        deliveryModel: 'service',
+        readiness: 'pilot_ready',
+        confidence: 'high',
+        confidenceScore: 0.82,
+        demandSignals: { messages: 22, uniqueUsers: 14, channels: 5, trend7dPct: 31 },
+        sampleEvidenceId: 'demo-bo-1',
+        latestAt: '2026-03-14T10:20:00Z',
+        evidence: [
+          { id: 'demo-bo-1', quote: 'Is there any coworking where I can work for a few hours and leave a child nearby safely?', channel: 'Relocants Armenia', timestamp: '2026-03-14T10:20:00Z', kind: 'comment' },
+          { id: 'demo-bo-2', quote: 'I keep seeing daycare and workspace discussed separately, but families need both together.', channel: 'Yerevan Parents', timestamp: '2026-03-12T08:05:00Z', kind: 'comment' },
+        ],
+      },
+    ],
+    ru: [
+      {
+        id: 'bo-family-friendly-coworking',
+        topic: 'Workspace',
+        category: 'Бизнес и предпринимательство',
+        opportunity: 'Семейный коворкинг с надёжной поддержкой по уходу за детьми',
+        summary: 'Родители повторяют одну и ту же проблему: им нужно тихое место для работы, но они не могут найти коворкинг, который реально учитывает вопрос с детьми. Это делает пилотный запуск услуги оправданным уже сейчас.',
+        deliveryModel: 'service',
+        readiness: 'pilot_ready',
+        confidence: 'high',
+        confidenceScore: 0.82,
+        demandSignals: { messages: 22, uniqueUsers: 14, channels: 5, trend7dPct: 31 },
+        sampleEvidenceId: 'demo-bo-1',
+        latestAt: '2026-03-14T10:20:00Z',
+        evidence: [
+          { id: 'demo-bo-1', quote: 'Есть ли коворкинг, где можно поработать несколько часов и рядом безопасно оставить ребёнка?', channel: 'Relocants Armenia', timestamp: '2026-03-14T10:20:00Z', kind: 'comment' },
+          { id: 'demo-bo-2', quote: 'Постоянно обсуждают отдельно детсад и отдельно рабочее место, а семьям нужно это вместе.', channel: 'Yerevan Parents', timestamp: '2026-03-12T08:05:00Z', kind: 'comment' },
+        ],
+      },
+    ],
+  },
+
   businessOpportunities: {
     en: [
       { need: 'Russian-speaking medical clinic', mentions: 1840, growth: 35, sector: 'Healthcare', readiness: 'High — people actively searching', sampleQuote: '"Would pay premium for a clinic with Russian-speaking staff and modern equipment"', revenue: '$$$$' },

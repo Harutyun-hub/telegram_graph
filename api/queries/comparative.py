@@ -5,51 +5,293 @@ Provides: weeklyShifts, sentimentByTopic, topPosts, contentTypePerformance,
           vitalityIndicators, allTopics, allChannels, allAudience
 """
 from __future__ import annotations
+from datetime import timedelta
+
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query, run_single
+from api.queries import predictive, pulse
+
+
+def _build_window_context(current_start, current_end, days: int) -> DashboardDateContext:
+    previous_end = current_start
+    previous_start = current_start - timedelta(days=days)
+    from_date = current_start.date()
+    to_date = (current_end - timedelta(days=1)).date()
+    return DashboardDateContext(
+        from_date=from_date,
+        to_date=to_date,
+        start_at=current_start,
+        end_at=current_end,
+        previous_start_at=previous_start,
+        previous_end_at=previous_end,
+        days=days,
+        cache_key=f"{from_date.isoformat()}:{to_date.isoformat()}",
+    )
+
+
+def _safe_int(value, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return fallback
+
+
+def _safe_pct(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        return 0
+    return int(round((float(numerator) / float(denominator)) * 100.0))
+
+
+def _weekly_metric_row(
+    metric_key: str,
+    current: int,
+    previous: int,
+    *,
+    unit: str = "",
+    category: str = "general",
+    is_inverse: bool = False,
+) -> dict:
+    return {
+        "metricKey": metric_key,
+        "current": current,
+        "previous": previous,
+        "unit": unit,
+        "category": category,
+        "isInverse": is_inverse,
+    }
 
 
 def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
-    """Week-over-week changes in key metrics."""
-    return run_query("""
-        // This week's activity
-        MATCH (p:Post)
-        WHERE p.posted_at >= datetime($current_start) AND p.posted_at < datetime($current_end)
-        WITH count(p) AS thisWeekPosts
-        OPTIONAL MATCH (c:Comment)
-        WHERE c.posted_at >= datetime($current_start) AND c.posted_at < datetime($current_end)
-        WITH thisWeekPosts, count(c) AS thisWeekComments
-        OPTIONAL MATCH (u:User)
-        WHERE u.last_seen >= datetime($current_start) AND u.last_seen < datetime($current_end)
-        WITH thisWeekPosts, thisWeekComments, count(u) AS thisWeekUsers
-
-        // Last week's activity
-        OPTIONAL MATCH (p2:Post)
-        WHERE p2.posted_at >= datetime($previous_start)
-          AND p2.posted_at < datetime($previous_end)
-        WITH thisWeekPosts, thisWeekComments, thisWeekUsers,
-             count(p2) AS lastWeekPosts
-        OPTIONAL MATCH (c2:Comment)
-        WHERE c2.posted_at >= datetime($previous_start)
-          AND c2.posted_at < datetime($previous_end)
-        WITH thisWeekPosts, thisWeekComments, thisWeekUsers, lastWeekPosts,
-             count(c2) AS lastWeekComments
-
-        RETURN thisWeekPosts, lastWeekPosts,
-               thisWeekComments, lastWeekComments,
-               thisWeekUsers,
-               CASE WHEN lastWeekPosts > 0
-                    THEN round(100.0 * (thisWeekPosts - lastWeekPosts) / lastWeekPosts, 1)
-                    ELSE 0 END AS postChange,
-               CASE WHEN lastWeekComments > 0
-                    THEN round(100.0 * (thisWeekComments - lastWeekComments) / lastWeekComments, 1)
-                    ELSE 0 END AS commentChange
+    """Exact week-over-week metric rows for the comparative widget."""
+    stats = run_single("""
+        CALL {
+            OPTIONAL MATCH (p:Post)
+            WHERE p.posted_at >= datetime($previous_start)
+              AND p.posted_at < datetime($current_end)
+            RETURN
+                count(CASE
+                    WHEN p.posted_at >= datetime($current_start)
+                     AND p.posted_at < datetime($current_end)
+                    THEN 1
+                END) AS currentPosts,
+                count(CASE
+                    WHEN p.posted_at >= datetime($previous_start)
+                     AND p.posted_at < datetime($previous_end)
+                    THEN 1
+                END) AS previousPosts,
+                count(CASE
+                    WHEN p.posted_at >= datetime($current_start)
+                     AND p.posted_at < datetime($current_end)
+                     AND p.text IS NOT NULL
+                     AND trim(p.text) <> ''
+                     AND p.text CONTAINS '?'
+                    THEN 1
+                END) AS currentPostQuestions,
+                count(CASE
+                    WHEN p.posted_at >= datetime($previous_start)
+                     AND p.posted_at < datetime($previous_end)
+                     AND p.text IS NOT NULL
+                     AND trim(p.text) <> ''
+                     AND p.text CONTAINS '?'
+                    THEN 1
+                END) AS previousPostQuestions
+        }
+        CALL {
+            OPTIONAL MATCH (c:Comment)
+            WHERE c.posted_at >= datetime($previous_start)
+              AND c.posted_at < datetime($current_end)
+            RETURN
+                count(CASE
+                    WHEN c.posted_at >= datetime($current_start)
+                     AND c.posted_at < datetime($current_end)
+                    THEN 1
+                END) AS currentComments,
+                count(CASE
+                    WHEN c.posted_at >= datetime($previous_start)
+                     AND c.posted_at < datetime($previous_end)
+                    THEN 1
+                END) AS previousComments,
+                count(CASE
+                    WHEN c.posted_at >= datetime($current_start)
+                     AND c.posted_at < datetime($current_end)
+                     AND c.text IS NOT NULL
+                     AND trim(c.text) <> ''
+                     AND c.text CONTAINS '?'
+                    THEN 1
+                END) AS currentCommentQuestions,
+                count(CASE
+                    WHEN c.posted_at >= datetime($previous_start)
+                     AND c.posted_at < datetime($previous_end)
+                     AND c.text IS NOT NULL
+                     AND trim(c.text) <> ''
+                     AND c.text CONTAINS '?'
+                    THEN 1
+                END) AS previousCommentQuestions
+        }
+        CALL {
+            CALL () {
+                MATCH (u:User)-[i:INTERESTED_IN]->(:Topic)
+                WHERE i.last_seen >= datetime($previous_start)
+                  AND i.last_seen < datetime($current_end)
+                RETURN u AS user, i.last_seen AS ts
+                UNION ALL
+                MATCH (u:User)-[:WROTE]->(c:Comment)
+                WHERE c.posted_at >= datetime($previous_start)
+                  AND c.posted_at < datetime($current_end)
+                RETURN u AS user, c.posted_at AS ts
+            }
+            RETURN
+                count(DISTINCT CASE
+                    WHEN ts >= datetime($current_start)
+                     AND ts < datetime($current_end)
+                    THEN user
+                END) AS currentActiveUsers,
+                count(DISTINCT CASE
+                    WHEN ts >= datetime($previous_start)
+                     AND ts < datetime($previous_end)
+                    THEN user
+                END) AS previousActiveUsers
+        }
+        CALL {
+            MATCH (u:User)-[:WROTE]->(c:Comment)
+            WHERE u.telegram_user_id IS NOT NULL
+            WITH u, min(c.posted_at) AS firstVoiceAt
+            RETURN
+                count(DISTINCT CASE
+                    WHEN firstVoiceAt >= datetime($current_start)
+                     AND firstVoiceAt < datetime($current_end)
+                    THEN u
+                END) AS currentNewVoices,
+                count(DISTINCT CASE
+                    WHEN firstVoiceAt >= datetime($previous_start)
+                     AND firstVoiceAt < datetime($previous_end)
+                    THEN u
+                END) AS previousNewVoices
+        }
+        CALL {
+            CALL () {
+                MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WHERE p.posted_at >= datetime($previous_start)
+                  AND p.posted_at < datetime($current_end)
+                RETURN p.posted_at AS ts, toLower(trim(coalesce(s.label, ''))) AS label
+                UNION ALL
+                MATCH (c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WHERE c.posted_at >= datetime($previous_start)
+                  AND c.posted_at < datetime($current_end)
+                RETURN c.posted_at AS ts, toLower(trim(coalesce(s.label, ''))) AS label
+            }
+            WITH ts, label
+            WHERE label <> ''
+            RETURN
+                count(CASE
+                    WHEN ts >= datetime($current_start)
+                     AND ts < datetime($current_end)
+                    THEN 1
+                END) AS currentSentimentTotal,
+                count(CASE
+                    WHEN ts >= datetime($current_start)
+                     AND ts < datetime($current_end)
+                     AND label = 'positive'
+                    THEN 1
+                END) AS currentPositiveSentiment,
+                count(CASE
+                    WHEN ts >= datetime($previous_start)
+                     AND ts < datetime($previous_end)
+                    THEN 1
+                END) AS previousSentimentTotal,
+                count(CASE
+                    WHEN ts >= datetime($previous_start)
+                     AND ts < datetime($previous_end)
+                     AND label = 'positive'
+                    THEN 1
+                END) AS previousPositiveSentiment
+        }
+        RETURN
+            currentPosts,
+            previousPosts,
+            currentComments,
+            previousComments,
+            currentPostQuestions + currentCommentQuestions AS currentQuestionsAsked,
+            previousPostQuestions + previousCommentQuestions AS previousQuestionsAsked,
+            currentActiveUsers,
+            previousActiveUsers,
+            currentNewVoices,
+            previousNewVoices,
+            currentPositiveSentiment,
+            currentSentimentTotal,
+            previousPositiveSentiment,
+            previousSentimentTotal
     """, {
         "current_start": ctx.start_at.isoformat(),
         "current_end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    })
+    }) or {}
+
+    health = pulse.get_community_health(ctx)
+    previous_ctx = _build_window_context(ctx.previous_start_at, ctx.previous_end_at, ctx.days)
+    current_churn_count = len(predictive.get_churn_signals(ctx))
+    previous_churn_count = len(predictive.get_churn_signals(previous_ctx))
+
+    return [
+        _weekly_metric_row(
+            "community_health_score",
+            _safe_int(health.get("score")),
+            _safe_int(health.get("previousScore")),
+            unit="/100",
+            category="health",
+        ),
+        _weekly_metric_row(
+            "active_members",
+            _safe_int(stats.get("currentActiveUsers")),
+            _safe_int(stats.get("previousActiveUsers")),
+            category="audience",
+        ),
+        _weekly_metric_row(
+            "new_voices",
+            _safe_int(stats.get("currentNewVoices")),
+            _safe_int(stats.get("previousNewVoices")),
+            category="growth",
+        ),
+        _weekly_metric_row(
+            "posts",
+            _safe_int(stats.get("currentPosts")),
+            _safe_int(stats.get("previousPosts")),
+            category="content",
+        ),
+        _weekly_metric_row(
+            "comments",
+            _safe_int(stats.get("currentComments")),
+            _safe_int(stats.get("previousComments")),
+            category="content",
+        ),
+        _weekly_metric_row(
+            "questions_asked",
+            _safe_int(stats.get("currentQuestionsAsked")),
+            _safe_int(stats.get("previousQuestionsAsked")),
+            category="engagement",
+        ),
+        _weekly_metric_row(
+            "positive_sentiment",
+            _safe_pct(
+                _safe_int(stats.get("currentPositiveSentiment")),
+                _safe_int(stats.get("currentSentimentTotal")),
+            ),
+            _safe_pct(
+                _safe_int(stats.get("previousPositiveSentiment")),
+                _safe_int(stats.get("previousSentimentTotal")),
+            ),
+            unit="%",
+            category="mood",
+        ),
+        _weekly_metric_row(
+            "churn_signals",
+            current_churn_count,
+            previous_churn_count,
+            category="risk",
+            is_inverse=True,
+        ),
+    ]
 
 
 def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:

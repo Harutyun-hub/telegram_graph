@@ -20,6 +20,7 @@ from loguru import logger
 
 from api import behavioral_briefs
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
+from api import opportunity_briefs
 from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
 from buffer.supabase_writer import SupabaseWriter
@@ -172,7 +173,7 @@ def _fallback_for_tier(name: str) -> dict:
     if name == "predictive":
         return {"emergingInterests": [], "retentionFactors": [], "churnSignals": [], "growthFunnel": [], "decisionStages": []}
     if name == "actionable":
-        return {"businessOpportunities": [], "jobSeeking": [], "jobTrends": [], "housingData": [], "housingHotTopics": []}
+        return {"businessOpportunities": [], "businessOpportunityBriefs": [], "jobSeeking": [], "jobTrends": [], "housingData": [], "housingHotTopics": []}
     if name == "comparative":
         return {"weeklyShifts": [], "sentimentByTopic": [], "topPosts": [], "contentTypePerformance": [], "vitalityIndicators": {}}
     if name == "details":
@@ -314,6 +315,7 @@ def _tier_actionable(_ctx: DashboardDateContext) -> dict:
         housing_data = actionable.get_housing_data()
         return {
             "businessOpportunities": actionable.get_business_opportunities(_ctx),
+            "businessOpportunityBriefs": opportunity_briefs.get_business_opportunity_briefs(),
             "jobSeeking": actionable.get_job_seeking(_ctx),
             "jobTrends": actionable.get_job_trends(_ctx),
             "housingData": housing_data,

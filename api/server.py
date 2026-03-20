@@ -42,9 +42,14 @@ from api.queries import graph_dashboard
 from api.freshness import get_freshness_snapshot
 from api import insights
 from api import behavioral_briefs
+from api import opportunity_briefs
 from api import question_briefs
 from api import recommendation_briefs
-from api.admin_runtime import load_admin_config_raw, save_admin_config_raw
+from api.admin_runtime import (
+    get_admin_config_runtime_warning,
+    load_admin_config_raw,
+    save_admin_config_raw,
+)
 from api import db
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
@@ -143,6 +148,7 @@ supabase_writer = SupabaseWriter()
 scraper_scheduler = ScraperSchedulerService(supabase_writer)
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
+opportunity_cards_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 ADMIN_WIDGET_IDS = (
     "community_brief",
@@ -178,13 +184,16 @@ ADMIN_RUNTIME_STRING_KEYS = {
     "openaiModel",
     "questionBriefsModel",
     "behavioralBriefsModel",
+    "opportunityBriefsModel",
     "questionBriefsPromptVersion",
     "behavioralBriefsPromptVersion",
+    "opportunityBriefsPromptVersion",
     "aiPostPromptStyle",
 }
 ADMIN_RUNTIME_BOOL_KEYS = {
     "featureQuestionBriefsAi",
     "featureBehavioralBriefsAi",
+    "featureOpportunityBriefsAi",
 }
 
 
@@ -194,6 +203,7 @@ def _admin_prompt_defaults() -> dict[str, str]:
         intent_extractor.get_admin_prompt_defaults,
         question_briefs.get_admin_prompt_defaults,
         behavioral_briefs.get_admin_prompt_defaults,
+        opportunity_briefs.get_admin_prompt_defaults,
         recommendation_briefs.get_admin_prompt_defaults,
     ):
         defaults.update(provider())
@@ -210,11 +220,14 @@ def _default_admin_config() -> dict[str, Any]:
             "openaiModel": config.OPENAI_MODEL,
             "questionBriefsModel": config.QUESTION_BRIEFS_MODEL,
             "behavioralBriefsModel": config.BEHAVIORAL_BRIEFS_MODEL,
+            "opportunityBriefsModel": config.OPPORTUNITY_BRIEFS_MODEL,
             "questionBriefsPromptVersion": config.QUESTION_BRIEFS_PROMPT_VERSION,
             "behavioralBriefsPromptVersion": config.BEHAVIORAL_BRIEFS_PROMPT_VERSION,
+            "opportunityBriefsPromptVersion": config.OPPORTUNITY_BRIEFS_PROMPT_VERSION,
             "aiPostPromptStyle": config.AI_POST_PROMPT_STYLE,
             "featureQuestionBriefsAi": bool(config.FEATURE_QUESTION_BRIEFS_AI),
             "featureBehavioralBriefsAi": bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI),
+            "featureOpportunityBriefsAi": bool(config.FEATURE_OPPORTUNITY_BRIEFS_AI),
         },
     }
 
@@ -305,6 +318,14 @@ def _load_admin_config() -> dict[str, Any]:
     except HTTPException:
         logger.warning("Admin config contains invalid values; falling back to defaults")
         return _default_admin_config()
+
+
+def _admin_config_response() -> dict[str, Any]:
+    payload = _load_admin_config()
+    warning = get_admin_config_runtime_warning()
+    if warning:
+        payload["warning"] = warning
+    return payload
 
 
 def _parse_snapshot_date(value: Any) -> Optional[datetime]:
@@ -420,6 +441,19 @@ async def _materialize_behavioral_cards_once(force: bool = False) -> None:
         logger.warning(f"Behavioral cards materialization failed: {e}")
 
 
+async def _materialize_opportunity_cards_once(force: bool = False) -> None:
+    """Run opportunity-card materialization off the request path."""
+    try:
+        loop = asyncio.get_running_loop()
+        cards = await loop.run_in_executor(
+            None,
+            lambda: opportunity_briefs.refresh_opportunity_briefs(force=force),
+        )
+        logger.info(f"Opportunity cards materialization completed | cards={len(cards)}")
+    except Exception as e:
+        logger.warning(f"Opportunity cards materialization failed: {e}")
+
+
 def _start_question_cards_scheduler() -> None:
     """Start recurring question-card materialization scheduler."""
     global question_cards_scheduler
@@ -458,6 +492,26 @@ def _start_behavioral_cards_scheduler() -> None:
     scheduler.start()
     behavioral_cards_scheduler = scheduler
     logger.info(f"Behavioral cards scheduler ready | interval={interval}m")
+
+
+def _start_opportunity_cards_scheduler() -> None:
+    """Start recurring business-opportunity card materialization scheduler."""
+    global opportunity_cards_scheduler
+
+    interval = max(15, int(config.OPPORTUNITY_BRIEFS_REFRESH_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _materialize_opportunity_cards_once,
+        "interval",
+        minutes=interval,
+        id="opportunity-cards-materializer",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    opportunity_cards_scheduler = scheduler
+    logger.info(f"Opportunity cards scheduler ready | interval={interval}m")
 
 
 def _normalize_channel_username(raw: str) -> str:
@@ -714,6 +768,34 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
         reverse=True,
     )[:3]
 
+    def _weekly_delta(metric_key: str, *legacy_metric_names: str) -> str:
+        for item in weekly:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("metricKey") or "").strip().lower()
+            label = str(item.get("metric") or "").strip().lower()
+            if key != metric_key and label not in legacy_metric_names:
+                continue
+
+            try:
+                current = float(item.get("current") or 0)
+                previous = float(item.get("previous") or 0)
+            except Exception:
+                return "N/A"
+
+            if previous <= 0:
+                return "new" if current > 0 else "0.0"
+            return f"{round(100.0 * (current - previous) / previous, 1)}"
+
+        legacy_value = week.get("postChange" if metric_key == "posts" else "commentChange")
+        return str(legacy_value if legacy_value is not None else "N/A")
+
+    def _format_delta(value: str) -> str:
+        return value if value in {"N/A", "new"} else f"{value}%"
+
+    post_delta = _weekly_delta("posts", "posts", "post")
+    comment_delta = _weekly_delta("comments", "comments", "comment")
+
     if ru:
         if "жил" in q or "аренд" in q or "housing" in q:
             return (
@@ -742,8 +824,8 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
             f"- Health score: {community.get('score', 'N/A')}\n"
             f"- Всего пользователей: {community.get('totalUsers', 'N/A')}\n"
             f"- Активные за 7 дней: {community.get('activeUsers', 'N/A')}\n"
-            f"- Изменение постов за неделю: {week.get('postChange', 'N/A')}%\n"
-            f"- Изменение комментариев за неделю: {week.get('commentChange', 'N/A')}%"
+            f"- Изменение постов за неделю: {_format_delta(post_delta)}\n"
+            f"- Изменение комментариев за неделю: {_format_delta(comment_delta)}"
         )
 
     if "hous" in q or "rent" in q:
@@ -774,8 +856,8 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
         f"- Health score: {community.get('score', 'N/A')}\n"
         f"- Total users: {community.get('totalUsers', 'N/A')}\n"
         f"- Active users (7d): {community.get('activeUsers', 'N/A')}\n"
-        f"- Weekly post delta: {week.get('postChange', 'N/A')}%\n"
-        f"- Weekly comment delta: {week.get('commentChange', 'N/A')}%"
+        f"- Weekly post delta: {_format_delta(post_delta)}\n"
+        f"- Weekly comment delta: {_format_delta(comment_delta)}"
     )
 
 
@@ -1030,7 +1112,7 @@ async def insight_cards(payload: InsightCardsRequest):
 async def get_admin_config():
     """Return merged Admin config with defaults and runtime overrides."""
     try:
-        return _load_admin_config()
+        return _admin_config_response()
     except Exception as e:
         logger.error(f"Get admin config error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1055,8 +1137,11 @@ async def update_admin_config(payload: AdminConfigPatchRequest):
         }
 
         if not save_admin_config_raw(next_config):
-            raise HTTPException(status_code=500, detail="Failed to persist admin config")
-        return _load_admin_config()
+            raise HTTPException(
+                status_code=500,
+                detail=get_admin_config_runtime_warning() or "Failed to persist admin config",
+            )
+        return _admin_config_response()
     except HTTPException:
         raise
     except Exception as e:
@@ -1432,6 +1517,7 @@ async def clear_cache():
     invalidate_cache()
     question_briefs.invalidate_question_briefs_cache()
     behavioral_briefs.invalidate_behavioral_briefs_cache()
+    opportunity_briefs.invalidate_opportunity_briefs_cache()
     return {"success": True, "message": "Cache cleared"}
 
 
@@ -1455,6 +1541,47 @@ async def debug_refresh_question_briefs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/behavioral-briefs/debug/refresh")
+async def debug_refresh_behavioral_briefs():
+    """Force-refresh behavioral cards and return stage diagnostics."""
+    try:
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
+            lambda: behavioral_briefs.refresh_behavioral_briefs_with_diagnostics(force=True),
+        )
+        return {
+            "success": True,
+            "problemCardsProduced": diagnostics.get("stages", {}).get("problemCards", 0),
+            "serviceCardsProduced": diagnostics.get("stages", {}).get("serviceCards", 0),
+            "urgencyCardsProduced": diagnostics.get("stages", {}).get("urgencyCards", 0),
+            "diagnostics": diagnostics,
+        }
+    except Exception as e:
+        logger.error(f"Behavioral briefs debug refresh endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/opportunity-briefs/debug/refresh")
+async def debug_refresh_opportunity_briefs():
+    """Force-refresh opportunity cards and return stage diagnostics."""
+    try:
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
+            lambda: opportunity_briefs.refresh_opportunity_briefs_with_diagnostics(force=True),
+        )
+        return {
+            "success": True,
+            "cardsProduced": diagnostics.get("cardsProduced", 0),
+            "firstRejectionBucket": diagnostics.get("firstRejectionBucket", ""),
+            "diagnostics": diagnostics,
+        }
+    except Exception as e:
+        logger.error(f"Opportunity briefs debug refresh endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Shutdown hook ────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
@@ -1464,16 +1591,19 @@ async def startup():
     await scraper_scheduler.startup()
     _start_question_cards_scheduler()
     _start_behavioral_cards_scheduler()
+    _start_opportunity_cards_scheduler()
     asyncio.create_task(_warm_dashboard_cache())
     asyncio.create_task(_warm_detail_caches())
     if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
         asyncio.create_task(_materialize_question_cards_once(force=False))
     if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
         asyncio.create_task(_materialize_behavioral_cards_once(force=False))
+    if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
+        asyncio.create_task(_materialize_opportunity_cards_once(force=False))
 
 @app.on_event("shutdown")
 async def shutdown():
-    global question_cards_scheduler, behavioral_cards_scheduler
+    global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler
     if question_cards_scheduler is not None:
         try:
             question_cards_scheduler.shutdown(wait=False)
@@ -1486,6 +1616,12 @@ async def shutdown():
         except Exception:
             pass
         behavioral_cards_scheduler = None
+    if opportunity_cards_scheduler is not None:
+        try:
+            opportunity_cards_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        opportunity_cards_scheduler = None
     await scraper_scheduler.shutdown()
     db.close()
     logger.info("API server shut down — Neo4j driver closed")

@@ -395,6 +395,7 @@ export interface EmergingInterest {
   originChannel: string;
   mood: string;
   opportunity: string;
+  emergenceScore?: number;
 }
 
 export interface RetentionFactor {
@@ -461,15 +462,48 @@ export interface BusinessOpportunity {
   revenue: string;
 }
 
+export interface BusinessOpportunityBriefCard {
+  id: string;
+  topic: string;
+  sourceTopic?: string;
+  category: string;
+  opportunity: string;
+  summary: string;
+  deliveryModel: 'service' | 'product' | 'marketplace' | 'content' | 'community_program';
+  readiness: 'pilot_ready' | 'validate_now' | 'watchlist';
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  demandSignals: {
+    messages: number;
+    uniqueUsers: number;
+    channels: number;
+    trend7dPct: number;
+  };
+  sampleEvidenceId?: string;
+  latestAt?: string;
+  evidence: QuestionBriefEvidence[];
+}
+
 export interface JobSeekingItem {
   role: string;
   pct: number;
   count: number;
+  evidence?: JobEvidence[];
 }
 
 export interface JobTrend {
   trend: string;
   type: string;
+}
+
+export interface JobEvidence {
+  id: string;
+  text: string;
+  kind: 'post' | 'comment';
+  topic: string;
+  sourceTopic?: string;
+  channel?: string;
+  postedAt?: string;
 }
 
 export interface HousingItem {
@@ -489,6 +523,7 @@ export interface HousingHotTopic {
 // ── Tier 8: Comparative ──
 
 export interface WeeklyShiftItem {
+  metricKey?: string;
   metric: string;
   current: number;
   previous: number;
@@ -671,6 +706,7 @@ export interface AppData {
 
   // Tier 7
   businessOpportunities: BilingualData<BusinessOpportunity>;
+  businessOpportunityBriefs: BilingualData<BusinessOpportunityBriefCard>;
   jobSeeking: BilingualData<JobSeekingItem>;
   jobTrends: BilingualData<JobTrend>;
   housingData: BilingualData<HousingItem>;

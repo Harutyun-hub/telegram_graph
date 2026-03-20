@@ -1,4 +1,4 @@
-import { ArrowUpRight, ArrowDownRight, Star } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, Minus, Star } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
@@ -40,25 +40,31 @@ export function WeekOverWeekShifts() {
       <div className="grid grid-cols-3 gap-2">
         {weeklyShifts.map((item) => {
           const diff = item.current - item.previous;
-          const pctChange = ((diff / item.previous) * 100).toFixed(1);
           const isUp = diff > 0;
+          const isFlat = diff === 0;
+          const pctChange = item.previous === 0
+            ? (item.current === 0 ? '0.0%' : (ru ? 'нов.' : 'new'))
+            : `${isUp ? '+' : ''}${((diff / item.previous) * 100).toFixed(1)}%`;
           // ✅ FIX: isInverse is now a typed field on WeeklyShiftItem — no string matching
-          const isGood = item.isInverse ? !isUp : isUp;
+          const isGood = !isFlat && (item.isInverse ? !isUp : isUp);
+          const deltaClass = isFlat ? 'text-gray-400' : (isGood ? 'text-emerald-500' : 'text-red-500');
 
           return (
-            <div key={item.metric} className="bg-gray-50 rounded-lg p-2.5">
+            <div key={item.metricKey || item.metric} className="bg-gray-50 rounded-lg p-2.5">
               <span className="text-xs text-gray-500 block truncate">{item.metric}</span>
               <div className="flex items-center justify-between mt-1">
                 <span className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
                   {item.current > 999 ? item.current.toLocaleString() : item.current}{item.unit}
                 </span>
                 <div className="flex items-center gap-0.5">
-                  {isUp
-                    ? <ArrowUpRight className={`w-3 h-3 ${isGood ? 'text-emerald-500' : 'text-red-500'}`} />
-                    : <ArrowDownRight className={`w-3 h-3 ${isGood ? 'text-emerald-500' : 'text-red-500'}`} />
+                  {isFlat
+                    ? <Minus className="w-3 h-3 text-gray-400" />
+                    : isUp
+                      ? <ArrowUpRight className={`w-3 h-3 ${deltaClass}`} />
+                      : <ArrowDownRight className={`w-3 h-3 ${deltaClass}`} />
                   }
-                  <span className={`${isGood ? 'text-emerald-500' : 'text-red-500'}`} style={{ fontWeight: 600, fontSize: '10px' }}>
-                    {isUp ? '+' : ''}{pctChange}%
+                  <span className={deltaClass} style={{ fontWeight: 600, fontSize: '10px' }}>
+                    {pctChange}
                   </span>
                 </div>
               </div>

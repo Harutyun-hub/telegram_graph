@@ -117,11 +117,14 @@ export function AdminPage() {
     'openaiModel',
     'questionBriefsModel',
     'behavioralBriefsModel',
+    'opportunityBriefsModel',
     'questionBriefsPromptVersion',
     'behavioralBriefsPromptVersion',
+    'opportunityBriefsPromptVersion',
     'aiPostPromptStyle',
     'featureQuestionBriefsAi',
     'featureBehavioralBriefsAi',
+    'featureOpportunityBriefsAi',
   ];
 
   const runtimeDirty = runtimeKeys.some((key) => runtimeDraft[key] !== config.runtime[key]);
@@ -149,6 +152,13 @@ export function AdminPage() {
       descriptionRu: 'Используется для проблем, сервисных пробелов и срочности.',
     },
     {
+      key: 'opportunityBriefsModel' as const,
+      labelEn: 'Opportunity briefs model',
+      labelRu: 'Модель карточек возможностей',
+      descriptionEn: 'Used by business opportunity AI cards.',
+      descriptionRu: 'Используется карточками AI-бизнес-возможностей.',
+    },
+    {
       key: 'questionBriefsPromptVersion' as const,
       labelEn: 'Question prompt version',
       labelRu: 'Версия промпта вопросов',
@@ -161,6 +171,13 @@ export function AdminPage() {
       labelRu: 'Версия поведенческого промпта',
       descriptionEn: 'Fingerprint label for behavioral card snapshots.',
       descriptionRu: 'Версия для отпечатка поведенческих карточек.',
+    },
+    {
+      key: 'opportunityBriefsPromptVersion' as const,
+      labelEn: 'Opportunity prompt version',
+      labelRu: 'Версия промпта возможностей',
+      descriptionEn: 'Fingerprint label for opportunity-card snapshots.',
+      descriptionRu: 'Версия для отпечатка карточек возможностей.',
     },
   ];
 
@@ -473,6 +490,13 @@ export function AdminPage() {
                 labelRu: 'Включить AI для поведенческих карточек',
                 descriptionEn: 'Controls AI generation for problem and service-gap cards.',
                 descriptionRu: 'Управляет AI-генерацией карточек проблем и сервисных пробелов.',
+              },
+              {
+                key: 'featureOpportunityBriefsAi' as const,
+                labelEn: 'Enable Opportunity Briefs AI',
+                labelRu: 'Включить AI для карточек возможностей',
+                descriptionEn: 'Controls AI generation for business opportunity cards.',
+                descriptionRu: 'Управляет AI-генерацией карточек бизнес-возможностей.',
               },
             ].map((toggle) => (
               <div key={toggle.key} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50">

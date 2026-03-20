@@ -1,3 +1,4 @@
+import { Link } from 'react-router';
 import { Home } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
@@ -7,17 +8,40 @@ import { EmptyWidget } from '../ui/EmptyWidget';
 // W26: BUSINESS OPPORTUNITY SIGNALS
 // ============================================================
 
-const revenueColors: Record<string, string> = {
-  '$$$$': '#10b981', '$$$': '#3b82f6', '$$': '#f59e0b', '$': '#6b7280',
-};
-
 export function BusinessOpportunityTracker() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
-  const opportunities = data.businessOpportunities[lang] ?? [];
+  const opportunities = data.businessOpportunityBriefs[lang] ?? [];
 
   if (!opportunities.length) return <EmptyWidget title={ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'} />;
+
+  const confidenceLabel = (value: string) => {
+    if (value === 'high') return ru ? 'Высокая' : 'High';
+    if (value === 'medium') return ru ? 'Средняя' : 'Medium';
+    return ru ? 'Низкая' : 'Low';
+  };
+
+  const deliveryLabel = (value: string) => {
+    if (ru) {
+      if (value === 'product') return 'Продукт';
+      if (value === 'marketplace') return 'Маркетплейс';
+      if (value === 'content') return 'Контент';
+      if (value === 'community_program') return 'Программа сообщества';
+      return 'Сервис';
+    }
+    if (value === 'product') return 'Product';
+    if (value === 'marketplace') return 'Marketplace';
+    if (value === 'content') return 'Content';
+    if (value === 'community_program') return 'Community program';
+    return 'Service';
+  };
+
+  const readinessLabel = (value: string) => {
+    if (value === 'pilot_ready') return ru ? 'Готово к пилоту' : 'Pilot ready';
+    if (value === 'watchlist') return ru ? 'Наблюдать' : 'Watchlist';
+    return ru ? 'Проверить сейчас' : 'Validate now';
+  };
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -25,41 +49,59 @@ export function BusinessOpportunityTracker() {
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'}
         </h3>
-        <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
-          {opportunities.length} {ru ? 'возможностей' : 'opportunities'}
-        </span>
+        <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Сообщество само подсказывает, какой бизнес строить — слушайте и действуйте'
-          : 'The community is telling you what businesses to build — listen and act'}
+          ? 'Показываем AI-сводку возможностей: повторяющиеся неудовлетворённые запросы объединяются в конкретные идеи, привязанные к реальным сообщениям из недавнего окна.'
+          : 'Shows the AI opportunity overview: recurring unmet needs are grouped into concrete ideas and tied back to real source messages from the recent rolling window.'}
       </p>
 
-      <div className="space-y-2.5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
         {opportunities.map((opp) => (
-          <div key={opp.need} className="bg-gray-50 rounded-lg p-3 hover:bg-gray-100 transition-colors cursor-pointer">
-            <div className="flex items-start justify-between mb-1.5">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{opp.need}</span>
-                  <span className="text-xs px-1.5 py-0.5 rounded" style={{
-                    backgroundColor: (revenueColors[opp.revenue] ?? '#6b7280') + '20',
-                    color: revenueColors[opp.revenue] ?? '#6b7280',
-                    fontWeight: 600,
-                  }}>{opp.revenue}</span>
-                </div>
-                <p className="text-xs text-gray-400 italic mt-0.5 truncate">&ldquo;{opp.sampleQuote}&rdquo;</p>
+          <Link
+            key={opp.id}
+            to={(() => {
+              const params = new URLSearchParams();
+              params.set('topic', opp.sourceTopic || opp.topic);
+              params.set('view', 'evidence');
+              if (opp.sampleEvidenceId) params.set('evidenceId', opp.sampleEvidenceId);
+              return `/topics?${params.toString()}`;
+            })()}
+            className="rounded-xl border border-blue-100 bg-blue-50/50 p-3 transition-colors hover:shadow-sm"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] text-blue-800/80">{opp.category}</div>
+                <div className="text-sm leading-snug text-gray-900" style={{ fontWeight: 700 }}>{opp.opportunity}</div>
               </div>
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-blue-300 text-blue-900" style={{ fontWeight: 600 }}>
+                {confidenceLabel(opp.confidence)} {ru ? 'уверенность' : 'confidence'}
+              </span>
             </div>
-            <div className="flex items-center gap-4 text-xs">
-              <span className="text-gray-500">{opp.mentions.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}</span>
-              <span className={`${opp.growth >= 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>{opp.growth > 0 ? '+' : ''}{opp.growth}%</span>
-              <span className="text-gray-400">{opp.sector}</span>
-              <span className="text-gray-400 ml-auto text-right truncate" style={{ fontSize: '10px', maxWidth: '100px' }}>{opp.readiness}</span>
+
+            <p className="text-xs leading-relaxed text-gray-700 mt-1.5">{opp.summary}</p>
+
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+              <span className="px-1.5 py-0.5 rounded-full bg-white border border-blue-200 text-blue-900">{deliveryLabel(opp.deliveryModel)}</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-white border border-gray-200 text-gray-700">{readinessLabel(opp.readiness)}</span>
             </div>
-          </div>
+
+            <div className="text-[11px] mt-2 text-gray-600">
+              {opp.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {opp.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {opp.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
+            </div>
+            <div className="text-[11px] mt-0.5 text-gray-600">
+              {ru ? '7д тренд' : '7d trend'}: {opp.demandSignals.trend7dPct > 0 ? '+' : ''}{opp.demandSignals.trend7dPct}%
+            </div>
+          </Link>
         ))}
       </div>
+
+      <p className="text-xs text-gray-400 mt-3">
+        {ru
+          ? 'Карточки строятся по скользящему AI-окну, а не по выбранному диапазону дашборда. Пустой виджет означает, что надёжных AI-возможностей сейчас нет.'
+          : 'These cards are built from a rolling AI analysis window, not the selected dashboard date range. An empty widget means there are no reliable AI-detected opportunities right now.'}
+      </p>
     </div>
   );
 }
@@ -81,6 +123,7 @@ export function JobMarketPulse() {
   // ✅ GENERIC: dynamic max divisor + top role computed from data
   const maxJobPct = Math.max(...jobSeeking.map(j => j.pct), 1);
   const topJob = [...jobSeeking].sort((a, b) => b.pct - a.pct)[0];
+  const topEvidence = topJob?.evidence?.slice(0, 3) ?? [];
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -135,11 +178,51 @@ export function JobMarketPulse() {
         </div>
       </div>
 
+      {topEvidence.length > 0 && (
+        <div className="mt-3">
+          <span className="text-xs text-gray-500 block mb-2" style={{ fontWeight: 500 }}>
+            {ru ? 'Доказательства из сообщества' : 'Community evidence'}
+          </span>
+          <div className="space-y-2.5">
+            {topEvidence.map((item, index) => (
+              <Link
+                key={`${item.sourceTopic || item.topic}-${item.id || index}`}
+                to={(() => {
+                  const params = new URLSearchParams();
+                  params.set('topic', item.sourceTopic || item.topic);
+                  params.set('view', 'evidence');
+                  if (item.id) params.set('evidenceId', item.id);
+                  return `/topics?${params.toString()}`;
+                })()}
+                className="block bg-gray-50 border border-gray-100 rounded-lg p-3 cursor-pointer hover:bg-gray-100 transition-colors"
+              >
+                <div className="flex items-start gap-2.5">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-900 leading-relaxed" style={{ fontWeight: 600 }}>{item.topic}</p>
+                    <p className="text-xs text-gray-400 italic mt-0.5">
+                      &ldquo;{item.text}&rdquo;
+                    </p>
+                    <div className="flex items-center gap-3 mt-1.5">
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+                        {item.kind === 'post' ? (ru ? 'Пост' : 'Post') : (ru ? 'Комментарий' : 'Comment')}
+                      </span>
+                      <span className="text-xs text-gray-500 truncate">
+                        {item.channel || (ru ? 'Открыть тему' : 'Open topic')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-3 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
         <p className="text-xs text-blue-800">
           {topJob && (ru
-            ? <><span style={{ fontWeight: 600 }}>Ключевой инсайт:</span> {topJob.pct}% работают в категории «{topJob.role}» ({topJob.count.toLocaleString()} человек). Это якорная группа сообщества — создавайте контент, ориентированный на их потребности.</>
-            : <><span style={{ fontWeight: 600 }}>Key insight:</span> {topJob.pct}% are in &quot;{topJob.role}&quot; ({topJob.count.toLocaleString()} people). This is the community&apos;s anchor group — create content tailored to their needs.</>
+            ? <><span style={{ fontWeight: 600 }}>Ключевой инсайт:</span> {topJob.pct}% сигналов относятся к категории «{topJob.role}» ({topJob.count.toLocaleString()} человек). Это подтверждено реальными обсуждениями выше, поэтому можно уверенно строить контент вокруг этой потребности.</>
+            : <><span style={{ fontWeight: 600 }}>Key insight:</span> {topJob.pct}% of work-intent signals are in &quot;{topJob.role}&quot; ({topJob.count.toLocaleString()} people). The excerpts above show this is grounded in real community discussion, so it is a credible content and service signal.</>
           )}
         </p>
       </div>
