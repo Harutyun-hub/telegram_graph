@@ -4,7 +4,6 @@ import { Link } from 'react-router';
 import { AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
-import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 
 // ============================================================
@@ -21,25 +20,11 @@ const severityColors: Record<string, { bg: string; text: string; border: string 
 export function ProblemTracker() {
   const { lang } = useLanguage();
   const { data } = useData();
-  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [expandedEvidenceKey, setExpandedEvidenceKey] = useState('');
-  const [showAllProblems, setShowAllProblems] = useState(false);
-  const problemGroups = data.problems?.[lang] ?? [];
-  const problemRows = problemGroups.flatMap((group) =>
-    (group.problems || []).map((problem) => ({
-      ...problem,
-      category: group.category,
-      topic: problem.name,
-      sourceTopic: problem.sourceTopic || problem.name,
-    })),
-  );
+  const problemBriefs = data.problemBriefs?.[lang] ?? [];
 
-  if (!problemRows.length) return <EmptyWidget title={ru ? 'Трекер проблем' : 'Problem Tracker'} />;
-
-  const topProblem = [...problemRows].sort((a, b) => b.mentions - a.mentions)[0];
-  const lowEvidenceCount = problemRows.filter((problem) => !problem.trendReliable).length;
-  const visibleProblems = showAllProblems ? problemRows : problemRows.slice(0, 5);
+  if (!problemBriefs.length) return <EmptyWidget title={ru ? 'Трекер проблем' : 'Problem Tracker'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -48,48 +33,44 @@ export function ProblemTracker() {
           {ru ? 'Трекер проблем' : 'Problem Tracker'}
         </h3>
         <span className="text-xs text-gray-500">
-          {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
+          {ru ? 'Болевые точки из разговоров' : 'Pain points from community chatter'}
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Показывает темы с негативными, срочными и стрессовыми сигналами в выбранном диапазоне. Динамика сравнивает текущее окно с предыдущим окном той же длины.'
-          : 'Shows topics with negative, urgent, and stress signals in the selected range. Trend compares the current window with the previous window of the same length.'}
+          ? 'Показывает темы с негативными/срочными сигналами и стресс-маркерами. Цитаты берутся из реальных сообщений, если они есть.'
+          : 'Shows topics with negative/urgent signals and stress markers. Quotes come from real messages when available.'}
       </p>
 
-      {problemRows.length > 0 && (
+      {problemBriefs.length > 0 && (
         <div className="mb-4 space-y-2.5">
           <p className="text-xs text-gray-500">
             {ru
-              ? 'Живые проблемные темы сгруппированы по категориям и привязаны к реальным сигналам из текущего окна.'
-              : 'Live problem themes are grouped by category and grounded in real signals from the current window.'}
+              ? 'AI-карточки проблем: сформулированы простым языком и привязаны к реальным сообщениям.'
+              : 'AI problem cards: plain-language statements grounded in real messages.'}
           </p>
-          {visibleProblems.map((problem) => {
-            const sev = severityColors[problem.severity] ?? severityColors.medium;
-            const key = `problem-${problem.category}-${problem.topic}`;
+          {problemBriefs.map((brief) => {
+            const sev = severityColors[brief.severity] ?? severityColors.medium;
+            const key = `problem-${brief.id}`;
             const expanded = expandedEvidenceKey === key;
             return (
-              <div key={key} className={`${sev.bg} ${sev.border} border rounded-lg p-3`}>
+              <div key={brief.id} className={`${sev.bg} ${sev.border} border rounded-lg p-3`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-[11px] opacity-80">{problem.category}</div>
-                    <div className="text-sm leading-snug" style={{ fontWeight: 700 }}>{problem.topic}</div>
-                    <p className="text-xs mt-1 opacity-90">
-                      {problem.quote || (ru ? 'Цитата появится, когда в источниках будет найден релевантный пример.' : 'A quote will appear once a relevant source example is available.')}
-                    </p>
+                    <div className="text-[11px] opacity-80">{brief.category}</div>
+                    <div className="text-sm leading-snug" style={{ fontWeight: 700 }}>{brief.problem}</div>
+                    <p className="text-xs mt-1 opacity-90">{brief.summary}</p>
                   </div>
                   <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20" style={{ fontWeight: 600 }}>
-                    {problem.mentions.toLocaleString()} {ru ? 'людей' : 'people'}
+                    {Math.round(brief.confidenceScore * 100)}% {ru ? 'увер.' : 'conf.'}
                   </span>
                 </div>
 
                 <div className="text-[11px] mt-2 opacity-85">
-                  {problem.evidenceCount?.toLocaleString() || 0} {ru ? 'сигналов ·' : 'signals ·'} {problem.mentions.toLocaleString()} {ru ? 'затронутых людей' : 'affected people'}
+                  {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
                 </div>
                 <div className="text-[11px] mt-0.5 opacity-85">
-                  {problem.trendReliable
-                    ? `${ru ? 'Динамика' : 'Trend'}: ${problem.trend > 0 ? '+' : ''}${problem.trend}%`
-                    : (ru ? 'Динамика скрыта: недостаточно данных.' : 'Trend hidden: low evidence.')}
+                  {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}%
                 </div>
 
                 <button
@@ -98,73 +79,39 @@ export function ProblemTracker() {
                   className="mt-2 text-xs text-blue-700 hover:underline"
                 >
                   {expanded
-                    ? (ru ? 'Скрыть детали' : 'Hide details')
-                    : (ru ? 'Показать детали' : 'Show details')}
+                    ? (ru ? 'Скрыть доказательства' : 'Hide evidence')
+                    : `${ru ? 'Доказательства' : 'Evidence'} (${brief.evidence.length})`}
                 </button>
 
                 {expanded && (
                   <div className="mt-2 space-y-2">
-                    <div className="bg-white/80 rounded border border-gray-200 p-2">
-                      <p className="text-xs text-gray-700 leading-relaxed">
-                        {problem.quote
-                          ? <>&ldquo;{problem.quote}&rdquo;</>
-                          : (ru ? 'Для этой темы пока нет сохранённой цитаты, но сигналы уже зафиксированы в данных текущего окна.' : 'No saved quote is available for this topic yet, but the signals are already present in the selected-window data.')}
-                      </p>
-                      <div className="mt-1 flex items-center justify-between gap-2">
-                        <span className="text-[11px] text-gray-500">
-                          {problem.trendReliable
-                            ? (ru ? 'Сравнение с предыдущим окном' : 'Compared with previous window')
-                            : (ru ? 'Недостаточно выборки для тренда' : 'Insufficient sample for trend')}
-                        </span>
-                        <Link
-                          to={`/topics?topic=${encodeURIComponent(problem.sourceTopic || problem.topic)}&view=evidence`}
-                          className="text-[11px] text-blue-700 hover:underline"
-                        >
-                          {ru ? 'Открыть →' : 'Open →'}
-                        </Link>
+                    {(brief.evidence || []).slice(0, 3).map((ev) => (
+                      <div key={ev.id} className="bg-white/80 rounded border border-gray-200 p-2">
+                        <p className="text-xs text-gray-700 leading-relaxed">&ldquo;{ev.quote}&rdquo;</p>
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <span className="text-[11px] text-gray-500">{ev.channel}</span>
+                          <Link
+                            to={(() => {
+                              const params = new URLSearchParams();
+                              params.set('topic', brief.sourceTopic || brief.topic);
+                              params.set('view', 'evidence');
+                              if (ev.id) params.set('evidenceId', ev.id);
+                              return `/topics?${params.toString()}`;
+                            })()}
+                            className="text-[11px] text-blue-700 hover:underline"
+                          >
+                            {ru ? 'Открыть →' : 'Open →'}
+                          </Link>
+                        </div>
                       </div>
-                    </div>
+                    ))}
                   </div>
                 )}
               </div>
             );
           })}
-
-          {problemRows.length > 5 && (
-            <button
-              type="button"
-              onClick={() => {
-                setShowAllProblems((value) => !value);
-                if (showAllProblems) setExpandedEvidenceKey('');
-              }}
-              className="text-xs text-blue-700 hover:underline"
-              style={{ fontWeight: 600 }}
-            >
-              {showAllProblems
-                ? (ru ? 'Показать меньше' : 'Show less')
-                : (ru ? `Показать все (${problemRows.length})` : `See all (${problemRows.length})`)}
-            </button>
-          )}
         </div>
       )}
-
-      {topProblem && (
-        <div className="mt-3 pt-3 border-t border-gray-100">
-          <div className="bg-red-50 border border-red-100 rounded-lg px-3 py-2">
-            <p className="text-xs text-red-800">
-              {ru
-                ? <><span style={{ fontWeight: 600 }}>Главная точка напряжения:</span> {topProblem.topic} затронула {topProblem.mentions.toLocaleString()} человек{topProblem.mentions === 1 ? 'а' : ''} в текущем окне.</>
-                : <><span style={{ fontWeight: 600 }}>Primary friction:</span> {topProblem.topic} affected {topProblem.mentions.toLocaleString()} people in the current window.</>}
-            </p>
-          </div>
-        </div>
-      )}
-
-      <p className="text-xs text-gray-400 mt-2">
-        {ru
-          ? `${lowEvidenceCount.toLocaleString()} тем с малой выборкой не участвуют в сравнении динамики.`
-          : `${lowEvidenceCount.toLocaleString()} low-evidence topics are excluded from trend comparison.`}
-      </p>
     </div>
   );
 }

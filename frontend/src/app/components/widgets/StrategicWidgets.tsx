@@ -448,41 +448,38 @@ export function ContentEngagementHeatmap() {
 export function QuestionCloud() {
   const { lang } = useLanguage();
   const { data } = useData();
-  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const questionBriefs = data.questionBriefs[lang] ?? [];
-  const questionCategories = data.questionCategories[lang] ?? [];
 
-  if (!questionBriefs.length && !questionCategories.length) {
+  if (!questionBriefs.length) {
     return <EmptyWidget title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
   }
 
-  if (questionBriefs.length) {
-    const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
-    const totalSignals = questionBriefs.reduce((sum, b) => sum + (b.demandSignals?.messages || 0), 0);
-    const avgConfidence = questionBriefs.length
-      ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
-      : 0;
+  const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
+  const totalSignals = questionBriefs.reduce((sum, b) => sum + (b.demandSignals?.messages || 0), 0);
+  const avgConfidence = questionBriefs.length
+    ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
+    : 0;
 
-    const statusLabel = (status: string) => {
-      if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
-      if (status === 'well_covered') return ru ? 'Тема в целом покрыта' : 'Mostly covered';
-      return ru ? 'Частично покрыта' : 'Partially covered';
-    };
+  const statusLabel = (status: string) => {
+    if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
+    if (status === 'well_covered') return ru ? 'Тема в целом покрыта' : 'Mostly covered';
+    return ru ? 'Частично покрыта' : 'Partially covered';
+  };
 
-    const statusClass = (status: string) => {
-      if (status === 'needs_guide') return 'bg-amber-50 border-amber-200 text-amber-900';
-      if (status === 'well_covered') return 'bg-emerald-50 border-emerald-200 text-emerald-900';
-      return 'bg-blue-50 border-blue-200 text-blue-900';
-    };
+  const statusClass = (status: string) => {
+    if (status === 'needs_guide') return 'bg-amber-50 border-amber-200 text-amber-900';
+    if (status === 'well_covered') return 'bg-emerald-50 border-emerald-200 text-emerald-900';
+    return 'bg-blue-50 border-blue-200 text-blue-900';
+  };
 
-    const confidenceLabel = (value: string) => {
-      if (value === 'high') return ru ? 'Высокая' : 'High';
-      if (value === 'medium') return ru ? 'Средняя' : 'Medium';
-      return ru ? 'Низкая' : 'Low';
-    };
+  const confidenceLabel = (value: string) => {
+    if (value === 'high') return ru ? 'Высокая' : 'High';
+    if (value === 'medium') return ru ? 'Средняя' : 'Medium';
+    return ru ? 'Низкая' : 'Low';
+  };
 
-    return (
+  return (
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-1">
           <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
@@ -554,125 +551,6 @@ export function QuestionCloud() {
             : `AI overview: ${totalSignals.toLocaleString()} signals in sample. Showing medium/high-confidence cards (avg confidence ${avgConfidence}%).`}
         </p>
       </div>
-    );
-  }
-
-  const totalSignals = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.reduce((inner, q) => inner + q.count, 0), 0,
-  );
-  const answeredCount = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.filter((q) => q.answered).length,
-    0,
-  );
-  const lowEvidenceCount = questionCategories.reduce(
-    (sum, cat) => sum + cat.questions.filter((q) => q.lowEvidence).length,
-    0,
-  );
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
-          {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
-        </h3>
-        <span className="text-xs text-gray-500">
-          {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
-        </span>
-      </div>
-      <p className="text-xs text-gray-500 mb-4">
-        {ru
-          ? 'Показываем живые сигналы вопросов из выбранного диапазона: объединяем похожие запросы по темам и оставляем привязку к реальным сообщениям.'
-          : 'Shows live question signals from the selected range: similar asks are grouped by topic and tied back to real source messages.'}
-      </p>
-
-      <div className="space-y-4">
-        {questionCategories.map((cat) => (
-          <div key={cat.category}>
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
-              <span className="text-xs text-gray-900" style={{ fontWeight: 600 }}>{cat.category}</span>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-              {cat.questions.map((q) => (
-                (() => {
-                  const mainQuestion = q.preview || (ru ? 'В текущем окне вопрос не зафиксирован дословно.' : 'No verbatim question was captured in the current window.');
-                  const topicLabel = q.topic || q.q;
-                  return (
-                    <Link
-                      key={`${cat.category}-${topicLabel}`}
-                      to={(() => {
-                        const params = new URLSearchParams();
-                        params.set('topic', topicLabel);
-                        params.set('view', 'questions');
-                        if (q.evidenceId) params.set('evidenceId', q.evidenceId);
-                        return `/topics?${params.toString()}`;
-                      })()}
-                      className={`rounded-xl border p-3 transition-colors hover:shadow-sm ${
-                        q.lowEvidence
-                          ? 'bg-gray-50 border-gray-200 text-gray-700'
-                          : q.answered
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                            : 'bg-amber-50 border-amber-200 text-amber-900'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="text-[11px] opacity-80">{cat.category}</div>
-                          <div className="text-[11px] opacity-80 mt-0.5">{topicLabel}</div>
-                        </div>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded border border-current/20 whitespace-nowrap" style={{ fontWeight: 600 }}>
-                          {q.lowEvidence
-                            ? (ru ? 'Мало данных' : 'Low evidence')
-                            : q.answered
-                              ? (ru ? 'Есть ответы' : 'Answered')
-                              : (ru ? 'Нужен ответ' : 'Needs answer')}
-                        </span>
-                      </div>
-
-                      <p className="text-sm leading-snug mt-1.5" style={{ fontWeight: 700 }}>
-                        {mainQuestion}
-                      </p>
-
-                      <div className="text-[11px] mt-2 opacity-85">
-                        {q.count.toLocaleString()} {ru ? 'сигналов вопроса' : 'question signals'}
-                      </div>
-                      <div className="text-[11px] mt-0.5 opacity-85">
-                        {q.lowEvidence
-                          ? (ru ? 'Метрика покрытия скрыта до накопления достаточной выборки.' : 'Coverage stays hidden until enough evidence accumulates.')
-                          : `${ru ? 'Покрытие ответа' : 'Response coverage'}: ${Math.round(q.coveragePct || 0)}%`}
-                      </div>
-                    </Link>
-                  );
-                })()
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-amber-50 border border-amber-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Нужен чёткий ответ' : 'Needs clear response'}</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-emerald-50 border border-emerald-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Есть ответы в текущем окне' : 'Answered in the current window'}</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded bg-gray-50 border border-gray-200" />
-          <span className="text-xs text-gray-500">{ru ? 'Недостаточно данных' : 'Low evidence'}</span>
-        </div>
-        <span className="text-xs text-amber-600 ml-auto" style={{ fontWeight: 500 }}>
-          {answeredCount} {ru ? 'тем с ответами' : 'topics already answered'}
-        </span>
-      </div>
-      <p className="text-xs text-gray-400 mt-2">
-        {ru
-          ? `Основа: ${totalSignals.toLocaleString()} сигналов вопроса в выбранном окне за ${range.days} дней. ${lowEvidenceCount.toLocaleString()} тем с малой выборкой не участвуют в покрытии.`
-          : `Evidence: ${totalSignals.toLocaleString()} question signals in the selected ${range.days}-day window. ${lowEvidenceCount.toLocaleString()} low-evidence topics are excluded from coverage scoring.`}
-      </p>
-    </div>
   );
 }
 
