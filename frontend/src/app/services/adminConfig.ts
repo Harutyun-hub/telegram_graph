@@ -2,6 +2,8 @@ import { createDefaultAdminConfig } from '../admin/catalog';
 import type { AdminConfig, AdminConfigPatch } from '../types/admin';
 import { apiFetch } from './api';
 
+const ADMIN_CONFIG_CACHE_KEY = 'admin-config-cache-v1';
+
 function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): AdminConfig {
   const defaults = createDefaultAdminConfig();
   return {
@@ -24,6 +26,34 @@ function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): Adm
   };
 }
 
+export function readCachedAdminConfig(): AdminConfig | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ADMIN_CONFIG_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return mergeAdminConfig(JSON.parse(raw) as Partial<AdminConfig>);
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAdminConfig(config: AdminConfig) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(ADMIN_CONFIG_CACHE_KEY, JSON.stringify(config));
+  } catch {
+    // Ignore storage failures and continue with runtime state.
+  }
+}
+
 export async function getAdminConfig(): Promise<AdminConfig> {
   const payload = await apiFetch<Partial<AdminConfig>>('/admin/config', {
     method: 'GET',
@@ -31,7 +61,9 @@ export async function getAdminConfig(): Promise<AdminConfig> {
     cache: 'no-store',
     timeoutMs: 25_000,
   });
-  return mergeAdminConfig(payload);
+  const config = mergeAdminConfig(payload);
+  writeCachedAdminConfig(config);
+  return config;
 }
 
 export async function patchAdminConfig(patch: AdminConfigPatch): Promise<AdminConfig> {
@@ -40,5 +72,7 @@ export async function patchAdminConfig(patch: AdminConfigPatch): Promise<AdminCo
     body: JSON.stringify(patch),
     timeoutMs: 25_000,
   });
-  return mergeAdminConfig(payload);
+  const config = mergeAdminConfig(payload);
+  writeCachedAdminConfig(config);
+  return config;
 }

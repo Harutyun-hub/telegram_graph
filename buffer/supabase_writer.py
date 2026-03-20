@@ -8,6 +8,7 @@ from __future__ import annotations
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
+import requests
 from loguru import logger
 import config
 from utils.topic_normalizer import set_runtime_topic_aliases
@@ -140,7 +141,15 @@ class SupabaseWriter:
 
         try:
             self._ensure_runtime_bucket()
-            raw = self.client.storage.from_(self._runtime_bucket_name).download(key)
+            bucket = self.client.storage.from_(self._runtime_bucket_name)
+            signed = bucket.create_signed_url(key, 60)
+            signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
+            if signed_url:
+                response = requests.get(signed_url, timeout=10)
+                response.raise_for_status()
+                raw = response.content
+            else:
+                raw = bucket.download(key)
             if not raw:
                 return dict(fallback)
             parsed = json.loads(raw.decode("utf-8"))
@@ -157,15 +166,17 @@ class SupabaseWriter:
         data = payload if isinstance(payload, dict) else {}
         try:
             self._ensure_runtime_bucket()
+            bucket = self.client.storage.from_(self._runtime_bucket_name)
+            body = json.dumps(data, ensure_ascii=True).encode("utf-8")
+            file_options = {"content-type": "application/json"}
             try:
-                self.client.storage.from_(self._runtime_bucket_name).remove([key])
+                bucket.update(key, body, file_options)
             except Exception:
-                pass
-            self.client.storage.from_(self._runtime_bucket_name).upload(
-                key,
-                json.dumps(data, ensure_ascii=True).encode("utf-8"),
-                {"content-type": "application/json", "upsert": "true"},
-            )
+                bucket.upload(
+                    key,
+                    body,
+                    {"content-type": "application/json", "upsert": "true"},
+                )
             return True
         except Exception:
             return False

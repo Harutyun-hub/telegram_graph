@@ -13,8 +13,8 @@ from buffer.supabase_writer import SupabaseWriter
 
 ADMIN_CONFIG_PATH = "admin/config.json"
 ADMIN_CONFIG_CACHE_TTL_SECONDS = 5.0
-ADMIN_CONFIG_READ_TIMEOUT_SECONDS = 2.0
-ADMIN_CONFIG_SAVE_TIMEOUT_SECONDS = 3.0
+ADMIN_CONFIG_READ_TIMEOUT_SECONDS = 8.0
+ADMIN_CONFIG_SAVE_TIMEOUT_SECONDS = 8.0
 
 _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
@@ -78,21 +78,21 @@ def save_admin_config_raw(payload: dict[str, Any]) -> bool:
 
     store = _get_runtime_store()
     if not store:
-        logger.warning("Admin config store unavailable; using in-memory config only")
-        return True
+        logger.warning("Admin config store unavailable; cannot persist admin config")
+        return False
 
     try:
         future = _io_executor.submit(store.save_runtime_json, ADMIN_CONFIG_PATH, data)
         saved = future.result(timeout=ADMIN_CONFIG_SAVE_TIMEOUT_SECONDS)
         if not saved:
-            logger.warning("Admin config save failed in runtime storage; using in-memory config only")
-        return True
+            logger.warning("Admin config save failed in runtime storage")
+        return bool(saved)
     except FutureTimeoutError:
-        logger.warning("Admin config save timed out; using in-memory config only")
-        return True
+        logger.warning("Admin config save timed out; cannot confirm persistence")
+        return False
     except Exception as exc:
-        logger.warning(f"Admin config save failed; using in-memory config only ({exc})")
-        return True
+        logger.warning(f"Admin config save failed; cannot confirm persistence ({exc})")
+        return False
 
 
 def get_admin_prompt(prompt_key: str, default: str) -> str:

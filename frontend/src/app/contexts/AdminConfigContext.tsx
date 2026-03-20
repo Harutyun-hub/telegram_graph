@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createDefaultAdminConfig } from '../admin/catalog';
-import { getAdminConfig, patchAdminConfig } from '../services/adminConfig';
+import { getAdminConfig, patchAdminConfig, readCachedAdminConfig } from '../services/adminConfig';
 import type { AdminConfig, AdminConfigPatch } from '../types/admin';
 
 interface AdminConfigContextValue {
@@ -15,9 +15,10 @@ interface AdminConfigContextValue {
 }
 
 const defaultConfig = createDefaultAdminConfig();
+const cachedConfig = readCachedAdminConfig();
 
 const AdminConfigContext = createContext<AdminConfigContextValue>({
-  config: defaultConfig,
+  config: cachedConfig || defaultConfig,
   loading: false,
   saving: false,
   error: null,
@@ -27,7 +28,7 @@ const AdminConfigContext = createContext<AdminConfigContextValue>({
 });
 
 export function AdminConfigProvider({ children }: { children: ReactNode }) {
-  const [config, setConfig] = useState<AdminConfig>(defaultConfig);
+  const [config, setConfig] = useState<AdminConfig>(cachedConfig || defaultConfig);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
