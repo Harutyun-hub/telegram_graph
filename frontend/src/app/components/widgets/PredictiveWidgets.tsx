@@ -45,7 +45,7 @@ export function EmergingInterests() {
       </p>
 
       <div className="space-y-2.5">
-        {[...emergingInterests].sort((a, b) => (b.emergenceScore ?? b.growthRate) - (a.emergenceScore ?? a.growthRate) || b.currentVolume - a.currentVolume).map((item) => {
+        {[...emergingInterests].sort((a, b) => b.growthRate - a.growthRate).map((item) => {
           const opp = oppColors[item.opportunity];
           const oppLabel = oLabels[item.opportunity as keyof typeof oLabels];
           return (
@@ -167,13 +167,13 @@ export function CommunityGrowthFunnel() {
   const askers      = growthFunnel.find(s => s.role === 'asks')        ?? null;
   const helpers     = growthFunnel.find(s => s.role === 'helps')       ?? null;
   const leaders     = growthFunnel.find(s => s.role === 'leads')       ?? growthFunnel[growthFunnel.length - 1];
-  const passiveReaderCount = Math.max(0, (readers?.count ?? 0) - (askers?.count ?? 0));
+  const lurkerCount = readers?.count ?? 0;
 
-  const dropReadToAsk = readers && askers && readers.count > 0
-    ? Math.max(0, Math.round((1 - (askers.count / readers.count)) * 100))
+  const dropReadToAsk = readers && askers && readers.pct > 0
+    ? Math.round(((askers.pct - readers.pct) / readers.pct) * 100)
     : null;
-  const conversionAskToHelp = askers && helpers && askers.count > 0
-    ? Math.max(0, Math.round((helpers.count / askers.count) * 100))
+  const dropAskToHelp = askers && helpers && askers.pct > 0
+    ? Math.round(((helpers.pct - askers.pct) / askers.pct) * 100)
     : null;
 
   return (
@@ -222,8 +222,8 @@ export function CommunityGrowthFunnel() {
         <div className="text-center">
           <span className="text-xs text-gray-500 block">{ru ? 'Конверсия' : 'Conversion'}</span>
           <span className="text-sm text-gray-900" style={{ fontWeight: 600 }}>{ru ? 'Спрос. → Пом.' : 'Ask → Help'}</span>
-          {conversionAskToHelp !== null && (
-            <span className="text-xs text-emerald-500 block">{conversionAskToHelp}%</span>
+          {dropAskToHelp !== null && (
+            <span className="text-xs text-red-500 block">{dropAskToHelp}%</span>
           )}
         </div>
         <div className="text-center">
@@ -236,8 +236,8 @@ export function CommunityGrowthFunnel() {
       <div className="mt-3 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
         <p className="text-xs text-blue-800">
           {ru
-            ? <><span style={{ fontWeight: 600 }}>Главная возможность:</span> {passiveReaderCount.toLocaleString()} человек читают, но не переходят к вопросам. Запустите ветку «Новичок понедельника», чтобы снизить барьер первого взаимодействия.</>
-            : <><span style={{ fontWeight: 600 }}>Biggest opportunity:</span> {passiveReaderCount.toLocaleString()} people read but do not move into asking. Create &quot;New Member Monday&quot; threads to lower the barrier to first engagement.</>
+            ? <><span style={{ fontWeight: 600 }}>Главная возможность:</span> {lurkerCount.toLocaleString()} человек читают, но никогда не задают вопросов. Запустите ветку «Новичок понедельника», чтобы снизить барьер первого взаимодействия.</>
+            : <><span style={{ fontWeight: 600 }}>Biggest opportunity:</span> {lurkerCount.toLocaleString()} people read but never ask. Create &quot;New Member Monday&quot; threads to lower the barrier to first engagement.</>
           }
         </p>
       </div>

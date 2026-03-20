@@ -401,6 +401,9 @@ export interface RetentionFactor {
   factor: string;
   score: number;
   weight: number;
+  overallScore?: number;
+  support?: number;
+  lift?: number;
 }
 
 export interface ChurnSignal {
@@ -408,6 +411,8 @@ export interface ChurnSignal {
   count: number;
   trend: number;
   severity: string;
+  baseline?: number;
+  rate?: number;
 }
 
 export interface GrowthFunnelStage {

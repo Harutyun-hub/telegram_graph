@@ -110,7 +110,7 @@ export function DashboardPage() {
     {
       id: 'growth',
       title: ru ? 'Рост, удержание и путь' : 'Growth, Retention & Journey',
-      subtitle: ru ? 'Воронка вовлечённости и сигналы оттока' : 'Engagement funnel & churn signals',
+      subtitle: ru ? 'Воронка вовлечённости и риски выпадения активности' : 'Engagement funnel & activity drop-off risk',
       icon: Brain, color: 'text-purple-700', bgColor: 'bg-purple-50', borderColor: 'border-purple-200',
     },
     {

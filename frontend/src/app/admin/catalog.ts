@@ -59,7 +59,7 @@ export const ADMIN_WIDGET_DEFINITIONS: AdminWidgetDefinition[] = [
   { id: 'persona_gallery', tierId: 'who', labelEn: 'Persona Gallery', labelRu: 'Галерея персон' },
   { id: 'interest_radar', tierId: 'who', labelEn: 'Interest Radar', labelRu: 'Радар интересов' },
   { id: 'community_growth_funnel', tierId: 'growth', labelEn: 'Community Growth Funnel', labelRu: 'Воронка роста сообщества' },
-  { id: 'retention_risk_gauge', tierId: 'growth', labelEn: 'Retention Risk Gauge', labelRu: 'Индикатор риска оттока' },
+  { id: 'retention_risk_gauge', tierId: 'growth', labelEn: 'Activity Continuity & Risk Signals', labelRu: 'Непрерывность активности и сигналы риска' },
   { id: 'decision_stage_tracker', tierId: 'growth', labelEn: 'Decision Stage Tracker', labelRu: 'Трекер стадий решения' },
   { id: 'emerging_interests', tierId: 'growth', labelEn: 'Emerging Interests', labelRu: 'Новые интересы' },
   { id: 'new_vs_returning_voice', tierId: 'growth', labelEn: 'New vs Returning Voice', labelRu: 'Новые и возвращающиеся голоса' },
