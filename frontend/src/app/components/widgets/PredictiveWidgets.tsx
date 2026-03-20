@@ -45,7 +45,7 @@ export function EmergingInterests() {
       </p>
 
       <div className="space-y-2.5">
-        {[...emergingInterests].sort((a, b) => b.growthRate - a.growthRate).map((item) => {
+        {[...emergingInterests].sort((a, b) => (b.emergenceScore ?? b.growthRate) - (a.emergenceScore ?? a.growthRate) || b.currentVolume - a.currentVolume).map((item) => {
           const opp = oppColors[item.opportunity];
           const oppLabel = oLabels[item.opportunity as keyof typeof oLabels];
           return (
