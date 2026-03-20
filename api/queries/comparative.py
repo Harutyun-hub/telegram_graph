@@ -5,11 +5,234 @@ Provides: weeklyShifts, sentimentByTopic, topPosts, contentTypePerformance,
           vitalityIndicators, allTopics, allChannels, allAudience
 """
 from __future__ import annotations
+from collections import defaultdict
 from datetime import timedelta
+from typing import Any, Iterable
 
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query, run_single
 from api.queries import predictive, pulse
+from buffer.supabase_writer import SupabaseWriter
+from utils.topic_normalizer import normalize_model_topics
+
+
+_SUPABASE_WRITER: SupabaseWriter | None = None
+_SUPABASE_PAGE_SIZE = 500
+_SUPABASE_IN_FILTER_CHUNK = 150
+_SENTIMENT_CANON = {
+    "positive": "Positive",
+    "negative": "Negative",
+    "neutral": "Neutral",
+    "mixed": "Mixed",
+    "urgent": "Urgent",
+    "sarcastic": "Sarcastic",
+}
+_NEGATIVE_SENTIMENTS = {"Negative", "Urgent", "Sarcastic"}
+_NOISY_TOPIC_KEYS = {"", "null", "unknown", "none", "n/a", "na"}
+
+
+def _supabase() -> SupabaseWriter:
+    global _SUPABASE_WRITER
+    if _SUPABASE_WRITER is None:
+        _SUPABASE_WRITER = SupabaseWriter()
+    return _SUPABASE_WRITER
+
+
+def _paginate(query_factory) -> list[dict]:
+    rows: list[dict] = []
+    offset = 0
+    total_count: int | None = None
+    while True:
+        response = query_factory(offset, offset + _SUPABASE_PAGE_SIZE - 1).execute()
+        batch = response.data or []
+        if total_count is None:
+            raw_count = getattr(response, "count", None)
+            total_count = int(raw_count) if raw_count is not None else None
+        if not batch:
+            break
+        rows.extend(batch)
+        if total_count is not None and len(rows) >= total_count:
+            break
+        offset += len(batch)
+    return rows
+
+
+def _chunked(values: Iterable[str], size: int = _SUPABASE_IN_FILTER_CHUNK) -> list[list[str]]:
+    chunk: list[str] = []
+    output: list[list[str]] = []
+    for value in values:
+        chunk.append(str(value))
+        if len(chunk) >= max(1, int(size)):
+            output.append(chunk)
+            chunk = []
+    if chunk:
+        output.append(chunk)
+    return output
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return fallback
+
+
+def _normalize_sentiment_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    key = str(value).strip().lower()
+    if not key or key in {"null", "none", "unknown", "n/a"}:
+        return None
+    return _SENTIMENT_CANON.get(key)
+
+
+def _bucket_sentiment(label: Any, sentiment_score: Any = None) -> str | None:
+    normalized = _normalize_sentiment_label(label)
+    if normalized == "Positive":
+        return "Positive"
+    if normalized in _NEGATIVE_SENTIMENTS:
+        return "Negative"
+    if normalized == "Neutral":
+        return "Neutral"
+    if normalized == "Mixed":
+        score = _safe_float(sentiment_score, 0.0)
+        if score >= 0.2:
+            return "Positive"
+        if score <= -0.2:
+            return "Negative"
+        return "Neutral"
+
+    if label is None and sentiment_score is not None:
+        score = _safe_float(sentiment_score, 0.0)
+        if score >= 0.2:
+            return "Positive"
+        if score <= -0.2:
+            return "Negative"
+        return "Neutral"
+    return None
+
+
+def _topic_names_from_payload(raw_topics: Any) -> list[str]:
+    if not isinstance(raw_topics, list):
+        return []
+
+    normalized = normalize_model_topics(raw_topics)
+    if not normalized:
+        normalized = normalize_model_topics([str(item) for item in raw_topics if isinstance(item, str) and item.strip()])
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in normalized:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        if name.lower() in _NOISY_TOPIC_KEYS or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _message_topic_map(raw: dict) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for item in raw.get("message_topics") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or "").strip()
+        if not comment_id or comment_id in result:
+            continue
+        topic_names = _topic_names_from_payload(item.get("topics") or [])
+        if topic_names:
+            result[comment_id] = topic_names
+    return result
+
+
+def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
+    result: dict[str, tuple[str, float]] = {}
+    for item in raw.get("message_sentiments") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or "").strip()
+        if not comment_id or comment_id in result:
+            continue
+        bucket = _bucket_sentiment(item.get("sentiment"), item.get("sentiment_score"))
+        if not bucket:
+            continue
+        result[comment_id] = (bucket, _safe_float(item.get("sentiment_score"), 0.0))
+    return result
+
+
+def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
+    return _paginate(
+        lambda from_idx, to_idx: _supabase().client.table("telegram_posts")
+        .select("id, posted_at", count="exact")
+        .gte("posted_at", ctx.start_at.isoformat())
+        .lt("posted_at", ctx.end_at.isoformat())
+        .order("posted_at", desc=False)
+        .range(from_idx, to_idx)
+    )
+
+
+def _fetch_window_comments(ctx: DashboardDateContext) -> list[dict]:
+    return _paginate(
+        lambda from_idx, to_idx: _supabase().client.table("telegram_comments")
+        .select("id, post_id, channel_id, telegram_user_id, posted_at", count="exact")
+        .gte("posted_at", ctx.start_at.isoformat())
+        .lt("posted_at", ctx.end_at.isoformat())
+        .not_.is_("telegram_user_id", "null")
+        .order("posted_at", desc=False)
+        .range(from_idx, to_idx)
+    )
+
+
+def _fetch_post_analyses(post_ids: list[str]) -> dict[str, dict]:
+    latest_by_post: dict[str, dict] = {}
+    if not post_ids:
+        return latest_by_post
+
+    for chunk in _chunked(post_ids):
+        rows = _paginate(
+            lambda from_idx, to_idx, ids=chunk: _supabase().client.table("ai_analysis")
+            .select("content_id, raw_llm_response, created_at", count="exact")
+            .eq("content_type", "post")
+            .in_("content_id", ids)
+            .order("created_at", desc=True)
+            .range(from_idx, to_idx)
+        )
+        for row in rows:
+            post_id = str(row.get("content_id") or "").strip()
+            if not post_id or post_id in latest_by_post:
+                continue
+            latest_by_post[post_id] = row
+    return latest_by_post
+
+
+def _fetch_batch_analyses(post_ids: list[str]) -> dict[tuple[str, str, str], dict]:
+    latest_by_scope: dict[tuple[str, str, str], dict] = {}
+    if not post_ids:
+        return latest_by_scope
+
+    for chunk in _chunked(post_ids):
+        rows = _paginate(
+            lambda from_idx, to_idx, ids=chunk: _supabase().client.table("ai_analysis")
+            .select("content_id, channel_id, telegram_user_id, raw_llm_response, created_at", count="exact")
+            .eq("content_type", "batch")
+            .not_.is_("channel_id", "null")
+            .not_.is_("telegram_user_id", "null")
+            .in_("content_id", ids)
+            .order("created_at", desc=True)
+            .range(from_idx, to_idx)
+        )
+        for row in rows:
+            post_id = str(row.get("content_id") or "").strip()
+            channel_id = str(row.get("channel_id") or "").strip()
+            user_id = str(row.get("telegram_user_id") or "").strip()
+            if not post_id or not channel_id or not user_id:
+                continue
+            key = (post_id, channel_id, user_id)
+            if key not in latest_by_scope:
+                latest_by_scope[key] = row
+    return latest_by_scope
 
 
 def _build_window_context(current_start, current_end, days: int) -> DashboardDateContext:
@@ -295,26 +518,85 @@ def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
 
 
 def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
-    """Sentiment breakdown per topic."""
-    return run_query("""
-        CALL () {
-            MATCH (p:Post)-[:TAGGED]->(t:Topic)
-            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-              AND p.posted_at >= datetime($start)
-              AND p.posted_at < datetime($end)
-            RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
-            UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t:Topic)
-            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-              AND c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-            RETURN t.name AS topic, s.label AS sentiment, count(*) AS count
-        }
-        RETURN topic, sentiment, sum(count) AS count
-        ORDER BY topic, count DESC
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """Reliable topic sentiment counts reconstructed from source posts/comments + AI analysis."""
+    topic_sentiment_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"Positive": 0, "Neutral": 0, "Negative": 0})
+
+    posts = _fetch_window_posts(ctx)
+    post_ids = [str(row.get("id") or "").strip() for row in posts if row.get("id")]
+    post_analyses = _fetch_post_analyses(post_ids)
+    seen_post_topic_pairs: set[tuple[str, str]] = set()
+
+    for post in posts:
+        post_id = str(post.get("id") or "").strip()
+        analysis = post_analyses.get(post_id)
+        raw = analysis.get("raw_llm_response") if isinstance(analysis, dict) and isinstance(analysis.get("raw_llm_response"), dict) else {}
+        if not raw:
+            continue
+
+        sentiment_bucket = _bucket_sentiment(raw.get("sentiment"), raw.get("sentiment_score"))
+        if not sentiment_bucket:
+            continue
+
+        for topic_name in _topic_names_from_payload(raw.get("topics") or []):
+            pair = (post_id, topic_name)
+            if pair in seen_post_topic_pairs:
+                continue
+            seen_post_topic_pairs.add(pair)
+            topic_sentiment_counts[topic_name][sentiment_bucket] += 1
+
+    comments = _fetch_window_comments(ctx)
+    comment_post_ids = list({str(row.get("post_id") or "").strip() for row in comments if row.get("post_id")})
+    batch_analyses = _fetch_batch_analyses(comment_post_ids)
+    seen_comment_topic_pairs: set[tuple[str, str]] = set()
+
+    for comment in comments:
+        comment_id = str(comment.get("id") or "").strip()
+        post_id = str(comment.get("post_id") or "").strip()
+        channel_id = str(comment.get("channel_id") or "").strip()
+        user_id = str(comment.get("telegram_user_id") or "").strip()
+        if not comment_id or not post_id or not channel_id or not user_id:
+            continue
+
+        analysis = batch_analyses.get((post_id, channel_id, user_id))
+        raw = analysis.get("raw_llm_response") if isinstance(analysis, dict) and isinstance(analysis.get("raw_llm_response"), dict) else {}
+        if not raw:
+            continue
+
+        topic_map = _message_topic_map(raw)
+        topic_names = topic_map.get(comment_id) or []
+        if not topic_names:
+            continue
+
+        sentiment_map = _message_sentiment_map(raw)
+        message_sentiment = sentiment_map.get(comment_id)
+        sentiment_bucket = (
+            message_sentiment[0]
+            if message_sentiment
+            else _bucket_sentiment(raw.get("sentiment"), raw.get("sentiment_score"))
+        )
+        if not sentiment_bucket:
+            continue
+
+        for topic_name in topic_names:
+            pair = (comment_id, topic_name)
+            if pair in seen_comment_topic_pairs:
+                continue
+            seen_comment_topic_pairs.add(pair)
+            topic_sentiment_counts[topic_name][sentiment_bucket] += 1
+
+    rows: list[dict] = []
+    for topic_name, counts in topic_sentiment_counts.items():
+        total = sum(counts.values())
+        if total <= 0:
+            continue
+        for sentiment in ("Positive", "Neutral", "Negative"):
+            count = int(counts.get(sentiment, 0) or 0)
+            if count <= 0:
+                continue
+            rows.append({"topic": topic_name, "sentiment": sentiment, "count": count})
+
+    rows.sort(key=lambda row: (-int(row.get("count") or 0), str(row.get("topic") or ""), str(row.get("sentiment") or "")))
+    return rows
 
 
 def get_top_posts(ctx: DashboardDateContext) -> list[dict]:

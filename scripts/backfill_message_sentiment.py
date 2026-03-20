@@ -101,6 +101,18 @@ def _normalize_tags(raw_llm: dict, sentiment: str | None) -> list[str]:
     return tags
 
 
+def _message_sentiment_map(raw_llm: dict) -> dict[str, str | None]:
+    mapping: dict[str, str | None] = {}
+    for item in raw_llm.get("message_sentiments") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or "").strip()
+        if not comment_id or comment_id in mapping:
+            continue
+        mapping[comment_id] = _normalize_sentiment(item.get("sentiment"))
+    return mapping
+
+
 def _fetch_analysis_rows(writer: SupabaseWriter, *, content_type: str, limit: int) -> list[dict]:
     page_size = 500
     rows: list[dict] = []
@@ -169,9 +181,10 @@ def _build_comment_rows(writer: SupabaseWriter, analysis_rows: list[dict], max_r
             continue
 
         raw_llm = row.get("raw_llm_response") if isinstance(row.get("raw_llm_response"), dict) else {}
-        sentiment = _normalize_sentiment(raw_llm.get("sentiment"))
-        tags = _normalize_tags(raw_llm, sentiment)
-        if not sentiment and not tags:
+        group_sentiment = _normalize_sentiment(raw_llm.get("sentiment"))
+        tags = _normalize_tags(raw_llm, group_sentiment)
+        sentiment_by_comment = _message_sentiment_map(raw_llm)
+        if not group_sentiment and not tags and not sentiment_by_comment:
             continue
 
         try:
@@ -195,7 +208,11 @@ def _build_comment_rows(writer: SupabaseWriter, analysis_rows: list[dict], max_r
             if not comment_uuid or comment_uuid in seen:
                 continue
             seen.add(comment_uuid)
-            out.append({"comment_uuid": comment_uuid, "sentiment": sentiment, "tags": tags})
+            out.append({
+                "comment_uuid": comment_uuid,
+                "sentiment": sentiment_by_comment.get(comment_uuid, group_sentiment),
+                "tags": tags,
+            })
             if len(out) >= max_rows:
                 break
     return out

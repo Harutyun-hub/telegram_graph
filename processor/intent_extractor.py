@@ -244,6 +244,15 @@ Capture signals of entrepreneurial activity, market observations, and economic o
     }
   ],
 
+  "message_sentiments": [
+    {
+      "message_ref": "MSG 1",
+      "comment_id": "<comment UUID if provided in input, otherwise null>",
+      "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
+      "sentiment_score": <-1.0 to 1.0>
+    }
+  ],
+
   "desires": {
     "explicit": "<stated desire or null>",
     "implicit": "<inferred desire>",
@@ -483,6 +492,29 @@ def _normalize_payload(parsed: dict) -> dict:
     if message_topics:
         normalized["message_topics"] = message_topics
         normalized["topics"] = list(aggregate_by_name.values())[:6]
+
+    message_sentiments: list[dict] = []
+    seen_message_sentiments: set[tuple[str, str]] = set()
+    for item in parsed.get("message_sentiments") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("comment_id") or "").strip()
+        message_ref = str(item.get("message_ref") or "").strip()
+        if not comment_id and not message_ref:
+            continue
+        key = (comment_id, message_ref)
+        if key in seen_message_sentiments:
+            continue
+        seen_message_sentiments.add(key)
+        message_sentiments.append({
+            "comment_id": comment_id,
+            "message_ref": message_ref,
+            "sentiment": _normalize_enum(item.get("sentiment")),
+            "sentiment_score": _clamp_score(item.get("sentiment_score"), normalized["sentiment_score"]),
+        })
+
+    if message_sentiments:
+        normalized["message_sentiments"] = message_sentiments
 
     return normalized
 
@@ -737,7 +769,8 @@ def extract_intents(
             f"Messages analyzed: {min(len(user_comments), config.AI_BATCH_SIZE)}\n"
             f"User ID: {telegram_user_id}\n"
             f"IMPORTANT: Return message_topics with one entry per message using the COMMENT_ID from each [MSG ...] header. "
-            f"Only assign a topic to a message when that specific message clearly mentions it."
+            f"Only assign a topic to a message when that specific message clearly mentions it. "
+            f"Also return message_sentiments with one entry per message using the same COMMENT_ID values."
             f"{profile_section}"
             f"{post_context_section}\n"
             f"--- MESSAGES ---\n{messages_text}"

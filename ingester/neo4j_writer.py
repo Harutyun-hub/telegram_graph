@@ -387,7 +387,12 @@ FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
                THEN [1] ELSE [] END |
     MERGE (b:BusinessOpportunity {type: $business_opportunity_type})
     SET b.description = $business_opportunity_desc
-    MERGE (u)-[:SIGNALS_OPPORTUNITY]->(b)
+    MERGE (u)-[ro:SIGNALS_OPPORTUNITY]->(b)
+    ON CREATE SET ro.count = 1,
+                  ro.first_seen = datetime($posted_at),
+                  ro.last_seen = datetime($posted_at)
+    ON MATCH  SET ro.count = coalesce(ro.count, 0) + 1,
+                  ro.last_seen = datetime($posted_at)
   )
 
   // User → Topics (normalized, with timestamps)
@@ -648,6 +653,22 @@ def _extract_sentiment_payload_from_analysis(analysis: dict) -> tuple[str | None
     return primary, tags
 
 
+def _extract_message_sentiment_label(raw_response: dict, comment_uuid: str | None) -> str | None:
+    """Return a comment-specific primary sentiment when available."""
+    target_id = str(comment_uuid or "").strip()
+    if not target_id:
+        return None
+
+    for item in (raw_response.get("message_sentiments") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("comment_id") or "").strip() != target_id:
+            continue
+        return _normalize_sentiment_label(item.get("sentiment"))
+
+    return None
+
+
 # ── Parameter Builders ────────────────────────────────────────────────────────
 
 def _channel_post_params(channel: dict, post: dict) -> dict:
@@ -720,6 +741,7 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
 
     entities = _extract_entities(raw)
     primary_sentiment, social_sentiment_tags = _extract_sentiment_payload_from_analysis(analysis)
+    message_sentiment = _extract_message_sentiment_label(raw, comment.get("id"))
 
     return {
         "comment_uuid":                 comment["id"],
@@ -768,7 +790,7 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         "business_opportunity_desc":    (biz.get("description") or "")[:200],
         # ── Intent & sentiment ──
         "primary_intent":               analysis.get("primary_intent"),
-        "sentiment":                    primary_sentiment,
+        "sentiment":                    message_sentiment or primary_sentiment,
         "social_sentiment_tags":        social_sentiment_tags,
         "sentiment_score":              float(analysis.get("sentiment_score") or 0.0),
         # ── Normalized topics for this user ──

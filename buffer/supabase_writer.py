@@ -8,10 +8,16 @@ from __future__ import annotations
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
-import requests
+import ssl
+from urllib.request import urlopen
 from loguru import logger
 import config
 from utils.topic_normalizer import set_runtime_topic_aliases
+
+try:
+    import certifi
+except Exception:  # pragma: no cover
+    certifi = None  # type: ignore[assignment]
 
 
 def _parse_iso_datetime(value):
@@ -32,6 +38,18 @@ def _parse_iso_datetime(value):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _looks_like_versioned_runtime_json_name(name: str) -> bool:
+    text = str(name or "")
+    return (
+        len(text) >= 17
+        and text[:8].isdigit()
+        and text[8] == "T"
+        and text[9:15].isdigit()
+        and text[15] == "Z"
+        and text.endswith(".json")
+    )
 
 
 class SupabaseWriter:
@@ -139,23 +157,11 @@ class SupabaseWriter:
         if not key:
             return dict(fallback)
 
-        try:
-            self._ensure_runtime_bucket()
-            bucket = self.client.storage.from_(self._runtime_bucket_name)
-            signed = bucket.create_signed_url(key, 60)
-            signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
-            if signed_url:
-                response = requests.get(signed_url, timeout=10)
-                response.raise_for_status()
-                raw = response.content
-            else:
-                raw = bucket.download(key)
-            if not raw:
-                return dict(fallback)
-            parsed = json.loads(raw.decode("utf-8"))
-            return parsed if isinstance(parsed, dict) else dict(fallback)
-        except Exception:
+        result = self.read_runtime_json(key)
+        if result["status"] != "ok":
             return dict(fallback)
+        payload = result.get("payload")
+        return dict(payload) if isinstance(payload, dict) else dict(fallback)
 
     def save_runtime_json(self, path: str, payload: dict) -> bool:
         """Persist a JSON object to runtime-config storage bucket."""
@@ -170,17 +176,125 @@ class SupabaseWriter:
             body = json.dumps(data, ensure_ascii=True).encode("utf-8")
             file_options = {"content-type": "application/json"}
             try:
-                bucket.update(key, body, file_options)
-            except Exception:
-                bucket.upload(
+                bucket.upload(key, body, file_options)
+            except Exception as exc:
+                if "duplicate" not in str(exc).lower():
+                    raise
+                # Overwrite existing runtime JSON by replacing the object.
+                bucket.remove([key])
+                bucket.upload(key, body, file_options)
+            verify = self.read_runtime_json(key)
+            if verify["status"] != "ok":
+                logger.error(
+                    "Runtime JSON write succeeded but readback failed | path={} status={} error={}",
                     key,
-                    body,
-                    {"content-type": "application/json", "upsert": "true"},
+                    verify["status"],
+                    verify.get("error") or "",
                 )
+                return False
+            stored = verify.get("payload")
+            if not isinstance(stored, dict):
+                logger.error(
+                    "Runtime JSON write read back non-object payload | path={} status={}",
+                    key,
+                    verify["status"],
+                )
+                return False
+            if stored != data:
+                logger.error("Runtime JSON write read back different payload | path={}", key)
+                return False
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error("Runtime JSON write failed | path={} error={}", key, exc)
             return False
 
+    def read_runtime_json(self, path: str) -> dict:
+        """Load runtime-config JSON with status metadata for callers that need diagnostics."""
+        key = str(path or "").strip()
+        if not key:
+            return {"status": "invalid_path", "payload": {}, "error": "Runtime JSON path is empty"}
+
+        try:
+            self._ensure_runtime_bucket()
+            raw = self.client.storage.from_(self._runtime_bucket_name).download(key)
+        except Exception as exc:
+            status = self._classify_runtime_read_error(exc)
+            if status == "missing":
+                logger.info("Runtime JSON missing | path={}", key)
+            else:
+                logger.warning("Runtime JSON unreadable | path={} error={}", key, exc)
+            return {"status": status, "payload": {}, "error": str(exc)}
+
+        if not raw:
+            logger.warning("Runtime JSON unreadable | path={} error=empty response body", key)
+            return {"status": "unreadable", "payload": {}, "error": "Empty response body"}
+
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            logger.warning("Runtime JSON unreadable | path={} error={}", key, exc)
+            return {"status": "unreadable", "payload": {}, "error": str(exc)}
+        except json.JSONDecodeError as exc:
+            logger.warning("Runtime JSON invalid JSON | path={} error={}", key, exc)
+            return {"status": "invalid_json", "payload": {}, "error": str(exc)}
+
+        if not isinstance(parsed, dict):
+            logger.warning("Runtime JSON invalid JSON | path={} error=root JSON value must be an object", key)
+            return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
+
+        if self._should_prefer_signed_read(key):
+            signed = self._read_runtime_json_via_signed_url(key)
+            if signed["status"] == "ok":
+                return signed
+
+        return {"status": "ok", "payload": parsed, "error": ""}
+
+    @staticmethod
+    def _classify_runtime_read_error(error: Exception) -> str:
+        status_code = getattr(error, "status_code", None)
+        if status_code == 404:
+            return "missing"
+
+        low = str(error).lower()
+        if any(marker in low for marker in ("not found", "404", "no such", "does not exist", "missing")):
+            return "missing"
+        return "unreadable"
+
+    @staticmethod
+    def _should_prefer_signed_read(path: str) -> bool:
+        name = str(path or "").rsplit("/", 1)[-1]
+        return bool(name.endswith(".json") and not _looks_like_versioned_runtime_json_name(name))
+
+    def _read_runtime_json_via_signed_url(self, path: str) -> dict:
+        key = str(path or "").strip()
+        if not key or certifi is None:
+            return {"status": "unavailable", "payload": {}, "error": "Signed URL reader unavailable"}
+
+        try:
+            signed = self.client.storage.from_(self._runtime_bucket_name).create_signed_url(key, 60)
+            signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
+            if not signed_url:
+                return {"status": "unavailable", "payload": {}, "error": "Signed URL missing from response"}
+
+            context = ssl.create_default_context(cafile=certifi.where())
+            with urlopen(signed_url, timeout=10, context=context) as response:
+                raw = response.read()
+        except Exception as exc:
+            logger.warning("Runtime JSON signed read failed | path={} error={}", key, exc)
+            return {"status": "unreadable", "payload": {}, "error": str(exc)}
+
+        if not raw:
+            return {"status": "unreadable", "payload": {}, "error": "Empty response body"}
+
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            return {"status": "invalid_json", "payload": {}, "error": str(exc)}
+
+        if not isinstance(parsed, dict):
+            return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
+
+        return {"status": "ok", "payload": parsed, "error": ""}
     def list_runtime_files(self, folder: str) -> list[dict]:
         """List files under a runtime-config folder path."""
         path = str(folder or "").strip().strip("/")
@@ -419,6 +533,78 @@ class SupabaseWriter:
 
     # ── AI Analysis ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _analysis_message_key(item: object) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        comment_id = str(item.get("comment_id") or "").strip()
+        message_ref = str(item.get("message_ref") or "").strip()
+        key = comment_id or message_ref
+        return key or None
+
+    @staticmethod
+    def _merge_analysis_items(existing_items: object, incoming_items: object) -> list[dict]:
+        merged: list[dict] = []
+        seen: set[str] = set()
+
+        for source in (incoming_items, existing_items):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if not isinstance(item, dict):
+                    continue
+                key = SupabaseWriter._analysis_message_key(item)
+                if not key:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(dict(item))
+        return merged
+
+    @staticmethod
+    def _merge_topic_items(existing_topics: object, incoming_topics: object) -> list[dict]:
+        merged: list[dict] = []
+        seen: set[str] = set()
+
+        for source in (incoming_topics, existing_topics):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                merged.append(dict(item))
+        return merged
+
+    def _merge_batch_raw_llm_response(self, existing_raw: object, incoming_raw: object) -> dict:
+        existing = existing_raw if isinstance(existing_raw, dict) else {}
+        incoming = incoming_raw if isinstance(incoming_raw, dict) else {}
+        if not existing:
+            return dict(incoming)
+        if not incoming:
+            return dict(existing)
+
+        merged = dict(existing)
+        merged.update(incoming)
+
+        message_topics = self._merge_analysis_items(existing.get("message_topics"), incoming.get("message_topics"))
+        if message_topics:
+            merged["message_topics"] = message_topics
+
+        message_sentiments = self._merge_analysis_items(existing.get("message_sentiments"), incoming.get("message_sentiments"))
+        if message_sentiments:
+            merged["message_sentiments"] = message_sentiments
+
+        merged_topics = self._merge_topic_items(existing.get("topics"), incoming.get("topics"))
+        if merged_topics:
+            merged["topics"] = merged_topics
+
+        return merged
+
     def save_analysis(self, analysis: dict) -> dict | None:
         """
         Save AI analysis result.
@@ -444,7 +630,7 @@ class SupabaseWriter:
 
         if content_type == "post" and content_id:
             idempotency_query = self.client.table("ai_analysis") \
-                .select("id, created_at") \
+                .select("id, created_at, raw_llm_response") \
                 .eq("content_type", "post") \
                 .eq("content_id", content_id) \
                 .order("created_at", desc=True) \
@@ -457,7 +643,7 @@ class SupabaseWriter:
             and telegram_user_id is not None
         ):
             idempotency_query = self.client.table("ai_analysis") \
-                .select("id, created_at") \
+                .select("id, created_at, raw_llm_response") \
                 .eq("content_type", "batch") \
                 .eq("content_id", content_id) \
                 .eq("channel_id", channel_id) \
@@ -480,6 +666,11 @@ class SupabaseWriter:
                         for k, v in payload.items()
                         if k not in {"id", "created_at"}
                     }
+                    if content_type == "batch":
+                        current_raw = existing.get("raw_llm_response")
+                        next_raw = update_payload.get("raw_llm_response")
+                        if isinstance(current_raw, dict) or isinstance(next_raw, dict):
+                            update_payload["raw_llm_response"] = self._merge_batch_raw_llm_response(current_raw, next_raw)
                     # Re-analysis must be re-synced to graph.
                     update_payload["neo4j_synced"] = False
 

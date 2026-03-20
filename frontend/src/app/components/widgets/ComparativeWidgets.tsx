@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ArrowUpRight, ArrowDownRight, Minus, Star } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
@@ -85,6 +86,7 @@ export function SentimentByTopic() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
+  const [showAll, setShowAll] = useState(false);
   const sentimentByTopic = data.sentimentByTopic[lang] ?? [];
 
   if (!sentimentByTopic.length) return <EmptyWidget title={ru ? 'Тональность по темам' : 'Sentiment by Topic'} />;
@@ -94,6 +96,7 @@ export function SentimentByTopic() {
   const sortedByNeg = [...sentimentByTopic].sort((a, b) => b.negative - a.negative);
   const top3pos = sortedByPos.slice(0, 3);
   const top2neg = sortedByNeg.slice(0, 2);
+  const visibleRows = showAll ? sentimentByTopic : sentimentByTopic.slice(0, 10);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -112,7 +115,7 @@ export function SentimentByTopic() {
       </p>
 
       <div className="space-y-2.5">
-        {sentimentByTopic.map((item) => (
+        {visibleRows.map((item) => (
           <div key={item.topic}>
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-gray-700" style={{ fontWeight: 500 }}>{item.topic}</span>
@@ -126,6 +129,21 @@ export function SentimentByTopic() {
           </div>
         ))}
       </div>
+
+      {sentimentByTopic.length > 10 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowAll((prev) => !prev)}
+            className="text-xs text-teal-700 hover:text-teal-800"
+            style={{ fontWeight: 600 }}
+          >
+            {showAll
+              ? (ru ? 'Свернуть' : 'See top 10')
+              : (ru ? `Показать все ${sentimentByTopic.length}` : `See all ${sentimentByTopic.length}`)}
+          </button>
+        </div>
+      )}
 
       <div className="flex items-center gap-4 mt-4 pt-3 border-t border-gray-100">
         <div className="flex items-center gap-1.5">
