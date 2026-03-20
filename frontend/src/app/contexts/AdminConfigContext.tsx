@@ -35,10 +35,10 @@ export function AdminConfigProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
-      const nextConfig = await getAdminConfig();
-      setConfig(nextConfig);
+      const result = await getAdminConfig();
+      setConfig(result.config);
+      setError(result.warning);
     } catch (err: any) {
       setError(err?.message ?? 'Failed to load admin config');
     } finally {
@@ -54,8 +54,9 @@ export function AdminConfigProvider({ children }: { children: ReactNode }) {
     setSaving(true);
     setError(null);
     try {
-      const nextConfig = await patchAdminConfig(patch);
-      setConfig(nextConfig);
+      const result = await patchAdminConfig(patch);
+      setConfig(result.config);
+      setError(result.warning);
     } catch (err: any) {
       const message = err?.message ?? 'Failed to save admin config';
       setError(message);

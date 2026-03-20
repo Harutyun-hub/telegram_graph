@@ -1,5 +1,5 @@
 import { createDefaultAdminConfig } from '../admin/catalog';
-import type { AdminConfig, AdminConfigPatch } from '../types/admin';
+import type { AdminConfig, AdminConfigEnvelope, AdminConfigPatch, AdminConfigResult } from '../types/admin';
 import { apiFetch } from './api';
 
 const ADMIN_CONFIG_CACHE_KEY = 'admin-config-cache-v1';
@@ -54,8 +54,8 @@ function writeCachedAdminConfig(config: AdminConfig) {
   }
 }
 
-export async function getAdminConfig(): Promise<AdminConfig> {
-  const payload = await apiFetch<Partial<AdminConfig>>('/admin/config', {
+export async function getAdminConfig(): Promise<AdminConfigResult> {
+  const payload = await apiFetch<AdminConfigEnvelope>('/admin/config', {
     method: 'GET',
     headers: { Accept: 'application/json' },
     cache: 'no-store',
@@ -63,16 +63,22 @@ export async function getAdminConfig(): Promise<AdminConfig> {
   });
   const config = mergeAdminConfig(payload);
   writeCachedAdminConfig(config);
-  return config;
+  return {
+    config,
+    warning: typeof payload?.warning === 'string' && payload.warning.trim() ? payload.warning : null,
+  };
 }
 
-export async function patchAdminConfig(patch: AdminConfigPatch): Promise<AdminConfig> {
-  const payload = await apiFetch<Partial<AdminConfig>>('/admin/config', {
+export async function patchAdminConfig(patch: AdminConfigPatch): Promise<AdminConfigResult> {
+  const payload = await apiFetch<AdminConfigEnvelope>('/admin/config', {
     method: 'PATCH',
     body: JSON.stringify(patch),
     timeoutMs: 25_000,
   });
   const config = mergeAdminConfig(payload);
   writeCachedAdminConfig(config);
-  return config;
+  return {
+    config,
+    warning: typeof payload?.warning === 'string' && payload.warning.trim() ? payload.warning : null,
+  };
 }

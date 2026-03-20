@@ -21,6 +21,8 @@ _runtime_store: SupabaseWriter | None = None
 _config_cache_lock = threading.Lock()
 _config_cache: dict[str, Any] | None = None
 _config_cache_ts: float = 0.0
+_runtime_warning_lock = threading.Lock()
+_runtime_warning: str | None = None
 _io_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="admin-runtime")
 
 
@@ -37,6 +39,17 @@ def _get_runtime_store() -> SupabaseWriter | None:
     return _runtime_store
 
 
+def _set_runtime_warning(message: str | None) -> None:
+    global _runtime_warning
+    with _runtime_warning_lock:
+        _runtime_warning = message.strip() if isinstance(message, str) and message.strip() else None
+
+
+def get_admin_config_runtime_warning() -> str | None:
+    with _runtime_warning_lock:
+        return _runtime_warning
+
+
 def load_admin_config_raw() -> dict[str, Any]:
     global _config_cache, _config_cache_ts
     now = time.time()
@@ -46,19 +59,34 @@ def load_admin_config_raw() -> dict[str, Any]:
 
     store = _get_runtime_store()
     if not store:
+        _set_runtime_warning("Admin config storage is unavailable; showing defaults or in-memory values.")
         with _config_cache_lock:
             return dict(_config_cache or {})
 
     try:
-        future = _io_executor.submit(store.get_runtime_json, ADMIN_CONFIG_PATH, {})
-        payload = future.result(timeout=ADMIN_CONFIG_READ_TIMEOUT_SECONDS)
-        config_payload = payload if isinstance(payload, dict) else {}
+        future = _io_executor.submit(store.read_runtime_json, ADMIN_CONFIG_PATH)
+        result = future.result(timeout=ADMIN_CONFIG_READ_TIMEOUT_SECONDS)
+        status = result.get("status")
+        if status == "ok":
+            config_payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+            _set_runtime_warning(None)
+        elif status == "missing":
+            config_payload = {}
+            _set_runtime_warning(None)
+        else:
+            detail = result.get("error") or "Unknown runtime storage error"
+            logger.warning(f"Admin config read failed; using in-memory/default config ({status}: {detail})")
+            _set_runtime_warning("Admin config storage could not be read; showing defaults until persistence is healthy.")
+            with _config_cache_lock:
+                return dict(_config_cache or {})
     except FutureTimeoutError:
         logger.warning("Admin config read timed out; using in-memory/default config")
+        _set_runtime_warning("Admin config storage timed out; showing defaults until persistence is healthy.")
         with _config_cache_lock:
             return dict(_config_cache or {})
     except Exception as exc:
         logger.warning(f"Admin config read failed; using in-memory/default config ({exc})")
+        _set_runtime_warning("Admin config storage could not be read; showing defaults until persistence is healthy.")
         with _config_cache_lock:
             return dict(_config_cache or {})
 
@@ -72,13 +100,11 @@ def load_admin_config_raw() -> dict[str, Any]:
 def save_admin_config_raw(payload: dict[str, Any]) -> bool:
     global _config_cache, _config_cache_ts
     data = payload if isinstance(payload, dict) else {}
-    with _config_cache_lock:
-        _config_cache = dict(data)
-        _config_cache_ts = time.time()
 
     store = _get_runtime_store()
     if not store:
         logger.warning("Admin config store unavailable; cannot persist admin config")
+        _set_runtime_warning("Admin config storage is unavailable; save could not be verified.")
         return False
 
     try:
@@ -86,12 +112,20 @@ def save_admin_config_raw(payload: dict[str, Any]) -> bool:
         saved = future.result(timeout=ADMIN_CONFIG_SAVE_TIMEOUT_SECONDS)
         if not saved:
             logger.warning("Admin config save failed in runtime storage")
+            _set_runtime_warning("Admin config save failed because storage could not round-trip the new config.")
+            return False
+        with _config_cache_lock:
+            _config_cache = dict(data)
+            _config_cache_ts = time.time()
+        _set_runtime_warning(None)
         return bool(saved)
     except FutureTimeoutError:
         logger.warning("Admin config save timed out; cannot confirm persistence")
+        _set_runtime_warning("Admin config save timed out before persistence could be verified.")
         return False
     except Exception as exc:
         logger.warning(f"Admin config save failed; cannot confirm persistence ({exc})")
+        _set_runtime_warning("Admin config save failed because persistence could not be verified.")
         return False
 
 
