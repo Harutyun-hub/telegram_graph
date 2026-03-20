@@ -58,9 +58,6 @@ export function TopicsPage() {
 
     const evidenceParam = (searchParams.get('evidenceId') || '').trim();
     setFocusedEvidenceId(evidenceParam);
-    if (evidenceParam && viewParam !== 'questions') {
-      setProofView('questions');
-    }
 
     const topicParam = (searchParams.get('topic') || '').trim().toLowerCase();
     if (!topicParam || allTopics.length === 0) return;
@@ -109,11 +106,11 @@ export function TopicsPage() {
   }, [allTopics, selectedTopic]);
 
   useEffect(() => {
-    if (!selectedTopic || proofView !== 'questions' || !focusedEvidenceId) return;
-    const questionEvidence = getQuestionEvidence(selectedTopic);
-    if (!questionEvidence.some((ev) => ev.id === focusedEvidenceId)) return;
+    if (!selectedTopic || !focusedEvidenceId) return;
+    const visibleEvidence = proofView === 'questions' ? getQuestionEvidence(selectedTopic) : selectedTopic.evidence;
+    if (!visibleEvidence.some((ev) => ev.id === focusedEvidenceId)) return;
 
-    const domId = `question-evidence-${focusedEvidenceId}`;
+    const domId = `${proofView}-evidence-${focusedEvidenceId}`;
     const scrollToEvidence = () => {
       const el = document.getElementById(domId);
       if (!el) return false;
@@ -414,7 +411,7 @@ export function TopicsPage() {
               <div className="space-y-3">
                 {visibleEvidence.map((ev) => (
                   <div
-                    id={`question-evidence-${ev.id}`}
+                    id={`${proofView}-evidence-${ev.id}`}
                     key={ev.id}
                     className={`bg-white rounded-xl border p-4 hover:shadow-sm transition-shadow ${
                       highlightEvidenceId === ev.id

@@ -54,7 +54,7 @@ const DataContext = createContext<DataContextValue>({
 });
 
 function snapshotKeyForRange(from: string, to: string): string {
-  return `radar.dashboard.snapshot.v3:${from}:${to}`;
+  return `radar.dashboard.snapshot.v4:${from}:${to}`;
 }
 
 function loadSnapshot(from: string, to: string): AppData | null {
@@ -62,7 +62,12 @@ function loadSnapshot(from: string, to: string): AppData | null {
   try {
     const raw = window.sessionStorage.getItem(snapshotKeyForRange(from, to));
     if (!raw) return null;
-    return JSON.parse(raw) as AppData;
+    const parsed = JSON.parse(raw) as AppData;
+    const jobItems = parsed?.jobSeeking?.en ?? [];
+    const hasJobDataWithoutEvidence = Array.isArray(jobItems)
+      && jobItems.length > 0
+      && !jobItems.some((item: any) => Array.isArray(item?.evidence) && item.evidence.length > 0);
+    return hasJobDataWithoutEvidence ? null : parsed;
   } catch {
     return null;
   }
