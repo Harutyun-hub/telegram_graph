@@ -45,7 +45,7 @@ export function EmergingInterests() {
       </p>
 
       <div className="space-y-2.5">
-        {[...emergingInterests].sort((a, b) => b.growthRate - a.growthRate).map((item) => {
+        {[...emergingInterests].sort((a, b) => (b.emergenceScore ?? b.growthRate) - (a.emergenceScore ?? a.growthRate) || b.currentVolume - a.currentVolume).map((item) => {
           const opp = oppColors[item.opportunity];
           const oppLabel = oLabels[item.opportunity as keyof typeof oLabels];
           return (
@@ -80,13 +80,12 @@ export function RetentionRiskGauge() {
   const retentionFactors = data.retentionFactors[lang] ?? [];
   const churnSignals = data.churnSignals[lang] ?? [];
 
-  if (!retentionFactors.length && !churnSignals.length) return <EmptyWidget title={ru ? 'Удержание и сигналы оттока' : 'Retention & Churn Signals'} />;
+  if (!retentionFactors.length && !churnSignals.length) return <EmptyWidget title={ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'} />;
 
-  const retentionScore = retentionFactors.length > 0
-    ? Math.round(retentionFactors.reduce((acc, f) => acc + f.score * f.weight, 0) / retentionFactors.reduce((acc, f) => acc + f.weight, 0))
+  const continuityScore = retentionFactors.length > 0
+    ? Math.round(retentionFactors[0]?.overallScore ?? (retentionFactors.reduce((acc, f) => acc + f.score * f.weight, 0) / retentionFactors.reduce((acc, f) => acc + f.weight, 0)))
     : 0;
 
-  // ✅ GENERIC: find the worst (fastest-rising) churn signal dynamically
   const risingSignal = churnSignals.length > 0
     ? [...churnSignals].filter(s => s.severity === 'rising').sort((a, b) => b.trend - a.trend)[0] ?? null
     : null;
@@ -95,21 +94,21 @@ export function RetentionRiskGauge() {
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
-          {ru ? 'Удержание и сигналы оттока' : 'Retention & Churn Signals'}
+          {ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'}
         </h3>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${retentionScore >= 70 ? 'bg-emerald-100 text-emerald-700' : retentionScore >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 600 }}>
-          {ru ? 'Удержание:' : 'Retention:'} {retentionScore}/100
+        <span className={`text-xs px-2 py-0.5 rounded-full ${continuityScore >= 70 ? 'bg-emerald-100 text-emerald-700' : continuityScore >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 600 }}>
+          {ru ? 'Возврат:' : 'Continuity:'} {continuityScore}/100
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? 'Почему люди остаются? Почему могут уйти? Работайте с причинами оттока заблаговременно.'
-          : 'Why do people stay? Why might they leave? Address the "leave" reasons proactively.'}
+          ? 'Какая доля активных участников возвращается, и какие темы дают риск оттока выше базового уровня.'
+          : 'Shows how many active members return and which topics carry above-baseline drop-off risk.'}
       </p>
 
       <div className="space-y-2 mb-4">
         <span className="text-xs text-gray-500 block" style={{ fontWeight: 500 }}>
-          {ru ? 'Что удерживает людей здесь' : 'What keeps people here'}
+          {ru ? 'Темы, связанные с повторной активностью' : 'Topics linked to repeat activity'}
         </span>
         {retentionFactors.map((f) => (
           <div key={f.factor} className="flex items-center gap-2">
@@ -124,7 +123,7 @@ export function RetentionRiskGauge() {
 
       <div className="pt-3 border-t border-gray-100 space-y-2">
         <span className="text-xs text-gray-500 block" style={{ fontWeight: 500 }}>
-          {ru ? 'Сигналы оттока для мониторинга' : 'Churn signals to watch'}
+          {ru ? 'Сигналы риска выше базового уровня' : 'Above-baseline risk signals'}
         </span>
         {churnSignals.map((signal) => (
           <div key={signal.signal} className={`flex items-center gap-2 text-xs rounded-lg p-2 ${signal.severity === 'rising' ? 'bg-red-50' : signal.severity === 'watch' ? 'bg-amber-50' : 'bg-gray-50'}`}>
@@ -140,9 +139,9 @@ export function RetentionRiskGauge() {
       <div className="mt-3 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
         <p className="text-xs text-amber-800">
           {risingSignal ? (ru
-            ? <><span style={{ fontWeight: 600 }}>Требует внимания:</span> {risingSignal.signal} выросло на {risingSignal.trend > 0 ? '+' : ''}{risingSignal.trend}%. Работайте над устранением этой причины оттока в первую очередь.</>
-            : <><span style={{ fontWeight: 600 }}>Action needed:</span> {risingSignal.signal} is up {risingSignal.trend > 0 ? '+' : ''}{risingSignal.trend}%. Address this churn driver as the top priority.</>
-          ) : (ru ? 'Сигналы оттока стабильны.' : 'Churn signals are stable.')}
+            ? <><span style={{ fontWeight: 600 }}>Требует внимания:</span> тема {risingSignal.signal} даёт риск выше базового на {risingSignal.trend > 0 ? '+' : ''}{risingSignal.trend}%. Это главный приоритет для удержания активности.</>
+            : <><span style={{ fontWeight: 600 }}>Action needed:</span> {risingSignal.signal} runs {risingSignal.trend > 0 ? '+' : ''}{risingSignal.trend}% above the community baseline. This is the top drop-off risk to address.</>
+          ) : (ru ? 'Сигналы риска находятся в пределах базового уровня.' : 'Risk signals are within the community baseline.')}
         </p>
       </div>
     </div>
@@ -168,13 +167,13 @@ export function CommunityGrowthFunnel() {
   const askers      = growthFunnel.find(s => s.role === 'asks')        ?? null;
   const helpers     = growthFunnel.find(s => s.role === 'helps')       ?? null;
   const leaders     = growthFunnel.find(s => s.role === 'leads')       ?? growthFunnel[growthFunnel.length - 1];
-  const lurkerCount = readers?.count ?? 0;
+  const passiveReaderCount = Math.max(0, (readers?.count ?? 0) - (askers?.count ?? 0));
 
-  const dropReadToAsk = readers && askers && readers.pct > 0
-    ? Math.round(((askers.pct - readers.pct) / readers.pct) * 100)
+  const dropReadToAsk = readers && askers && readers.count > 0
+    ? Math.max(0, Math.round((1 - (askers.count / readers.count)) * 100))
     : null;
-  const dropAskToHelp = askers && helpers && askers.pct > 0
-    ? Math.round(((helpers.pct - askers.pct) / askers.pct) * 100)
+  const conversionAskToHelp = askers && helpers && askers.count > 0
+    ? Math.max(0, Math.round((helpers.count / askers.count) * 100))
     : null;
 
   return (
@@ -223,8 +222,8 @@ export function CommunityGrowthFunnel() {
         <div className="text-center">
           <span className="text-xs text-gray-500 block">{ru ? 'Конверсия' : 'Conversion'}</span>
           <span className="text-sm text-gray-900" style={{ fontWeight: 600 }}>{ru ? 'Спрос. → Пом.' : 'Ask → Help'}</span>
-          {dropAskToHelp !== null && (
-            <span className="text-xs text-red-500 block">{dropAskToHelp}%</span>
+          {conversionAskToHelp !== null && (
+            <span className="text-xs text-emerald-500 block">{conversionAskToHelp}%</span>
           )}
         </div>
         <div className="text-center">
@@ -237,8 +236,8 @@ export function CommunityGrowthFunnel() {
       <div className="mt-3 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
         <p className="text-xs text-blue-800">
           {ru
-            ? <><span style={{ fontWeight: 600 }}>Главная возможность:</span> {lurkerCount.toLocaleString()} человек читают, но никогда не задают вопросов. Запустите ветку «Новичок понедельника», чтобы снизить барьер первого взаимодействия.</>
-            : <><span style={{ fontWeight: 600 }}>Biggest opportunity:</span> {lurkerCount.toLocaleString()} people read but never ask. Create &quot;New Member Monday&quot; threads to lower the barrier to first engagement.</>
+            ? <><span style={{ fontWeight: 600 }}>Главная возможность:</span> {passiveReaderCount.toLocaleString()} человек читают, но не переходят к вопросам. Запустите ветку «Новичок понедельника», чтобы снизить барьер первого взаимодействия.</>
+            : <><span style={{ fontWeight: 600 }}>Biggest opportunity:</span> {passiveReaderCount.toLocaleString()} people read but do not move into asking. Create &quot;New Member Monday&quot; threads to lower the barrier to first engagement.</>
           }
         </p>
       </div>
