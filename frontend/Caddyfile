@@ -31,7 +31,9 @@
 	# Reverse proxy all /api/* requests to the backend service.
 	# Set BACKEND_URL in Railway variables (e.g. https://telegramgraph-production.up.railway.app)
 	handle /api/* {
-		reverse_proxy {$BACKEND_URL}
+		reverse_proxy {$BACKEND_URL} {
+			header_up Authorization "Bearer {$BACKEND_ANALYTICS_API_KEY_FRONTEND}"
+		}
 	}
 
 	# Serve static files for everything else (SPA)

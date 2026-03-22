@@ -44,7 +44,8 @@ Key variable:
 
 - The production frontend is designed to work behind the Caddy config in [`/Users/harutnahapetyan/Documents/Gemini/Telegram/frontend/Caddyfile`](/Users/harutnahapetyan/Documents/Gemini/Telegram/frontend/Caddyfile).
 - `/api/*` requests are still expected to be reverse-proxied to the backend via `BACKEND_URL`.
-- This release does not change the frontend deploy contract used by Railway.
+- Railway runtime must also provide `BACKEND_ANALYTICS_API_KEY_FRONTEND` so Caddy can inject the backend Bearer token server-side.
+- The browser must never receive analytics secrets through `VITE_*` variables.
 
 ## Current Dashboard Behavior
 

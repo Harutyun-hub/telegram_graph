@@ -17,6 +17,9 @@ from __future__ import annotations
 import sys, os
 import hashlib
 import asyncio
+import hmac
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
@@ -27,14 +30,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 config.validate()
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from api.aggregator import (
-    get_dashboard_data, get_topics_page, get_channels_page,
+    get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, invalidate_cache
 )
 from api.dashboard_dates import build_dashboard_date_context
@@ -150,6 +153,8 @@ question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
+_analytics_rate_limit_lock = threading.Lock()
+_analytics_rate_limit_buckets: dict[tuple[str, str], list[float]] = {}
 ADMIN_WIDGET_IDS = (
     "community_brief",
     "community_health_score",
@@ -296,6 +301,109 @@ def _validate_admin_runtime(raw_runtime: Any) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="aiPostPromptStyle must be compact or full")
         validated[key] = text.lower() if key == "aiPostPromptStyle" else text
     return validated
+
+
+def _configured_analytics_tokens() -> list[str]:
+    return [
+        token
+        for token in (
+            config.ANALYTICS_API_KEY_FRONTEND,
+            config.ANALYTICS_API_KEY_OPENCLAW,
+        )
+        if token
+    ]
+
+
+def _token_fingerprint(token: str | None) -> str:
+    text = (token or "").strip()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _analytics_client_ip(request: Request) -> str:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+    if config.ANALYTICS_RATE_LIMIT_TRUST_PROXY and forwarded_for:
+        return forwarded_for.split(",")[0].strip() or "unknown"
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _enforce_analytics_rate_limit(request: Request) -> None:
+    if not config.ANALYTICS_RATE_LIMIT_ENABLED:
+        return
+
+    now = time.monotonic()
+    window_seconds = max(1, int(config.ANALYTICS_RATE_LIMIT_WINDOW_SECONDS))
+    max_requests = max(1, int(config.ANALYTICS_RATE_LIMIT_MAX_REQUESTS))
+    bucket_key = (_analytics_client_ip(request), request.url.path)
+
+    with _analytics_rate_limit_lock:
+        timestamps = _analytics_rate_limit_buckets.get(bucket_key, [])
+        cutoff = now - window_seconds
+        timestamps = [ts for ts in timestamps if ts >= cutoff]
+        if len(timestamps) >= max_requests:
+            _analytics_rate_limit_buckets[bucket_key] = timestamps
+            logger.warning(
+                "Analytics rate limit exceeded | endpoint={} client_ip={} count={}".format(
+                    request.url.path,
+                    bucket_key[0],
+                    len(timestamps),
+                )
+            )
+            raise HTTPException(status_code=429, detail="Rate limit exceeded for analytics API.")
+        timestamps.append(now)
+        _analytics_rate_limit_buckets[bucket_key] = timestamps
+
+
+def require_analytics_access(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> None:
+    _enforce_analytics_rate_limit(request)
+
+    if not config.ANALYTICS_API_REQUIRE_AUTH:
+        return
+
+    valid_tokens = _configured_analytics_tokens()
+    if not valid_tokens:
+        logger.error(
+            "Analytics auth enabled without configured tokens | endpoint={}".format(request.url.path)
+        )
+        raise HTTPException(status_code=503, detail="Analytics API auth is enabled but no server token is configured.")
+
+    if not authorization:
+        logger.warning(
+            "Analytics auth failure | endpoint={} reason=missing_header client_ip={}".format(
+                request.url.path,
+                _analytics_client_ip(request),
+            )
+        )
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        logger.warning(
+            "Analytics auth failure | endpoint={} reason=bad_scheme client_ip={}".format(
+                request.url.path,
+                _analytics_client_ip(request),
+            )
+        )
+        raise HTTPException(status_code=401, detail="Authorization header must use Bearer token.")
+
+    clean_token = token.strip()
+    if any(hmac.compare_digest(clean_token, valid) for valid in valid_tokens):
+        return
+
+    logger.warning(
+        "Analytics auth failure | endpoint={} reason=invalid_token token_fp={} client_ip={}".format(
+            request.url.path,
+            _token_fingerprint(clean_token),
+            _analytics_client_ip(request),
+        )
+    )
+    raise HTTPException(status_code=401, detail="Invalid analytics API token.")
 
 
 def _sanitize_admin_config(raw_config: Any) -> dict[str, Any]:
@@ -873,7 +981,7 @@ async def health():
         return {"status": "degraded", "neo4j": str(e)}
 
 
-@app.get("/api/dashboard")
+@app.get("/api/dashboard", dependencies=[Depends(require_analytics_access)])
 async def dashboard(
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
@@ -890,16 +998,25 @@ async def dashboard(
         else:
             ctx = build_dashboard_date_context(from_date, to_date)
         loop = asyncio.get_running_loop()
-        dashboard_data = await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
+        dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
         return {
             "data": dashboard_data,
             "meta": {
                 "from": ctx.from_date.isoformat(),
                 "to": ctx.to_date.isoformat(),
+                "requestedFrom": from_date or ctx.from_date.isoformat(),
+                "requestedTo": to_date or ctx.to_date.isoformat(),
                 "days": ctx.days,
                 "mode": "operational" if ctx.is_operational else "intelligence",
                 "rangeLabel": ctx.range_label,
                 "trustedEndDate": trusted_end.isoformat(),
+                "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
+                "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
+                "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
+                "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
+                "isStale": dashboard_runtime_meta.get("isStale", False),
+                "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
+                "buildMode": dashboard_runtime_meta.get("buildMode"),
                 "freshness": {
                     "status": freshness.get("health", {}).get("status"),
                     "generatedAt": freshness.get("generated_at"),
@@ -911,7 +1028,7 @@ async def dashboard(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ai/query")
+@app.post("/api/ai/query", dependencies=[Depends(require_analytics_access)])
 async def ai_query(request: AIQueryRequest):
     """Lightweight AI endpoint backed by the live dashboard snapshot."""
     try:
@@ -928,29 +1045,39 @@ async def ai_query(request: AIQueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/topics")
-async def topics(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1000)):
+@app.get("/api/topics", dependencies=[Depends(require_analytics_access)])
+async def topics(
+    page: int = Query(0, ge=0),
+    size: int = Query(500, ge=1, le=1000),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """Topics detail page — paginated."""
     try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: get_topics_page(page, size))
+        return await loop.run_in_executor(None, lambda: get_topics_page(page, size, ctx))
     except Exception as e:
         logger.error(f"Topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/channels")
-async def channels():
+@app.get("/api/channels", dependencies=[Depends(require_analytics_access)])
+async def channels(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """Channels detail page."""
     try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, get_channels_page)
+        return await loop.run_in_executor(None, lambda: get_channels_page(ctx))
     except Exception as e:
         logger.error(f"Channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/graph")
+@app.post("/api/graph", dependencies=[Depends(require_analytics_access)])
 async def graph_data(payload: GraphRequest):
     """Graph dataset for /graph page (server-side Neo4j)."""
     try:
@@ -983,7 +1110,7 @@ async def graph_data(payload: GraphRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/node-details")
+@app.get("/api/node-details", dependencies=[Depends(require_analytics_access)])
 async def node_details(
     nodeId: str = Query(...),
     nodeType: str = Query(...),
@@ -1009,7 +1136,7 @@ async def node_details(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/search")
+@app.get("/api/search", dependencies=[Depends(require_analytics_access)])
 async def search_graph(query: str = Query("", min_length=0, max_length=200), limit: int = Query(20, ge=1, le=100)):
     """Graph search across channels/topics/intents."""
     try:
@@ -1021,7 +1148,7 @@ async def search_graph(query: str = Query("", min_length=0, max_length=200), lim
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/trending-topics")
+@app.get("/api/trending-topics", dependencies=[Depends(require_analytics_access)])
 async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top trending topics for graph filters."""
     try:
@@ -1031,7 +1158,7 @@ async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str =
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/top-channels")
+@app.get("/api/top-channels", dependencies=[Depends(require_analytics_access)])
 async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top channels by post activity (graph context)."""
     try:
@@ -1041,7 +1168,7 @@ async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Qu
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/all-channels")
+@app.get("/api/all-channels", dependencies=[Depends(require_analytics_access)])
 async def all_channels_graph():
     """All channels list for graph filters."""
     try:
@@ -1051,7 +1178,7 @@ async def all_channels_graph():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/top-brands")
+@app.get("/api/top-brands", dependencies=[Depends(require_analytics_access)])
 async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Compatibility endpoint: returns top channels in legacy shape."""
     try:
@@ -1061,7 +1188,7 @@ async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/all-brands")
+@app.get("/api/all-brands", dependencies=[Depends(require_analytics_access)])
 async def all_brands_compat():
     """Compatibility endpoint: returns all channels in legacy shape."""
     try:
@@ -1071,7 +1198,7 @@ async def all_brands_compat():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/sentiment-distribution")
+@app.get("/api/sentiment-distribution", dependencies=[Depends(require_analytics_access)])
 async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
     """Sentiment distribution for graph side panels/filters."""
     try:
@@ -1081,7 +1208,7 @@ async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/graph-insights")
+@app.get("/api/graph-insights", dependencies=[Depends(require_analytics_access)])
 async def graph_insights(timeframe: str = Query("Last 7 Days")):
     """Narrative summary for graph context."""
     try:
@@ -1091,7 +1218,7 @@ async def graph_insights(timeframe: str = Query("Last 7 Days")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/insights/cards")
+@app.post("/api/insights/cards", dependencies=[Depends(require_analytics_access)])
 async def insight_cards(payload: InsightCardsRequest):
     """Structured insight cards for analyst/executive surfaces."""
     try:
@@ -1262,7 +1389,7 @@ async def get_scraper_scheduler_status():
     return scraper_scheduler.status()
 
 
-@app.get("/api/freshness")
+@app.get("/api/freshness", dependencies=[Depends(require_analytics_access)])
 async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
@@ -1276,7 +1403,7 @@ async def freshness_snapshot(force: bool = Query(False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/quality/taxonomy")
+@app.get("/api/quality/taxonomy", dependencies=[Depends(require_analytics_access)])
 async def taxonomy_quality_snapshot():
     """Enterprise taxonomy quality snapshot with sign-off gates."""
     try:
@@ -1500,12 +1627,18 @@ async def reload_taxonomy_promotions():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/audience")
-async def audience(page: int = Query(0, ge=0), size: int = Query(500, ge=1, le=1000)):
+@app.get("/api/audience", dependencies=[Depends(require_analytics_access)])
+async def audience(
+    page: int = Query(0, ge=0),
+    size: int = Query(500, ge=1, le=1000),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """Audience detail page — paginated."""
     try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: get_audience_page(page, size))
+        return await loop.run_in_executor(None, lambda: get_audience_page(page, size, ctx))
     except Exception as e:
         logger.error(f"Audience endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

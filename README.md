@@ -109,6 +109,12 @@ Backend:
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `OPENAI_API_KEY`
+- `ANALYTICS_API_REQUIRE_AUTH` default `false`
+- `ANALYTICS_API_KEY_FRONTEND` for the frontend proxy
+- `ANALYTICS_API_KEY_OPENCLAW` for OpenClaw/server-to-server calls
+- `ANALYTICS_RATE_LIMIT_ENABLED` default `true`
+- `ANALYTICS_RATE_LIMIT_WINDOW_SECONDS` default `60`
+- `ANALYTICS_RATE_LIMIT_MAX_REQUESTS` default `120`
 - `OPENAI_MODEL` default `gpt-5-nano`
 - `QUESTION_BRIEFS_MODEL` default `gpt-5-nano`
 - `QUESTION_BRIEFS_TRIAGE_MODEL` default `gpt-5-nano`
@@ -120,6 +126,7 @@ Backend:
 Frontend:
 
 - `VITE_API_BASE_URL` default `/api`
+- `BACKEND_ANALYTICS_API_KEY_FRONTEND` runtime secret for Caddy proxy injection
 
 ## AI Systems
 
@@ -143,6 +150,19 @@ Operational note:
   `OPENAI_MODEL`, `QUESTION_BRIEFS_MODEL`, `QUESTION_BRIEFS_TRIAGE_MODEL`, `QUESTION_BRIEFS_SYNTHESIS_MODEL`, `BEHAVIORAL_BRIEFS_MODEL`, `BEHAVIORAL_BRIEFS_PROMPT_VERSION`
 
 The frontend still expects `/api/*` to be reverse-proxied to the backend through `BACKEND_URL` in Railway.
+
+Analytics auth rollout:
+
+- deploy backend code with auth support while `ANALYTICS_API_REQUIRE_AUTH=false`
+- set backend + frontend + OpenClaw env vars
+- deploy frontend proxy change
+- verify website and OpenClaw both still work
+- flip `ANALYTICS_API_REQUIRE_AUTH=true`
+- run smoke tests again
+
+Immediate rollback:
+
+- if there is an outage, set `ANALYTICS_API_REQUIRE_AUTH=false` and redeploy
 
 ## Validation Commands
 
