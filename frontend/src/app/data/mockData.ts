@@ -11,7 +11,7 @@
 
 import type { AppData } from '../types/data';
 
-export const mockAppData: AppData = {
+export const mockAppData = {
 
   // ════════════════════════════════════════════════════════
   // TIER 1: COMMUNITY PULSE
@@ -1450,4 +1450,4 @@ export const mockAppData: AppData = {
       persona: 'Entrepreneur', integrationLevel: 'Bilingual Bubble',
     },
   ],
-};
+} as AppData;

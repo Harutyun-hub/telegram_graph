@@ -3,7 +3,8 @@ import { Search, TrendingUp, TrendingDown, MessageCircle, ThumbsUp, Hash, X, Clo
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useSearchParams } from 'react-router';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useTopicsDetailData } from '../services/detailData';
+import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { useTopicDetail, useTopicsDetailData } from '../services/detailData';
 import type { TopicDetail, TopicEvidence } from '../types/data';
 
 const categoryColors: Record<string, string> = {
@@ -27,6 +28,7 @@ const categoryMapRev: Record<string, string> = {
 
 export function TopicsPage() {
   const { lang } = useLanguage();
+  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [searchParams, setSearchParams] = useSearchParams();
   const {
@@ -35,14 +37,22 @@ export function TopicsPage() {
     error: topicsError,
     refresh: refreshTopics,
   } = useTopicsDetailData();
-
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedTopic, setSelectedTopic] = useState<TopicDetail | null>(null);
+  const {
+    data: selectedTopicDetail,
+    loading: topicDetailLoading,
+    error: topicDetailError,
+    refresh: refreshTopicDetail,
+  } = useTopicDetail(selectedTopic?.sourceTopic || selectedTopic?.name || null, selectedTopic?.category || null);
   const [sortBy, setSortBy] = useState<'mentions' | 'growth'>('mentions');
   const [proofView, setProofView] = useState<'evidence' | 'questions'>('evidence');
   const [focusedEvidenceId, setFocusedEvidenceId] = useState('');
   const [highlightEvidenceId, setHighlightEvidenceId] = useState('');
+  const requestedTopic = (searchParams.get('topic') || '').trim();
+
+  const normalizeTopicKey = (value: string) => value.trim().toLowerCase();
 
   const getQuestionEvidence = (topic: TopicDetail | null): TopicEvidence[] => {
     if (!topic) return [];
@@ -59,23 +69,25 @@ export function TopicsPage() {
     const evidenceParam = (searchParams.get('evidenceId') || '').trim();
     setFocusedEvidenceId(evidenceParam);
 
-    const topicParam = (searchParams.get('topic') || '').trim().toLowerCase();
+    const topicParam = normalizeTopicKey(requestedTopic);
     if (!topicParam || allTopics.length === 0) return;
 
     const fromQuery = allTopics.find((t) =>
-      t.name.toLowerCase() === topicParam || t.nameRu.toLowerCase() === topicParam,
+      normalizeTopicKey(t.sourceTopic || t.name) === topicParam
+        || normalizeTopicKey(t.name) === topicParam
+        || normalizeTopicKey(t.nameRu) === topicParam,
     );
     if (fromQuery && selectedTopic?.id !== fromQuery.id) {
       setSelectedTopic(fromQuery);
     }
-  }, [searchParams, allTopics, selectedTopic?.id]);
+  }, [requestedTopic, searchParams, allTopics, selectedTopic?.id]);
 
   const selectTopic = (topic: TopicDetail, view: 'evidence' | 'questions' = proofView, evidenceId?: string) => {
     setSelectedTopic(topic);
     setProofView(view);
     setFocusedEvidenceId(evidenceId || '');
     const next = new URLSearchParams(searchParams);
-    next.set('topic', topic.name);
+    next.set('topic', topic.sourceTopic || topic.name);
     next.set('view', view);
     if (evidenceId) next.set('evidenceId', evidenceId);
     else next.delete('evidenceId');
@@ -104,10 +116,12 @@ export function TopicsPage() {
       setSelectedTopic(fresh);
     }
   }, [allTopics, selectedTopic]);
+  const activeTopic = selectedTopicDetail || selectedTopic;
 
   useEffect(() => {
-    if (!selectedTopic || !focusedEvidenceId) return;
-    const visibleEvidence = proofView === 'questions' ? getQuestionEvidence(selectedTopic) : selectedTopic.evidence;
+    const evidenceTopic = activeTopic || selectedTopic;
+    if (!evidenceTopic || !focusedEvidenceId) return;
+    const visibleEvidence = proofView === 'questions' ? getQuestionEvidence(evidenceTopic) : evidenceTopic.evidence;
     if (!visibleEvidence.some((ev) => ev.id === focusedEvidenceId)) return;
 
     const domId = `${proofView}-evidence-${focusedEvidenceId}`;
@@ -129,7 +143,7 @@ export function TopicsPage() {
       if (timeoutId) window.clearTimeout(timeoutId);
       window.clearTimeout(clearId);
     };
-  }, [selectedTopic, proofView, focusedEvidenceId]);
+  }, [activeTopic, selectedTopic, proofView, focusedEvidenceId]);
 
   const categories = ru ? categoryLabelsRU : categoryLabelsEN;
 
@@ -144,6 +158,17 @@ export function TopicsPage() {
     .sort((a, b) => sortBy === 'mentions' ? b.mentions - a.mentions : b.growth - a.growth);
 
   const totalMentions = allTopics.reduce((s, t) => s + t.mentions, 0);
+  const requestedTopicMissing = Boolean(
+    requestedTopic
+    && !topicsLoading
+    && !selectedTopic
+    && allTopics.length >= 0
+    && !allTopics.some((t) => (
+      normalizeTopicKey(t.sourceTopic || t.name) === normalizeTopicKey(requestedTopic)
+      || normalizeTopicKey(t.name) === normalizeTopicKey(requestedTopic)
+      || normalizeTopicKey(t.nameRu) === normalizeTopicKey(requestedTopic)
+    )),
+  );
 
   return (
     <div className="flex flex-col md:flex-row h-full">
@@ -220,6 +245,25 @@ export function TopicsPage() {
 
         {/* Topic List */}
         <div className="flex-1 overflow-y-auto">
+          {requestedTopicMissing && (
+            <div className="px-6 py-3 border-b border-amber-100 bg-amber-50 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-amber-900" style={{ fontWeight: 600 }}>
+                  {ru ? 'Эта тема не найдена в выбранном окне.' : 'This topic has no evidence in the selected date window.'}
+                </p>
+                <p className="text-[11px] text-amber-800 mt-0.5 truncate">
+                  {ru ? `Период: ${range.from} — ${range.to}` : `Window: ${range.from} — ${range.to}`}
+                </p>
+              </div>
+              <button
+                onClick={clearTopicSelection}
+                className="text-xs text-amber-900 hover:text-amber-950 underline"
+                style={{ fontWeight: 600 }}
+              >
+                {ru ? 'Сбросить' : 'Clear'}
+              </button>
+            </div>
+          )}
           {topicsError && (
             <div className="px-6 py-3 border-b border-red-100 bg-red-50 flex items-center justify-between gap-2">
               <span className="text-xs text-red-700 truncate">
@@ -308,7 +352,7 @@ export function TopicsPage() {
                 </div>
                 <div>
                   <h2 className="text-gray-900" style={{ fontSize: '1.1rem', fontWeight: 600 }}>{ru ? selectedTopic.nameRu : selectedTopic.name}</h2>
-                  <p className="text-xs text-gray-500">{ru ? selectedTopic.descriptionRu : selectedTopic.description}</p>
+                  <p className="text-xs text-gray-500">{activeTopic ? (ru ? activeTopic.descriptionRu : activeTopic.description) : ''}</p>
                 </div>
               </div>
               <button onClick={clearTopicSelection} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
@@ -319,10 +363,10 @@ export function TopicsPage() {
             {/* Stats Row */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
               {[
-                { label: ru ? 'Упоминания' : 'Mentions', value: selectedTopic.mentions.toLocaleString(), color: 'text-gray-900' },
-                { label: ru ? 'Рост' : 'Growth', value: `${selectedTopic.growth > 0 ? '+' : ''}${selectedTopic.growth}%`, color: selectedTopic.growth > 0 ? 'text-emerald-600' : 'text-red-500' },
-                { label: ru ? 'Позитив' : 'Positive', value: `${selectedTopic.sentiment.positive}%`, color: 'text-emerald-600' },
-                { label: ru ? 'Негатив' : 'Negative', value: `${selectedTopic.sentiment.negative}%`, color: 'text-red-500' },
+                { label: ru ? 'Упоминания' : 'Mentions', value: (activeTopic?.mentions || 0).toLocaleString(), color: 'text-gray-900' },
+                { label: ru ? 'Рост' : 'Growth', value: `${(activeTopic?.growth || 0) > 0 ? '+' : ''}${activeTopic?.growth || 0}%`, color: (activeTopic?.growth || 0) > 0 ? 'text-emerald-600' : 'text-red-500' },
+                { label: ru ? 'Позитив' : 'Positive', value: `${activeTopic?.sentiment.positive || 0}%`, color: 'text-emerald-600' },
+                { label: ru ? 'Негатив' : 'Negative', value: `${activeTopic?.sentiment.negative || 0}%`, color: 'text-red-500' },
               ].map((stat) => (
                 <div key={stat.label} className="bg-gray-50 rounded-lg px-3 py-2.5">
                   <p className="text-xs text-gray-500">{stat.label}</p>
@@ -334,7 +378,7 @@ export function TopicsPage() {
             {/* Trend Chart */}
             <div className="mt-4">
               <ResponsiveContainer width="100%" height={120}>
-                <AreaChart data={selectedTopic.weeklyData}>
+                <AreaChart data={activeTopic?.weeklyData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                   <XAxis dataKey="week" tick={{ fontSize: 10 }} stroke="#9ca3af" />
                   <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" hide />
@@ -347,7 +391,7 @@ export function TopicsPage() {
             {/* Top Channels */}
             <div className="flex items-center gap-2 mt-3">
               <span className="text-xs text-gray-400">{ru ? 'Ведущие каналы:' : 'Top channels:'}</span>
-              {selectedTopic.topChannels.map((ch) => (
+              {(activeTopic?.topChannels || []).map((ch) => (
                 <span key={ch} className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full">{ch}</span>
               ))}
             </div>
@@ -355,6 +399,25 @@ export function TopicsPage() {
 
           {/* Evidence Feed */}
           <div className="flex-1 overflow-y-auto px-6 py-4">
+            {topicDetailError && (
+              <div className="mb-3 px-4 py-3 border border-red-100 bg-red-50 rounded-xl flex items-center justify-between gap-3">
+                <span className="text-xs text-red-700 truncate">
+                  {ru ? 'Не удалось загрузить детали темы. Показаны краткие данные.' : 'Unable to load full topic details. Showing summary data.'}
+                </span>
+                <button
+                  onClick={refreshTopicDetail}
+                  className="text-xs text-red-700 hover:text-red-800 underline"
+                  style={{ fontWeight: 600 }}
+                >
+                  {ru ? 'Повторить' : 'Retry'}
+                </button>
+              </div>
+            )}
+            {topicDetailLoading && !selectedTopicDetail && (
+              <div className="mb-3 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                {ru ? 'Загружаем доказательства и динамику темы...' : 'Loading topic evidence and trend details...'}
+              </div>
+            )}
             <div className="flex items-center gap-2 mb-3">
               <button
                 onClick={() => selectTopic(selectedTopic, 'evidence')}
@@ -373,8 +436,9 @@ export function TopicsPage() {
             </div>
 
             {(() => {
-              const questionEvidence = getQuestionEvidence(selectedTopic);
-              const visibleEvidence = proofView === 'questions' ? questionEvidence : selectedTopic.evidence;
+              const topicForView = activeTopic || selectedTopic;
+              const questionEvidence = getQuestionEvidence(topicForView);
+              const visibleEvidence = proofView === 'questions' ? questionEvidence : topicForView.evidence;
 
               return (
                 <>

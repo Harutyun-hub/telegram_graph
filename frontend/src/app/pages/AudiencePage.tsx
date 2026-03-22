@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Search, Users, User, ChevronRight, ChevronLeft, X, Clock, MessageCircle, ThumbsUp, Radio, Hash, ArrowUpDown, MapPin, Calendar, Activity, Star } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area, Cell } from 'recharts';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useAudienceDetailData } from '../services/detailData';
+import { useAudienceDetailData, useAudienceMemberDetail } from '../services/detailData';
 import type { AudienceMember } from '../types/data';
 
 const typeColors: Record<string, string> = {
@@ -45,9 +45,14 @@ export function AudiencePage() {
     error: audienceError,
     refresh: refreshAudience,
   } = useAudienceDetailData();
-
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMember, setSelectedMember] = useState<AudienceMember | null>(null);
+  const {
+    data: selectedMemberDetail,
+    loading: memberDetailLoading,
+    error: memberDetailError,
+    refresh: refreshMemberDetail,
+  } = useAudienceMemberDetail(selectedMember?.id || null);
   const [genderFilter, setGenderFilter] = useState<string>('All');
   const [sortBy, setSortBy] = useState<'messages' | 'helpScore' | 'reactions' | 'recent'>('messages');
   const [activeTab, setActiveTab] = useState<'profile' | 'channels' | 'activity'>('profile');
@@ -99,6 +104,7 @@ export function AudiencePage() {
       setSelectedMember(fresh);
     }
   }, [allAudience, selectedMember]);
+  const activeMember = selectedMemberDetail || selectedMember;
 
   return (
     <div className="flex flex-col md:flex-row h-full">
@@ -283,8 +289,8 @@ export function AudiencePage() {
                     <span className={`text-xs px-2 py-0.5 rounded-full ${selectedMember.gender === 'Female' ? 'bg-pink-50 text-pink-600' : 'bg-blue-50 text-blue-600'}`} style={{ fontWeight: 500 }}>
                       {selectedMember.gender === 'Female' ? '♀' : '♂'} {selectedMember.gender}
                     </span>
-                    <span className="text-xs text-gray-400">{ru ? 'Возраст:' : 'Age:'} {selectedMember.age}</span>
-                    <span className="text-xs text-gray-400 flex items-center gap-0.5"><MapPin className="w-3 h-3" />{selectedMember.origin} → {selectedMember.location}</span>
+                    <span className="text-xs text-gray-400">{ru ? 'Возраст:' : 'Age:'} {activeMember?.age || ''}</span>
+                    <span className="text-xs text-gray-400 flex items-center gap-0.5"><MapPin className="w-3 h-3" />{activeMember?.origin || ''} → {activeMember?.location || ''}</span>
                   </div>
                 </div>
               </div>
@@ -296,12 +302,12 @@ export function AudiencePage() {
             {/* Stats Row */}
             <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
               {[
-                { label: ru ? 'Сообщений' : 'Messages', value: selectedMember.totalMessages.toLocaleString() },
-                { label: ru ? 'Реакций' : 'Reactions', value: selectedMember.totalReactions.toLocaleString() },
-                { label: ru ? 'Рейтинг' : 'Help Score', value: selectedMember.helpScore.toString() },
-                { label: ru ? 'Каналов' : 'Channels', value: selectedMember.channels.length.toString() },
-                { label: ru ? 'Тип' : 'Persona', value: ru ? (personaMapRU[selectedMember.persona] || selectedMember.persona).split(' ')[0] : selectedMember.persona.split(' ')[0] },
-                { label: ru ? 'Интеграция' : 'Integration', value: ru ? (integrationMapRU[selectedMember.integrationLevel] || selectedMember.integrationLevel).split(' ')[0] : selectedMember.integrationLevel.split(' ')[0] },
+                { label: ru ? 'Сообщений' : 'Messages', value: (activeMember?.totalMessages || 0).toLocaleString() },
+                { label: ru ? 'Реакций' : 'Reactions', value: (activeMember?.totalReactions || 0).toLocaleString() },
+                { label: ru ? 'Рейтинг' : 'Help Score', value: String(activeMember?.helpScore || 0) },
+                { label: ru ? 'Каналов' : 'Channels', value: String(activeMember?.channels.length || 0) },
+                { label: ru ? 'Тип' : 'Persona', value: ru ? (personaMapRU[activeMember?.persona || ''] || activeMember?.persona || '').split(' ')[0] : (activeMember?.persona || '').split(' ')[0] },
+                { label: ru ? 'Интеграция' : 'Integration', value: ru ? (integrationMapRU[activeMember?.integrationLevel || ''] || activeMember?.integrationLevel || '').split(' ')[0] : (activeMember?.integrationLevel || '').split(' ')[0] },
               ].map((stat) => (
                 <div key={stat.label} className="bg-gray-50 rounded-lg px-2.5 py-2">
                   <p className="text-xs text-gray-500" style={{ fontSize: '10px' }}>{stat.label}</p>
@@ -329,6 +335,25 @@ export function AudiencePage() {
 
           {/* Tab Content */}
           <div className="flex-1 overflow-y-auto px-6 py-4">
+            {memberDetailError && (
+              <div className="mb-4 px-4 py-3 border border-red-100 bg-red-50 rounded-xl flex items-center justify-between gap-3">
+                <span className="text-xs text-red-700 truncate">
+                  {ru ? 'Не удалось загрузить детали участника. Показаны краткие данные.' : 'Unable to load full member details. Showing summary data.'}
+                </span>
+                <button
+                  onClick={refreshMemberDetail}
+                  className="text-xs text-red-700 hover:text-red-800 underline"
+                  style={{ fontWeight: 600 }}
+                >
+                  {ru ? 'Повторить' : 'Retry'}
+                </button>
+              </div>
+            )}
+            {memberDetailLoading && !selectedMemberDetail && (
+              <div className="mb-4 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                {ru ? 'Загружаем расширенный профиль участника...' : 'Loading member profile details...'}
+              </div>
+            )}
 
             {/* ── PROFILE & INTERESTS ── */}
             {activeTab === 'profile' && (
@@ -342,32 +367,32 @@ export function AudiencePage() {
                     <div className="flex items-center gap-2">
                       <User className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Пол:' : 'Gender:'}</span>
-                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{selectedMember.gender}</span>
+                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{activeMember?.gender || ''}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Calendar className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Возраст:' : 'Age range:'}</span>
-                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{selectedMember.age}</span>
+                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{activeMember?.age || ''}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <MapPin className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Откуда:' : 'From:'}</span>
-                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{selectedMember.origin}</span>
+                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{activeMember?.origin || ''}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <MapPin className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Живёт:' : 'Lives in:'}</span>
-                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{selectedMember.location}</span>
+                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{activeMember?.location || ''}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Clock className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Вступил:' : 'Joined:'}</span>
-                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{selectedMember.joinedDate}</span>
+                      <span className="text-gray-900" style={{ fontWeight: 500 }}>{activeMember?.joinedDate || ''}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Activity className="w-3.5 h-3.5 text-gray-400" />
                       <span className="text-gray-500">{ru ? 'Активен:' : 'Last active:'}</span>
-                      <span className="text-emerald-600" style={{ fontWeight: 500 }}>{selectedMember.lastActive}</span>
+                      <span className="text-emerald-600" style={{ fontWeight: 500 }}>{activeMember?.lastActive || ''}</span>
                     </div>
                   </div>
                 </div>
@@ -378,7 +403,7 @@ export function AudiencePage() {
                     {ru ? 'Интересы' : 'Interests'}
                   </h4>
                   <div className="flex flex-wrap gap-2">
-                    {selectedMember.interests.map((interest) => (
+                    {(activeMember?.interests || []).map((interest) => (
                       <span key={interest} className="text-xs px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100" style={{ fontWeight: 500 }}>
                         {interest}
                       </span>
@@ -390,13 +415,13 @@ export function AudiencePage() {
                 <div className="bg-white rounded-xl border border-gray-200 p-4">
                   <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>{ru ? 'Главные темы' : 'Most Discussed Topics'}</h4>
                   <div className="space-y-2">
-                    {selectedMember.topTopics.map((topic, i) => (
+                    {(activeMember?.topTopics || []).map((topic, i) => (
                       <div key={topic.name} className="flex items-center gap-3">
                         <span className="text-xs text-gray-400 w-4 text-right">{i + 1}</span>
                         <Hash className="w-3 h-3 text-gray-400" />
                         <span className="text-xs text-gray-700 flex-1" style={{ fontWeight: 500 }}>{topic.name}</span>
                         <div className="w-24 bg-gray-100 rounded-full h-2">
-                          <div className="h-2 rounded-full bg-blue-400" style={{ width: `${(topic.count / Math.max(...selectedMember.topTopics.map(t => t.count), 1)) * 100}%` }} />
+                          <div className="h-2 rounded-full bg-blue-400" style={{ width: `${(topic.count / Math.max(...(activeMember?.topTopics || []).map(t => t.count), 1)) * 100}%` }} />
                         </div>
                         <span className="text-xs text-gray-500 w-10 text-right">{topic.count}</span>
                       </div>
@@ -408,14 +433,14 @@ export function AudiencePage() {
                 <div className="bg-white rounded-xl border border-gray-200 p-4">
                   <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>{ru ? 'Тональность публикаций' : 'Sentiment Profile'}</h4>
                   <div className="flex h-4 rounded-full overflow-hidden mb-2">
-                    <div className="bg-emerald-400" style={{ width: `${selectedMember.sentiment.positive}%` }} />
-                    <div className="bg-gray-300" style={{ width: `${selectedMember.sentiment.neutral}%` }} />
-                    <div className="bg-red-400" style={{ width: `${selectedMember.sentiment.negative}%` }} />
+                    <div className="bg-emerald-400" style={{ width: `${activeMember?.sentiment.positive || 0}%` }} />
+                    <div className="bg-gray-300" style={{ width: `${activeMember?.sentiment.neutral || 0}%` }} />
+                    <div className="bg-red-400" style={{ width: `${activeMember?.sentiment.negative || 0}%` }} />
                   </div>
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-emerald-600">{selectedMember.sentiment.positive}% {ru ? 'позит.' : 'positive'}</span>
-                    <span className="text-gray-400">{selectedMember.sentiment.neutral}% {ru ? 'нейтр.' : 'neutral'}</span>
-                    <span className="text-red-500">{selectedMember.sentiment.negative}% {ru ? 'негат.' : 'negative'}</span>
+                    <span className="text-emerald-600">{activeMember?.sentiment.positive || 0}% {ru ? 'позит.' : 'positive'}</span>
+                    <span className="text-gray-400">{activeMember?.sentiment.neutral || 0}% {ru ? 'нейтр.' : 'neutral'}</span>
+                    <span className="text-red-500">{activeMember?.sentiment.negative || 0}% {ru ? 'негат.' : 'negative'}</span>
                   </div>
                 </div>
               </div>
@@ -426,7 +451,7 @@ export function AudiencePage() {
               <div className="space-y-4">
                 <p className="text-xs text-gray-500">{ru ? 'Каналы, в которых активен участник, и уровень активности в каждом' : 'Channels this person is subscribed to and their activity level in each'}</p>
 
-                {selectedMember.channels.map((ch) => {
+                {(activeMember?.channels || []).map((ch) => {
                   const color = typeColors[ch.type] || '#6b7280';
                   const rc = roleColors[ch.role] || roleColors['Member'];
                   return (
@@ -463,7 +488,7 @@ export function AudiencePage() {
 
                       {/* Percentage of total */}
                       <div className="mt-2 text-xs text-gray-400">
-                        {selectedMember.totalMessages > 0 ? Math.round((ch.messageCount / selectedMember.totalMessages) * 100) : 0}% {ru ? 'от общей активности участника' : "of this person's total activity"}
+                        {(activeMember?.totalMessages || 0) > 0 ? Math.round((ch.messageCount / (activeMember?.totalMessages || 0)) * 100) : 0}% {ru ? 'от общей активности участника' : "of this person's total activity"}
                       </div>
                     </div>
                   );
@@ -473,13 +498,13 @@ export function AudiencePage() {
                 <div className="bg-white rounded-xl border border-gray-200 p-4">
                   <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>{ru ? 'Распределение активности по каналам' : 'Activity Distribution Across Channels'}</h4>
                   <ResponsiveContainer width="100%" height={180}>
-                    <BarChart data={selectedMember.channels.map(c => ({ name: c.name.split(' ')[0], msgs: c.messageCount, type: c.type }))}>
+                    <BarChart data={(activeMember?.channels || []).map(c => ({ name: c.name.split(' ')[0], msgs: c.messageCount, type: c.type }))}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                       <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="#9ca3af" />
                       <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
                       <Tooltip />
                       <Bar dataKey="msgs" radius={[4, 4, 0, 0]}>
-                        {selectedMember.channels.map((c, i) => (
+                        {(activeMember?.channels || []).map((c, i) => (
                           <Cell key={i} fill={typeColors[c.type] || '#6b7280'} />
                         ))}
                       </Bar>
@@ -496,7 +521,7 @@ export function AudiencePage() {
                 <div className="bg-white rounded-xl border border-gray-200 p-4">
                   <h4 className="text-sm text-gray-900 mb-2" style={{ fontWeight: 600 }}>{ru ? 'Активность за 7 недель' : 'Weekly Activity'}</h4>
                   <ResponsiveContainer width="100%" height={140}>
-                    <AreaChart data={selectedMember.activityData}>
+                    <AreaChart data={activeMember?.activityData || []}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                       <XAxis dataKey="week" tick={{ fontSize: 10 }} stroke="#9ca3af" />
                       <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
@@ -509,16 +534,16 @@ export function AudiencePage() {
                 {/* Recent Messages */}
                 <div>
                   <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>
-                    {ru ? `Последние сообщения (${selectedMember.recentMessages.length})` : `Recent Messages (${selectedMember.recentMessages.length})`}
+                    {ru ? `Последние сообщения (${activeMember?.recentMessages.length || 0})` : `Recent Messages (${activeMember?.recentMessages.length || 0})`}
                   </h4>
-                  {selectedMember.recentMessages.length === 0 ? (
+                  {(activeMember?.recentMessages || []).length === 0 ? (
                     <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400">
                       <MessageCircle className="w-8 h-8 mx-auto mb-2" />
                       <p className="text-sm">{ru ? 'Сообщения не загружены' : 'No recent messages loaded'}</p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {selectedMember.recentMessages.map((msg, i) => (
+                      {(activeMember?.recentMessages || []).map((msg, i) => (
                         <div key={i} className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-sm transition-shadow">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-xs text-blue-600" style={{ fontWeight: 500 }}>{msg.channel}</span>

@@ -586,6 +586,7 @@ export interface TopicDetail {
   id: string;
   name: string;
   nameRu: string;
+  sourceTopic?: string;
   category: string;
   color: string;
   mentions: number;
@@ -719,10 +720,6 @@ export interface AppData {
   contentTypePerformance: BilingualData<ContentTypePerf>;
   vitalityIndicators: BilingualData<VitalityIndicator>;
 
-  // Pages
-  allTopics: TopicDetail[];
-  allChannels: ChannelDetail[];
-  allAudience: AudienceMember[];
 }
 
 // ── Sources Page ──

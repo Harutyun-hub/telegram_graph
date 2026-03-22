@@ -15,6 +15,7 @@ Run:
 """
 from __future__ import annotations
 import sys, os
+import json
 import hashlib
 import asyncio
 import hmac
@@ -38,7 +39,8 @@ from loguru import logger
 
 from api.aggregator import (
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
-    get_audience_page, invalidate_cache
+    get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
+    invalidate_cache
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard
@@ -505,20 +507,6 @@ async def _warm_dashboard_cache() -> None:
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")
-
-
-async def _warm_detail_caches() -> None:
-    """Warm detail page caches in background after startup."""
-    try:
-        loop = asyncio.get_running_loop()
-        await asyncio.gather(
-            loop.run_in_executor(None, lambda: get_topics_page(0, 500)),
-            loop.run_in_executor(None, get_channels_page),
-            loop.run_in_executor(None, lambda: get_audience_page(0, 500)),
-        )
-        logger.info("Detail caches warm-up completed")
-    except Exception as e:
-        logger.warning(f"Detail caches warm-up failed: {e}")
 
 
 async def _materialize_question_cards_once(force: bool = False) -> None:
@@ -999,7 +987,7 @@ async def dashboard(
             ctx = build_dashboard_date_context(from_date, to_date)
         loop = asyncio.get_running_loop()
         dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
-        return {
+        response = {
             "data": dashboard_data,
             "meta": {
                 "from": ctx.from_date.isoformat(),
@@ -1011,6 +999,7 @@ async def dashboard(
                 "rangeLabel": ctx.range_label,
                 "trustedEndDate": trusted_end.isoformat(),
                 "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
+                "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
                 "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
                 "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
                 "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
@@ -1023,6 +1012,11 @@ async def dashboard(
                 },
             },
         }
+        serialize_started = time.perf_counter()
+        response_bytes = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        response["meta"]["responseBytes"] = response_bytes
+        response["meta"]["responseSerializeMs"] = round((time.perf_counter() - serialize_started) * 1000, 2)
+        return response
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1062,6 +1056,28 @@ async def topics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/topics/detail", dependencies=[Depends(require_analytics_access)])
+async def topic_detail(
+    topic: str = Query(..., min_length=1),
+    category: Optional[str] = Query(default=None),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Single topic detail payload with evidence and trend series."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_topic_detail(topic, category, ctx))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Topic detail endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/channels", dependencies=[Depends(require_analytics_access)])
 async def channels(
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -1074,6 +1090,27 @@ async def channels(
         return await loop.run_in_executor(None, lambda: get_channels_page(ctx))
     except Exception as e:
         logger.error(f"Channels endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/channels/detail", dependencies=[Depends(require_analytics_access)])
+async def channel_detail(
+    channel: str = Query(..., min_length=1),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Single channel detail payload with recent posts and distributions."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_channel_detail(channel, ctx))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Channel detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1644,6 +1681,27 @@ async def audience(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/audience/detail", dependencies=[Depends(require_analytics_access)])
+async def audience_detail(
+    user_id: str = Query(..., alias="userId", min_length=1),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Single audience-member detail payload."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_audience_detail(user_id, ctx))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Audience detail endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/cache/clear")
 async def clear_cache():
     """Invalidate the in-memory dashboard cache."""
@@ -1726,7 +1784,6 @@ async def startup():
     _start_behavioral_cards_scheduler()
     _start_opportunity_cards_scheduler()
     asyncio.create_task(_warm_dashboard_cache())
-    asyncio.create_task(_warm_detail_caches())
     if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
         asyncio.create_task(_materialize_question_cards_once(force=False))
     if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:

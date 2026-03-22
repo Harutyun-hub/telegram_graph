@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Search, TrendingUp, TrendingDown, MessageCircle, Users, Radio, ChevronRight, ChevronLeft, X, Clock, User, Hash, ThumbsUp, Zap } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useChannelsDetailData } from '../services/detailData';
+import { useChannelDetail, useChannelsDetailData } from '../services/detailData';
 import type { ChannelDetail } from '../types/data';
 
 const typeColors: Record<string, string> = {
@@ -42,10 +42,15 @@ export function ChannelsPage() {
     error: channelsError,
     refresh: refreshChannels,
   } = useChannelsDetailData();
-
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedType, setSelectedType] = useState('All');
   const [selectedChannel, setSelectedChannel] = useState<ChannelDetail | null>(null);
+  const {
+    data: selectedChannelDetail,
+    loading: channelDetailLoading,
+    error: channelDetailError,
+    refresh: refreshChannelDetail,
+  } = useChannelDetail(selectedChannel?.id || null);
   const [sortBy, setSortBy] = useState<'engagement' | 'members' | 'growth'>('engagement');
   const [activeTab, setActiveTab] = useState<'overview' | 'topics' | 'posts'>('overview');
 
@@ -84,6 +89,7 @@ export function ChannelsPage() {
       setSelectedChannel(fresh);
     }
   }, [allChannels, selectedChannel]);
+  const activeChannel = selectedChannelDetail || selectedChannel;
 
   return (
     <div className="flex flex-col md:flex-row h-full">
@@ -245,7 +251,7 @@ export function ChannelsPage() {
                 </div>
                 <div>
                   <h2 className="text-gray-900" style={{ fontSize: '1.1rem', fontWeight: 600 }}>{selectedChannel.name}</h2>
-                  <p className="text-xs text-gray-500">{selectedChannel.description}</p>
+                  <p className="text-xs text-gray-500">{activeChannel?.description || ''}</p>
                 </div>
               </div>
               <button onClick={() => setSelectedChannel(null)} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
@@ -256,11 +262,11 @@ export function ChannelsPage() {
             {/* Stats Row */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               {[
-                { label: ru ? 'Участников' : 'Members', value: (selectedChannel.members / 1000).toFixed(1) + 'K', icon: Users },
-                { label: ru ? 'Сообщений/день' : 'Daily Msgs', value: selectedChannel.dailyMessages.toString(), icon: MessageCircle },
-                { label: ru ? 'Вовлечённость' : 'Engagement', value: selectedChannel.engagement + '%', icon: Zap },
-                { label: ru ? 'Рост' : 'Growth', value: `${selectedChannel.growth > 0 ? '+' : ''}${selectedChannel.growth}`, icon: TrendingUp },
-                { label: ru ? 'Горячая тема' : 'Hot Topic', value: selectedChannel.topTopic, icon: Hash },
+                { label: ru ? 'Участников' : 'Members', value: `${((activeChannel?.members || 0) / 1000).toFixed(1)}K`, icon: Users },
+                { label: ru ? 'Сообщений/день' : 'Daily Msgs', value: String(activeChannel?.dailyMessages || 0), icon: MessageCircle },
+                { label: ru ? 'Вовлечённость' : 'Engagement', value: `${activeChannel?.engagement || 0}%`, icon: Zap },
+                { label: ru ? 'Рост' : 'Growth', value: `${(activeChannel?.growth || 0) > 0 ? '+' : ''}${activeChannel?.growth || 0}`, icon: TrendingUp },
+                { label: ru ? 'Горячая тема' : 'Hot Topic', value: activeChannel?.topTopic || '', icon: Hash },
               ].map((stat) => (
                 <div key={stat.label} className="bg-gray-50 rounded-lg px-3 py-2.5">
                   <div className="flex items-center gap-1.5 mb-0.5">
@@ -293,6 +299,25 @@ export function ChannelsPage() {
 
           {/* Tab Content */}
           <div className="flex-1 overflow-y-auto px-6 py-4">
+            {channelDetailError && (
+              <div className="mb-4 px-4 py-3 border border-red-100 bg-red-50 rounded-xl flex items-center justify-between gap-3">
+                <span className="text-xs text-red-700 truncate">
+                  {ru ? 'Не удалось загрузить детали канала. Показаны краткие данные.' : 'Unable to load full channel details. Showing summary data.'}
+                </span>
+                <button
+                  onClick={refreshChannelDetail}
+                  className="text-xs text-red-700 hover:text-red-800 underline"
+                  style={{ fontWeight: 600 }}
+                >
+                  {ru ? 'Повторить' : 'Retry'}
+                </button>
+              </div>
+            )}
+            {channelDetailLoading && !selectedChannelDetail && (
+              <div className="mb-4 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                {ru ? 'Загружаем детальную активность канала...' : 'Loading channel activity details...'}
+              </div>
+            )}
             {activeTab === 'overview' && (
               <div className="space-y-4">
                 {/* Activity Chart */}
@@ -301,7 +326,7 @@ export function ChannelsPage() {
                     {ru ? 'Активность за неделю' : 'Weekly Activity'}
                   </h4>
                   <ResponsiveContainer width="100%" height={160}>
-                    <BarChart data={selectedChannel.weeklyData}>
+                    <BarChart data={activeChannel?.weeklyData || []}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                       <XAxis dataKey="day" tick={{ fontSize: 11 }} stroke="#9ca3af" />
                       <YAxis tick={{ fontSize: 11 }} stroke="#9ca3af" />
@@ -317,7 +342,7 @@ export function ChannelsPage() {
                     {ru ? 'Почасовая активность' : 'Hourly Pattern'}
                   </h4>
                   <ResponsiveContainer width="100%" height={120}>
-                    <AreaChart data={selectedChannel.hourlyData}>
+                    <AreaChart data={activeChannel?.hourlyData || []}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                       <XAxis dataKey="hour" tick={{ fontSize: 10 }} stroke="#9ca3af" />
                       <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" hide />
@@ -335,15 +360,15 @@ export function ChannelsPage() {
                     </h4>
                     <div className="flex items-center gap-3 mb-3">
                       <div className="flex h-3 flex-1 rounded-full overflow-hidden">
-                        <div className="bg-emerald-400" style={{ width: `${selectedChannel.sentimentBreakdown.positive}%` }} />
-                        <div className="bg-gray-300" style={{ width: `${selectedChannel.sentimentBreakdown.neutral}%` }} />
-                        <div className="bg-red-400" style={{ width: `${selectedChannel.sentimentBreakdown.negative}%` }} />
+                        <div className="bg-emerald-400" style={{ width: `${activeChannel?.sentimentBreakdown.positive || 0}%` }} />
+                        <div className="bg-gray-300" style={{ width: `${activeChannel?.sentimentBreakdown.neutral || 0}%` }} />
+                        <div className="bg-red-400" style={{ width: `${activeChannel?.sentimentBreakdown.negative || 0}%` }} />
                       </div>
                     </div>
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-emerald-600">{selectedChannel.sentimentBreakdown.positive}% {ru ? 'позит.' : 'positive'}</span>
-                      <span className="text-gray-400">{selectedChannel.sentimentBreakdown.neutral}% {ru ? 'нейтр.' : 'neutral'}</span>
-                      <span className="text-red-500">{selectedChannel.sentimentBreakdown.negative}% {ru ? 'негат.' : 'negative'}</span>
+                      <span className="text-emerald-600">{activeChannel?.sentimentBreakdown.positive || 0}% {ru ? 'позит.' : 'positive'}</span>
+                      <span className="text-gray-400">{activeChannel?.sentimentBreakdown.neutral || 0}% {ru ? 'нейтр.' : 'neutral'}</span>
+                      <span className="text-red-500">{activeChannel?.sentimentBreakdown.negative || 0}% {ru ? 'негат.' : 'negative'}</span>
                     </div>
                   </div>
 
@@ -353,7 +378,7 @@ export function ChannelsPage() {
                       {ru ? 'Типы сообщений' : 'Message Types'}
                     </h4>
                     <div className="space-y-1.5">
-                      {selectedChannel.messageTypes.slice(0, 4).map((mt) => (
+                      {(activeChannel?.messageTypes || []).slice(0, 4).map((mt) => (
                         <div key={mt.type} className="flex items-center gap-2">
                           <span className="text-xs text-gray-600 w-28 truncate">
                             {ru ? (messageTypeMapRU[mt.type] || mt.type) : mt.type}
@@ -369,13 +394,13 @@ export function ChannelsPage() {
                 </div>
 
                 {/* Top Voices */}
-                {selectedChannel.topVoices.length > 0 && (
+                {(activeChannel?.topVoices || []).length > 0 && (
                   <div className="bg-white rounded-xl border border-gray-200 p-4">
                     <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>
                       {ru ? 'Ведущие участники' : 'Top Contributors'}
                     </h4>
                     <div className="space-y-2">
-                      {selectedChannel.topVoices.map((v, i) => (
+                      {(activeChannel?.topVoices || []).map((v, i) => (
                         <div key={v.name} className="flex items-center gap-3 py-1.5">
                           <div className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-xs text-slate-600" style={{ fontWeight: 600 }}>
                             {i + 1}
@@ -399,7 +424,7 @@ export function ChannelsPage() {
                 <p className="text-xs text-gray-500 mb-3">
                   {ru ? 'Что обсуждают в этом канале:' : 'What people discuss in this channel:'}
                 </p>
-                {selectedChannel.topTopics.map((t) => (
+                {(activeChannel?.topTopics || []).map((t) => (
                   <div key={t.name} className="bg-white rounded-lg border border-gray-200 p-3">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-xs text-gray-900" style={{ fontWeight: 500 }}>{t.name}</span>
@@ -416,14 +441,14 @@ export function ChannelsPage() {
 
             {activeTab === 'posts' && (
               <div className="space-y-3">
-                {selectedChannel.recentPosts.length === 0 ? (
+                {(activeChannel?.recentPosts || []).length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-gray-400">
                     <MessageCircle className="w-8 h-8 mb-2" />
                     <p className="text-sm">{ru ? 'Публикации не загружены' : 'No posts loaded'}</p>
                     <p className="text-xs mt-1">{ru ? 'Подключите Neo4j для загрузки реальных данных' : 'Connect to Neo4j to load real posts'}</p>
                   </div>
                 ) : (
-                  selectedChannel.recentPosts.map((post) => (
+                  (activeChannel?.recentPosts || []).map((post) => (
                     <div key={post.id} className="bg-white rounded-xl border border-gray-200 p-4">
                       <div className="flex items-center gap-2 mb-2">
                         <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center">

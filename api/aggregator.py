@@ -14,7 +14,8 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from typing import Callable, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -41,7 +42,7 @@ CACHE_TTL_SECONDS = int(os.getenv("DASH_CACHE_TTL_SECONDS", "300"))
 STALE_WHILE_REVALIDATE = _env_flag("DASH_STALE_WHILE_REVALIDATE_ENABLED", True)
 PARALLEL_ENABLED = _env_flag("DASH_PARALLEL_ENABLED", True)
 PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4")), 8))
-TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "8.0")))
+TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "10.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
 
@@ -50,16 +51,26 @@ DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "18
 CRITICAL_TIERS = {"pulse", "strategic"}
 
 
-_cache_entries: Dict[str, Tuple[float, dict]] = {}
+DashboardCacheMeta = Dict[str, object]
+DashboardCacheEntry = Tuple[float, dict, DashboardCacheMeta]
+
+
+_cache_entries: Dict[str, DashboardCacheEntry] = {}
 
 _cache_lock = threading.Lock()
 
 _detail_cache_lock = threading.Lock()
-_detail_cache: Dict[str, Tuple[float, list[dict]]] = {}
+_detail_cache: Dict[str, Tuple[float, Any]] = {}
 
 
 def _fallback_tiers(tier_times: Dict[str, Optional[float]]) -> list[str]:
     return [name for name, duration in tier_times.items() if name != "derived" and duration is None]
+
+
+def _critical_fallback_tiers(tier_names: list[str] | None) -> list[str]:
+    if not tier_names:
+        return []
+    return [name for name in tier_names if name in CRITICAL_TIERS]
 
 
 def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
@@ -87,6 +98,15 @@ def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
     )
     has_health_shape = any(key in health for key in ("components", "score", "totalUsers"))
     return has_brief_volume and has_health_shape and len(trending) > 0
+
+
+def _should_bypass_cached_snapshot(snapshot: Optional[dict], meta: Optional[DashboardCacheMeta]) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    degraded = _critical_fallback_tiers(list(meta.get("degradedTiers") or []))
+    if not degraded:
+        return False
+    return True
 
 
 def _should_preserve_existing_cache(
@@ -117,7 +137,7 @@ def _is_cache_valid(cache_key: str, now: Optional[float] = None) -> bool:
     entry = _cache_entries.get(cache_key)
     if entry is None:
         return False
-    ts, payload = entry
+    ts, payload, _meta = entry
     return bool(payload) and (t - ts) < CACHE_TTL_SECONDS
 
 
@@ -205,16 +225,21 @@ def _tier_pulse(ctx: DashboardDateContext) -> dict:
             logger.warning(f"Tier pulse trending-new failed: {e}")
             return []
 
-    try:
-        return {
-            "communityHealth": pulse.get_community_health(ctx),
-            "trendingTopics": pulse.get_trending_topics(ctx),
-            "trendingNewTopics": _trending_new_topics(),
-            "communityBrief": pulse.get_community_brief(ctx),
-        }
-    except Exception as e:
-        logger.error(f"Tier pulse failed: {e}")
-        return _fallback_for_tier("pulse")
+    fallback = _fallback_for_tier("pulse")
+
+    def _safe(name: str, fn: Callable[[], object], default):
+        try:
+            return fn()
+        except Exception as e:
+            logger.error(f"Pulse widget {name} failed: {e}")
+            return default
+
+    return {
+        "communityHealth": _safe("communityHealth", lambda: pulse.get_community_health(ctx), fallback["communityHealth"]),
+        "trendingTopics": _safe("trendingTopics", lambda: pulse.get_trending_topics(ctx), fallback["trendingTopics"]),
+        "trendingNewTopics": _safe("trendingNewTopics", _trending_new_topics, fallback["trendingNewTopics"]),
+        "communityBrief": _safe("communityBrief", lambda: pulse.get_community_brief(ctx), fallback["communityBrief"]),
+    }
 
 
 def _tier_strategic(_ctx: DashboardDateContext) -> dict:
@@ -453,6 +478,25 @@ def _build_snapshot(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tup
     return data, tier_times, elapsed, mode
 
 
+def _snapshot_meta(
+    *,
+    tier_times: Dict[str, Optional[float]],
+    elapsed: float,
+    mode: str,
+    cache_status: str,
+    is_stale: bool = False,
+) -> DashboardCacheMeta:
+    return {
+        "tierTimes": dict(tier_times),
+        "degradedTiers": _fallback_tiers(tier_times),
+        "snapshotBuiltAt": datetime.now(timezone.utc).isoformat(),
+        "buildElapsedSeconds": elapsed,
+        "buildMode": mode,
+        "cacheStatus": cache_status,
+        "isStale": is_stale,
+    }
+
+
 # ── Main aggregation API ─────────────────────────────────────────────────────
 
 def _default_dashboard_context() -> DashboardDateContext:
@@ -462,10 +506,10 @@ def _default_dashboard_context() -> DashboardDateContext:
     return build_dashboard_date_context(start_date.isoformat(), end_date.isoformat())
 
 
-def get_dashboard_data(
+def get_dashboard_snapshot(
     ctx: Optional[DashboardDateContext] = None,
     force_refresh: bool = False,
-) -> dict:
+) -> tuple[dict, DashboardCacheMeta]:
     """Assemble full AppData snapshot with simple per-range caching."""
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = resolved_ctx.cache_key
@@ -475,11 +519,27 @@ def get_dashboard_data(
         entry = _cache_entries.get(cache_key)
         if entry is not None and not force_refresh and _is_cache_valid(cache_key, now):
             logger.debug(f"Serving dashboard data from range cache | key={cache_key}")
-            return entry[1]
+            _ts, snapshot, meta = entry
+            if not _should_bypass_cached_snapshot(snapshot, meta):
+                return snapshot, dict(meta)
+            logger.warning(
+                "Bypassing cached dashboard snapshot because a critical tier was degraded "
+                f"| key={cache_key} degraded={meta.get('degradedTiers', [])}"
+            )
         stale_snapshot = entry[1] if entry is not None else None
+        stale_meta = dict(entry[2]) if entry is not None else None
 
     try:
-        data, tier_times, elapsed, mode = _build_snapshot(resolved_ctx, use_timeouts=stale_snapshot is not None)
+        data, tier_times, elapsed, mode = _build_snapshot(resolved_ctx, use_timeouts=True)
+        build_meta = _snapshot_meta(
+            tier_times=tier_times,
+            elapsed=elapsed,
+            mode=mode,
+            cache_status="refresh_success",
+            is_stale=False,
+        )
+        critical_degraded = _critical_fallback_tiers(build_meta.get("degradedTiers", []))
+
         with _cache_lock:
             preserve_existing = False
             fallback_tiers: list[str] = []
@@ -494,29 +554,52 @@ def get_dashboard_data(
                     "Dashboard rebuild preserved previous range cache because critical tiers fell back "
                     f"({fallback_tiers}); key={cache_key} elapsed={elapsed}s mode={mode}"
                 )
-                return stale_snapshot
+                preserved_meta = dict(stale_meta or {})
+                preserved_meta["cacheStatus"] = "preserved_previous_on_fallback"
+                preserved_meta["isStale"] = True
+                preserved_meta["suppressedDegradedTiers"] = fallback_tiers
+                return stale_snapshot, preserved_meta
 
-            _cache_entries[cache_key] = (time.time(), data)
+            if critical_degraded:
+                logger.warning(
+                    "Dashboard rebuild completed with critical degraded tiers; returning uncached snapshot "
+                    f"| key={cache_key} degraded={critical_degraded} elapsed={elapsed}s mode={mode}"
+                )
+                build_meta["cacheStatus"] = "refresh_success_uncached_degraded"
+            else:
+                _cache_entries[cache_key] = (time.time(), data, build_meta)
 
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
-        return data
+        return data, build_meta
     except Exception as e:
         if stale_snapshot is not None:
             logger.warning(f"Dashboard rebuild failed for range {cache_key}; serving stale cache instead: {e}")
-            return stale_snapshot
+            failure_meta = dict(stale_meta or {})
+            failure_meta["cacheStatus"] = "stale_on_error"
+            failure_meta["isStale"] = True
+            failure_meta["refreshError"] = str(e)
+            return stale_snapshot, failure_meta
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {e}")
         raise
 
 
+def get_dashboard_data(
+    ctx: Optional[DashboardDateContext] = None,
+    force_refresh: bool = False,
+) -> dict:
+    snapshot, _meta = get_dashboard_snapshot(ctx, force_refresh=force_refresh)
+    return snapshot
+
+
 # ── Detail page queries (independent cache) ──────────────────────────────────
 
-def _get_cached_detail_list(
+def _get_cached_detail_value(
     cache_key: str,
-    builder: Callable[[], list[dict]],
+    builder: Callable[[], Any],
     ttl_seconds: int = DETAIL_CACHE_TTL_SECONDS,
-) -> list[dict]:
+) -> Any:
     now = time.time()
-    stale: Optional[list[dict]] = None
+    stale: Any = None
 
     with _detail_cache_lock:
         entry = _detail_cache.get(cache_key)
@@ -527,9 +610,12 @@ def _get_cached_detail_list(
                 return data
 
     try:
-        fresh = builder() or []
-        if stale and len(stale) > 0 and len(fresh) == 0:
+        fresh = builder()
+        if isinstance(stale, list) and len(stale) > 0 and isinstance(fresh, list) and len(fresh) == 0:
             logger.warning(f"Detail query {cache_key} returned empty payload; serving stale cache")
+            return stale
+        if stale is not None and fresh is None:
+            logger.warning(f"Detail query {cache_key} returned empty detail payload; serving stale cache")
             return stale
         with _detail_cache_lock:
             _detail_cache[cache_key] = (time.time(), fresh)
@@ -541,15 +627,55 @@ def _get_cached_detail_list(
         raise
 
 
-def get_topics_page(page: int = 0, size: int = 50) -> list[dict]:
-    cache_key = f"topics:{page}:{size}"
-    return _get_cached_detail_list(cache_key, lambda: comparative.get_all_topics(page, size))
+def get_topics_page(
+    page: int = 0,
+    size: int = 50,
+    ctx: Optional[DashboardDateContext] = None,
+) -> list[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"topics:{resolved_ctx.cache_key}:{page}:{size}"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_topics(page, size, resolved_ctx))
 
 
-def get_channels_page() -> list[dict]:
-    return _get_cached_detail_list("channels:all", comparative.get_all_channels)
+def get_channels_page(ctx: Optional[DashboardDateContext] = None) -> list[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"channels:{resolved_ctx.cache_key}:all"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_channels(resolved_ctx))
 
 
-def get_audience_page(page: int = 0, size: int = 50) -> list[dict]:
-    cache_key = f"audience:{page}:{size}"
-    return _get_cached_detail_list(cache_key, lambda: comparative.get_all_audience(page, size))
+def get_audience_page(
+    page: int = 0,
+    size: int = 50,
+    ctx: Optional[DashboardDateContext] = None,
+) -> list[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"audience:{resolved_ctx.cache_key}:{page}:{size}"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_audience(page, size, resolved_ctx))
+
+
+def get_topic_detail(
+    topic_name: str,
+    category: Optional[str] = None,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"topic-detail:{resolved_ctx.cache_key}:{topic_name}:{category or ''}"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
+
+
+def get_channel_detail(
+    channel_key: str,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"channel-detail:{resolved_ctx.cache_key}:{channel_key}"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_channel_detail(channel_key, resolved_ctx))
+
+
+def get_audience_detail(
+    user_id: str,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"audience-detail:{resolved_ctx.cache_key}:{user_id}"
+    return _get_cached_detail_value(cache_key, lambda: comparative.get_audience_detail(user_id, resolved_ctx))

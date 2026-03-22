@@ -26,17 +26,40 @@ import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboard
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
 
+interface DashboardRangeRef {
+  from: string;
+  to: string;
+}
+
+interface DashboardMeta {
+  trustedEndDate?: string;
+  freshnessStatus?: string;
+  rangeLabel?: string;
+  requestedFrom?: string;
+  requestedTo?: string;
+  degradedTiers?: string[];
+  suppressedDegradedTiers?: string[];
+  tierTimes?: Record<string, number | null>;
+  snapshotBuiltAt?: string;
+  cacheStatus?: string;
+  isStale?: boolean;
+  responseBytes?: number;
+  responseSerializeMs?: number;
+}
+
+const DASHBOARD_TIMEOUT_MS = 30_000;
+
 interface DataContextValue {
   data: AppData;
   loading: boolean;
   isRefreshing: boolean;
   hasLiveData: boolean;
+  isStaleForSelection: boolean;
   error: string | null;
-  dashboardMeta: {
-    trustedEndDate?: string;
-    freshnessStatus?: string;
-    rangeLabel?: string;
-  } | null;
+  dashboardMeta: DashboardMeta | null;
+  selectedRange: DashboardRangeRef | null;
+  visibleRange: DashboardRangeRef | null;
+  lastSuccessfulRange: DashboardRangeRef | null;
   /** Call this to manually refresh data from the API */
   refresh: () => void;
 }
@@ -48,35 +71,47 @@ const DataContext = createContext<DataContextValue>({
   loading: false,
   isRefreshing: false,
   hasLiveData: false,
+  isStaleForSelection: false,
   error: null,
   dashboardMeta: null,
+  selectedRange: null,
+  visibleRange: null,
+  lastSuccessfulRange: null,
   refresh: () => {},
 });
 
 function snapshotKeyForRange(from: string, to: string): string {
-  return `radar.dashboard.snapshot.v4:${from}:${to}`;
+  return `radar.dashboard.snapshot.v5:${from}:${to}`;
 }
 
-function loadSnapshot(from: string, to: string): AppData | null {
+function sameRange(a: DashboardRangeRef | null, b: DashboardRangeRef | null): boolean {
+  return Boolean(a && b && a.from === b.from && a.to === b.to);
+}
+
+function loadSnapshot(from: string, to: string): { data: AppData; meta: DashboardMeta | null } | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = window.sessionStorage.getItem(snapshotKeyForRange(from, to));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as AppData;
-    const jobItems = parsed?.jobSeeking?.en ?? [];
+    const parsed = JSON.parse(raw) as AppData | { data?: AppData; meta?: DashboardMeta | null };
+    const snapshot = parsed && typeof parsed === 'object' && 'data' in parsed
+      ? { data: parsed.data as AppData, meta: (parsed as { meta?: DashboardMeta | null }).meta ?? null }
+      : { data: parsed as AppData, meta: null };
+    const payload = snapshot.data;
+    const jobItems = payload?.jobSeeking?.en ?? [];
     const hasJobDataWithoutEvidence = Array.isArray(jobItems)
       && jobItems.length > 0
       && !jobItems.some((item: any) => Array.isArray(item?.evidence) && item.evidence.length > 0);
-    return hasJobDataWithoutEvidence ? null : parsed;
+    return hasJobDataWithoutEvidence ? null : snapshot;
   } catch {
     return null;
   }
 }
 
-function saveSnapshot(from: string, to: string, data: AppData): void {
+function saveSnapshot(from: string, to: string, data: AppData, meta: DashboardMeta | null): void {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(snapshotKeyForRange(from, to), JSON.stringify(data));
+    window.sessionStorage.setItem(snapshotKeyForRange(from, to), JSON.stringify({ data, meta }));
   } catch {
     // ignore storage errors
   }
@@ -84,10 +119,11 @@ function saveSnapshot(from: string, to: string, data: AppData): void {
 
 // ── Data fetching logic ───────────────────────────────────────
 // Live backend mode: fetch dashboard payload and normalize with adapter.
-async function fetchData(from: string, to: string, signal?: AbortSignal): Promise<{ data: AppData; meta: DataContextValue['dashboardMeta'] }> {
+async function fetchData(from: string, to: string, signal?: AbortSignal): Promise<{ data: AppData; meta: DashboardMeta | null }> {
   const params = new URLSearchParams({ from, to });
   const payload = await apiFetch<any>(`/dashboard?${params.toString()}`, {
     method: 'GET',
+    timeoutMs: DASHBOARD_TIMEOUT_MS,
     signal,
     headers: { Accept: 'application/json' },
     cache: 'no-store',
@@ -98,6 +134,16 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
       trustedEndDate: payload?.meta?.trustedEndDate,
       freshnessStatus: payload?.meta?.freshness?.status,
       rangeLabel: payload?.meta?.rangeLabel,
+      requestedFrom: payload?.meta?.requestedFrom,
+      requestedTo: payload?.meta?.requestedTo,
+      degradedTiers: Array.isArray(payload?.meta?.degradedTiers) ? payload.meta.degradedTiers : [],
+      suppressedDegradedTiers: Array.isArray(payload?.meta?.suppressedDegradedTiers) ? payload.meta.suppressedDegradedTiers : [],
+      tierTimes: payload?.meta?.tierTimes && typeof payload.meta.tierTimes === 'object' ? payload.meta.tierTimes : {},
+      snapshotBuiltAt: payload?.meta?.snapshotBuiltAt,
+      cacheStatus: payload?.meta?.cacheStatus,
+      isStale: Boolean(payload?.meta?.isStale),
+      responseBytes: Number.isFinite(Number(payload?.meta?.responseBytes)) ? Number(payload.meta.responseBytes) : undefined,
+      responseSerializeMs: Number.isFinite(Number(payload?.meta?.responseSerializeMs)) ? Number(payload.meta.responseSerializeMs) : undefined,
     },
   };
 }
@@ -105,11 +151,13 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
 export function DataProvider({ children }: { children: ReactNode }) {
   const { range, ready } = useDashboardDateRange();
   const initialSnapshot = loadSnapshot(range.from, range.to);
-  const [appData, setAppData] = useState<AppData>(initialSnapshot ?? createEmptyAppData());
+  const [appData, setAppData] = useState<AppData>(initialSnapshot?.data ?? createEmptyAppData());
   const [hasLiveData, setHasLiveData] = useState(Boolean(initialSnapshot));
   const [loading, setLoading] = useState(!initialSnapshot || !ready);
   const [error, setError] = useState<string | null>(null);
-  const [dashboardMeta, setDashboardMeta] = useState<DataContextValue['dashboardMeta']>(null);
+  const [dashboardMeta, setDashboardMeta] = useState<DashboardMeta | null>(initialSnapshot?.meta ?? null);
+  const [visibleRange, setVisibleRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
+  const [lastSuccessfulRange, setLastSuccessfulRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
   const abortRef = useRef<AbortController | null>(null);
 
   const doFetch = useCallback(async () => {
@@ -128,8 +176,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
       if (!controller.signal.aborted) {
         setAppData(payload.data);
         setDashboardMeta(payload.meta);
+        setVisibleRange({ from: range.from, to: range.to });
+        setLastSuccessfulRange({ from: range.from, to: range.to });
         setHasLiveData(true);
-        saveSnapshot(range.from, range.to, payload.data);
+        saveSnapshot(range.from, range.to, payload.data, payload.meta);
         setLoading(false);
       }
     } catch (err: any) {
@@ -145,8 +195,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const snapshot = loadSnapshot(range.from, range.to);
+    setError(null);
     if (snapshot) {
-      setAppData(snapshot);
+      setAppData(snapshot.data);
+      setDashboardMeta(snapshot.meta);
+      setVisibleRange({ from: range.from, to: range.to });
+      setLastSuccessfulRange({ from: range.from, to: range.to });
       setHasLiveData(true);
     }
   }, [range.from, range.to]);
@@ -158,13 +212,24 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return () => { abortRef.current?.abort(); };
   }, [doFetch, ready]);
 
+  const selectedRange: DashboardRangeRef = { from: range.from, to: range.to };
+  const isStaleForSelection = hasLiveData && (
+    error !== null
+    || Boolean(dashboardMeta?.isStale)
+    || !sameRange(visibleRange, selectedRange)
+  );
+
   const value: DataContextValue = {
     data: appData,
     loading: ready ? loading : true,
     isRefreshing: ready && loading && hasLiveData,
     hasLiveData,
+    isStaleForSelection,
     error,
     dashboardMeta,
+    selectedRange,
+    visibleRange,
+    lastSuccessfulRange,
     refresh: doFetch,
   };
 

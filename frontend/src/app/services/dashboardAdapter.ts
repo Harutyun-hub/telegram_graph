@@ -412,65 +412,6 @@ export function adaptDashboardPayload(payload: any): AppData {
     : null;
   const rawTopPosts = asArray(raw.topPosts);
   const rawSentimentByTopic = asArray(raw.sentimentByTopic);
-  const rawAllTopics = asArray(raw.allTopics);
-
-  const topicEvidenceTextByTopic = new Map<string, string>();
-  const topicQuestionEvidenceByTopic = new Map<string, string[]>();
-  const topicLifecycleDetailsByTopic = new Map<string, {
-    summary: string;
-    topChannels: string[];
-    evidence: { text: string; channel: string; timestamp: string }[];
-  }>();
-  rawAllTopics.forEach((row: any) => {
-    const topic = normalizeTopicLabel(row?.name);
-    if (!topic) return;
-    const key = topicKey(topic);
-    const evidenceRows = asArray(row?.evidence);
-    const questionRows = asArray(row?.questionEvidence);
-
-    const firstEvidence = evidenceRows
-      .map((ev: any) => snippet(ev?.text, 180))
-      .find((text: string) => text.length > 0);
-    if (firstEvidence && !topicEvidenceTextByTopic.has(key)) {
-      topicEvidenceTextByTopic.set(key, firstEvidence);
-    }
-
-    const questionSnippets = [
-      ...questionRows.map((ev: any) => questionSnippet(ev?.text, 180)),
-      ...evidenceRows.map((ev: any) => questionSnippet(ev?.text, 180)),
-    ].filter((text: string) => text.length > 0);
-    if (questionSnippets.length > 0) {
-      topicQuestionEvidenceByTopic.set(key, questionSnippets.slice(0, 10));
-    }
-
-    const combinedEvidence = [...questionRows, ...evidenceRows]
-      .map((ev: any) => ({
-        text: snippet(ev?.text, 260),
-        channel: asStr(ev?.channel, 'unknown'),
-        timestamp: asStr(ev?.timestamp, ''),
-      }))
-      .filter((ev: any) => ev.text.length > 0)
-      .slice(0, 4);
-
-    const channelCounts = new Map<string, number>();
-    [...questionRows, ...evidenceRows].forEach((ev: any) => {
-      const channel = asStr(ev?.channel, '').trim();
-      if (!channel) return;
-      channelCounts.set(channel, (channelCounts.get(channel) || 0) + 1);
-    });
-    const topChannels = Array.from(channelCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([channel]) => channel);
-
-    if (combinedEvidence.length > 0 || topChannels.length > 0) {
-      topicLifecycleDetailsByTopic.set(key, {
-        summary: combinedEvidence[0]?.text || firstEvidence || '',
-        topChannels,
-        evidence: combinedEvidence,
-      });
-    }
-  });
 
   try {
     const score = clamp(asNum(raw?.communityHealth?.score, app.communityHealth.currentScore), 0, 100);
@@ -524,7 +465,6 @@ export function adaptDashboardPayload(payload: any): AppData {
     const sentiments = ['seeking', 'curious', 'excited', 'concerned', 'frustrated', 'motivated', 'confused'];
       const toTopic = (row: any, i: number, ru: boolean) => {
         const topic = normalizeTopicLabel(row.name || row.topic) || `Topic ${i + 1}`;
-        const key = topicKey(topic);
         const category = asStr(row.category, 'General');
         const mentions = asNum(row.mentions || row.postMentions || row.totalPosts, 0);
         const currentMentions = asNum(row.currentMentions, mentions);
@@ -533,7 +473,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const growthSupport = asNum(row.growthSupport, computedTrend.support);
         const backendTrend = asNum(row.trendPct, Number.NaN);
         const backendReliable = Boolean(row.trendReliable) && Number.isFinite(backendTrend) && growthSupport >= MIN_SUPPORT_FOR_TREND;
-        const quoteFromEvidence = snippet(row.sampleQuote, 180) || topicEvidenceTextByTopic.get(key) || topicQuestionEvidenceByTopic.get(key)?.[0] || '';
+        const quoteFromEvidence = snippet(row.sampleQuote, 180);
         return {
           id: i + 1,
           topic: ru ? translateTopicRu(topic) : topic,
@@ -647,7 +587,6 @@ export function adaptDashboardPayload(payload: any): AppData {
         const backendGrowth = asNum(r.growth7dPct, Number.NaN);
         const backendReliable = Number.isFinite(backendGrowth) && support >= MIN_SUPPORT_FOR_TREND;
         const sourceTopic = normalizeTopicLabel(r.name);
-        const sourceKey = topicKey(sourceTopic);
         return {
           name: ru ? translateTopicRu(sourceTopic) : sourceTopic,
           sourceTopic,
@@ -659,7 +598,7 @@ export function adaptDashboardPayload(payload: any): AppData {
             : fromWindow.value,
           growthReliable: backendReliable || fromWindow.reliable,
           evidenceCount: support,
-          sampleQuote: topicEvidenceTextByTopic.get(sourceKey) || topicQuestionEvidenceByTopic.get(sourceKey)?.[0] || '',
+          sampleQuote: '',
         };
       }).filter((item): item is NonNullable<typeof item> => Boolean(item));
       app.topicBubbles.en = convert(false);
@@ -952,9 +891,6 @@ export function adaptDashboardPayload(payload: any): AppData {
         const stage = style.key;
         if (!byStage.has(stage)) byStage.set(stage, []);
 
-        const key = topicKey(topic);
-        const details = topicLifecycleDetailsByTopic.get(key);
-
         const first = new Date(asStr(r.firstSeen, new Date().toISOString()));
         const fallbackDays = Math.max(1, Math.round((Date.now() - first.getTime()) / 86400000));
         const daysActive = Math.max(1, asNum(r.ageDays, fallbackDays));
@@ -969,9 +905,9 @@ export function adaptDashboardPayload(payload: any): AppData {
           daysActive,
           momentum: Math.round(weeklyDelta),
           volume: weeklyCurrent,
-          summary: details?.summary || '',
-          topChannels: details?.topChannels || [],
-          evidence: details?.evidence || [],
+          summary: '',
+          topChannels: [],
+          evidence: [],
         });
       });
 
@@ -1190,7 +1126,6 @@ export function adaptDashboardPayload(payload: any): AppData {
         const topic = normalizeTopicLabel(r.topic);
         if (!topic) return;
         if (NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return;
-        const key = topicKey(topic);
         const weeklyCurrent = asNum(r.affectedThisWeek, 0);
         const weeklyPrevious = asNum(r.affectedPrevWeek, 0);
         const computedTrend = boundedTrend(weeklyCurrent, weeklyPrevious);
@@ -1207,7 +1142,7 @@ export function adaptDashboardPayload(payload: any): AppData {
             : computedTrend.value,
           trendReliable: trendReliable || computedTrend.reliable,
           evidenceCount: trendSupport,
-          quote: snippet(r.sampleText, 180) || topicEvidenceTextByTopic.get(key) || '',
+          quote: snippet(r.sampleText, 180),
         };
         const existing = grouped.get(category)?.get(key);
         if (!existing) {
@@ -2323,368 +2258,6 @@ export function adaptDashboardPayload(payload: any): AppData {
         en: indicators,
         ru: indicators.map((i) => ({ ...i, indicator: i.indicator === 'Activity Rate' ? 'Уровень активности' : i.indicator === 'User Vitality' ? 'Живость аудитории' : i.indicator === 'Discussion Depth' ? 'Глубина дискуссий' : 'Ширина тем', benchmark: i.benchmark === 'Good' ? 'Хорошо' : i.benchmark === 'Above Avg' ? 'Выше среднего' : i.benchmark === 'Average' ? 'Средне' : 'Отлично' })),
       };
-    }
-  } catch {
-    // Keep mock defaults.
-  }
-
-  try {
-    const topicRows = rawAllTopics;
-    if (topicRows.length > 0) {
-      const mergedTopicRows = new Map<string, any>();
-      topicRows.forEach((row: any) => {
-        const name = normalizeTopicLabel(row.name);
-        if (!name) return;
-        const key = topicKey(name);
-        const existing = mergedTopicRows.get(key);
-        if (!existing) {
-          mergedTopicRows.set(key, { ...row, name });
-          return;
-        }
-        mergedTopicRows.set(key, {
-          ...existing,
-          name,
-          mentionCount: asNum(existing.mentionCount, asNum(existing.postCount, 0) + asNum(existing.commentCount, 0))
-            + asNum(row.mentionCount, asNum(row.postCount, 0) + asNum(row.commentCount, 0)),
-          postCount: asNum(existing.postCount, 0) + asNum(row.postCount, 0),
-          commentCount: asNum(existing.commentCount, 0) + asNum(row.commentCount, 0),
-          last7Mentions: asNum(existing.last7Mentions, 0) + asNum(row.last7Mentions, 0),
-          prev7Mentions: asNum(existing.prev7Mentions, 0) + asNum(row.prev7Mentions, 0),
-          totalInteractions: asNum(existing.totalInteractions, 0) + asNum(row.totalInteractions, 0),
-          evidence: [...asArray(existing.evidence), ...asArray(row.evidence)].slice(0, 6),
-          category: asStr(existing.category || row.category, 'General'),
-          description: asStr(existing.description || row.description, ''),
-          descriptionRu: asStr(existing.descriptionRu || row.descriptionRu || existing.description || row.description, ''),
-        });
-      });
-
-      const dedupedTopicRows = Array.from(mergedTopicRows.values());
-
-      const sentimentMap = new Map<string, any>((app.sentimentByTopic.en || []).map((s) => [topicKey(s.topic), s]));
-      const sentimentRows = asArray<any>(app.sentimentByTopic.en);
-      const sentimentTotalVolume = sentimentRows.reduce((sum, s) => sum + Math.max(0, asNum(s.volume, 0)), 0);
-      const globalSentiment = sentimentTotalVolume > 0
-        ? {
-            positive: clamp(Math.round(sentimentRows.reduce((sum, s) => sum + (asNum(s.positive, 0) * asNum(s.volume, 0)), 0) / sentimentTotalVolume), 0, 100),
-            neutral: clamp(Math.round(sentimentRows.reduce((sum, s) => sum + (asNum(s.neutral, 0) * asNum(s.volume, 0)), 0) / sentimentTotalVolume), 0, 100),
-            negative: clamp(Math.round(sentimentRows.reduce((sum, s) => sum + (asNum(s.negative, 0) * asNum(s.volume, 0)), 0) / sentimentTotalVolume), 0, 100),
-          }
-        : { positive: 50, neutral: 30, negative: 20 };
-
-      const trendWeeks = Array.from(new Set(rawTrendRows.map((r: any) => `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`)))
-        .sort((a, b) => a.localeCompare(b))
-        .slice(-6);
-      const trendByTopic = new Map<string, Map<string, number>>();
-      rawTrendRows.forEach((r: any) => {
-        const topic = normalizeTopicLabel(r.topic);
-        const week = `${asNum(r.year, 0)}-W${String(asNum(r.week, 0)).padStart(2, '0')}`;
-        if (!topic || !week) return;
-        const key = topicKey(topic);
-        if (!trendByTopic.has(key)) trendByTopic.set(key, new Map<string, number>());
-        trendByTopic.get(key)!.set(week, asNum(r.posts, 0));
-      });
-
-      app.allTopics = dedupedTopicRows.map((t: any, i: number) => {
-        const name = normalizeTopicLabel(t.name) || `Topic ${i + 1}`;
-        const estimateWarnings: string[] = [];
-
-        let mentions = asNum(t.mentionCount, Number.NaN);
-        if (!Number.isFinite(mentions)) {
-          const posts = asNum(t.postCount, 0);
-          const comments = asNum(t.commentCount, Number.NaN);
-          if (Number.isFinite(comments)) {
-            mentions = posts + comments;
-            estimateWarnings.push('Mentions estimated from post/comment counts');
-          } else {
-            mentions = posts;
-            estimateWarnings.push('Mentions include posts only (comment data unavailable)');
-          }
-        }
-
-        const sentimentSource = sentimentMap.get(topicKey(name));
-        const sentiment = sentimentSource || globalSentiment;
-        if (!sentimentSource) {
-          estimateWarnings.push('Sentiment estimated from global baseline');
-        }
-
-        const perTopicTrend = trendByTopic.get(topicKey(name));
-        let trendSeries = trendWeeks.map((week) => ({
-          week,
-          count: perTopicTrend ? asNum(perTopicTrend.get(week), 0) : 0,
-        }));
-        if (trendSeries.length === 0 || trendSeries.every((point) => point.count === 0)) {
-          trendSeries = [];
-          estimateWarnings.push('Weekly trend unavailable for this topic');
-        }
-
-        const backendEvidence = asArray(t.evidence)
-          .map((ev: any, idx: number) => {
-            const evTypeRaw = asStr(ev.type, 'message').toLowerCase();
-            const evType = evTypeRaw === 'post' ? 'message' : evTypeRaw;
-            return {
-              id: asStr(ev.id, `${slugify(name)}-ev-${idx}`),
-              type: (evType === 'message' || evType === 'reply' || evType === 'reaction') ? evType : 'message',
-              author: asStr(ev.author, 'unknown'),
-              channel: asStr(ev.channel, 'unknown'),
-              text: asStr(ev.text, '').slice(0, 500),
-              timestamp: asStr(ev.timestamp, new Date().toISOString()),
-              reactions: Math.max(0, asNum(ev.reactions, 0)),
-              replies: Math.max(0, asNum(ev.replies, 0)),
-            };
-          })
-          .filter((ev: any) => ev.text.length > 0)
-          .slice(0, 6);
-
-        const backendQuestionEvidence = asArray(t.questionEvidence)
-          .map((ev: any, idx: number) => {
-            const evTypeRaw = asStr(ev.type, 'message').toLowerCase();
-            const evType = evTypeRaw === 'post' ? 'message' : evTypeRaw;
-            return {
-              id: asStr(ev.id, `${slugify(name)}-qev-${idx}`),
-              type: (evType === 'message' || evType === 'reply' || evType === 'reaction') ? evType : 'message',
-              author: asStr(ev.author, 'unknown'),
-              channel: asStr(ev.channel, 'unknown'),
-              text: asStr(ev.text, '').slice(0, 500),
-              timestamp: asStr(ev.timestamp, new Date().toISOString()),
-              reactions: Math.max(0, asNum(ev.reactions, 0)),
-              replies: Math.max(0, asNum(ev.replies, 0)),
-            };
-          })
-          .filter((ev: any) => ev.text.length > 0)
-          .slice(0, 12);
-
-        const evidence = backendEvidence.length > 0
-          ? backendEvidence
-          : [];
-        const questionEvidence = backendQuestionEvidence.length > 0
-          ? backendQuestionEvidence
-          : evidence.filter((ev: any) => asStr(ev.text).includes('?'));
-
-        const channelCounts = new Map<string, number>();
-        evidence.forEach((ev: any) => {
-          const channel = asStr(ev.channel, '').trim();
-          if (!channel) return;
-          channelCounts.set(channel, (channelCounts.get(channel) || 0) + 1);
-        });
-        const topChannelsFromEvidence = Array.from(channelCounts.entries())
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([channel]) => channel);
-        const topChannels = topChannelsFromEvidence;
-
-        let growth = asNum(t.growth7dPct, Number.NaN);
-        if (!Number.isFinite(growth)) {
-          const last7Mentions = asNum(t.last7Mentions, Number.NaN);
-          const prev7Mentions = asNum(t.prev7Mentions, Number.NaN);
-          if (Number.isFinite(last7Mentions) && Number.isFinite(prev7Mentions) && prev7Mentions > 0) {
-            growth = Math.round(((last7Mentions - prev7Mentions) / prev7Mentions) * 100);
-            estimateWarnings.push('Growth estimated from 7d period deltas');
-          } else {
-            growth = clamp(Math.round(asNum(t.totalInteractions, 0) / Math.max(1, mentions) * 10), -30, 200);
-            estimateWarnings.push('Growth estimated from interaction intensity');
-          }
-        } else {
-          growth = Math.round(growth);
-        }
-
-        return {
-          id: slugify(name),
-          name,
-          nameRu: name,
-          category: asStr(t.category, 'General'),
-          color: hashColor(asStr(t.category, 'General')),
-          mentions,
-          growth: clamp(growth, -200, 200),
-          sentiment,
-          weeklyData: trendSeries,
-          topChannels,
-          description: asStr(t.description, ''),
-          descriptionRu: asStr(t.descriptionRu, asStr(t.description, '')),
-          evidence,
-          questionEvidence,
-          estimateWarnings: estimateWarnings.length > 0 ? Array.from(new Set(estimateWarnings)) : undefined,
-        };
-      });
-    }
-  } catch {
-    // Keep mock defaults.
-  }
-
-  try {
-    const channelRows = asArray(raw.allChannels);
-    if (channelRows.length > 0) {
-      app.allChannels = channelRows.map((c: any, i: number) => {
-        const chName = asStr(c.title || c.username, `Channel ${i + 1}`);
-        const weeklyMap = new Map<number, number>();
-        asArray(c.weeklyRows).forEach((row: any) => {
-          const dow = asNum(row.dow, Number.NaN);
-          if (!Number.isFinite(dow)) return;
-          weeklyMap.set(Math.round(dow), Math.max(0, asNum(row.count, 0)));
-        });
-        const weeklyData = DOW_EN.map((day, idx) => ({ day, msgs: weeklyMap.get(idx + 1) || 0 }));
-
-        const hourlyMap = new Map<number, number>();
-        asArray(c.hourlyRows).forEach((row: any) => {
-          const hour = asNum(row.hour, Number.NaN);
-          if (!Number.isFinite(hour)) return;
-          hourlyMap.set(Math.round(hour), Math.max(0, asNum(row.count, 0)));
-        });
-        const hourlyData = Array.from({ length: 24 }).map((_, h) => ({
-          hour: `${String(h).padStart(2, '0')}:00`,
-          msgs: hourlyMap.get(h) || 0,
-        }));
-
-        const topTopics = asArray(c.topTopics)
-          .map((t: any) => ({
-            name: asStr(t.name, ''),
-            mentions: Math.max(0, asNum(t.mentions, 0)),
-            pct: clamp(Math.max(0, asNum(t.pct, 0)), 0, 100),
-          }))
-          .filter((t: any) => t.name.length > 0)
-          .slice(0, 6);
-
-        const topVoices = asArray(c.topVoices)
-          .map((v: any) => ({
-            name: asStr(v.name, ''),
-            posts: Math.max(0, asNum(v.posts, 0)),
-            helpScore: clamp(Math.max(0, asNum(v.helpScore, 0)), 0, 100),
-          }))
-          .filter((v: any) => v.name.length > 0)
-          .slice(0, 4);
-
-        const recentPosts = asArray(c.recentPosts)
-          .map((p: any, idx: number) => ({
-            id: asStr(p.id, `${slugify(chName)}-${idx}`),
-            author: asStr(p.author, asStr(c.username, chName)),
-            text: asStr(p.text, '').slice(0, 220),
-            timestamp: asStr(p.timestamp, ''),
-            reactions: Math.max(0, asNum(p.reactions, 0)),
-            replies: Math.max(0, asNum(p.replies, 0)),
-          }))
-          .filter((p: any) => p.text.length > 0)
-          .slice(0, 6);
-
-        const messageTypes = asArray(c.messageTypes)
-          .map((m: any) => ({
-            type: asStr(m.type, 'text'),
-            count: Math.max(0, asNum(m.count, 0)),
-            pct: 0,
-          }))
-          .slice(0, 6);
-        const totalMessageTypeCount = messageTypes.reduce((sum: number, m: any) => sum + m.count, 0);
-        const messageTypesWithPct = messageTypes.map((m: any) => ({
-          ...m,
-          pct: totalMessageTypeCount > 0 ? clamp(Math.round((m.count / totalMessageTypeCount) * 100), 0, 100) : 0,
-        }));
-
-        const postsCount = Math.max(0, asNum(c.postCount, 0));
-        const memberCount = Math.max(0, asNum(c.memberCount, 0));
-        const avgViews = Math.max(0, asNum(c.avgViews, 0));
-        return {
-          id: asStr(c.username, slugify(chName)),
-          name: chName,
-          type: 'General',
-          members: memberCount,
-          dailyMessages: Math.max(0, asNum(c.dailyMessages, Math.round(postsCount / 30))),
-          engagement: clamp(Math.round(avgViews / 25), 0, 100),
-          growth: clamp(Math.round(asNum(c.growth7dPct, 0)), -200, 300),
-          topTopic: topTopics[0]?.name || '',
-          description: asStr(c.description, ''),
-          weeklyData,
-          hourlyData,
-          topTopics,
-          sentimentBreakdown: {
-            positive: clamp(Math.max(0, asNum(c.sentimentPositive, 0)), 0, 100),
-            neutral: clamp(Math.max(0, asNum(c.sentimentNeutral, 0)), 0, 100),
-            negative: clamp(Math.max(0, asNum(c.sentimentNegative, 0)), 0, 100),
-          },
-          messageTypes: messageTypesWithPct,
-          topVoices,
-          recentPosts,
-        };
-      });
-    }
-  } catch {
-    // Keep mock defaults.
-  }
-
-  try {
-    const audienceRows = asArray(raw.allAudience);
-    if (audienceRows.length > 0) {
-      app.allAudience = audienceRows.map((u: any, i: number) => {
-        const genderRaw = asStr(u.gender, 'Unknown').toLowerCase();
-        const gender = genderRaw.includes('female') ? 'Female' : genderRaw.includes('male') ? 'Male' : 'Unknown';
-        const channels = asArray(u.channels)
-          .map((ch: any) => ({
-            name: asStr(ch.name, ''),
-            type: asStr(ch.type, 'General'),
-            role: asStr(ch.role, 'Member'),
-            messageCount: Math.max(0, asNum(ch.messageCount, 0)),
-          }))
-          .filter((ch: any) => ch.name.length > 0)
-          .slice(0, 3);
-
-        let topTopics = asArray(u.topTopics).map((t: any) => ({
-          name: asStr(t.name, ''),
-          count: Math.max(0, asNum(t.count, 0)),
-        })).filter((t: any) => t.name.length > 0).slice(0, 5);
-        if (topTopics.length === 0) {
-          topTopics = asArray<string>(u.topics).slice(0, 5).map((name) => ({ name, count: 0 }));
-        }
-
-        const userId = asStr(u.userId, `u-${i + 1}`);
-        const language = asStr(u.language, 'unknown');
-        const role = asStr(u.role, 'Member');
-        const commentCount = Math.max(0, asNum(u.commentCount, 0));
-
-        const recentMessages = asArray(u.recentMessages)
-          .map((m: any) => ({
-            text: asStr(m.text, '').slice(0, 220),
-            channel: asStr(m.channel, ''),
-            timestamp: asStr(m.timestamp, ''),
-            reactions: Math.max(0, asNum(m.reactions, 0)),
-            replies: Math.max(0, asNum(m.replies, 0)),
-          }))
-          .filter((m: any) => m.text.length > 0)
-          .slice(0, 4);
-
-        const activityData = asArray(u.activityData)
-          .map((point: any) => ({
-            week: asStr(point.week, ''),
-            msgs: Math.max(0, asNum(point.msgs, 0)),
-          }))
-          .filter((point: any) => point.week.length > 0)
-          .slice(-6);
-
-        const username = userId ? (String(userId).startsWith('@') ? String(userId) : `@${userId}`) : '';
-
-        return {
-          id: userId,
-          username,
-          displayName: userId,
-          gender: gender as 'Male' | 'Female' | 'Unknown',
-          age: asStr(u.age, 'Unknown'),
-          origin: language.toUpperCase(),
-          location: '',
-          joinedDate: '',
-          lastActive: asStr(u.lastSeen, '').slice(0, 10),
-          totalMessages: commentCount,
-          totalReactions: 0,
-          helpScore: clamp(Math.round(commentCount * 3), 0, 100),
-          interests: topTopics.map((t) => t.name),
-          channels,
-          topTopics,
-          sentiment: {
-            positive: clamp(Math.max(0, asNum(u.sentimentPositive, 0)), 0, 100),
-            neutral: clamp(Math.max(0, asNum(u.sentimentNeutral, 0)), 0, 100),
-            negative: clamp(Math.max(0, asNum(u.sentimentNegative, 0)), 0, 100),
-          },
-          activityData,
-          recentMessages,
-          persona: role,
-          integrationLevel: '',
-        };
-      });
     }
   } catch {
     // Keep mock defaults.
