@@ -1,4 +1,4 @@
-import { Calendar, Filter, RotateCcw, ChevronLeft, ChevronDown, Search, Layers, Target } from 'lucide-react';
+import { Calendar, Check, Filter, RotateCcw, ChevronLeft, ChevronDown, Search, Layers, Target } from 'lucide-react';
 import { Checkbox } from '@/app/components/ui/checkbox';
 import { useState, useEffect, useRef } from 'react';
 import { getAllChannels, getTopChannels, getTrendingTopics, TopChannel, TrendingTopic } from '@/app/graph/services/api';
@@ -756,26 +756,41 @@ export function GlobalFilters({ onFiltersChange, onQuickSelectChannel, onDateRan
                   allTopics
                     .filter(topic => topic.name.toLowerCase().includes(topicSearchQuery.toLowerCase()))
                     .slice(0, showAllTopics ? allTopics.length : 5)
-                    .map((topic) => (
-                      <label
+                    .map((topic) => {
+                      const isSelected = selectedTopics.includes(topic.name);
+                      return (
+                      <button
+                        type="button"
                         key={topic.name}
-                        className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer transition-colors group"
+                        aria-pressed={isSelected}
+                        onClick={() => handleTopicToggle(topic.name)}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors group ${
+                          isSelected
+                            ? 'bg-cyan-500/10 border-cyan-500/40'
+                            : 'bg-white/5 border-white/10 hover:bg-white/10'
+                        }`}
                       >
-                        <Checkbox
-                          checked={selectedTopics.includes(topic.name)}
-                          onCheckedChange={() => handleTopicToggle(topic.name)}
-                          className="border-white/30 data-[state=checked]:bg-cyan-500 data-[state=checked]:border-cyan-500"
-                        />
-                        <div className="flex-1 flex items-center justify-between">
-                          <span className="text-white/80 text-sm group-hover:text-white transition-colors">
+                        <span
+                          aria-hidden="true"
+                          className={`flex h-4 w-4 items-center justify-center rounded-sm border ${
+                            isSelected
+                              ? 'border-cyan-500 bg-cyan-500 text-slate-950'
+                              : 'border-white/30 bg-transparent text-transparent'
+                          }`}
+                        >
+                          <Check className="h-3 w-3" strokeWidth={3} />
+                        </span>
+                        <div className="flex-1 min-w-0 flex items-center justify-between gap-3">
+                          <span className="text-left text-white/80 text-sm truncate group-hover:text-white transition-colors">
                             {topic.name}
                           </span>
-                          <span className="text-white/40 text-xs font-mono">
+                          <span className="flex-shrink-0 text-white/40 text-xs font-mono">
                             {topic.adCount} posts
                           </span>
                         </div>
-                      </label>
-                    ))
+                      </button>
+                    );
+                    })
                 )}
                 {allTopics.length > 5 && !showAllTopics && (
                   <button

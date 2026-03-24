@@ -190,11 +190,7 @@ export function AdminLayout() {
     loading,
     isRefreshing,
     hasLiveData,
-    isStaleForSelection,
     error,
-    dashboardMeta,
-    selectedRange,
-    visibleRange,
     refresh,
   } = useData();
   const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
@@ -303,15 +299,6 @@ export function AdminLayout() {
   const activeRange = QUICK_RANGES.find((preset) => preset.id === range.presetId);
   const draftDays = differenceInDaysInclusive(draftFrom, draftTo);
   const springConfig = { type: 'spring', damping: 30, stiffness: 300 };
-  const degradedTiers = dashboardMeta?.degradedTiers ?? [];
-  const showDataStatusBanner = hasLiveData && (isStaleForSelection || degradedTiers.length > 0);
-  const selectedRangeLabel = selectedRange
-    ? `${formatDisplayDate(selectedRange.from, lang)} — ${formatDisplayDate(selectedRange.to, lang)}`
-    : '';
-  const visibleRangeLabel = visibleRange
-    ? `${formatDisplayDate(visibleRange.from, lang)} — ${formatDisplayDate(visibleRange.to, lang)}`
-    : '';
-
   const applyCustomRange = useCallback(() => {
     setCustomRange(draftFrom, draftTo);
     setShowDatePicker(false);
@@ -588,42 +575,6 @@ export function AdminLayout() {
               </div>
             ) : (
               <>
-                {showDataStatusBanner && (
-                  <div className="px-4 md:px-6 pt-4">
-                    <div className={`rounded-xl border px-4 py-3 ${isStaleForSelection ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'}`}>
-                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                        <div className="min-w-0">
-                          <p className={`text-sm ${isStaleForSelection ? 'text-amber-900' : 'text-blue-900'}`} style={{ fontWeight: 600 }}>
-                            {isStaleForSelection
-                              ? (ru ? 'Показан не самый свежий снимок для выбранного периода.' : 'Showing a stale snapshot for the selected date range.')
-                              : (ru ? 'Часть виджетов показана в режиме деградации.' : 'Some widgets are currently served in degraded mode.')}
-                          </p>
-                          <p className={`text-xs mt-1 ${isStaleForSelection ? 'text-amber-800' : 'text-blue-800'}`}>
-                            {isStaleForSelection
-                              ? (
-                                (visibleRange && selectedRange && (visibleRange.from !== selectedRange.from || visibleRange.to !== selectedRange.to))
-                                  ? (ru ? `Выбран период ${selectedRangeLabel}, но на экране пока ${visibleRangeLabel}.` : `Selected range is ${selectedRangeLabel}, but the visible data is still ${visibleRangeLabel}.`)
-                                  : (ru ? 'Не удалось обновить данные для текущего диапазона. Оставлен последний сохранённый снимок.' : 'The current range failed to refresh, so the last saved snapshot remains visible.')
-                              )
-                              : (ru ? `Деградированные секции: ${degradedTiers.join(', ')}.` : `Degraded sections: ${degradedTiers.join(', ')}.`)}
-                          </p>
-                          {dashboardMeta?.snapshotBuiltAt && (
-                            <p className={`text-[11px] mt-1 ${isStaleForSelection ? 'text-amber-700' : 'text-blue-700'}`}>
-                              {ru ? `Снимок собран: ${new Date(dashboardMeta.snapshotBuiltAt).toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US')}` : `Snapshot built: ${new Date(dashboardMeta.snapshotBuiltAt).toLocaleString(lang === 'ru' ? 'ru-RU' : 'en-US')}`}
-                            </p>
-                          )}
-                        </div>
-                        <button
-                          onClick={refresh}
-                          className={`self-start md:self-auto px-3 py-1.5 rounded-lg text-xs transition-colors ${isStaleForSelection ? 'bg-amber-100 text-amber-900 hover:bg-amber-200' : 'bg-blue-100 text-blue-900 hover:bg-blue-200'}`}
-                          style={{ fontWeight: 600 }}
-                        >
-                          {ru ? 'Обновить' : 'Refresh'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
                 {hasLiveData && isRefreshing && (
                   <div className="px-4 md:px-6 pt-4">
                     <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
