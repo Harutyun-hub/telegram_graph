@@ -3,7 +3,7 @@ session_manager.py — Handles Telethon authentication via QR code.
 
 Supports two modes:
 1. StringSession from environment variable (for Railway/cloud deployments)
-2. File-based session (for local development)
+2. File-based session (for local development only)
 
 QR Login (recommended):
   1. Run the script
@@ -17,7 +17,8 @@ Fallback (phone code):
   If QR login fails, falls back to phone code entry.
 
 For Railway deployment:
-  Use scripts/export_telegram_session.py to generate TELEGRAM_SESSION_STRING
+  Use scripts/export_telegram_session.py locally to generate TELEGRAM_SESSION_STRING.
+  Keep that production session exclusive to Railway; do not reuse it locally.
 """
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -76,7 +77,10 @@ async def get_client() -> TelegramClient:
         )
     else:
         # Use file-based session for local development
-        logger.info(f"Using file-based session: {config.TELEGRAM_SESSION_NAME}.session")
+        logger.info(
+            f"Using file-based local session: {config.TELEGRAM_SESSION_NAME}.session "
+            "(keep this separate from Railway production session)"
+        )
         client = TelegramClient(
             config.TELEGRAM_SESSION_NAME,
             config.TELEGRAM_API_ID,

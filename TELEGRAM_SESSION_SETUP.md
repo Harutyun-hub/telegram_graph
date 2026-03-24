@@ -2,171 +2,156 @@
 
 ## Overview
 
-This document explains how to set up persistent Telegram authentication for Railway.com deployment. The main challenge is that Railway containers are ephemeral - any files created at runtime (like session files) are lost when the container restarts.
+This repository now uses one canonical production session flow:
 
-## The Problem
+- Railway uses exactly one `TELEGRAM_SESSION_STRING`
+- You generate that string locally with QR login
+- Local development keeps using a separate file-based session name
+- The same production session must not be reused locally
 
-- **Local Development**: Telethon creates a `telegram_scraper.session` file that persists on disk
-- **Railway Deployment**: Session files are lost on every deployment/restart
-- **Result**: The error you saw: `"Scraper error: Telegram session is not authorized"`
+This avoids Telegram invalidating the authorization key when the same session is used from different places.
 
-## The Solution
+## Required Environment Variables
 
-We now support **StringSession** - storing the session as an environment variable that persists across deployments.
+In your local `.env`:
 
-## Setup Instructions
-
-### Step 1: Generate Session String Locally
-
-1. **Ensure you have your Telegram API credentials in `.env`**:
-   ```bash
-   TELEGRAM_API_ID=your_api_id
-   TELEGRAM_API_HASH=your_api_hash
-   TELEGRAM_PHONE=+1234567890  # Your phone with country code
-   ```
-
-2. **Run the session export script**:
-   ```bash
-   python scripts/export_telegram_session.py
-   ```
-
-3. **Authenticate**:
-   - A QR code will appear in your terminal
-   - Open Telegram app → Settings → Devices → Link Desktop Device
-   - Scan the QR code
-   - Tap "Confirm" in the app
-
-4. **Copy the session string**:
-   - The script will display a long base64 string
-   - This is your `TELEGRAM_SESSION_STRING` value
-
-### Step 2: Configure Railway Environment
-
-1. **Go to Railway Dashboard**:
-   - Navigate to your project
-   - Click on your backend service
-   - Go to the "Variables" tab
-
-2. **Add the session string**:
-   - Click "New Variable"
-   - Name: `TELEGRAM_SESSION_STRING`
-   - Value: [Paste the base64 string from Step 1]
-   - Click "Add"
-
-3. **Add other required variables** (if not already set):
-   ```
-   TELEGRAM_API_ID=your_api_id
-   TELEGRAM_API_HASH=your_api_hash
-   TELEGRAM_PHONE=+1234567890
-
-   # Plus all other required vars:
-   SUPABASE_URL=...
-   SUPABASE_SERVICE_ROLE_KEY=...
-   NEO4J_URI=...
-   NEO4J_PASSWORD=...
-   OPENAI_API_KEY=...
-   ```
-
-4. **Deploy**: Railway will automatically redeploy with the new variables
-
-## How It Works
-
-### Local Development (No Changes)
-```python
-# When TELEGRAM_SESSION_STRING is not set:
-# Uses file-based session (telegram_scraper.session)
-client = TelegramClient('telegram_scraper', api_id, api_hash)
+```bash
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_PHONE=+1234567890
+TELEGRAM_SESSION_NAME=telegram_scraper_dev
 ```
 
-### Railway Deployment (New)
+Notes:
+- `TELEGRAM_SESSION_NAME` is for local development only
+- Railway production should use `TELEGRAM_SESSION_STRING`
+
+## Canonical Production Flow
+
+### Step 1: Generate a fresh Railway session locally
+
+Run:
+
+```bash
+python scripts/export_telegram_session.py
+```
+
+What happens:
+- A QR code appears in your terminal
+- Open Telegram on your phone
+- Go to `Settings -> Devices -> Link Desktop Device`
+- Scan the QR code
+- If Telegram asks for a password, enter your **Telegram two-step verification password**
+
+Important:
+- That password is not an SMS code
+- That password is not your phone PIN
+- That password is not the QR code text
+
+### Step 2: Copy the generated session string
+
+The script will:
+- print `TELEGRAM_SESSION_STRING`
+- save it to `.env.telegram_session`
+
+That file is gitignored and should stay private.
+
+### Step 3: Add it to Railway
+
+In Railway:
+
+1. Open your project
+2. Open the backend service
+3. Go to `Variables`
+4. Set:
+
+```text
+TELEGRAM_SESSION_STRING=<paste the generated string>
+```
+
+5. Redeploy the service
+
+### Step 4: Keep production and local usage separate
+
+After creating a new Railway session:
+
+- Railway should use the new `TELEGRAM_SESSION_STRING`
+- local development should keep using `TELEGRAM_SESSION_NAME=telegram_scraper_dev`
+- do not run local scraping with the same exported Railway session
+
+## How the App Chooses a Session
+
+### Railway / cloud
+
+When `TELEGRAM_SESSION_STRING` is present:
+
 ```python
-# When TELEGRAM_SESSION_STRING is set:
-# Uses string session from environment variable
-from telethon.sessions import StringSession
-session_string = os.getenv('TELEGRAM_SESSION_STRING')
 client = TelegramClient(StringSession(session_string), api_id, api_hash)
 ```
 
-## File Structure
+### Local development
 
+When `TELEGRAM_SESSION_STRING` is not present:
+
+```python
+client = TelegramClient("telegram_scraper_dev", api_id, api_hash)
 ```
-scripts/
-└── export_telegram_session.py   # Generate session string
-
-scraper/
-└── session_manager.py           # Modified to support StringSession
-
-config.py                        # Added TELEGRAM_SESSION_STRING variable
-.gitignore                       # Ignores .env.telegram_session
-```
-
-## Security Considerations
-
-⚠️ **CRITICAL SECURITY NOTES**:
-
-1. **Session String = Full Account Access**
-   - Treat it like a password
-   - Anyone with this string can access your Telegram account
-   - NEVER commit it to Git or share publicly
-
-2. **Revocation**
-   - To revoke access: Telegram App → Settings → Devices → Terminate session
-   - Each new export invalidates previous session strings
-
-3. **Best Practices**
-   - Use a dedicated Telegram account for production
-   - Regularly rotate session strings
-   - Monitor active sessions in Telegram settings
 
 ## Troubleshooting
 
+### Error: "authorization key was used under two different IP addresses simultaneously"
+
+Cause:
+- the same Telegram session was used from more than one environment
+
+Fix:
+1. Generate a fresh Railway session with `python scripts/export_telegram_session.py`
+2. Update Railway with the new `TELEGRAM_SESSION_STRING`
+3. Stop using that same production session locally
+
+### QR scan works, but Telegram asks for a password
+
+That is your Telegram **two-step verification password**.
+
+If you do not know it:
+- open Telegram
+- go to `Settings -> Privacy and Security -> Two-Step Verification`
+- recover or reset it there before generating a new Railway session
+
 ### Error: "Invalid TELEGRAM_SESSION_STRING"
-- The session string may be expired or invalid
-- Re-run `python scripts/export_telegram_session.py` locally
-- Update the Railway environment variable with the new string
 
-### Error: "Cannot authenticate interactively in cloud deployment"
-- This means Railway is trying to show a QR code (impossible in cloud)
-- You must set `TELEGRAM_SESSION_STRING` in Railway environment variables
+Fix:
+1. Generate a fresh string locally
+2. Replace the Railway variable
+3. Redeploy Railway
 
-### Session Works Locally but Not on Railway
-- Ensure you copied the ENTIRE session string (it's long!)
-- Check for any spaces or line breaks in the Railway variable
-- Verify all Telegram-related env vars are set correctly
+### Session works locally but not on Railway
 
-## Alternative: Disable Telegram Scraping
+Check:
+- the full string was copied
+- no spaces or line breaks were added
+- Railway has the latest value
+- local `.env` still uses a separate `TELEGRAM_SESSION_NAME`
 
-If you don't need Telegram data immediately, you can disable the scraper:
+## Security Notes
 
-1. Add to Railway environment variables:
-   ```
-   SKIP_TELEGRAM_SCRAPER=true
-   ```
+- `TELEGRAM_SESSION_STRING` gives full access to that Telegram account
+- Never commit `.env.telegram_session`
+- Never share the string in chat, logs, or screenshots
+- If compromised, revoke it in Telegram under `Settings -> Devices`
 
-2. The API and frontend will work without Telegram data
+## Expected Railway Logs
 
-## Testing the Setup
+Success:
 
-After deployment, check Railway logs:
-
-**Success**:
-```
+```text
 INFO: Using session from TELEGRAM_SESSION_STRING environment variable
 SUCCESS: Session active — logged in as: YourName (@yourusername)
 ```
 
-**Failure**:
-```
+Failure:
+
+```text
 ERROR: TELEGRAM_SESSION_STRING is invalid or expired!
 ERROR: Please run locally: python scripts/export_telegram_session.py
 ```
-
-## Questions?
-
-If you encounter issues:
-1. Check Railway deployment logs
-2. Verify all environment variables are set
-3. Ensure the session string was copied completely
-4. Try generating a fresh session string
-
-Remember: The session string approach is the **only** way to maintain Telegram authentication in ephemeral container environments like Railway.

@@ -1,37 +1,35 @@
 #!/usr/bin/env python3
 """
-Export Telegram session to environment variable string.
+Canonical Railway Telegram session exporter.
 
-This script authenticates with Telegram and exports the session as a base64 string
-that can be used as an environment variable in Railway or other cloud deployments.
-
-Usage:
-    python scripts/export_telegram_session.py
-
-Output:
-    - Displays the session string to copy
-    - Saves to .env.telegram_session (gitignored)
+Creates a fresh TELEGRAM_SESSION_STRING locally using QR login, prompts for
+Telegram two-step verification only if Telegram requires it, and saves the
+result to .env.telegram_session.
 """
 
 import asyncio
-import sys
+import getpass
 import os
-import base64
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from telethon import TelegramClient
-from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
-import qrcode
+from telethon.sessions import StringSession
 from loguru import logger
+import qrcode
 import config
 
+QR_TIMEOUT_SECONDS = 30
+ENV_OUTPUT_PATH = Path(".env.telegram_session")
 
-def print_qr(url: str):
-    """Print a scannable QR code to the terminal."""
+
+def print_qr(url: str) -> None:
+    """Print a fresh QR code and operator guidance."""
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -41,232 +39,149 @@ def print_qr(url: str):
     qr.add_data(url)
     qr.make(fit=True)
 
-    print("\n" + "=" * 60)
-    print("📱 QR CODE LOGIN FOR SESSION EXPORT")
-    print("=" * 60)
+    print("\n" + "=" * 64)
+    print("TELEGRAM QR LOGIN FOR RAILWAY")
+    print("=" * 64)
     print()
     qr.print_ascii(invert=True)
     print()
-    print("▶ Open Telegram on your phone")
-    print("▶ Settings → Devices → Link Desktop Device")
-    print("▶ Scan the QR code above")
-    print("▶ Tap CONFIRM in the app")
-    print("=" * 60 + "\n")
+    print("1. Open Telegram on your phone")
+    print("2. Go to Settings -> Devices -> Link Desktop Device")
+    print("3. Scan the QR code")
+    print("4. If Telegram asks for a password, enter your Telegram two-step verification password here")
+    print("=" * 64)
 
 
-async def export_session():
-    """Authenticate and export Telegram session as string."""
+def prompt_yes_no(message: str) -> bool:
+    response = input(f"{message} [y/N]: ").strip().lower()
+    return response == "y"
 
-    # Check if we already have a session string
-    existing_session = os.getenv("TELEGRAM_SESSION_STRING")
-    if existing_session:
-        print("\n⚠️  WARNING: TELEGRAM_SESSION_STRING already exists in environment.")
-        print("This script will create a NEW session and invalidate the old one.")
-        response = input("Continue? (y/N): ").strip().lower()
-        if response != 'y':
-            print("Aborted.")
+
+def prompt_2fa_password() -> str:
+    print("\nTelegram requested two-step verification.")
+    print("Enter the Telegram two-step verification password for this account.")
+    print("This is not your phone number, SMS code, phone lock PIN, or QR text.")
+    return getpass.getpass("Telegram 2FA password: ")
+
+
+async def complete_qr_login(client: TelegramClient) -> None:
+    """Run QR login until scanned, refreshing the QR if it expires."""
+    qr_login = await client.qr_login()
+    print_qr(qr_login.url)
+
+    while True:
+        try:
+            await qr_login.wait(timeout=QR_TIMEOUT_SECONDS)
             return
+        except asyncio.TimeoutError:
+            logger.info("QR code expired; generating a fresh one")
+            await qr_login.recreate()
+            print_qr(qr_login.url)
+        except SessionPasswordNeededError:
+            password = prompt_2fa_password()
+            await client.sign_in(password=password)
+            return
+        except Exception as exc:
+            message = str(exc)
+            if (
+                "SESSION_PASSWORD_NEEDED" in message
+                or "Two-steps verification is enabled" in message
+                or "password" in message.lower()
+            ):
+                password = prompt_2fa_password()
+                await client.sign_in(password=password)
+                return
+            raise
 
-    # Check for existing session file
-    session_file = Path(f"{config.TELEGRAM_SESSION_NAME}.session")
-    client = None
 
-    if session_file.exists():
-        print(f"\n✅ Found existing session file: {session_file}")
-        print("Converting to string session...")
+async def export_session() -> str:
+    """Create a fresh Railway-only string session."""
+    print("\nThis command creates a NEW production session for Railway.")
+    print("Do not keep using the same exported session locally after this.")
 
-        # Load from existing file session
-        file_client = TelegramClient(
-            str(session_file.with_suffix('')),
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_API_HASH
-        )
+    if os.getenv("TELEGRAM_SESSION_STRING"):
+        print("\nWARNING: TELEGRAM_SESSION_STRING is already set in this shell.")
+        print("If you continue, you should replace the Railway value with the new one.")
+        if not prompt_yes_no("Continue and create a new Railway session?"):
+            raise SystemExit(1)
 
-        await file_client.connect()
+    client = TelegramClient(
+        StringSession(),
+        config.TELEGRAM_API_ID,
+        config.TELEGRAM_API_HASH,
+    )
 
-        if await file_client.is_user_authorized():
-            # Export to string
-            string_session = StringSession.save(file_client.session)
-            await file_client.disconnect()
-
-            # Verify the string session works
-            client = TelegramClient(
-                StringSession(string_session),
-                config.TELEGRAM_API_ID,
-                config.TELEGRAM_API_HASH
-            )
-            await client.connect()
-
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                print(f"✅ Successfully exported session for: {me.first_name} (@{me.username})")
-                await client.disconnect()
-                return string_session
-            else:
-                print("❌ String session verification failed. Creating new session...")
-                await client.disconnect()
-                client = None
-        else:
-            print("⚠️  Session file exists but is not authorized. Creating new session...")
-            await file_client.disconnect()
-
-    # Create new string session from scratch
-    if not client:
-        print("\n🔐 Creating new Telegram session...")
-        client = TelegramClient(
-            StringSession(),
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_API_HASH
-        )
-
+    try:
         await client.connect()
+        if not await client.is_user_authorized():
+            print("\nStarting QR authentication...")
+            await complete_qr_login(client)
 
         if not await client.is_user_authorized():
-            print("Starting authentication process...")
-
-            # Try QR login first
-            try:
-                qr_login = await client.qr_login()
-                print_qr(qr_login.url)
-
-                # Keep refreshing until the user scans
-                while True:
-                    try:
-                        await qr_login.wait(timeout=30)
-                        break  # Scan successful
-                    except asyncio.TimeoutError:
-                        # QR codes expire every 30s — regenerate
-                        logger.info("QR code expired — refreshing...")
-                        await qr_login.recreate()
-                        print_qr(qr_login.url)
-                    except Exception as e:
-                        if "SESSION_PASSWORD_NEEDED" in str(e):
-                            raise SessionPasswordNeededError(None)
-                        raise
-
-            except SessionPasswordNeededError:
-                print("\n🔒 Two-factor authentication is enabled.")
-                password = input("Enter your Telegram password: ").strip()
-                await client.sign_in(password=password)
-
-            except Exception as e:
-                logger.warning(f"QR login failed ({e}). Falling back to phone code login...")
-
-                # Phone code fallback
-                await client.send_code_request(config.TELEGRAM_PHONE)
-
-                print("\n" + "=" * 60)
-                print("📱 PHONE CODE LOGIN (fallback)")
-                print(f"   A code was sent to your Telegram app")
-                print(f"   Check the 'Telegram' service chat in your app")
-                print("=" * 60)
-
-                code = input("Enter the 5-digit code: ").strip()
-                try:
-                    await client.sign_in(config.TELEGRAM_PHONE, code)
-                except SessionPasswordNeededError:
-                    password = input("Enter your Telegram password: ").strip()
-                    await client.sign_in(password=password)
+            raise RuntimeError("Telegram login did not complete successfully")
 
         me = await client.get_me()
-        print(f"\n✅ Authenticated as: {me.first_name} (@{me.username})")
+        display_name = " ".join(part for part in [me.first_name, me.last_name] if part).strip() or "Unknown"
+        username = f"@{me.username}" if getattr(me, "username", None) else "no username"
+        print(f"\nAuthenticated as: {display_name} ({username})")
 
-        # Save the string session
-        string_session = StringSession.save(client.session)
+        return StringSession.save(client.session)
+    finally:
         await client.disconnect()
-        return string_session
 
 
-def save_session_string(session_string: str):
-    """Save session string to file and display instructions."""
-
-    # Save to local file (gitignored)
-    env_file = Path(".env.telegram_session")
-    with open(env_file, "w") as f:
-        f.write(f"# Telegram Session String for Railway Deployment\n")
-        f.write(f"# Generated: {asyncio.get_event_loop().time()}\n")
-        f.write(f"# DO NOT COMMIT THIS FILE TO GIT\n\n")
-        f.write(f"TELEGRAM_SESSION_STRING={session_string}\n")
+def save_session_string(session_string: str) -> None:
+    """Save session string to gitignored file and print Railway instructions."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    with open(ENV_OUTPUT_PATH, "w", encoding="utf-8") as handle:
+        handle.write("# Telegram session string for Railway deployment\n")
+        handle.write(f"# Generated at {generated_at}\n")
+        handle.write("# Keep this file private. Do not commit it.\n")
+        handle.write(f"TELEGRAM_SESSION_STRING={session_string}\n")
 
     print("\n" + "=" * 80)
-    print("🎉 SESSION EXPORT SUCCESSFUL!")
+    print("SESSION EXPORT SUCCESSFUL")
     print("=" * 80)
+    print("\nAdd this Railway variable:")
+    print("Name:  TELEGRAM_SESSION_STRING")
+    print(f"Value: {session_string}")
+    print(f"\nA copy was saved to: {ENV_OUTPUT_PATH.absolute()}")
 
-    print("\n📋 NEXT STEPS FOR RAILWAY DEPLOYMENT:")
-    print("-" * 80)
+    print("\nNext steps:")
+    print("1. Open Railway -> your service -> Variables")
+    print("2. Set TELEGRAM_SESSION_STRING to the new value")
+    print("3. Redeploy Railway")
+    print("4. Stop using this same production session locally")
 
-    print("\n1️⃣  Copy this environment variable to Railway:")
-    print("\n   Variable Name:  TELEGRAM_SESSION_STRING")
-    print(f"   Variable Value: {session_string}")
-
-    print("\n2️⃣  In Railway Dashboard:")
-    print("   • Go to your project")
-    print("   • Click on your service")
-    print("   • Go to 'Variables' tab")
-    print("   • Add New Variable:")
-    print("     - Name: TELEGRAM_SESSION_STRING")
-    print("     - Value: [paste the string above]")
-    print("   • Click 'Add' and deploy")
-
-    print("\n3️⃣  Session string also saved to:")
-    print(f"   📄 {env_file.absolute()}")
-    print("   (This file is gitignored and safe)")
-
-    print("\n⚠️  IMPORTANT SECURITY NOTES:")
-    print("-" * 80)
-    print("• This session string grants full access to your Telegram account")
-    print("• NEVER commit it to Git or share publicly")
-    print("• Treat it like a password")
-    print("• If compromised, revoke via Telegram Settings → Devices")
-    print("• Each new export invalidates the previous session string")
-
-    print("\n✅ Your app is now ready for Railway deployment with persistent Telegram auth!")
+    print("\nImportant:")
+    print("• This string is for Railway only")
+    print("• Keep local development on a separate file session name")
+    print("• Never commit .env.telegram_session or any .session files")
+    print("• If this string is exposed, revoke it in Telegram -> Settings -> Devices")
     print("=" * 80 + "\n")
 
 
-async def main():
-    """Main entry point."""
+async def main() -> None:
     print("\n" + "=" * 80)
-    print("🚀 TELEGRAM SESSION EXPORT FOR RAILWAY")
+    print("TELEGRAM SESSION EXPORT FOR RAILWAY")
     print("=" * 80)
-    print("\nThis tool exports your Telegram session as an environment variable")
-    print("for use in Railway.com or other cloud deployments.")
-    print("-" * 80)
+    print("\nThis is the only supported production session flow in this repo.")
+    print("It creates a fresh Railway-only TELEGRAM_SESSION_STRING via QR login.")
 
-    # Validate config
-    try:
-        if not config.TELEGRAM_API_ID or not config.TELEGRAM_API_HASH:
-            print("\n❌ ERROR: Missing Telegram API credentials in .env:")
-            print("   - TELEGRAM_API_ID")
-            print("   - TELEGRAM_API_HASH")
-            print("\nGet them from: https://my.telegram.org/apps")
-            sys.exit(1)
+    if not config.TELEGRAM_API_ID or not config.TELEGRAM_API_HASH:
+        print("\nERROR: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env")
+        raise SystemExit(1)
 
-        if not config.TELEGRAM_PHONE:
-            print("\n❌ ERROR: Missing TELEGRAM_PHONE in .env")
-            print("   Format: +1234567890 (with country code)")
-            sys.exit(1)
-
-    except Exception as e:
-        print(f"\n❌ Configuration error: {e}")
-        sys.exit(1)
-
-    try:
-        session_string = await export_session()
-        if session_string:
-            save_session_string(session_string)
-        else:
-            print("\n❌ Failed to export session.")
-            sys.exit(1)
-
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Export cancelled by user.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Export failed: {e}")
-        logger.exception("Session export error")
-        sys.exit(1)
+    session_string = await export_session()
+    save_session_string(session_string)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        raise SystemExit(1)
+    except Exception as exc:
+        print(f"\nERROR: {exc}")
+        raise SystemExit(1)

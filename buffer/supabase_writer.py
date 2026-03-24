@@ -427,16 +427,99 @@ class SupabaseWriter:
             .execute()
         logger.debug(f"Upserted {len(posts)} posts")
 
+    @staticmethod
+    def _comment_failure_scope_key(comment: dict) -> str:
+        uid = comment.get("telegram_user_id")
+        uid_text = str(uid if uid is not None else "anonymous")
+        channel_id = str(comment.get("channel_id") or "unknown")
+        post_id = str(comment.get("post_id") or "unknown")
+        return f"{uid_text}:{channel_id}:{post_id}"
+
+    def _filter_out_blocked_rows(
+        self,
+        rows: list[dict],
+        *,
+        scope_type: str,
+        scope_key_builder,
+        limit: int,
+    ) -> list[dict]:
+        """Return up to `limit` rows whose retry/dead-letter scopes are not blocked."""
+        if not rows or limit <= 0:
+            return []
+
+        row_keys: list[str] = []
+        keys: list[str] = []
+        for row in rows:
+            key = str(scope_key_builder(row) or "").strip()
+            row_keys.append(key)
+            if key:
+                keys.append(key)
+
+        blocked = self.get_blocked_scopes(scope_type, keys) if keys else set()
+        selected: list[dict] = []
+        for row, key in zip(rows, row_keys):
+            if key and key in blocked:
+                continue
+            selected.append(row)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _paged_unprocessed_rows(
+        self,
+        *,
+        table_name: str,
+        select_columns: str,
+        limit: int,
+        scope_type: str,
+        scope_key_builder,
+    ) -> list[dict]:
+        """Read unprocessed rows in pages so blocked rows do not starve runnable work."""
+        target = max(0, int(limit))
+        if target <= 0:
+            return []
+
+        page_size = max(target, min(200, target * 4))
+        start = 0
+        selected: list[dict] = []
+
+        while len(selected) < target:
+            query = self.client.table(table_name) \
+                .select(select_columns) \
+                .eq("is_processed", False) \
+                .not_.is_("text", "null") \
+                .order("posted_at", desc=False) \
+                .range(start, start + page_size - 1)
+            res = query.execute()
+            rows = res.data or []
+            if not rows:
+                break
+
+            remaining = target - len(selected)
+            selected.extend(
+                self._filter_out_blocked_rows(
+                    rows,
+                    scope_type=scope_type,
+                    scope_key_builder=scope_key_builder,
+                    limit=remaining,
+                )
+            )
+
+            if len(rows) < page_size:
+                break
+            start += len(rows)
+
+        return selected[:target]
+
     def get_unprocessed_posts(self, limit: int = 100) -> list[dict]:
-        """Fetch posts not yet sent to AI."""
-        res = self.client.table("telegram_posts") \
-            .select("id, channel_id, telegram_message_id, text, posted_at") \
-            .eq("is_processed", False) \
-            .not_.is_("text", "null") \
-            .order("posted_at", desc=False) \
-            .limit(limit) \
-            .execute()
-        return res.data or []
+        """Fetch oldest unprocessed posts that are currently runnable by the AI stage."""
+        return self._paged_unprocessed_rows(
+            table_name="telegram_posts",
+            select_columns="id, channel_id, telegram_message_id, text, posted_at",
+            limit=limit,
+            scope_type="post",
+            scope_key_builder=lambda row: row.get("id"),
+        )
 
     def get_posts_with_comments_pending(self, limit: int = 50) -> list[dict]:
         """Fetch posts that have comments but haven't had comments scraped yet."""
@@ -486,15 +569,14 @@ class SupabaseWriter:
         logger.debug(f"Upserted {len(comments)} comments")
 
     def get_unprocessed_comments(self, limit: int = 200) -> list[dict]:
-        """Fetch comments not yet sent to AI."""
-        res = self.client.table("telegram_comments") \
-            .select("id, post_id, channel_id, telegram_user_id, text, posted_at") \
-            .eq("is_processed", False) \
-            .not_.is_("text", "null") \
-            .order("posted_at", desc=False) \
-            .limit(limit) \
-            .execute()
-        return res.data or []
+        """Fetch oldest unprocessed comment groups that are currently runnable by the AI stage."""
+        return self._paged_unprocessed_rows(
+            table_name="telegram_comments",
+            select_columns="id, post_id, channel_id, telegram_user_id, text, posted_at",
+            limit=limit,
+            scope_type="comment_group",
+            scope_key_builder=self._comment_failure_scope_key,
+        )
 
     def mark_comment_processed(self, comment_uuid: str):
         self.client.table("telegram_comments") \
@@ -883,6 +965,7 @@ class SupabaseWriter:
             now_iso = datetime.now(timezone.utc).isoformat()
             self.client.table("ai_processing_failures") \
                 .update({
+                    "attempt_count": 0,
                     "is_dead_letter": False,
                     "next_retry_at": now_iso,
                     "updated_at": now_iso,

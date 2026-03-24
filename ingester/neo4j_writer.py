@@ -876,7 +876,23 @@ def _extract_message_topic_items(raw_response: dict, comment_uuid: str | None) -
             continue
         candidate_topics = item.get("topics")
         raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
-        return normalize_model_topics(raw_topics)
+        normalized_items = normalize_model_topics(raw_topics)
+        output: list[dict] = []
+        for topic_item in normalized_items:
+            name = str(topic_item.get("name") or "").strip()
+            if not name:
+                continue
+            output.append(
+                {
+                    "name": name,
+                    "category": normalize_topic_category(
+                        topic_item.get("closest_category") or topic_item.get("category")
+                    ),
+                    "domain": normalize_topic_domain(topic_item.get("domain")),
+                    "proposed": bool(topic_item.get("proposed", False)),
+                }
+            )
+        return output
 
     return []
 
