@@ -1012,10 +1012,8 @@ async def dashboard(
                 },
             },
         }
-        serialize_started = time.perf_counter()
-        response_bytes = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        response["meta"]["responseBytes"] = response_bytes
-        response["meta"]["responseSerializeMs"] = round((time.perf_counter() - serialize_started) * 1000, 2)
+        response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
+        response["meta"]["responseSerializeMs"] = 0
         return response
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")

@@ -9,6 +9,8 @@ Provides:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import threading
+import time
 from typing import Any
 
 from api.db import run_query, run_single
@@ -96,6 +98,29 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+_row_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_row_cache_lock = threading.Lock()
+
+
+def _fetch_analysis_rows_cached(
+    *, start: datetime, end: datetime, max_rows: int = 12000
+) -> list[dict]:
+    """Cached wrapper. Returns same list for same window within 30 seconds."""
+    key = (start.isoformat(), end.isoformat())
+    now = time.monotonic()
+    with _row_cache_lock:
+        stale_keys = [cache_key for cache_key, (ts, _rows) in _row_cache.items() if (now - ts) >= 30.0]
+        for stale_key in stale_keys:
+            _row_cache.pop(stale_key, None)
+        entry = _row_cache.get(key)
+        if entry and (now - entry[0]) < 30.0:
+            return entry[1]
+    rows = _fetch_analysis_rows(start=start, end=end, max_rows=max_rows)
+    with _row_cache_lock:
+        _row_cache[key] = (now, rows)
+    return rows
 
 
 def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 12000) -> list[dict]:
@@ -321,8 +346,8 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     - discussion diversity,
     - conversation depth.
     """
-    current_rows = _fetch_analysis_rows(start=ctx.start_at, end=ctx.end_at)
-    previous_rows = _fetch_analysis_rows(start=ctx.previous_start_at, end=ctx.previous_end_at)
+    current_rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
+    previous_rows = _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
     current_intent = _window_intent_stats(current_rows)
     previous_intent = _window_intent_stats(previous_rows)
@@ -568,7 +593,7 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
 
 def get_community_brief(ctx: DashboardDateContext) -> dict:
     """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
-    rows = _fetch_analysis_rows(start=ctx.start_at, end=ctx.end_at)
+    rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
 
     if not rows:
         return _neo4j_brief_fallback(ctx)

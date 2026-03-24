@@ -61,6 +61,38 @@ _cache_lock = threading.Lock()
 
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, Any]] = {}
+_tier_executor_lock = threading.Lock()
+
+
+def _new_tier_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(
+        max_workers=PARALLEL_MAX_WORKERS,
+        thread_name_prefix="dash-tier",
+    )
+
+# Module-level thread pool — reused across all dashboard builds.
+# Replaces per-request ThreadPoolExecutor to avoid thread creation overhead
+# and thread leak from shutdown(wait=False).
+_tier_executor = _new_tier_executor()
+
+
+def _submit_tier_futures(
+    ordered: List[Tuple[str, Callable[[], dict]]],
+) -> tuple[ThreadPoolExecutor, Dict[str, Any]]:
+    with _tier_executor_lock:
+        executor = _tier_executor
+        futures = {name: executor.submit(_run_tier_builder, builder) for name, builder in ordered}
+    return executor, futures
+
+
+def _replace_tier_executor(stale_executor: ThreadPoolExecutor) -> None:
+    """Rotate the shared executor when a timed-out task is still running."""
+    global _tier_executor
+    with _tier_executor_lock:
+        if stale_executor is not _tier_executor:
+            return
+        _tier_executor = _new_tier_executor()
+    stale_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _fallback_tiers(tier_times: Dict[str, Optional[float]]) -> list[str]:
@@ -196,8 +228,6 @@ def _fallback_for_tier(name: str) -> dict:
         return {"businessOpportunities": [], "businessOpportunityBriefs": [], "jobSeeking": [], "jobTrends": [], "housingData": [], "housingHotTopics": []}
     if name == "comparative":
         return {"weeklyShifts": [], "sentimentByTopic": [], "topPosts": [], "contentTypePerformance": [], "vitalityIndicators": {}}
-    if name == "details":
-        return {"allTopics": [], "allChannels": [], "allAudience": []}
     return {}
 
 
@@ -365,18 +395,6 @@ def _tier_comparative(ctx: DashboardDateContext) -> dict:
         return _fallback_for_tier("comparative")
 
 
-def _tier_details() -> dict:
-    try:
-        return {
-            "allTopics": comparative.get_all_topics(page=0, size=500),
-            "allChannels": comparative.get_all_channels(),
-            "allAudience": comparative.get_all_audience(page=0, size=500),
-        }
-    except Exception as e:
-        logger.error(f"Tier details failed: {e}")
-        return _fallback_for_tier("details")
-
-
 def _tier_derived(data: dict) -> dict:
     try:
         return {
@@ -430,30 +448,25 @@ def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = Tru
     ordered = _ordered_tiers(ctx)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
-
-    executor = ThreadPoolExecutor(max_workers=PARALLEL_MAX_WORKERS, thread_name_prefix="dash-tier")
-    futures = {name: executor.submit(_run_tier_builder, builder) for name, builder in ordered}
-
-    try:
-        for name, future in futures.items():
-            try:
-                if use_timeouts:
-                    payload, duration = future.result(timeout=TIER_TIMEOUT_SECONDS)
-                else:
-                    payload, duration = future.result()
-                tier_payloads[name] = payload
-                tier_times[name] = duration
-            except FuturesTimeout:
-                logger.warning(f"Tier {name} timed out after {TIER_TIMEOUT_SECONDS}s — using fallback")
-                tier_payloads[name] = _fallback_for_tier(name)
-                tier_times[name] = None
-            except Exception as e:
-                logger.error(f"Tier {name} crashed — using fallback: {e}")
-                tier_payloads[name] = _fallback_for_tier(name)
-                tier_times[name] = None
-    finally:
-        # wait=False prevents hanging cold starts when a tier thread stalls.
-        executor.shutdown(wait=False)
+    executor, futures = _submit_tier_futures(ordered)
+    for name, future in futures.items():
+        try:
+            if use_timeouts:
+                payload, duration = future.result(timeout=TIER_TIMEOUT_SECONDS)
+            else:
+                payload, duration = future.result()
+            tier_payloads[name] = payload
+            tier_times[name] = duration
+        except FuturesTimeout:
+            logger.warning(f"Tier {name} timed out after {TIER_TIMEOUT_SECONDS}s — using fallback")
+            tier_payloads[name] = _fallback_for_tier(name)
+            tier_times[name] = None
+            if not future.cancel():
+                _replace_tier_executor(executor)
+        except Exception as e:
+            logger.error(f"Tier {name} crashed — using fallback: {e}")
+            tier_payloads[name] = _fallback_for_tier(name)
+            tier_times[name] = None
 
     data: dict = {}
     for name, _builder in ordered:
