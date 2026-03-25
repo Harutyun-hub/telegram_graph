@@ -21,6 +21,8 @@ import asyncio
 import hmac
 import threading
 import time
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
@@ -40,6 +42,7 @@ from loguru import logger
 from api.aggregator import (
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
+    get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
     invalidate_cache
 )
 from api.dashboard_dates import build_dashboard_date_context
@@ -64,10 +67,73 @@ from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
+APP_ROLE = os.getenv("APP_ROLE", "web").strip().lower()
+RUN_STARTUP_WARMERS = str(os.getenv("RUN_STARTUP_WARMERS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+_SERVER_TIMING_PATHS = {
+    "/api/dashboard",
+    "/api/topics",
+    "/api/topics/detail",
+    "/api/topics/evidence",
+}
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
+    logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
+
+    if APP_ROLE == "worker":
+        scheduler = get_scraper_scheduler()
+        await scheduler.startup()
+        _start_question_cards_scheduler()
+        _start_behavioral_cards_scheduler()
+        _start_opportunity_cards_scheduler()
+        if RUN_STARTUP_WARMERS:
+            asyncio.create_task(_warm_dashboard_cache())
+            if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_question_cards_once(force=False))
+            if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_behavioral_cards_once(force=False))
+            if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_opportunity_cards_once(force=False))
+    else:
+        logger.info("Web runtime ready | startup warmers disabled")
+
+    try:
+        yield
+    finally:
+        global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler
+        global scraper_scheduler, supabase_writer
+        if question_cards_scheduler is not None:
+            try:
+                question_cards_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            question_cards_scheduler = None
+        if behavioral_cards_scheduler is not None:
+            try:
+                behavioral_cards_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            behavioral_cards_scheduler = None
+        if opportunity_cards_scheduler is not None:
+            try:
+                opportunity_cards_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            opportunity_cards_scheduler = None
+        if scraper_scheduler is not None:
+            await scraper_scheduler.shutdown()
+            scraper_scheduler = None
+        supabase_writer = None
+        db.close()
+        logger.info("API server shut down — Neo4j driver closed")
+
 app = FastAPI(
     title="Radar Obshchiny API",
     description="Dashboard data API for the Radar Obshchiny community intelligence platform",
     version="1.0.0",
+    lifespan=app_lifespan,
 )
 
 _cors_allow_origins = config.CORS_ALLOW_ORIGINS or ["*"]
@@ -80,6 +146,56 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _format_server_timing(request: Request, total_ms: float) -> str:
+    metrics = [f"app;dur={total_ms:.2f}"]
+    query_ms = getattr(request.state, "query_ms", None)
+    if isinstance(query_ms, (int, float)):
+        metrics.append(f"query;dur={float(query_ms):.2f}")
+    return ", ".join(metrics)
+
+
+def _record_query_timing(request: Request, started_at: float, *, cache_status: Optional[str] = None) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    request.state.query_ms = round(elapsed_ms, 2)
+    if cache_status:
+        request.state.cache_status = cache_status
+
+
+@app.middleware("http")
+async def request_metrics_middleware(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        if response is not None:
+            response.headers["X-Request-ID"] = request_id
+            if request.url.path in _SERVER_TIMING_PATHS:
+                response.headers["Server-Timing"] = _format_server_timing(request, elapsed_ms)
+        payload: dict[str, Any] = {
+            "level": "info",
+            "message": "request_completed",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
+        }
+        cache_status = getattr(request.state, "cache_status", None)
+        if cache_status:
+            payload["cache_status"] = cache_status
+        query_ms = getattr(request.state, "query_ms", None)
+        if isinstance(query_ms, (int, float)):
+            payload["query_ms"] = round(float(query_ms), 2)
+        logger.info(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 
 
 class AIQueryRequest(BaseModel):
@@ -149,8 +265,8 @@ class TopicProposalReviewRequest(BaseModel):
     reviewed_by: Optional[str] = Field(default=None, max_length=120)
 
 
-supabase_writer = SupabaseWriter()
-scraper_scheduler = ScraperSchedulerService(supabase_writer)
+supabase_writer: SupabaseWriter | None = None
+scraper_scheduler: ScraperSchedulerService | None = None
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
@@ -215,6 +331,50 @@ def _admin_prompt_defaults() -> dict[str, str]:
     ):
         defaults.update(provider())
     return defaults
+
+
+def get_supabase_writer() -> SupabaseWriter:
+    global supabase_writer
+    if supabase_writer is None:
+        supabase_writer = SupabaseWriter()
+    return supabase_writer
+
+
+def get_scraper_scheduler() -> ScraperSchedulerService:
+    global scraper_scheduler
+    if scraper_scheduler is None:
+        scraper_scheduler = ScraperSchedulerService(get_supabase_writer())
+    return scraper_scheduler
+
+
+def get_current_scraper_scheduler_status() -> dict[str, Any]:
+    if scraper_scheduler is None:
+        return {
+            "status": "stopped",
+            "is_active": False,
+            "interval_minutes": 15,
+            "running_now": False,
+            "last_run_started_at": None,
+            "last_run_finished_at": None,
+            "last_success_at": None,
+            "next_run_at": None,
+            "last_error": None,
+            "last_result": None,
+            "last_mode": "normal",
+            "catchup_limits": {
+                "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
+                "post_limit": config.AI_CATCHUP_POST_LIMIT,
+                "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
+            },
+            "normal_limits": {
+                "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
+                "post_limit": config.AI_NORMAL_POST_LIMIT,
+                "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
+            },
+            "run_history": [],
+            "persisted": None,
+        }
+    return scraper_scheduler.status()
 
 
 def _default_admin_config() -> dict[str, Any]:
@@ -484,8 +644,8 @@ def _trusted_end_date_from_freshness(snapshot: dict) -> datetime.date:
 
 def _dashboard_freshness_snapshot(force_refresh: bool = False) -> dict:
     return get_freshness_snapshot(
-        supabase_writer,
-        scheduler_status=scraper_scheduler.status(),
+        get_supabase_writer(),
+        scheduler_status=get_current_scraper_scheduler_status(),
         force_refresh=force_refresh,
     )
 
@@ -686,7 +846,7 @@ async def _try_enrich_channel_metadata(
         if not metadata.get("channel_title") and fallback_title:
             metadata["channel_title"] = fallback_title
 
-        supabase_writer.update_channel_metadata(channel_uuid, metadata)
+        get_supabase_writer().update_channel_metadata(channel_uuid, metadata)
     except Exception as e:
         logger.warning(f"Metadata enrichment failed for {username}: {e}")
     finally:
@@ -786,8 +946,9 @@ def _taxonomy_quality_snapshot() -> dict:
         """
     ) or {}
 
-    pending_proposals = len(supabase_writer.list_topic_proposals(status="pending", limit=500))
-    visible_emerging_proposals = len(supabase_writer.list_emerging_topic_candidates(status="pending", limit=500))
+    writer = get_supabase_writer()
+    pending_proposals = len(writer.list_topic_proposals(status="pending", limit=500))
+    visible_emerging_proposals = len(writer.list_emerging_topic_candidates(status="pending", limit=500))
 
     total_topics = int(general_stats.get("total") or 0)
     general_topics = int(general_stats.get("general_topics") or 0)
@@ -959,6 +1120,12 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
+@app.get("/readyz")
+async def readyz():
+    """Cheap readiness probe that avoids database work."""
+    return {"status": "ready", "role": APP_ROLE}
+
+
 @app.get("/api/health")
 async def health():
     """Health check."""
@@ -971,6 +1138,7 @@ async def health():
 
 @app.get("/api/dashboard", dependencies=[Depends(require_analytics_access)])
 async def dashboard(
+    request: Request,
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
 ):
@@ -986,7 +1154,13 @@ async def dashboard(
         else:
             ctx = build_dashboard_date_context(from_date, to_date)
         loop = asyncio.get_running_loop()
+        query_started_at = time.perf_counter()
         dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
+        _record_query_timing(
+            request,
+            query_started_at,
+            cache_status=str(dashboard_runtime_meta.get("cacheStatus") or ""),
+        )
         response = {
             "data": dashboard_data,
             "meta": {
@@ -1039,6 +1213,7 @@ async def ai_query(request: AIQueryRequest):
 
 @app.get("/api/topics", dependencies=[Depends(require_analytics_access)])
 async def topics(
+    request: Request,
     page: int = Query(0, ge=0),
     size: int = Query(500, ge=1, le=1000),
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -1048,7 +1223,10 @@ async def topics(
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: get_topics_page(page, size, ctx))
+        query_started_at = time.perf_counter()
+        payload = await loop.run_in_executor(None, lambda: get_topics_page(page, size, ctx))
+        _record_query_timing(request, query_started_at)
+        return payload
     except Exception as e:
         logger.error(f"Topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1056,6 +1234,7 @@ async def topics(
 
 @app.get("/api/topics/detail", dependencies=[Depends(require_analytics_access)])
 async def topic_detail(
+    request: Request,
     topic: str = Query(..., min_length=1),
     category: Optional[str] = Query(default=None),
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -1065,7 +1244,9 @@ async def topic_detail(
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
         loop = asyncio.get_running_loop()
+        query_started_at = time.perf_counter()
         payload = await loop.run_in_executor(None, lambda: get_topic_detail(topic, category, ctx))
+        _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
         return payload
@@ -1073,6 +1254,41 @@ async def topic_detail(
         raise
     except Exception as e:
         logger.error(f"Topic detail endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/topics/evidence", dependencies=[Depends(require_analytics_access)])
+async def topic_evidence(
+    request: Request,
+    topic: str = Query(..., min_length=1),
+    category: Optional[str] = Query(default=None),
+    view: str = Query(default="all"),
+    page: int = Query(0, ge=0),
+    size: int = Query(20, ge=1, le=50),
+    focus_id: Optional[str] = Query(default=None, alias="focusId"),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Paginated topic evidence feed for the selected window."""
+    try:
+        normalized_view = (view or "all").strip().lower()
+        if normalized_view not in {"all", "questions"}:
+            raise HTTPException(status_code=422, detail="view must be 'all' or 'questions'.")
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        query_started_at = time.perf_counter()
+        payload = await loop.run_in_executor(
+            None,
+            lambda: get_topic_evidence_page(topic, category, normalized_view, page, size, focus_id, ctx),
+        )
+        _record_query_timing(request, query_started_at)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Topic evidence endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1112,6 +1328,29 @@ async def channel_detail(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/channels/posts", dependencies=[Depends(require_analytics_access)])
+async def channel_posts(
+    channel: str = Query(..., min_length=1),
+    page: int = Query(0, ge=0),
+    size: int = Query(20, ge=1, le=50),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Paginated recent posts feed for a selected channel."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_channel_posts_page(channel, page, size, ctx))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Channel posts endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/graph", dependencies=[Depends(require_analytics_access)])
 async def graph_data(payload: GraphRequest):
     """Graph dataset for /graph page (server-side Neo4j)."""
@@ -1119,8 +1358,8 @@ async def graph_data(payload: GraphRequest):
         filters = payload.model_dump(exclude_none=True)
         graph = graph_dashboard.get_graph_data(filters)
         freshness = get_freshness_snapshot(
-            supabase_writer,
-            scheduler_status=scraper_scheduler.status(),
+            get_supabase_writer(),
+            scheduler_status=get_current_scraper_scheduler_status(),
         )
         if not isinstance(graph, dict):
             return graph
@@ -1315,7 +1554,7 @@ async def update_admin_config(payload: AdminConfigPatchRequest):
 async def list_channel_sources():
     """List configured Telegram channel sources from Supabase."""
     try:
-        items = supabase_writer.list_channels()
+        items = get_supabase_writer().list_channels()
         return {"count": len(items), "items": items}
     except Exception as e:
         logger.error(f"List source channels error: {e}")
@@ -1333,7 +1572,8 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
         provided_title = (payload.channel_title or "").strip()
         channel_title = provided_title or normalized_handle
 
-        existing = supabase_writer.get_channel_by_handle(normalized_handle)
+        writer = get_supabase_writer()
+        existing = writer.get_channel_by_handle(normalized_handle)
         if existing:
             update_payload = {
                 "channel_username": canonical_username,
@@ -1350,17 +1590,17 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
                 update_payload["is_active"] = True
                 action = "reactivated"
 
-            updated = supabase_writer.update_channel(existing["id"], update_payload)
+            updated = writer.update_channel(existing["id"], update_payload)
             if updated:
                 await _try_enrich_channel_metadata(
                     updated["id"],
                     updated.get("channel_username") or canonical_username,
                     updated.get("channel_title"),
                 )
-                updated = supabase_writer.get_channel_by_id(updated["id"]) or updated
+                updated = writer.get_channel_by_id(updated["id"]) or updated
             return {"action": action, "item": updated}
 
-        created = supabase_writer.create_channel(
+        created = writer.create_channel(
             {
                 "channel_username": canonical_username,
                 "channel_title": channel_title,
@@ -1374,7 +1614,7 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
             created.get("channel_username") or canonical_username,
             created.get("channel_title"),
         )
-        created = supabase_writer.get_channel_by_id(created["id"]) or created
+        created = writer.get_channel_by_id(created["id"]) or created
         return {"action": "created", "item": created}
     except HTTPException:
         raise
@@ -1387,7 +1627,8 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
 async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateRequest):
     """Update source settings (active flag and scrape settings)."""
     try:
-        existing = supabase_writer.get_channel_by_id(channel_id)
+        writer = get_supabase_writer()
+        existing = writer.get_channel_by_id(channel_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Channel source not found")
 
@@ -1402,14 +1643,14 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
         if not update_payload:
             raise HTTPException(status_code=400, detail="No update fields provided")
 
-        updated = supabase_writer.update_channel(channel_id, update_payload)
+        updated = writer.update_channel(channel_id, update_payload)
         if updated and updated.get("is_active"):
             await _try_enrich_channel_metadata(
                 updated["id"],
                 updated.get("channel_username") or "",
                 updated.get("channel_title"),
             )
-            updated = supabase_writer.get_channel_by_id(updated["id"]) or updated
+            updated = writer.get_channel_by_id(updated["id"]) or updated
         return {"item": updated}
     except HTTPException:
         raise
@@ -1421,7 +1662,7 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 @app.get("/api/scraper/scheduler")
 async def get_scraper_scheduler_status():
     """Current scraper scheduler runtime status."""
-    return scraper_scheduler.status()
+    return get_scraper_scheduler().status()
 
 
 @app.get("/api/freshness", dependencies=[Depends(require_analytics_access)])
@@ -1429,8 +1670,8 @@ async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
         return get_freshness_snapshot(
-            supabase_writer,
-            scheduler_status=scraper_scheduler.status(),
+            get_supabase_writer(),
+            scheduler_status=get_current_scraper_scheduler_status(),
             force_refresh=force,
         )
     except Exception as e:
@@ -1455,7 +1696,7 @@ async def taxonomy_quality_snapshot():
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
-        return await scraper_scheduler.start()
+        return await get_scraper_scheduler().start()
     except Exception as e:
         logger.error(f"Start scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1465,7 +1706,7 @@ async def start_scraper_scheduler():
 async def stop_scraper_scheduler():
     """Stop recurring scraper schedule."""
     try:
-        return await scraper_scheduler.stop()
+        return await get_scraper_scheduler().stop()
     except Exception as e:
         logger.error(f"Stop scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1475,7 +1716,7 @@ async def stop_scraper_scheduler():
 async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
     """Update scraper scheduler interval in minutes."""
     try:
-        return await scraper_scheduler.set_interval(payload.interval_minutes)
+        return await get_scraper_scheduler().set_interval(payload.interval_minutes)
     except Exception as e:
         logger.error(f"Update scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1485,7 +1726,7 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
 async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
-        return await scraper_scheduler.run_once()
+        return await get_scraper_scheduler().run_once()
     except Exception as e:
         logger.error(f"Run-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1495,7 +1736,7 @@ async def run_scraper_once():
 async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
-        return await scraper_scheduler.run_catchup_once()
+        return await get_scraper_scheduler().run_catchup_once()
     except Exception as e:
         logger.error(f"Catchup-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1509,7 +1750,7 @@ async def list_ai_failures(
 ):
     """List AI processing failure scopes for operator triage."""
     try:
-        items = supabase_writer.list_processing_failures(
+        items = get_supabase_writer().list_processing_failures(
             dead_letter_only=dead_letter_only,
             scope_type=scope_type,
             limit=limit,
@@ -1531,7 +1772,7 @@ async def retry_ai_failures(payload: FailureRetryRequest):
         raise HTTPException(status_code=400, detail="scope_type must be 'comment_group' or 'post'")
 
     try:
-        retried = supabase_writer.retry_processing_failures(
+        retried = get_supabase_writer().retry_processing_failures(
             scope_type=scope_type,
             scope_keys=payload.scope_keys,
         )
@@ -1553,7 +1794,7 @@ async def list_taxonomy_proposals(
 ):
     """List proposed topics for review queue triage."""
     try:
-        items = supabase_writer.list_topic_proposals(status=status, limit=limit)
+        items = get_supabase_writer().list_topic_proposals(status=status, limit=limit)
         normalized_visibility = (visibility_state or "").strip().lower()
 
         if visible_only:
@@ -1589,7 +1830,7 @@ async def list_taxonomy_trending_new(
 ):
     """List emerging proposed topics eligible for frontend visibility."""
     try:
-        items = supabase_writer.list_emerging_topic_candidates(status=status, limit=limit)
+        items = get_supabase_writer().list_emerging_topic_candidates(status=status, limit=limit)
         return {
             "count": len(items),
             "status": status,
@@ -1608,7 +1849,7 @@ async def review_taxonomy_proposal(payload: TopicProposalReviewRequest):
         raise HTTPException(status_code=400, detail="decision must be 'approve' or 'reject'")
 
     try:
-        item = supabase_writer.review_topic_proposal(
+        item = get_supabase_writer().review_topic_proposal(
             topic_name=payload.topic_name,
             decision=decision,
             canonical_topic=payload.canonical_topic,
@@ -1638,7 +1879,7 @@ async def list_taxonomy_promotions(
 ):
     """List runtime topic promotion aliases."""
     try:
-        items = supabase_writer.list_topic_promotions(limit=limit, active_only=active_only)
+        items = get_supabase_writer().list_topic_promotions(limit=limit, active_only=active_only)
         return {
             "count": len(items),
             "active_only": active_only,
@@ -1653,7 +1894,7 @@ async def list_taxonomy_promotions(
 async def reload_taxonomy_promotions():
     """Reload runtime alias map from approved promotions table."""
     try:
-        loaded = supabase_writer.refresh_runtime_topic_aliases()
+        loaded = get_supabase_writer().refresh_runtime_topic_aliases()
         return {
             "loaded_aliases": int(loaded),
         }
@@ -1697,6 +1938,29 @@ async def audience_detail(
         raise
     except Exception as e:
         logger.error(f"Audience detail endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audience/messages", dependencies=[Depends(require_analytics_access)])
+async def audience_messages(
+    user_id: str = Query(..., alias="userId", min_length=1),
+    page: int = Query(0, ge=0),
+    size: int = Query(20, ge=1, le=50),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Paginated recent messages feed for a selected audience member."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_audience_messages_page(user_id, page, size, ctx))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Audience messages endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1769,51 +2033,6 @@ async def debug_refresh_opportunity_briefs():
     except Exception as e:
         logger.error(f"Opportunity briefs debug refresh endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Shutdown hook ────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup():
-    key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
-    logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp}")
-    await scraper_scheduler.startup()
-    _start_question_cards_scheduler()
-    _start_behavioral_cards_scheduler()
-    _start_opportunity_cards_scheduler()
-    asyncio.create_task(_warm_dashboard_cache())
-    if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
-        asyncio.create_task(_materialize_question_cards_once(force=False))
-    if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
-        asyncio.create_task(_materialize_behavioral_cards_once(force=False))
-    if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
-        asyncio.create_task(_materialize_opportunity_cards_once(force=False))
-
-@app.on_event("shutdown")
-async def shutdown():
-    global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler
-    if question_cards_scheduler is not None:
-        try:
-            question_cards_scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        question_cards_scheduler = None
-    if behavioral_cards_scheduler is not None:
-        try:
-            behavioral_cards_scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        behavioral_cards_scheduler = None
-    if opportunity_cards_scheduler is not None:
-        try:
-            opportunity_cards_scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        opportunity_cards_scheduler = None
-    await scraper_scheduler.shutdown()
-    db.close()
-    logger.info("API server shut down — Neo4j driver closed")
-
 
 if __name__ == "__main__":
     import uvicorn

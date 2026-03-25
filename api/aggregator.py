@@ -676,6 +676,23 @@ def get_topic_detail(
     return _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
 
 
+def get_topic_evidence_page(
+    topic_name: str,
+    category: Optional[str] = None,
+    view: str = "all",
+    page: int = 0,
+    size: int = 20,
+    focus_id: Optional[str] = None,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"topic-evidence:{resolved_ctx.cache_key}:{topic_name}:{category or ''}:{view}:{page}:{size}:{focus_id or ''}"
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_topic_evidence_page(topic_name, category, view, page, size, focus_id, resolved_ctx),
+    )
+
+
 def get_channel_detail(
     channel_key: str,
     ctx: Optional[DashboardDateContext] = None,
@@ -685,6 +702,20 @@ def get_channel_detail(
     return _get_cached_detail_value(cache_key, lambda: comparative.get_channel_detail(channel_key, resolved_ctx))
 
 
+def get_channel_posts_page(
+    channel_key: str,
+    page: int = 0,
+    size: int = 20,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"channel-posts:{resolved_ctx.cache_key}:{channel_key}:{page}:{size}"
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_channel_posts_page(channel_key, page, size, resolved_ctx),
+    )
+
+
 def get_audience_detail(
     user_id: str,
     ctx: Optional[DashboardDateContext] = None,
@@ -692,3 +723,17 @@ def get_audience_detail(
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"audience-detail:{resolved_ctx.cache_key}:{user_id}"
     return _get_cached_detail_value(cache_key, lambda: comparative.get_audience_detail(user_id, resolved_ctx))
+
+
+def get_audience_messages_page(
+    user_id: str,
+    page: int = 0,
+    size: int = 20,
+    ctx: Optional[DashboardDateContext] = None,
+) -> Optional[dict]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = f"audience-messages:{resolved_ctx.cache_key}:{user_id}:{page}:{size}"
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_audience_messages_page(user_id, page, size, resolved_ctx),
+    )
