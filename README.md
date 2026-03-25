@@ -115,12 +115,12 @@ Backend:
 - `ANALYTICS_RATE_LIMIT_ENABLED` default `true`
 - `ANALYTICS_RATE_LIMIT_WINDOW_SECONDS` default `60`
 - `ANALYTICS_RATE_LIMIT_MAX_REQUESTS` default `120`
-- `OPENAI_MODEL` default `gpt-5-nano`
-- `QUESTION_BRIEFS_MODEL` default `gpt-5-nano`
-- `QUESTION_BRIEFS_TRIAGE_MODEL` default `gpt-5-nano`
-- `QUESTION_BRIEFS_SYNTHESIS_MODEL` default `gpt-5-nano`
+- `OPENAI_MODEL` default `gpt-5.4-mini`
+- `QUESTION_BRIEFS_MODEL` default `gpt-5.4-mini`
+- `QUESTION_BRIEFS_TRIAGE_MODEL` default `gpt-5.4-mini`
+- `QUESTION_BRIEFS_SYNTHESIS_MODEL` default `gpt-5.4-mini`
 - `GRAPH_ANALYTICS_RETENTION_DAYS` default `15`
-- `BEHAVIORAL_BRIEFS_MODEL` default `gpt-5-nano`
+- `BEHAVIORAL_BRIEFS_MODEL` default `gpt-5.4-mini`
 - `BEHAVIORAL_BRIEFS_PROMPT_VERSION` default `behavior-v2`
 
 Frontend:
@@ -130,9 +130,9 @@ Frontend:
 
 ## AI Systems
 
-- The main extraction pipeline defaults to `gpt-5-nano` through `OPENAI_MODEL`.
-- Question briefs default to `gpt-5-nano` for primary, triage, and synthesis passes.
-- Behavioral briefs default to `gpt-5-nano`.
+- The main extraction pipeline defaults to `gpt-5.4-mini` through `OPENAI_MODEL`.
+- Question briefs default to `gpt-5.4-mini` for primary, triage, and synthesis passes.
+- Behavioral briefs default to `gpt-5.4-mini`.
 - Service-gap cards are generated only from grounded service/help evidence in posts and related comments. There is no production fallback that turns generic topic dissatisfaction into service-gap bars.
 
 ## Railway Compatibility

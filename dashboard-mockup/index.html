@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Радар Общины - Дашборд</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon"><i class="ph ph-radar"></i></div>
+                <div class="brand-text">
+                    <h1>Радар Общины</h1>
+                    <span>Платформа</span>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <h2 class="nav-title">МЕНЮ</h2>
+                <ul>
+                    <li class="active"><a href="#"><i class="ph ph-squares-four"></i> Дашборд</a></li>
+                    <li><a href="#"><i class="ph ph-hash"></i> Темы</a></li>
+                    <li><a href="#"><i class="ph ph-broadcast"></i> Каналы</a></li>
+                    <li><a href="#"><i class="ph ph-users"></i> Аудитория</a></li>
+                    <li><a href="#"><i class="ph ph-graph"></i> Граф связей</a></li>
+                    <li><a href="#"><i class="ph ph-crosshair"></i> Источники</a></li>
+                    <li><a href="#"><i class="ph ph-shield"></i> Админ</a></li>
+                    <li><a href="#"><i class="ph ph-gear"></i> Настройки</a></li>
+                </ul>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-header">
+                <div class="search-bar">
+                    <i class="ph ph-magnifying-glass"></i>
+                    <input type="text" placeholder="Поиск по темам, каналам, участникам...">
+                </div>
+                <div class="header-actions">
+                    <div class="date-picker">
+                        <i class="ph ph-calendar-blank"></i> Последние 15 дней
+                        <span class="date-subtext">Data through today</span>
+                    </div>
+                    <div class="switcher-group">
+                        <div class="lang-switcher">
+                            <button class="active">EN</button>
+                            <button>РУ</button>
+                        </div>
+                    </div>
+                    <div class="notifications">
+                        <i class="ph ph-bell"></i>
+                        <span class="badge">3</span>
+                    </div>
+                    <div class="user-profile">
+                        <div class="avatar"><i class="ph ph-user"></i></div>
+                        <div class="user-info">
+                            <span class="name">Rakib</span>
+                            <span class="role">Менеджер</span>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Dashboard Content -->
+            <div class="dashboard-scroll-area">
+                <div class="dashboard-header">
+                    <div class="title-area">
+                        <h1>Аналитика сообщества</h1>
+                        <p>22 виджетов · 979 сообщений · 19 мин назад</p>
+                    </div>
+                    <div class="header-controls">
+                        <!-- Single combined toggle instead of separate Expand/Collapse -->
+                        <button class="btn btn-secondary"><i class="ph ph-caret-up"></i> Свернуть всё</button>
+                    </div>
+                </div>
+
+                <!-- Pulse Widget -->
+                <section class="widget widget-pulse">
+                    <div class="pulse-content">
+                        <i class="ph ph-eye"></i>
+                        <div class="pulse-text">
+                            <h3>Пульс сообщества</h3>
+                            <p>Сводка для руководства за 30 секунд</p>
+                        </div>
+                    </div>
+                    <button class="btn btn-text btn-icon"><i class="ph ph-caret-down"></i></button>
+                </section>
+
+                <!-- Snapshot Widget -->
+                <section class="widget widget-snapshot">
+                    <div class="widget-header">
+                        <div class="widget-title">
+                            <div class="icon-circle icon-blue"><i class="ph ph-chart-bar"></i></div>
+                            <div>
+                                <h2>Снимок сообщества</h2>
+                                <p>Обновлено 19 мин назад · проанализировано 979 единиц</p>
+                            </div>
+                        </div>
+                        <button class="btn btn-text"><i class="ph ph-clock-counter-clockwise"></i> Обновление по новым данным</button>
+                    </div>
+
+                    <div class="snapshot-alert">
+                        <h4><i class="ph ph-chart-line-up"></i> Снимок за 15 дней</h4>
+                        <p>Снимок выбранного окна (15 дн.): 685 постов и 294 контекстных групп комментариев.</p>
+                    </div>
+
+                    <div class="metrics-grid">
+                        <div class="metric-card metric-neutral">
+                            <i class="ph ph-chat-circle"></i>
+                            <div class="metric-val">685</div>
+                            <div class="metric-label">Постов проанализировано</div>
+                        </div>
+                        <div class="metric-card metric-neutral">
+                            <i class="ph ph-chat-teardrop"></i>
+                            <div class="metric-val">294</div>
+                            <div class="metric-label">Контекстных групп комментариев</div>
+                        </div>
+                        <!-- Color semantics properly fixed here -->
+                        <div class="metric-card metric-positive">
+                            <i class="ph ph-heart"></i>
+                            <div class="metric-val">35%</div>
+                            <div class="metric-label">Позитивный интент</div>
+                        </div>
+                        <div class="metric-card metric-negative">
+                            <i class="ph ph-lightning"></i>
+                            <div class="metric-val">60%</div>
+                            <div class="metric-label">Негативный интент</div>
+                        </div>
+                    </div>
+                    <a href="#" class="help-link">Как читать эти метрики <i class="ph ph-arrow-right"></i></a>
+                </section>
+
+                <div class="dashboard-grid-2col">
+                    <!-- Climate Widget -->
+                    <section class="widget widget-climate">
+                        <div class="widget-header">
+                            <div>
+                                <h2>Климат сообщества</h2>
+                                <p>Объяснимый индекс по интенту</p>
+                            </div>
+                            <span class="badge-warning">Хрупкий баланс</span>
+                        </div>
+                        <div class="climate-content">
+                            <div class="gauge-container">
+                                <div class="gauge-circle">
+                                    <div class="gauge-value">44</div>
+                                    <div class="gauge-label">индекс</div>
+                                </div>
+                            </div>
+                            <div class="bars-container">
+                                <div class="bar-item">
+                                    <div class="bar-labels">
+                                        <span>Конструктивный интент</span>
+                                        <div class="bar-stats">
+                                            <span class="current">35</span>
+                                            <span class="delta negative">↓ 9</span>
+                                        </div>
+                                    </div>
+                                    <div class="bar-track"><div class="bar-fill" style="width: 35%;"></div></div>
+                                </div>
+                                <div class="bar-item">
+                                    <div class="bar-labels">
+                                        <span>Эмоциональная стабильность</span>
+                                        <div class="bar-stats">
+                                            <span class="current">40</span>
+                                            <span class="delta negative">↓ 8</span>
+                                        </div>
+                                    </div>
+                                    <div class="bar-track"><div class="bar-fill" style="width: 40%;"></div></div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Trending Widget -->
+                    <section class="widget widget-trending">
+                        <div class="widget-header flex-between">
+                            <div class="tabs">
+                                <button class="tab active">Текущие <span class="tab-indicator">●</span></button>
+                                <button class="tab">Новые тренды</button>
+                            </div>
+                            <span class="meta-text">15 дней</span>
+                        </div>
+                        <div class="trending-list">
+                            <div class="trend-item active">
+                                <div class="trend-icon"><i class="ph ph-magnifying-glass"></i></div>
+                                <div class="trend-content">
+                                    <h4>Оценка работы правительства Армении</h4>
+                                    <div class="trend-meta">
+                                        <span class="tag">Государственное управление и лидерство</span>
+                                        <span class="mentions">177 упоминаний</span>
+                                        <span class="trend-delta negative">↓ 28 к прошлому окну</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            
+            <!-- Global FAB fixed properly at bottom right -->
+            <button class="global-ai-fab">
+                <i class="ph-fill ph-sparkle"></i>
+            </button>
+        </main>
+    </div>
+</body>
+</html>

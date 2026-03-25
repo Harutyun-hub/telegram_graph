@@ -196,7 +196,7 @@ Behavioral briefs cover:
 
 Current default model:
 
-- `BEHAVIORAL_BRIEFS_MODEL = gpt-5-nano`
+- `BEHAVIORAL_BRIEFS_MODEL = gpt-5.4-mini`
 
 Current prompt/version behavior:
 
@@ -222,11 +222,11 @@ Deterministic service-card fallback is intentionally disabled for production beh
 
 Current defaults:
 
-- `OPENAI_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5-nano`
-- `BEHAVIORAL_BRIEFS_MODEL = gpt-5-nano`
+- `OPENAI_MODEL = gpt-5.4-mini`
+- `QUESTION_BRIEFS_MODEL = gpt-5.4-mini`
+- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5.4-mini`
+- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5.4-mini`
+- `BEHAVIORAL_BRIEFS_MODEL = gpt-5.4-mini`
 
 ## 7. Railway Deployment Compatibility
 

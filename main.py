@@ -3,7 +3,7 @@ main.py — Pipeline orchestration.
 
 Three async jobs run on a schedule:
   1. scrape_job()     — fetches new posts + comments from Telegram
-  2. process_job()    — sends unprocessed content to AI (GPT-4o-mini)
+  2. process_job()    — sends unprocessed content to the configured OpenAI extraction model
   3. neo4j_sync_job() — pushes AI results into Neo4j graph
 
 Run with:  python main.py
@@ -72,7 +72,7 @@ async def scrape_job():
 # ── Job 2: AI Processor ───────────────────────────────────────────────────────
 
 async def process_job():
-    """Send unprocessed comments and posts to GPT-4o-mini."""
+    """Send unprocessed comments and posts to the configured extraction model."""
     logger.info("═══ AI PROCESS JOB STARTED ═══")
 
     # Process comments (main behavioral analysis)

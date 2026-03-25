@@ -41,8 +41,16 @@ frontend/.env.*.local
 # Backup and test files
 *.bak
 *.bak2
+*.bak.*
 test_*.py
 snapshot_output.json
+
+# macOS / local artifacts
+.DS_Store
+telegram_qr.png
+telegram_login_qr.png
+railway_session_string.txt
+telegram_session_*_string.txt
 
 # Backup directory
 backups/
