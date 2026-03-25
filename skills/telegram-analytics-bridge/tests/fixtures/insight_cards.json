@@ -1,0 +1,35 @@
+{
+  "cards": [
+    {
+      "id": "topic-momentum",
+      "title": "Residency permits",
+      "summary": "Residency permit conversations have the highest recent momentum.",
+      "why_it_matters": "Documentation confusion and delays are concentrating user attention.",
+      "confidence": 78,
+      "priority": "high",
+      "evidence": [
+        {
+          "query_id": "top_topics",
+          "metric": "posts",
+          "value": 42
+        }
+      ]
+    },
+    {
+      "id": "dominant-sentiment",
+      "title": "Negative pressure",
+      "summary": "Negative and urgent reactions are elevated in the current window.",
+      "why_it_matters": "Emotional pressure suggests unresolved operational friction.",
+      "confidence": 72,
+      "priority": "medium",
+      "evidence": [
+        {
+          "query_id": "sentiment_breakdown",
+          "metric": "mentions",
+          "value": 46
+        }
+      ]
+    }
+  ],
+  "source": "deterministic_fallback"
+}

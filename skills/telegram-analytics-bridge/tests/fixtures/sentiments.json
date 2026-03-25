@@ -1,0 +1,18 @@
+[
+  {
+    "label": "Negative",
+    "count": 38
+  },
+  {
+    "label": "Neutral",
+    "count": 21
+  },
+  {
+    "label": "Positive",
+    "count": 17
+  },
+  {
+    "label": "Urgent",
+    "count": 8
+  }
+]

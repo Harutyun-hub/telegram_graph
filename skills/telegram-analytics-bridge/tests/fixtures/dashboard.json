@@ -1,0 +1,195 @@
+{
+  "data": {
+    "trendingTopics": [
+      {
+        "name": "Residency permits",
+        "category": "Documents",
+        "mentions": 42,
+        "trendPct": 31.5,
+        "sampleQuote": "Permit processing is taking much longer than expected."
+      },
+      {
+        "name": "Rental costs",
+        "category": "Housing",
+        "mentions": 37,
+        "trendPct": -18.0,
+        "sampleQuote": "Two-bedroom prices went up again this week."
+      },
+      {
+        "name": "School admissions",
+        "category": "Education",
+        "mentions": 24,
+        "trendPct": 12.0,
+        "sampleQuote": "Parents are comparing waitlists and deadlines."
+      }
+    ],
+    "topicBubbles": [
+      {
+        "name": "Rental costs",
+        "category": "Housing",
+        "mentionCount": 37,
+        "growthSupport": 14,
+        "growth7dPct": -18.0
+      },
+      {
+        "name": "Freelance tax",
+        "category": "Finance",
+        "mentionCount": 18,
+        "growthSupport": 10,
+        "growth7dPct": -9.5
+      },
+      {
+        "name": "Residency permits",
+        "category": "Documents",
+        "mentionCount": 42,
+        "growthSupport": 16,
+        "growth7dPct": 31.5
+      }
+    ],
+    "problemBriefs": [
+      {
+        "id": "pb-residency",
+        "topic": "Residency permits",
+        "category": "Documents",
+        "problemEn": "Permit processing delays are creating uncertainty for newcomers.",
+        "summaryEn": "Users report longer waits, conflicting document guidance, and repeated in-person visits.",
+        "severity": "high",
+        "confidence": "high",
+        "confidenceScore": 0.87,
+        "demandSignals": {
+          "messages": 21,
+          "uniqueUsers": 12,
+          "channels": 4,
+          "trend7dPct": 27
+        },
+        "evidence": [
+          {
+            "id": "ev-1",
+            "quote": "The permit office asked for new paperwork after three weeks.",
+            "channel": "Docs Chat",
+            "timestamp": "2026-03-18T12:00:00Z",
+            "kind": "message"
+          },
+          {
+            "id": "ev-2",
+            "quote": "I got different instructions from two people on the same day.",
+            "channel": "Docs Chat",
+            "timestamp": "2026-03-18T14:00:00Z",
+            "kind": "message"
+          }
+        ]
+      },
+      {
+        "id": "pb-rent",
+        "topic": "Rental costs",
+        "category": "Housing",
+        "problemEn": "Rent inflation is pushing households out of preferred districts.",
+        "summaryEn": "Conversation centers on price jumps, fewer listings, and tighter budgets.",
+        "severity": "medium",
+        "confidence": "high",
+        "confidenceScore": 0.82,
+        "demandSignals": {
+          "messages": 15,
+          "uniqueUsers": 9,
+          "channels": 3,
+          "trend7dPct": 11
+        },
+        "evidence": [
+          {
+            "id": "ev-3",
+            "quote": "My landlord raised the price by 25% with no notice.",
+            "channel": "Rent Armenia",
+            "timestamp": "2026-03-17T10:00:00Z",
+            "kind": "message"
+          },
+          {
+            "id": "ev-4",
+            "quote": "Affordable listings disappear in a few hours.",
+            "channel": "Rent Armenia",
+            "timestamp": "2026-03-17T16:00:00Z",
+            "kind": "message"
+          }
+        ]
+      }
+    ],
+    "questionBriefs": [
+      {
+        "id": "qc-residency",
+        "topic": "Residency permits",
+        "category": "Documents",
+        "canonicalQuestionEn": "How long is residency permit processing taking now?",
+        "summaryEn": "The cluster reflects repeated questions about timelines, required documents, and office follow-up.",
+        "confidence": "high",
+        "confidenceScore": 0.9,
+        "status": "needs_guide",
+        "resolvedPct": 22,
+        "demandSignals": {
+          "messages": 18,
+          "uniqueUsers": 11,
+          "channels": 4,
+          "trend7dPct": 26
+        },
+        "evidence": [
+          {
+            "id": "q-1",
+            "quote": "Has anyone received their permit this month?",
+            "channel": "Docs Chat",
+            "timestamp": "2026-03-18T09:00:00Z",
+            "kind": "message"
+          },
+          {
+            "id": "q-2",
+            "quote": "Do I need a bank statement or only the lease agreement?",
+            "channel": "Docs Chat",
+            "timestamp": "2026-03-18T12:30:00Z",
+            "kind": "message"
+          }
+        ]
+      },
+      {
+        "id": "qc-school",
+        "topic": "School admissions",
+        "category": "Education",
+        "canonicalQuestionEn": "Which schools still have openings for September?",
+        "summaryEn": "Parents are asking about availability, language tracks, and admission deadlines.",
+        "confidence": "high",
+        "confidenceScore": 0.84,
+        "status": "partially_answered",
+        "resolvedPct": 41,
+        "demandSignals": {
+          "messages": 9,
+          "uniqueUsers": 6,
+          "channels": 2,
+          "trend7dPct": 8
+        },
+        "evidence": [
+          {
+            "id": "q-3",
+            "quote": "Is there still space in any Russian-program school?",
+            "channel": "Parents Armenia",
+            "timestamp": "2026-03-16T09:00:00Z",
+            "kind": "message"
+          }
+        ]
+      }
+    ],
+    "urgencySignals": [
+      {
+        "topicEn": "Residency permits",
+        "messageEn": "Permit delays are creating immediate visa-expiry anxiety for several users.",
+        "actionEn": "Post a verified permit update and escalation path in the documents channel.",
+        "urgency": "high"
+      }
+    ],
+    "communityHealth": {
+      "score": 62,
+      "trend": "down",
+      "previousScore": 68
+    }
+  },
+  "meta": {
+    "from": "2026-03-13",
+    "to": "2026-03-20",
+    "days": 7
+  }
+}
