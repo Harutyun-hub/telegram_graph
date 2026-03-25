@@ -38,11 +38,10 @@ frontend/.env.local
 frontend/.env.*.local
 !frontend/.env.example
 
-# Backup and test files
+# Backup files
 *.bak
 *.bak2
 *.bak.*
-test_*.py
 snapshot_output.json
 
 # macOS / local artifacts
