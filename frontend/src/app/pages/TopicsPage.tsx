@@ -4,8 +4,9 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianG
 import { useSearchParams } from 'react-router';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
-import { useTopicDetail, useTopicsDetailData } from '../services/detailData';
-import type { TopicDetail, TopicEvidence } from '../types/data';
+import { useTopicDetail, useTopicEvidenceFeed, useTopicsDetailData } from '../services/detailData';
+import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } from '../services/topicPresentation';
+import type { TopicDetail } from '../types/data';
 
 const categoryColors: Record<string, string> = {
   Living: '#ef4444', Work: '#3b82f6', Family: '#8b5cf6',
@@ -13,16 +14,28 @@ const categoryColors: Record<string, string> = {
   Admin: '#6b7280', Tech: '#06b6d4',
 };
 
-const categoryLabelsEN = ['All', 'Living', 'Work', 'Family', 'Finance', 'Lifestyle', 'Integration', 'Admin'];
-const categoryLabelsRU = ['Все', 'Быт', 'Работа', 'Семья', 'Финансы', 'Досуг', 'Интеграция', 'Документы'];
-const categoryMap: Record<string, string> = {
-  All: 'Все', Living: 'Быт', Work: 'Работа', Family: 'Семья',
-  Finance: 'Финансы', Lifestyle: 'Досуг', Integration: 'Интеграция', Admin: 'Документы',
-};
-const categoryMapRev: Record<string, string> = {
-  Все: 'All', Быт: 'Living', Работа: 'Work', Семья: 'Family',
-  Финансы: 'Finance', Досуг: 'Lifestyle', Интеграция: 'Integration', Документы: 'Admin',
-};
+function formatTopicTrendTick(bucket: string, lang: 'en' | 'ru'): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bucket)) return bucket;
+  const date = new Date(`${bucket}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return bucket;
+  return new Intl.DateTimeFormat(lang === 'ru' ? 'ru-RU' : 'en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(date);
+}
+
+function formatTopicTrendTooltip(bucket: string, lang: 'en' | 'ru'): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bucket)) return bucket;
+  const date = new Date(`${bucket}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return bucket;
+  return new Intl.DateTimeFormat(lang === 'ru' ? 'ru-RU' : 'en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(date);
+}
 
 // ── COMPONENT ──
 
@@ -53,12 +66,6 @@ export function TopicsPage() {
   const requestedTopic = (searchParams.get('topic') || '').trim();
 
   const normalizeTopicKey = (value: string) => value.trim().toLowerCase();
-
-  const getQuestionEvidence = (topic: TopicDetail | null): TopicEvidence[] => {
-    if (!topic) return [];
-    if (topic.questionEvidence && topic.questionEvidence.length > 0) return topic.questionEvidence;
-    return topic.evidence.filter((ev) => ev.text.includes('?'));
-  };
 
   useEffect(() => {
     const viewParam = searchParams.get('view');
@@ -117,11 +124,24 @@ export function TopicsPage() {
     }
   }, [allTopics, selectedTopic]);
   const activeTopic = selectedTopicDetail || selectedTopic;
+  const {
+    data: evidenceFeed,
+    loading: evidenceLoading,
+    loadingMore: evidenceLoadingMore,
+    error: evidenceError,
+    refresh: refreshEvidence,
+    loadMore: loadMoreEvidence,
+  } = useTopicEvidenceFeed(
+    selectedTopic?.sourceTopic || selectedTopic?.name || null,
+    selectedTopic?.category || null,
+    proofView,
+    focusedEvidenceId || null,
+    Boolean(selectedTopic),
+  );
 
   useEffect(() => {
-    const evidenceTopic = activeTopic || selectedTopic;
-    if (!evidenceTopic || !focusedEvidenceId) return;
-    const visibleEvidence = proofView === 'questions' ? getQuestionEvidence(evidenceTopic) : evidenceTopic.evidence;
+    if (!selectedTopic || !focusedEvidenceId) return;
+    const visibleEvidence = evidenceFeed.items;
     if (!visibleEvidence.some((ev) => ev.id === focusedEvidenceId)) return;
 
     const domId = `${proofView}-evidence-${focusedEvidenceId}`;
@@ -143,19 +163,34 @@ export function TopicsPage() {
       if (timeoutId) window.clearTimeout(timeoutId);
       window.clearTimeout(clearId);
     };
-  }, [activeTopic, selectedTopic, proofView, focusedEvidenceId]);
+  }, [selectedTopic, proofView, focusedEvidenceId, evidenceFeed.items]);
 
-  const categories = ru ? categoryLabelsRU : categoryLabelsEN;
+  const categories = TOPICS_PAGE_GROUPS_EN;
 
   const filtered = allTopics
     .filter((t) => {
-      const catFilter = ru ? (categoryMapRev[selectedCategory] || selectedCategory) : selectedCategory;
-      if (catFilter !== 'All' && t.category !== catFilter) return false;
+      if (selectedCategory !== 'All' && t.topicGroup !== selectedCategory) return false;
       const displayName = ru ? t.nameRu : t.name;
       if (searchQuery && !displayName.toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     })
-    .sort((a, b) => sortBy === 'mentions' ? b.mentions - a.mentions : b.growth - a.growth);
+    .sort((a, b) => {
+      if (sortBy === 'mentions') {
+        return (
+          (b.mentions - a.mentions)
+          || ((b.distinctUsers || 0) - (a.distinctUsers || 0))
+          || ((b.evidenceCount || 0) - (a.evidenceCount || 0))
+          || (a.sourceTopic || a.name).localeCompare(b.sourceTopic || b.name)
+        );
+      }
+      return (
+        ((b.deltaMentions || 0) - (a.deltaMentions || 0))
+        || (b.growth - a.growth)
+        || ((b.distinctUsers || 0) - (a.distinctUsers || 0))
+        || (b.mentions - a.mentions)
+        || (a.sourceTopic || a.name).localeCompare(b.sourceTopic || b.name)
+      );
+    });
 
   const totalMentions = allTopics.reduce((s, t) => s + t.mentions, 0);
   const requestedTopicMissing = Boolean(
@@ -202,7 +237,6 @@ export function TopicsPage() {
           {/* Category Tabs */}
           <div className="flex gap-1.5 flex-wrap">
             {categories.map((cat) => {
-              const engCat = ru ? (categoryMapRev[cat] || cat) : cat;
               return (
                 <button
                   key={cat}
@@ -214,10 +248,10 @@ export function TopicsPage() {
                   }`}
                   style={{ fontWeight: selectedCategory === cat ? 500 : 400 }}
                 >
-                  {cat !== (ru ? 'Все' : 'All') && (
-                    <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: categoryColors[engCat] }} />
+                  {cat !== 'All' && (
+                    <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: categoryColors[cat] }} />
                   )}
-                  {cat}
+                  {translateTopicsPageGroup(cat, ru)}
                 </button>
               );
             })}
@@ -298,7 +332,7 @@ export function TopicsPage() {
                     <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: topic.color }} />
                     <span className="text-sm text-gray-900 truncate" style={{ fontWeight: 500 }}>{ru ? topic.nameRu : topic.name}</span>
                     <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 flex-shrink-0">
-                      {ru ? (categoryMap[topic.category] || topic.category) : topic.category}
+                      {translateCategory(topic.category, ru)}
                     </span>
                   </div>
                   <div className="flex items-center gap-3 mt-1.5 ml-4.5">
@@ -380,9 +414,16 @@ export function TopicsPage() {
               <ResponsiveContainer width="100%" height={120}>
                 <AreaChart data={activeTopic?.weeklyData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                  <XAxis dataKey="week" tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                  <XAxis
+                    dataKey="week"
+                    tick={{ fontSize: 10 }}
+                    stroke="#9ca3af"
+                    interval="preserveStartEnd"
+                    minTickGap={28}
+                    tickFormatter={(value) => formatTopicTrendTick(String(value || ''), lang)}
+                  />
                   <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" hide />
-                  <Tooltip />
+                  <Tooltip labelFormatter={(value) => formatTopicTrendTooltip(String(value || ''), lang)} />
                   <Area type="monotone" dataKey="count" stroke={selectedTopic.color} fill={selectedTopic.color + '20'} strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
@@ -436,28 +477,42 @@ export function TopicsPage() {
             </div>
 
             {(() => {
-              const topicForView = activeTopic || selectedTopic;
-              const questionEvidence = getQuestionEvidence(topicForView);
-              const visibleEvidence = proofView === 'questions' ? questionEvidence : topicForView.evidence;
+              const visibleEvidence = evidenceFeed.items;
+              const totalEvidence = evidenceFeed.total;
 
               return (
                 <>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
                 {proofView === 'questions'
-                  ? (ru ? `Вопросы по теме (${visibleEvidence.length})` : `Questions for this topic (${visibleEvidence.length})`)
-                  : (ru ? `Доказательства (${visibleEvidence.length} публикаций и комментариев)` : `Evidence (${visibleEvidence.length} posts & comments)`)}
+                  ? (ru ? `Вопросы по теме (${totalEvidence})` : `Questions for this topic (${totalEvidence})`)
+                  : (ru ? `Доказательства (${totalEvidence} публикаций и комментариев)` : `Evidence (${totalEvidence} posts & comments)`)}
               </h3>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 <span className="text-xs text-gray-400">
                   {proofView === 'questions'
                     ? (ru ? 'Показаны реальные вопросы из сообщений' : 'Showing real question-style messages')
                     : (ru ? 'Сообщения по данной теме' : 'Messages mentioning this topic')}
                 </span>
+                {evidenceError && (
+                  <button
+                    onClick={refreshEvidence}
+                    className="text-xs text-red-700 hover:text-red-800 underline"
+                    style={{ fontWeight: 600 }}
+                  >
+                    {ru ? 'Повторить' : 'Retry'}
+                  </button>
+                )}
               </div>
             </div>
 
-            {visibleEvidence.length === 0 ? (
+            {evidenceLoading && visibleEvidence.length === 0 ? (
+              <div className="mb-3 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                {proofView === 'questions'
+                  ? (ru ? 'Загружаем вопросы по теме...' : 'Loading topic questions...')
+                  : (ru ? 'Загружаем доказательства по теме...' : 'Loading topic evidence...')}
+              </div>
+            ) : visibleEvidence.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-gray-400">
                 <MessageCircle className="w-8 h-8 mb-2" />
                 <p className="text-sm">
@@ -509,12 +564,26 @@ export function TopicsPage() {
                         <MessageCircle className="w-3 h-3" />
                         {ev.replies} {ru ? 'ответов' : 'replies'}
                       </div>
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${ev.type === 'post' ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
-                        {ev.type === 'post' ? (ru ? 'публикация' : 'post') : (ru ? 'комментарий' : 'comment')}
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${ev.type === 'message' ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>
+                        {ev.type === 'message' ? (ru ? 'публикация' : 'post') : (ru ? 'комментарий' : 'comment')}
                       </span>
                     </div>
                   </div>
                 ))}
+                {evidenceFeed.hasMore && (
+                  <div className="pt-2">
+                    <button
+                      onClick={loadMoreEvidence}
+                      disabled={evidenceLoadingMore}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{ fontWeight: 600 }}
+                    >
+                      {evidenceLoadingMore
+                        ? (ru ? 'Загружаем ещё...' : 'Loading more...')
+                        : (ru ? 'Показать ещё' : 'Load more')}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
                 </>

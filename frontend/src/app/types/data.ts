@@ -47,6 +47,21 @@ export interface TrendingTopic {
   category: string;
   sentiment: string;
   sampleQuote: string;
+  sampleEvidenceId?: string;
+  evidence?: Array<{
+    id: string;
+    kind: string;
+    text: string;
+    channel: string;
+    userId?: string;
+    postedAt: string;
+  }>;
+  evidenceCount?: number;
+  distinctUsers?: number;
+  distinctChannels?: number;
+  distinctPosts?: number;
+  distinctComments?: number;
+  qualityTier?: 'high' | 'medium' | 'low';
 }
 
 export interface CommunityBriefData {
@@ -582,17 +597,54 @@ export interface TopicEvidence {
   replies: number;
 }
 
+export interface ChannelPost {
+  id: string;
+  author: string;
+  text: string;
+  timestamp: string;
+  reactions: number;
+  replies: number;
+}
+
+export interface AudienceMessage {
+  id: string;
+  text: string;
+  channel: string;
+  timestamp: string;
+  reactions: number;
+  replies: number;
+}
+
+export interface PaginatedFeed<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+  hasMore: boolean;
+  focusedItem?: T | null;
+}
+
 export interface TopicDetail {
   id: string;
   name: string;
   nameRu: string;
   sourceTopic?: string;
+  topicGroup?: string;
   category: string;
   color: string;
   mentions: number;
   growth: number;
+  currentMentions?: number;
+  previousMentions?: number;
+  deltaMentions?: number;
+  trendReliable?: boolean;
+  sampleEvidenceId?: string;
+  sampleQuote?: string;
+  evidenceCount?: number;
+  distinctUsers?: number;
+  distinctChannels?: number;
   sentiment: { positive: number; neutral: number; negative: number };
-  weeklyData: { week: string; count: number }[];
+  weeklyData: { week: string; count: number; isoDate?: string }[];
   topChannels: string[];
   description: string;
   descriptionRu: string;
@@ -618,7 +670,7 @@ export interface ChannelDetail {
   sentimentBreakdown: { positive: number; neutral: number; negative: number };
   messageTypes: { type: string; count: number; pct: number }[];
   topVoices: { name: string; posts: number; helpScore: number }[];
-  recentPosts: { id: string; author: string; text: string; timestamp: string; reactions: number; replies: number }[];
+  recentPosts: ChannelPost[];
 }
 
 // ── Pages: Audience ──
@@ -643,7 +695,7 @@ export interface AudienceMember {
   topTopics: { name: string; count: number }[];
   sentiment: { positive: number; neutral: number; negative: number };
   activityData: { week: string; msgs: number }[];
-  recentMessages: { text: string; channel: string; timestamp: string; reactions: number; replies: number }[];
+  recentMessages: AudienceMessage[];
   persona: string;
   integrationLevel: string;
 }
