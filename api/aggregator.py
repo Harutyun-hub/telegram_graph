@@ -24,10 +24,6 @@ from api.dashboard_dates import DashboardDateContext, build_dashboard_date_conte
 from api import opportunity_briefs
 from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
-from buffer.supabase_writer import SupabaseWriter
-
-
-_supabase_writer = SupabaseWriter()
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -234,27 +230,6 @@ def _fallback_for_tier(name: str) -> dict:
 # ── Tier builders ────────────────────────────────────────────────────────────
 
 def _tier_pulse(ctx: DashboardDateContext) -> dict:
-    def _trending_new_topics() -> list[dict]:
-        try:
-            rows = _supabase_writer.list_emerging_topic_candidates(status="pending", limit=12)
-            result: list[dict] = []
-            for row in rows:
-                mentions = int(row.get("distinct_content_count") or row.get("proposed_count") or 0)
-                trend = min(300, max(0, (int(row.get("proposed_count") or 0) - 1) * 25))
-                result.append(
-                    {
-                        "name": row.get("topic_name"),
-                        "category": row.get("closest_category") or "General",
-                        "mentions": mentions,
-                        "trendPct": trend,
-                        "sampleQuote": row.get("latest_evidence"),
-                    }
-                )
-            return result
-        except Exception as e:
-            logger.warning(f"Tier pulse trending-new failed: {e}")
-            return []
-
     fallback = _fallback_for_tier("pulse")
 
     def _safe(name: str, fn: Callable[[], object], default):
@@ -267,7 +242,7 @@ def _tier_pulse(ctx: DashboardDateContext) -> dict:
     return {
         "communityHealth": _safe("communityHealth", lambda: pulse.get_community_health(ctx), fallback["communityHealth"]),
         "trendingTopics": _safe("trendingTopics", lambda: pulse.get_trending_topics(ctx), fallback["trendingTopics"]),
-        "trendingNewTopics": _safe("trendingNewTopics", _trending_new_topics, fallback["trendingNewTopics"]),
+        "trendingNewTopics": _safe("trendingNewTopics", lambda: pulse.get_trending_new_topics(ctx), fallback["trendingNewTopics"]),
         "communityBrief": _safe("communityBrief", lambda: pulse.get_community_brief(ctx), fallback["communityBrief"]),
     }
 

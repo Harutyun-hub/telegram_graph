@@ -46,7 +46,7 @@ from api.aggregator import (
     invalidate_cache
 )
 from api.dashboard_dates import build_dashboard_date_context
-from api.queries import graph_dashboard
+from api.queries import graph_dashboard, pulse
 from api.freshness import get_freshness_snapshot
 from api import insights
 from api import behavioral_briefs
@@ -396,6 +396,32 @@ def _default_admin_config() -> dict[str, Any]:
             "featureBehavioralBriefsAi": bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI),
             "featureOpportunityBriefsAi": bool(config.FEATURE_OPPORTUNITY_BRIEFS_AI),
         },
+    }
+
+
+def _active_ai_runtime_summary() -> dict[str, str | bool]:
+    raw_config = load_admin_config_raw()
+    runtime = raw_config.get("runtime") if isinstance(raw_config, dict) and isinstance(raw_config.get("runtime"), dict) else {}
+
+    def _runtime_value(key: str, fallback: Any) -> Any:
+        value = runtime.get(key)
+        if value is None:
+            return fallback
+        if isinstance(value, str):
+            text = value.strip()
+            return text or fallback
+        return value
+
+    return {
+        "openaiModel": str(_runtime_value("openaiModel", config.OPENAI_MODEL)),
+        "questionBriefsModel": str(_runtime_value("questionBriefsModel", config.QUESTION_BRIEFS_MODEL)),
+        "behavioralBriefsModel": str(_runtime_value("behavioralBriefsModel", config.BEHAVIORAL_BRIEFS_MODEL)),
+        "opportunityBriefsModel": str(_runtime_value("opportunityBriefsModel", config.OPPORTUNITY_BRIEFS_MODEL)),
+        "questionBriefsPromptVersion": str(_runtime_value("questionBriefsPromptVersion", config.QUESTION_BRIEFS_PROMPT_VERSION)),
+        "behavioralBriefsPromptVersion": str(_runtime_value("behavioralBriefsPromptVersion", config.BEHAVIORAL_BRIEFS_PROMPT_VERSION)),
+        "opportunityBriefsPromptVersion": str(_runtime_value("opportunityBriefsPromptVersion", config.OPPORTUNITY_BRIEFS_PROMPT_VERSION)),
+        "aiPostPromptStyle": str(_runtime_value("aiPostPromptStyle", config.AI_POST_PROMPT_STYLE)),
+        "featureExtractionV2": bool(config.FEATURE_EXTRACTION_V2),
     }
 
 
@@ -1689,6 +1715,65 @@ async def taxonomy_quality_snapshot():
         return snapshot
     except Exception as e:
         logger.error(f"Taxonomy quality endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/quality/trending-widget", dependencies=[Depends(require_analytics_access)])
+async def trending_widget_quality_snapshot(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """QA snapshot for the Trending widget read model and evidence integrity."""
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+
+        def _build_snapshot() -> dict[str, Any]:
+            writer = get_supabase_writer()
+            proposal_rows = writer.list_topic_proposals(status="pending", limit=500)
+            category_keys = {
+                "".join(part for part in str(category).lower().replace("&", " and ").replace("-", " ").split() if part != "and")
+                for categories in TAXONOMY_DOMAINS.values()
+                for category in categories.keys()
+            }
+            domain_keys = {
+                "".join(part for part in str(domain).lower().replace("&", " and ").replace("-", " ").split() if part != "and")
+                for domain in TAXONOMY_DOMAINS.keys()
+            }
+            proposal_summary = {
+                "pending": len(proposal_rows),
+                "visibleEmergingCandidates": len(writer.list_emerging_topic_candidates(status="pending", limit=500)),
+                "structureLabelLike": 0,
+                "rawProposedOnly": 0,
+            }
+            for row in proposal_rows:
+                topic_name = str(row.get("topic_name") or "").strip()
+                normalized = topic_name.lower().replace("&", " and ")
+                compact = "".join(ch if ch.isalnum() else " " for ch in normalized)
+                proposal_key = "".join(part for part in compact.split() if part and part != "and")
+                if not proposal_key:
+                    proposal_summary["structureLabelLike"] += 1
+                    continue
+                if proposal_key in category_keys or proposal_key in domain_keys:
+                    proposal_summary["structureLabelLike"] += 1
+                    continue
+                proposal_summary["rawProposedOnly"] += 1
+
+            return {
+                "generatedAt": datetime.now(timezone.utc).isoformat(),
+                "window": {
+                    "from": ctx.from_date.isoformat(),
+                    "to": ctx.to_date.isoformat(),
+                    "days": ctx.days,
+                },
+                "runtime": _active_ai_runtime_summary(),
+                "widget": pulse.get_trending_widget_diagnostics(ctx),
+                "proposalQueue": proposal_summary,
+            }
+
+        return await loop.run_in_executor(None, _build_snapshot)
+    except Exception as e:
+        logger.error(f"Trending widget quality endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

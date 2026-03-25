@@ -16,6 +16,7 @@ from typing import Any
 from api.db import run_query, run_single
 from api.dashboard_dates import DashboardDateContext
 from buffer.supabase_writer import SupabaseWriter
+from utils.taxonomy import TAXONOMY_DOMAINS, iter_topics
 
 
 _SUPABASE_WRITER: SupabaseWriter | None = None
@@ -58,6 +59,37 @@ _NEGATIVE_INTENT_HINTS = (
     "mock",
     "conflict",
 )
+
+_CANONICAL_TOPIC_NAMES = tuple(iter_topics())
+_CANONICAL_TOPIC_SET = set(_CANONICAL_TOPIC_NAMES)
+_TOPIC_WIDGET_CACHE_TTL_SECONDS = 180.0
+_TOPIC_WIDGET_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_TOPIC_WIDGET_CACHE_LOCK = threading.Lock()
+_TOPIC_WIDGET_EVIDENCE_LIMIT = 3
+_TRENDING_MIN_MENTIONS = 3
+_TRENDING_MIN_EVIDENCE = 2
+_TRENDING_MIN_CHANNELS = 2
+_TRENDING_MIN_USERS = 2
+_TRENDING_NEW_MIN_USERS = 3
+_TRENDING_NEW_MAX_PREVIOUS = 1
+_TREND_RELIABLE_MIN_SUPPORT = 6
+
+
+def _structure_key(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("&", " and ")
+    if not text:
+        return ""
+    compact = "".join(ch if ch.isalnum() else " " for ch in text)
+    parts = [part for part in compact.split() if part and part != "and"]
+    return "".join(parts)
+
+
+_CATEGORY_LABEL_KEYS = {
+    _structure_key(category)
+    for categories in TAXONOMY_DOMAINS.values()
+    for category in categories.keys()
+}
+_DOMAIN_LABEL_KEYS = {_structure_key(domain) for domain in TAXONOMY_DOMAINS.keys()}
 
 
 def _utc_now() -> datetime:
@@ -338,6 +370,360 @@ def _history_points(current_score: int, previous_score: int, label_suffix: str) 
     return points
 
 
+def _trim_widget_text(value: Any, limit: int = 240) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _is_widget_topic_name_allowed(name: Any) -> bool:
+    topic_name = str(name or "").strip()
+    if not topic_name:
+        return False
+    if topic_name not in _CANONICAL_TOPIC_SET:
+        return False
+    lowered = topic_name.lower()
+    if lowered in _NOISY_TOPIC_NAMES:
+        return False
+    key = _structure_key(topic_name)
+    if key in _CATEGORY_LABEL_KEYS or key in _DOMAIN_LABEL_KEYS:
+        return False
+    return True
+
+
+def _compute_trend_pct(current_mentions: int, previous_mentions: int) -> float:
+    support = max(0, current_mentions) + max(0, previous_mentions)
+    if support < _TREND_RELIABLE_MIN_SUPPORT:
+        return 0.0
+    return round(100.0 * (current_mentions - previous_mentions) / (previous_mentions + 3), 1)
+
+
+def _quality_tier(
+    *,
+    mentions: int,
+    evidence_count: int,
+    distinct_users: int,
+    distinct_channels: int,
+) -> str:
+    if mentions >= 8 and evidence_count >= 3 and distinct_users >= 3 and distinct_channels >= 2:
+        return "high"
+    if mentions >= 4 and evidence_count >= 2 and distinct_channels >= 2:
+        return "medium"
+    return "low"
+
+
+def _emergence_score(row: dict[str, Any]) -> float:
+    current_mentions = int(row.get("currentMentions") or 0)
+    previous_mentions = int(row.get("previousMentions") or 0)
+    delta_mentions = current_mentions - previous_mentions
+    distinct_users = int(row.get("distinctUsers") or 0)
+    distinct_channels = int(row.get("distinctChannels") or 0)
+    evidence_count = int(row.get("evidenceCount") or 0)
+    novelty_bonus = 4.0 if previous_mentions <= 0 else (2.0 if previous_mentions <= 1 else 0.0)
+    return round(
+        (current_mentions * 4.0)
+        + (max(delta_mentions, 0) * 6.0)
+        + (distinct_users * 3.5)
+        + (distinct_channels * 2.5)
+        + (evidence_count * 1.5)
+        + novelty_bonus,
+        2,
+    )
+
+
+def _topic_widget_cache_key(ctx: DashboardDateContext, evidence_limit: int) -> tuple[str, int]:
+    return (ctx.cache_key, max(1, int(evidence_limit)))
+
+
+def _query_topic_widget_rows(
+    ctx: DashboardDateContext,
+    *,
+    evidence_limit: int = _TOPIC_WIDGET_EVIDENCE_LIMIT,
+) -> list[dict[str, Any]]:
+    rows = run_query(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+        WHERE coalesce(t.proposed, false) = false
+          AND t.name IN $canonical_topics
+          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+
+        CALL (t) {
+            CALL (t) {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                WHERE p.posted_at >= datetime($start)
+                  AND p.posted_at < datetime($end)
+                  AND p.text IS NOT NULL
+                  AND trim(p.text) <> ''
+                OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+                RETURN
+                    coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
+                    'post' AS kind,
+                    left(trim(p.text), 320) AS text,
+                    coalesce(ch.title, ch.username, 'unknown') AS channel,
+                    '' AS userId,
+                    toString(p.posted_at) AS postedAt,
+                    p.posted_at AS ts
+                UNION ALL
+                WITH t
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                WHERE c.posted_at >= datetime($start)
+                  AND c.posted_at < datetime($end)
+                  AND c.text IS NOT NULL
+                  AND trim(c.text) <> ''
+                OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+                OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+                RETURN
+                    coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
+                    'comment' AS kind,
+                    left(trim(c.text), 320) AS text,
+                    coalesce(ch.title, ch.username, 'unknown') AS channel,
+                    coalesce(toString(u.telegram_user_id), '') AS userId,
+                    toString(c.posted_at) AS postedAt,
+                    c.posted_at AS ts
+            }
+            WITH evidenceId, kind, text, channel, userId, postedAt, ts
+            WHERE text <> ''
+            ORDER BY ts DESC, evidenceId DESC
+            RETURN
+                collect({
+                    id: evidenceId,
+                    kind: kind,
+                    text: text,
+                    channel: channel,
+                    userId: userId,
+                    postedAt: postedAt
+                })[..$evidence_limit] AS evidence,
+                count(DISTINCT evidenceId) AS currentMentions,
+                count(DISTINCT CASE WHEN kind = 'post' THEN evidenceId END) AS distinctPosts,
+                count(DISTINCT CASE WHEN kind = 'comment' THEN evidenceId END) AS distinctComments,
+                count(DISTINCT CASE WHEN trim(userId) <> '' THEN userId END) AS distinctUsers,
+                count(DISTINCT CASE WHEN trim(channel) <> '' THEN channel END) AS distinctChannels,
+                max(ts) AS latestTs
+        }
+
+        CALL (t) {
+            CALL (t) {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                WHERE p.posted_at >= datetime($previous_start)
+                  AND p.posted_at < datetime($previous_end)
+                RETURN count(DISTINCT coalesce(p.uuid, 'post:' + elementId(p))) AS hitCount
+                UNION ALL
+                WITH t
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                WHERE c.posted_at >= datetime($previous_start)
+                  AND c.posted_at < datetime($previous_end)
+                RETURN count(DISTINCT coalesce(c.uuid, 'comment:' + elementId(c))) AS hitCount
+            }
+            RETURN sum(hitCount) AS previousMentions
+        }
+
+        WITH t, cat, evidence, currentMentions, distinctPosts, distinctComments, distinctUsers, distinctChannels, latestTs, previousMentions
+        WHERE currentMentions > 0
+          AND size(evidence) > 0
+        RETURN
+            t.name AS topic,
+            cat.name AS category,
+            currentMentions,
+            coalesce(previousMentions, 0) AS previousMentions,
+            distinctPosts,
+            distinctComments,
+            distinctUsers,
+            distinctChannels,
+            evidence,
+            toString(latestTs) AS latestAt
+        ORDER BY currentMentions DESC, distinctChannels DESC, latestAt DESC
+        """,
+        {
+            "canonical_topics": list(_CANONICAL_TOPIC_NAMES),
+            "noise": list(_NOISY_TOPIC_NAMES),
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+            "previous_start": ctx.previous_start_at.isoformat(),
+            "previous_end": ctx.previous_end_at.isoformat(),
+            "evidence_limit": max(1, min(int(evidence_limit), 6)),
+        },
+    )
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        topic_name = str(row.get("topic") or "").strip()
+        if not _is_widget_topic_name_allowed(topic_name):
+            continue
+
+        evidence_rows = []
+        for evidence in row.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            text = _trim_widget_text(evidence.get("text"), 240)
+            if not text:
+                continue
+            evidence_rows.append(
+                {
+                    "id": str(evidence.get("id") or "").strip(),
+                    "kind": str(evidence.get("kind") or "message").strip() or "message",
+                    "text": text,
+                    "channel": str(evidence.get("channel") or "unknown").strip() or "unknown",
+                    "userId": str(evidence.get("userId") or "").strip(),
+                    "postedAt": str(evidence.get("postedAt") or "").strip(),
+                }
+            )
+
+        if not evidence_rows:
+            continue
+
+        current_mentions = int(row.get("currentMentions") or 0)
+        previous_mentions = int(row.get("previousMentions") or 0)
+        growth_support = current_mentions + previous_mentions
+        sample_evidence_id = evidence_rows[0]["id"] if evidence_rows else ""
+        output.append(
+            {
+                "name": topic_name,
+                "category": str(row.get("category") or "General").strip() or "General",
+                "mentions": current_mentions,
+                "currentMentions": current_mentions,
+                "previousMentions": previous_mentions,
+                "deltaMentions": current_mentions - previous_mentions,
+                "growthSupport": growth_support,
+                "trendReliable": (
+                    growth_support >= _TREND_RELIABLE_MIN_SUPPORT
+                    and len(evidence_rows) >= _TRENDING_MIN_EVIDENCE
+                    and int(row.get("distinctChannels") or 0) >= _TRENDING_MIN_CHANNELS
+                ),
+                "trendPct": _compute_trend_pct(current_mentions, previous_mentions),
+                "sampleEvidenceId": sample_evidence_id,
+                "sampleQuote": evidence_rows[0]["text"],
+                "evidence": evidence_rows,
+                "evidenceCount": len(evidence_rows),
+                "distinctPosts": int(row.get("distinctPosts") or 0),
+                "distinctComments": int(row.get("distinctComments") or 0),
+                "distinctUsers": int(row.get("distinctUsers") or 0),
+                "distinctChannels": int(row.get("distinctChannels") or 0),
+                "qualityTier": _quality_tier(
+                    mentions=current_mentions,
+                    evidence_count=len(evidence_rows),
+                    distinct_users=int(row.get("distinctUsers") or 0),
+                    distinct_channels=int(row.get("distinctChannels") or 0),
+                ),
+                "latestAt": str(row.get("latestAt") or "").strip(),
+                "sourceTopic": topic_name,
+            }
+        )
+    return output
+
+
+def _build_topic_widget_snapshot(
+    ctx: DashboardDateContext,
+    *,
+    evidence_limit: int = _TOPIC_WIDGET_EVIDENCE_LIMIT,
+) -> dict[str, Any]:
+    cache_key = _topic_widget_cache_key(ctx, evidence_limit)
+    now = time.monotonic()
+    with _TOPIC_WIDGET_CACHE_LOCK:
+        cached = _TOPIC_WIDGET_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _TOPIC_WIDGET_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    rows = _query_topic_widget_rows(ctx, evidence_limit=evidence_limit)
+    diagnostics = {
+        "scannedCanonicalTopics": len(rows),
+        "excludedCounts": {
+            "structure_label": 0,
+            "proposed_only": 0,
+            "low_evidence": 0,
+            "low_breadth": 0,
+            "not_new": 0,
+        },
+    }
+    trending_rows: list[dict[str, Any]] = []
+    trending_new_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        evidence_count = int(row.get("evidenceCount") or 0)
+        distinct_channels = int(row.get("distinctChannels") or 0)
+        distinct_users = int(row.get("distinctUsers") or 0)
+        current_mentions = int(row.get("currentMentions") or 0)
+        previous_mentions = int(row.get("previousMentions") or 0)
+
+        trending_reasons: list[str] = []
+        if current_mentions < _TRENDING_MIN_MENTIONS or evidence_count < _TRENDING_MIN_EVIDENCE:
+            trending_reasons.append("low_evidence")
+        if distinct_channels < _TRENDING_MIN_CHANNELS or distinct_users < _TRENDING_MIN_USERS:
+            trending_reasons.append("low_breadth")
+        if not trending_reasons:
+            trending_rows.append(row)
+        else:
+            for reason in set(trending_reasons):
+                diagnostics["excludedCounts"][reason] += 1
+
+        trending_new_reasons: list[str] = []
+        if current_mentions < _TRENDING_MIN_MENTIONS or evidence_count < _TRENDING_MIN_EVIDENCE:
+            trending_new_reasons.append("low_evidence")
+        if distinct_channels < _TRENDING_MIN_CHANNELS or distinct_users < _TRENDING_NEW_MIN_USERS:
+            trending_new_reasons.append("low_breadth")
+        if previous_mentions > _TRENDING_NEW_MAX_PREVIOUS:
+            trending_new_reasons.append("not_new")
+        if not trending_new_reasons:
+            enriched = dict(row)
+            enriched["trendScore"] = _emergence_score(row)
+            trending_new_rows.append(enriched)
+        else:
+            for reason in set(trending_new_reasons):
+                diagnostics["excludedCounts"][reason] += 1
+
+    trending_rows.sort(
+        key=lambda row: (
+            int(bool(row.get("trendReliable"))),
+            int(row.get("currentMentions") or 0),
+            int(row.get("distinctChannels") or 0),
+            int(row.get("distinctUsers") or 0),
+            int(row.get("evidenceCount") or 0),
+            str(row.get("latestAt") or ""),
+        ),
+        reverse=True,
+    )
+    trending_new_rows.sort(
+        key=lambda row: (
+            int(bool(row.get("trendReliable"))),
+            float(row.get("trendScore") or 0.0),
+            int(row.get("deltaMentions") or 0),
+            int(row.get("distinctUsers") or 0),
+            int(row.get("distinctChannels") or 0),
+            int(row.get("evidenceCount") or 0),
+            str(row.get("latestAt") or ""),
+        ),
+        reverse=True,
+    )
+
+    snapshot = {
+        "generatedAt": _utc_now().isoformat(),
+        "trendingTopics": trending_rows,
+        "trendingNewTopics": trending_new_rows,
+        "diagnostics": {
+            **diagnostics,
+            "eligibleTrendingTopics": len(trending_rows),
+            "eligibleTrendingNewTopics": len(trending_new_rows),
+            "overlapTopics": len(
+                {
+                    str(item.get("sourceTopic") or item.get("name") or "").strip()
+                    for item in trending_rows
+                }.intersection(
+                    {
+                        str(item.get("sourceTopic") or item.get("name") or "").strip()
+                        for item in trending_new_rows
+                    }
+                )
+            ),
+        },
+    }
+
+    with _TOPIC_WIDGET_CACHE_LOCK:
+        _TOPIC_WIDGET_CACHE[cache_key] = (now, snapshot)
+    return snapshot
+
+
 def get_community_health(ctx: DashboardDateContext) -> dict:
     """
     Explainable community climate score (0-100) based on:
@@ -441,105 +827,54 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
 
 
 def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
-    """Evidence-backed top topics by mentions in the selected window with same-length comparison."""
-    rows = run_query(
-        """
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
-        WHERE coalesce(t.proposed,false) = false
-          AND NOT toLower(trim(coalesce(t.name,''))) IN $noise
-        CALL (t) {
-            OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at >= datetime($previous_start) AND p.posted_at < datetime($end)
-            WITH p
-            RETURN
-                count(CASE WHEN p.posted_at >= datetime($start) AND p.posted_at < datetime($end) THEN 1 END) AS postCurrent,
-                count(CASE WHEN p.posted_at >= datetime($previous_start)
-                             AND p.posted_at < datetime($previous_end) THEN 1 END) AS postPrev,
-                head([
-                    txt IN collect(
-                        CASE
-                            WHEN p.posted_at >= datetime($start)
-                             AND p.posted_at < datetime($end)
-                             AND p.text IS NOT NULL
-                             AND trim(p.text) <> ''
-                            THEN left(trim(p.text), 180)
-                            ELSE null
-                        END
-                    )
-                    WHERE txt IS NOT NULL
-                ]) AS postSample
-        }
-        CALL (t) {
-            OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at >= datetime($previous_start) AND c.posted_at < datetime($end)
-            WITH c
-            RETURN
-                count(CASE WHEN c.posted_at >= datetime($start) AND c.posted_at < datetime($end) THEN 1 END) AS commentCurrent,
-                count(CASE WHEN c.posted_at >= datetime($previous_start)
-                             AND c.posted_at < datetime($previous_end) THEN 1 END) AS commentPrev,
-                head([
-                    txt IN collect(
-                        CASE
-                            WHEN c.posted_at >= datetime($start)
-                             AND c.posted_at < datetime($end)
-                             AND c.text IS NOT NULL
-                             AND trim(c.text) <> ''
-                            THEN left(trim(c.text), 180)
-                            ELSE null
-                        END
-                    )
-                    WHERE txt IS NOT NULL
-                ]) AS commentSample
-        }
-        WITH t, cat,
-             (postCurrent + commentCurrent) AS mentions,
-             (postPrev + commentPrev) AS previousMentions,
-             coalesce(postSample, commentSample, '') AS sampleQuote
-        WHERE mentions > 0
-        RETURN t.name AS topic,
-               cat.name AS category,
-               mentions,
-               mentions AS currentMentions,
-               previousMentions,
-               (mentions + previousMentions) AS growthSupport,
-               CASE
-                   WHEN (mentions + previousMentions) >= 8 THEN true
-                   ELSE false
-               END AS trendReliable,
-               CASE
-                   WHEN (mentions + previousMentions) < 8 THEN null
-                   ELSE round(100.0 * (mentions - previousMentions) / (previousMentions + 3), 1)
-               END AS trendPct,
-               sampleQuote
-        ORDER BY mentions DESC
-        LIMIT $limit
-        """,
-        {
-            "noise": list(_NOISY_TOPIC_NAMES),
-            "limit": limit,
-            "start": ctx.start_at.isoformat(),
-            "end": ctx.end_at.isoformat(),
-            "previous_start": ctx.previous_start_at.isoformat(),
-            "previous_end": ctx.previous_end_at.isoformat(),
-        },
-    )
+    """Evidence-backed top canonical topics for the selected window."""
+    snapshot = _build_topic_widget_snapshot(ctx)
+    return list(snapshot.get("trendingTopics") or [])[: max(1, int(limit))]
 
-    output: list[dict] = []
-    for row in rows:
-        output.append(
-            {
-                "name": row.get("topic"),
-                "category": row.get("category") or "General",
-                "mentions": int(row.get("mentions") or 0),
-                "trendPct": _to_float(row.get("trendPct"), 0.0),
-                "currentMentions": int(row.get("currentMentions") or 0),
-                "previousMentions": int(row.get("previousMentions") or 0),
-                "growthSupport": int(row.get("growthSupport") or 0),
-                "trendReliable": bool(row.get("trendReliable")),
-                "sampleQuote": str(row.get("sampleQuote") or "").strip(),
-            }
-        )
-    return output
+
+def get_trending_new_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+    """Evidence-backed newly emerging canonical topics for the selected window."""
+    snapshot = _build_topic_widget_snapshot(ctx)
+    return list(snapshot.get("trendingNewTopics") or [])[: max(1, int(limit))]
+
+
+def get_trending_widget_diagnostics(ctx: DashboardDateContext) -> dict[str, Any]:
+    """Diagnostics for widget QA, including candidate counts and evidence integrity."""
+    snapshot = _build_topic_widget_snapshot(ctx)
+    trending_rows = list(snapshot.get("trendingTopics") or [])
+    trending_new_rows = list(snapshot.get("trendingNewTopics") or [])
+
+    def _sample_integrity(rows: list[dict]) -> dict[str, int]:
+        total = len(rows)
+        exact = 0
+        missing = 0
+        for row in rows:
+            sample_id = str(row.get("sampleEvidenceId") or "").strip()
+            sample_quote = str(row.get("sampleQuote") or "").strip()
+            evidence_rows = row.get("evidence") or []
+            if not sample_id or not sample_quote:
+                missing += 1
+                continue
+            matched = next((ev for ev in evidence_rows if str(ev.get("id") or "").strip() == sample_id), None)
+            if matched and str(matched.get("text") or "").strip() == sample_quote:
+                exact += 1
+            else:
+                missing += 1
+        return {
+            "total": total,
+            "exactMatches": exact,
+            "mismatches": missing,
+        }
+
+    return {
+        "generatedAt": snapshot.get("generatedAt"),
+        "windowDays": ctx.days,
+        "diagnostics": snapshot.get("diagnostics") or {},
+        "sampleEvidenceIntegrity": {
+            "trending": _sample_integrity(trending_rows),
+            "trendingNew": _sample_integrity(trending_new_rows),
+        },
+    }
 
 
 def _latest_analysis_minutes_ago() -> int:

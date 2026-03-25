@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Search, TrendingUp, TrendingDown, MessageCircle, Users, Radio, ChevronRight, ChevronLeft, X, Clock, User, Hash, ThumbsUp, Zap } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useChannelDetail, useChannelsDetailData } from '../services/detailData';
+import { useChannelDetail, useChannelPostsFeed, useChannelsDetailData } from '../services/detailData';
 import type { ChannelDetail } from '../types/data';
 
 const typeColors: Record<string, string> = {
@@ -90,6 +90,14 @@ export function ChannelsPage() {
     }
   }, [allChannels, selectedChannel]);
   const activeChannel = selectedChannelDetail || selectedChannel;
+  const {
+    data: channelPostsFeed,
+    loading: channelPostsLoading,
+    loadingMore: channelPostsLoadingMore,
+    error: channelPostsError,
+    refresh: refreshChannelPosts,
+    loadMore: loadMoreChannelPosts,
+  } = useChannelPostsFeed(selectedChannel?.id || null, Boolean(selectedChannel && activeTab === 'posts'));
 
   return (
     <div className="flex flex-col md:flex-row h-full">
@@ -441,14 +449,33 @@ export function ChannelsPage() {
 
             {activeTab === 'posts' && (
               <div className="space-y-3">
-                {(activeChannel?.recentPosts || []).length === 0 ? (
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
+                    {ru ? `Публикации за период (${channelPostsFeed.total})` : `Posts in range (${channelPostsFeed.total})`}
+                  </h4>
+                  {channelPostsError && (
+                    <button
+                      onClick={refreshChannelPosts}
+                      className="text-xs text-red-700 hover:text-red-800 underline"
+                      style={{ fontWeight: 600 }}
+                    >
+                      {ru ? 'Повторить' : 'Retry'}
+                    </button>
+                  )}
+                </div>
+                {channelPostsLoading && channelPostsFeed.items.length === 0 ? (
+                  <div className="mb-2 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                    {ru ? 'Загружаем публикации канала...' : 'Loading channel posts...'}
+                  </div>
+                ) : channelPostsFeed.items.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 text-gray-400">
                     <MessageCircle className="w-8 h-8 mb-2" />
-                    <p className="text-sm">{ru ? 'Публикации не загружены' : 'No posts loaded'}</p>
-                    <p className="text-xs mt-1">{ru ? 'Подключите Neo4j для загрузки реальных данных' : 'Connect to Neo4j to load real posts'}</p>
+                    <p className="text-sm">{ru ? 'Публикации за выбранный период не найдены' : 'No posts found in the selected range'}</p>
+                    <p className="text-xs mt-1">{ru ? 'Попробуйте расширить период или выбрать другой канал' : 'Try expanding the date range or choosing another channel'}</p>
                   </div>
                 ) : (
-                  (activeChannel?.recentPosts || []).map((post) => (
+                  <>
+                  {channelPostsFeed.items.map((post) => (
                     <div key={post.id} className="bg-white rounded-xl border border-gray-200 p-4">
                       <div className="flex items-center gap-2 mb-2">
                         <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center">
@@ -463,7 +490,20 @@ export function ChannelsPage() {
                         <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" />{post.replies} {ru ? 'ответов' : 'replies'}</span>
                       </div>
                     </div>
-                  ))
+                  ))}
+                  {channelPostsFeed.hasMore && (
+                    <button
+                      onClick={loadMoreChannelPosts}
+                      disabled={channelPostsLoadingMore}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{ fontWeight: 600 }}
+                    >
+                      {channelPostsLoadingMore
+                        ? (ru ? 'Загружаем ещё...' : 'Loading more...')
+                        : (ru ? 'Показать ещё' : 'Load more')}
+                    </button>
+                  )}
+                  </>
                 )}
               </div>
             )}

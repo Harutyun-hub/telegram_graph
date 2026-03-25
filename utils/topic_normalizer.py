@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from utils.taxonomy import (
+    TAXONOMY_DOMAINS,
     TOPIC_ALIASES,
     build_topic_maps,
     canonical_category_name,
@@ -129,6 +130,8 @@ _CANONICAL_TOPICS: tuple[str, ...] = tuple(iter_topics())
 _CANONICAL_LOOKUP: dict[str, str] = {topic.lower(): topic for topic in _CANONICAL_TOPICS}
 _CANONICAL_LOOKUP_KEYS: tuple[str, ...] = tuple(_CANONICAL_LOOKUP.keys())
 _RUNTIME_TOPIC_ALIASES: dict[str, str] = {}
+_CATEGORY_LABEL_KEYS: set[str] = set()
+_DOMAIN_LABEL_KEYS: set[str] = set()
 
 _GENERIC_TRAILING_TERMS: set[str] = {
     "issue",
@@ -149,6 +152,32 @@ _GENERIC_TRAILING_TERMS: set[str] = {
     "studie",
     "studies",
 }
+
+_BLOCKED_PROPOSAL_KEYS: set[str] = {
+    "general",
+    "proposedtopic",
+    "topic",
+    "unknown",
+    "none",
+    "null",
+    "undefined",
+    "other",
+    "misc",
+}
+
+
+def _structure_key(value: str | None) -> str:
+    cleaned = _MULTI_SPACE.sub(" ", _NON_WORD.sub(" ", str(value or "").strip())).lower()
+    if not cleaned:
+        return ""
+    parts = [part for part in re.split(r"[\s\-]+", cleaned) if part and part not in {"and"}]
+    return "".join(parts)
+
+
+for _domain_name, _categories in TAXONOMY_DOMAINS.items():
+    _DOMAIN_LABEL_KEYS.add(_structure_key(_domain_name))
+    for _category_name in _categories.keys():
+        _CATEGORY_LABEL_KEYS.add(_structure_key(_category_name))
 
 
 def set_runtime_topic_aliases(aliases: dict[str, str] | None) -> None:
@@ -264,6 +293,13 @@ def classify_topic(raw: str | None) -> dict[str, Any] | None:
         return None
     sanitized = _sanitize_topic_text(str(raw))
     if not sanitized:
+        return None
+    sanitized_key = _structure_key(sanitized)
+    if not sanitized_key:
+        return None
+    if sanitized_key in _BLOCKED_PROPOSAL_KEYS:
+        return None
+    if sanitized_key in _CATEGORY_LABEL_KEYS or sanitized_key in _DOMAIN_LABEL_KEYS:
         return None
 
     canonical = None

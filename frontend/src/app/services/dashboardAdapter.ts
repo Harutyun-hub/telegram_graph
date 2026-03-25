@@ -1,4 +1,5 @@
 import { mockAppData } from '../data/mockData';
+import { CATEGORY_RU, translateCategory, translateTopicRu } from './topicPresentation';
 import type { AppData } from '../types/data';
 
 const TOPIC_COLORS = ['#ef4444', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#10b981', '#06b6d4', '#6b7280'];
@@ -8,37 +9,6 @@ const CONTENT_TYPE_RU: Record<string, string> = {
   video: 'Видео',
   audio: 'Аудио',
   document: 'Документ',
-};
-const CATEGORY_RU: Record<string, string> = {
-  Economy: 'Экономика',
-  Politics: 'Политика',
-  Society: 'Общество',
-  Technology: 'Технологии',
-  Culture: 'Культура',
-  Security: 'Безопасность',
-  General: 'Общий',
-  'Government & Leadership': 'Государственное управление и лидерство',
-  'Opposition & Protest': 'Оппозиция и протестная активность',
-  'Nagorno-Karabakh & Artsakh': 'Нагорный Карабах и Арцах',
-  'Global Conflict': 'Международные конфликты',
-  'National Identity': 'Национальная идентичность',
-  'Regional Security': 'Региональная безопасность',
-  Employment: 'Рынок труда',
-  'Democracy & Reform': 'Демократия и реформы',
-  'Military & Defense': 'Армия и оборона',
-  'Business & Enterprise': 'Бизнес и предпринимательство',
-  'Arts & Entertainment': 'Культура и развлечения',
-  'Macroeconomic Condition': 'Макроэкономическая ситуация',
-  Emigration: 'Эмиграция',
-  'Geopolitical Alignment': 'Геополитическая ориентация',
-  'Financial System': 'Финансовая система',
-  Education: 'Образование',
-  Religion: 'Религия',
-  'Social Services': 'Социальная поддержка',
-  'Media Landscape': 'Медийная среда',
-  'Information Integrity': 'Информационная достоверность',
-  'Community Life': 'Жизнь сообщества',
-  'Housing & Infrastructure': 'Жилье и инфраструктура',
 };
 const WORK_SIGNAL_LABELS_EN: Record<string, string> = {
   Job_Seeking: 'Job seeking',
@@ -71,97 +41,6 @@ const WEEKLY_SHIFT_LABELS_RU: Record<string, string> = {
   churn_signals: 'Сигналы оттока',
 };
 
-const TOPIC_RU: Record<string, string> = {
-  'Political Protest': 'Политические протесты',
-  'Armenian Government Performance': 'Оценка работы правительства Армении',
-  'Nagorno-Karabakh Conflict': 'Нагорно-Карабахский конфликт',
-  'Middle East Conflict': 'Конфликт на Ближнем Востоке',
-  'Armenian National Identity': 'Армянская национальная идентичность',
-  'Armenian Genocide Remembrance': 'Память о Геноциде армян',
-  'Armenian Opposition Movement': 'Армянское оппозиционное движение',
-  'Azerbaijan Aggression': 'Агрессия Азербайджана',
-  'Armenian Border Security': 'Безопасность границы Армении',
-  'Political Prisoner': 'Политические заключенные',
-  'Job Market Condition': 'Ситуация на рынке труда',
-  'Collective Memory': 'Коллективная память',
-  'Electoral Integrity': 'Честность выборов',
-  'Armenian Armed Force': 'Вооруженные силы Армении',
-  'Business Opportunity': 'Возможности для бизнеса',
-  'Iranian-Armenian Relation': 'Ирано-армянские отношения',
-  'Artsakh Sovereignty': 'Суверенитет Арцаха',
-  'Cultural Festival': 'Культурный фестиваль',
-  'Economic Growth': 'Экономический рост',
-  'Visa And Residency': 'Визы и ВНЖ',
-  'Pro-Western Orientation': 'Проевропейская ориентация',
-  'Russian Sanctions Impact': 'Влияние антироссийских санкций',
-  'Banking Sector': 'Банковский сектор',
-  'School System Quality': 'Качество школьного образования',
-  'Personal Insult': 'Личное оскорбление',
-  'Armenian Political Discourse': 'Армянская политическая дискуссия',
-  'Cognitive Style': 'Когнитивный стиль',
-  'Fear Los': 'Страх потерь',
-  'Language And Identity': 'Язык и идентичность',
-  'Political Candidate Criticism': 'Критика политических кандидатов',
-  'Information Clarity': 'Ясность информации',
-  'Iranian Response': 'Реакция Ирана',
-  'Ukraine Conflict': 'Конфликт в Украине',
-  'Public Opinion Poll': 'Опрос общественного мнения',
-  'Arts Entertainment': 'Культура и развлечения',
-  'Genetic Testing': 'Генетическое тестирование',
-  'Political Mythology': 'Политическая мифология',
-  'Analytical Critique': 'Аналитическая критика',
-  'Social Media Trend': 'Тренды в социальных сетях',
-  'Russian Propaganda': 'Российская пропаганда',
-  'Anti-Corruption Effort': 'Антикоррупционная повестка',
-  'South Caucasus Stability': 'Стабильность Южного Кавказа',
-  'Military Tactic': 'Военная тактика',
-  'Multi-Vector Foreign Policy': 'Многовекторная внешняя политика',
-  'Conspiracy Theory': 'Теория заговора',
-  'Armenian Geopolitical Strategy': 'Геополитическая стратегия Армении',
-  'Iranian Political Landscape': 'Политический ландшафт Ирана',
-  'Iranian Military Action': 'Военные действия Ирана',
-  'Political Insult': 'Политические оскорбления',
-  'Iranian Political Climate': 'Политический климат Ирана',
-  'War Commentary': 'Военные комментарии',
-  'American Propaganda': 'Американская пропаганда',
-  'Mental Health': 'Психическое здоровье',
-  'Armenian Dram Exchange': 'Курс армянского драма',
-  'Political Commentary': 'Политические комментарии',
-  'Military Support': 'Военная поддержка',
-  'Interfaith Dialogue': 'Межконфессиональный диалог',
-  'Constitutional Reform': 'Конституционная реформа',
-  'Post-Soviet Identity': 'Постсоветская идентичность',
-  'Ukrainian Conflict': 'Украинский конфликт',
-  'Culinary Culture': 'Кулинарная культура',
-  'Telegram Community': 'Телеграм-сообщество',
-  'Housing Market': 'Рынок жилья',
-  'Family Life': 'Семейная жизнь',
-  'Banking Service': 'Банковские услуги',
-  'Military Conflict': 'Военный конфликт',
-  'Social Infrastructure': 'Социальная инфраструктура',
-  'Political Tension': 'Политическая напряжённость',
-  'Public Space': 'Общественное пространство',
-  'Religious Sentiment': 'Религиозные настроения',
-  'Government Criticism': 'Критика правительства',
-  'Political Disillusionment': 'Политическое разочарование',
-  'Iranian Political Discourse': 'Политический дискурс Ирана',
-  'Bot Activity': 'Активность ботов',
-  'Historical Claim': 'Исторические заявления',
-  'Urban Development': 'Городское развитие',
-  'Migration Intent': 'Миграционные намерения',
-  'Tech Startup': 'Технологические стартапы',
-  'Geopolitical Discontent': 'Геополитическое недовольство',
-  'Armenian-Turkish Relation': 'Армяно-турецкие отношения',
-  'Evil Force': 'Враждебные силы',
-  'Iranian Conflict': 'Иранский конфликт',
-  'Healthcare Access': 'Доступ к здравоохранению',
-  'Economic Sanctions': 'Экономические санкции',
-  'Military Recruitment': 'Военный призыв',
-  'Disinformation Campaign': 'Кампания дезинформации',
-  'Orthodox Christianity': 'Православное христианство',
-  'Russian Expat Community': 'Русскоязычная экспат-среда',
-  'Armenian Diaspora Identity': 'Идентичность армянской диаспоры',
-};
 const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DOW_RU = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MIN_SUPPORT_FOR_TREND = 8;
@@ -222,27 +101,6 @@ function asStr(v: any, fallback = ''): string {
 
 function normalizeTopicLabel(v: any): string {
   return asStr(v, '').replace(/\s+/g, ' ').trim();
-}
-
-function translateTopicRu(topicRaw: any): string {
-  const topic = normalizeTopicLabel(topicRaw);
-  if (!topic) return topic;
-
-  const exact = TOPIC_RU[topic];
-  if (exact) return exact;
-
-  const normalized = topic.toLowerCase();
-  if (normalized === 'null' || normalized === 'unknown' || normalized === 'none') {
-    return 'Неопределенная тема';
-  }
-
-  return topic;
-}
-
-function translateCategory(categoryRaw: any, ru: boolean): string {
-  const category = asStr(categoryRaw, 'General');
-  if (!ru) return category;
-  return CATEGORY_RU[category] || category;
 }
 
 function topicKey(v: any): string {
@@ -473,7 +331,17 @@ export function adaptDashboardPayload(payload: any): AppData {
         const growthSupport = asNum(row.growthSupport, computedTrend.support);
         const backendTrend = asNum(row.trendPct, Number.NaN);
         const backendReliable = Boolean(row.trendReliable) && Number.isFinite(backendTrend) && growthSupport >= MIN_SUPPORT_FOR_TREND;
-        const quoteFromEvidence = snippet(row.sampleQuote, 180);
+        const evidenceRows = asArray(row.evidence)
+          .map((ev: any) => ({
+            id: asStr(ev?.id, ''),
+            kind: asStr(ev?.kind, 'message'),
+            text: snippet(ev?.text, 240),
+            channel: asStr(ev?.channel, 'unknown'),
+            userId: asStr(ev?.userId, ''),
+            postedAt: asStr(ev?.postedAt, ''),
+          }))
+          .filter((ev) => ev.id && ev.text);
+        const quoteFromEvidence = snippet(row.sampleQuote || evidenceRows[0]?.text, 180);
         return {
           id: i + 1,
           topic: ru ? translateTopicRu(topic) : topic,
@@ -488,6 +356,16 @@ export function adaptDashboardPayload(payload: any): AppData {
           category: translateCategory(category, ru),
           sentiment: sentiments[i % sentiments.length],
           sampleQuote: quoteFromEvidence,
+          sampleEvidenceId: asStr(row.sampleEvidenceId, evidenceRows[0]?.id || ''),
+          evidence: evidenceRows,
+          evidenceCount: asNum(row.evidenceCount, evidenceRows.length),
+          distinctUsers: asNum(row.distinctUsers, 0),
+          distinctChannels: asNum(row.distinctChannels, 0),
+          distinctPosts: asNum(row.distinctPosts, 0),
+          distinctComments: asNum(row.distinctComments, 0),
+          qualityTier: ['high', 'medium', 'low'].includes(asStr(row.qualityTier, ''))
+            ? asStr(row.qualityTier, 'low') as 'high' | 'medium' | 'low'
+            : 'low',
         };
       };
     const filteredTrending = rawTrending.filter((row: any) => {

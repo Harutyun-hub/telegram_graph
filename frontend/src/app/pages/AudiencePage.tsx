@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Search, Users, User, ChevronRight, ChevronLeft, X, Clock, MessageCircle, ThumbsUp, Radio, Hash, ArrowUpDown, MapPin, Calendar, Activity, Star } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area, Cell } from 'recharts';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useAudienceDetailData, useAudienceMemberDetail } from '../services/detailData';
+import { useAudienceDetailData, useAudienceMemberDetail, useAudienceMessagesFeed } from '../services/detailData';
 import type { AudienceMember } from '../types/data';
 
 const typeColors: Record<string, string> = {
@@ -105,6 +105,14 @@ export function AudiencePage() {
     }
   }, [allAudience, selectedMember]);
   const activeMember = selectedMemberDetail || selectedMember;
+  const {
+    data: audienceMessagesFeed,
+    loading: audienceMessagesLoading,
+    loadingMore: audienceMessagesLoadingMore,
+    error: audienceMessagesError,
+    refresh: refreshAudienceMessages,
+    loadMore: loadMoreAudienceMessages,
+  } = useAudienceMessagesFeed(selectedMember?.id || null, Boolean(selectedMember && activeTab === 'activity'));
 
   return (
     <div className="flex flex-col md:flex-row h-full">
@@ -534,17 +542,32 @@ export function AudiencePage() {
                 {/* Recent Messages */}
                 <div>
                   <h4 className="text-sm text-gray-900 mb-3" style={{ fontWeight: 600 }}>
-                    {ru ? `Последние сообщения (${activeMember?.recentMessages.length || 0})` : `Recent Messages (${activeMember?.recentMessages.length || 0})`}
+                    {ru ? `Сообщения за период (${audienceMessagesFeed.total})` : `Messages in range (${audienceMessagesFeed.total})`}
                   </h4>
-                  {(activeMember?.recentMessages || []).length === 0 ? (
+                  {audienceMessagesError && (
+                    <div className="mb-3">
+                      <button
+                        onClick={refreshAudienceMessages}
+                        className="text-xs text-red-700 hover:text-red-800 underline"
+                        style={{ fontWeight: 600 }}
+                      >
+                        {ru ? 'Повторить' : 'Retry'}
+                      </button>
+                    </div>
+                  )}
+                  {audienceMessagesLoading && audienceMessagesFeed.items.length === 0 ? (
+                    <div className="mb-3 px-4 py-3 border border-blue-100 bg-blue-50 rounded-xl text-xs text-blue-700">
+                      {ru ? 'Загружаем сообщения участника...' : 'Loading member messages...'}
+                    </div>
+                  ) : audienceMessagesFeed.items.length === 0 ? (
                     <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400">
                       <MessageCircle className="w-8 h-8 mx-auto mb-2" />
-                      <p className="text-sm">{ru ? 'Сообщения не загружены' : 'No recent messages loaded'}</p>
+                      <p className="text-sm">{ru ? 'Сообщения за выбранный период не найдены' : 'No messages found in the selected range'}</p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {(activeMember?.recentMessages || []).map((msg, i) => (
-                        <div key={i} className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-sm transition-shadow">
+                      {audienceMessagesFeed.items.map((msg) => (
+                        <div key={msg.id} className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-sm transition-shadow">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-xs text-blue-600" style={{ fontWeight: 500 }}>{msg.channel}</span>
                             <div className="flex items-center gap-1.5 text-xs text-gray-400">
@@ -562,6 +585,18 @@ export function AudiencePage() {
                           </div>
                         </div>
                       ))}
+                      {audienceMessagesFeed.hasMore && (
+                        <button
+                          onClick={loadMoreAudienceMessages}
+                          disabled={audienceMessagesLoadingMore}
+                          className="w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          style={{ fontWeight: 600 }}
+                        >
+                          {audienceMessagesLoadingMore
+                            ? (ru ? 'Загружаем ещё...' : 'Loading more...')
+                            : (ru ? 'Показать ещё' : 'Load more')}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
