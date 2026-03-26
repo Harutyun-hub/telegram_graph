@@ -5,6 +5,7 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W4: TOPIC LANDSCAPE
@@ -68,7 +69,7 @@ export function TopicLandscape() {
   const totalMentions = topicBubbles.reduce((sum, t) => sum + (t.value || 0), 0);
   const lowEvidenceGrowth = topicBubbles.filter((t) => !t.growthReliable).length;
 
-  if (!topicBubbles.length) return <EmptyWidget title={ru ? 'Карта тем' : 'Topic Landscape'} />;
+  if (!topicBubbles.length) return <EmptyWidget widgetId="topic_landscape" title={ru ? 'Карта тем' : 'Topic Landscape'} />;
 
   const categoryLegend = useMemo(() => {
     const map = new Map<string, { color: string; topics: number; mentions: number }>();
@@ -101,9 +102,9 @@ export function TopicLandscape() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="topic_landscape">
           {ru ? 'Карта тем' : 'Topic Landscape'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Что обсуждают чаще всего' : 'Most discussed topics'}
         </span>
@@ -286,7 +287,7 @@ export function ConversationTrends() {
   const trendLines = data.trendLines[lang] ?? [];
   const trendData = data.trendData;
 
-  if (!trendLines.length || !trendData.length) return <EmptyWidget title={ru ? 'Динамика разговоров' : 'Conversation Trends'} />;
+  if (!trendLines.length || !trendData.length) return <EmptyWidget widgetId="conversation_trends" title={ru ? 'Динамика разговоров' : 'Conversation Trends'} />;
 
   // Compute fastest-growing topics dynamically
   const sorted = [...trendLines].sort((a, b) => b.change - a.change);
@@ -295,9 +296,9 @@ export function ConversationTrends() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="conversation_trends">
           {ru ? 'Динамика разговоров' : 'Conversation Trends'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -452,7 +453,7 @@ export function QuestionCloud() {
   const questionBriefs = data.questionBriefs[lang] ?? [];
 
   if (!questionBriefs.length) {
-    return <EmptyWidget title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
+    return <EmptyWidget widgetId="question_cloud" title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
   }
 
   const needsGuideCount = questionBriefs.filter((b) => b.status === 'needs_guide').length;
@@ -482,9 +483,9 @@ export function QuestionCloud() {
   return (
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+          <WidgetTitle widgetId="question_cloud">
             {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
-          </h3>
+          </WidgetTitle>
           <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
         </div>
         <p className="text-xs text-gray-500 mb-4">
@@ -669,14 +670,14 @@ export function TopicLifecycle() {
   const lifecycleStages = data.lifecycleStages[lang] ?? [];
   const [expandedKey, setExpandedKey] = useState('');
 
-  if (!lifecycleStages.length) return <EmptyWidget title={ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'} />;
+  if (!lifecycleStages.length) return <EmptyWidget widgetId="topic_lifecycle" title={ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="topic_lifecycle">
           {ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Рост -> Снижение' : 'Growing -> Declining'}
         </span>

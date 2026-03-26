@@ -7,6 +7,7 @@ import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 import { useTopicDetail, useTopicEvidenceFeed, useTopicsDetailData } from '../services/detailData';
 import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } from '../services/topicPresentation';
 import type { TopicDetail } from '../types/data';
+import { PageInfoButton, type PageInfoCopy } from '../components/ui/PageInfoButton';
 
 const categoryColors: Record<string, string> = {
   Living: '#ef4444', Work: '#3b82f6', Family: '#8b5cf6',
@@ -35,6 +36,42 @@ function formatTopicTrendTooltip(bucket: string, lang: 'en' | 'ru'): string {
     day: 'numeric',
     timeZone: 'UTC',
   }).format(date);
+}
+
+function topicsInfoCopy(lang: 'en' | 'ru'): PageInfoCopy {
+  return lang === 'ru'
+    ? {
+      summary: 'Объясняет, откуда берутся темы, как они группируются и по какой логике ранжируются на этой странице.',
+      title: 'Как формируются темы',
+      overview: 'Темы на этой странице не создаются вручную. Они приходят из аналитической темы сообщения, извлечённой из постов и комментариев за выбранный период, а затем собираются в карточки для удобного просмотра.',
+      sectionTitle: 'Что лежит в основе',
+      items: [
+        'Базовая тема берётся из исходного идентификатора темы и аналитической классификации, связанной с проанализированными сообщениями.',
+        'Для каждой темы считаются упоминания, рост, тональность, уникальные участники, каналы и примеры доказательств.',
+        'Группы во вкладках нужны для навигации: они строятся из исходной категории темы, чтобы список было проще фильтровать.',
+        'При открытии темы загружаются её динамика, ключевые каналы и лента сообщений или вопросов в том же выбранном диапазоне дат.',
+      ],
+      noteTitle: 'Как читать страницу',
+      note: 'Сортировка по росту показывает недавний импульс, а не общий объём. Поэтому быстро растущая тема может идти выше, чем более крупная, но стабильная.',
+      ariaLabel: 'Объяснить, как формируются темы',
+      badgeLabel: 'О странице',
+    }
+    : {
+      summary: 'Explains where topics come from, how they are grouped, and how this page ranks them.',
+      title: 'How Topics Are Built',
+      overview: 'Topics on this page are not created manually. They come from the analyzed topic label behind community posts and comments in the selected date range, then get assembled into cards for easier review.',
+      sectionTitle: 'What it uses',
+      items: [
+        'Each topic starts from a backend topic label or sourceTopic linked to analyzed messages.',
+        'Every topic card combines mentions, growth, sentiment mix, distinct participants, channel spread, and evidence examples.',
+        'The tab groups are navigation buckets built from the underlying topic category so the list is easier to filter.',
+        'Opening a topic loads its trend history, top channels, and the evidence or question feed for the same selected date range.',
+      ],
+      noteTitle: 'How to read it',
+      note: 'Sorting by growth highlights recent momentum, not lifetime volume. A fast-rising topic can rank above a larger but steadier one.',
+      ariaLabel: 'Explain how topics are built',
+      badgeLabel: 'Page guide',
+    };
 }
 
 // ── COMPONENT ──
@@ -222,9 +259,12 @@ export function TopicsPage() {
         <div className="px-6 py-5 border-b border-gray-200">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
-                {ru ? 'Темы' : 'Topics'}
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
+                  {ru ? 'Темы' : 'Topics'}
+                </h1>
+                <PageInfoButton copy={topicsInfoCopy(lang)} />
+              </div>
               <p className="text-xs text-gray-500 mt-0.5">
                 {allTopics.length} {ru ? 'тем отслеживается' : 'topics tracked'} &middot; {totalMentions.toLocaleString()} {ru ? 'всего упоминаний' : 'total mentions'}
               </p>

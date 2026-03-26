@@ -39,7 +39,7 @@ export const ADMIN_TIERS: AdminTierDefinition[] = [
   { id: 'analytics', labelEn: 'Performance & Analytics', labelRu: 'Эффективность и аналитика' },
 ];
 
-export const ADMIN_WIDGET_DEFINITIONS: AdminWidgetDefinition[] = [
+export const ADMIN_WIDGET_DEFINITIONS = [
   { id: 'community_brief', tierId: 'pulse', labelEn: 'Community Brief', labelRu: 'Сводка сообщества' },
   { id: 'community_health_score', tierId: 'pulse', labelEn: 'Community Health Score', labelRu: 'Индекс здоровья сообщества' },
   { id: 'trending_topics_feed', tierId: 'pulse', labelEn: 'Trending Topics Feed', labelRu: 'Лента трендовых тем' },
@@ -68,7 +68,9 @@ export const ADMIN_WIDGET_DEFINITIONS: AdminWidgetDefinition[] = [
   { id: 'week_over_week_shifts', tierId: 'analytics', labelEn: 'Week-over-Week Shifts', labelRu: 'Изменения неделя к неделе' },
   { id: 'sentiment_by_topic', tierId: 'analytics', labelEn: 'Sentiment by Topic', labelRu: 'Настроения по темам' },
   { id: 'content_performance', tierId: 'analytics', labelEn: 'Content Performance', labelRu: 'Эффективность контента' },
-];
+] as const satisfies readonly AdminWidgetDefinition[];
+
+export type AdminWidgetId = (typeof ADMIN_WIDGET_DEFINITIONS)[number]['id'];
 
 export const ADMIN_PROMPT_GROUPS: AdminPromptGroup[] = [
   { id: 'extraction', labelEn: 'Extraction', labelRu: 'Извлечение' },

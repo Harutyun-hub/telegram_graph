@@ -4,6 +4,7 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W29: WEEK-OVER-WEEK SHIFTS
@@ -16,7 +17,7 @@ export function WeekOverWeekShifts() {
   const ru = lang === 'ru';
   const weeklyShifts = data.weeklyShifts[lang] ?? [];
 
-  if (!weeklyShifts.length) return <EmptyWidget title={ru ? 'Динамика за неделю' : 'Week-over-Week Shifts'} />;
+  if (!weeklyShifts.length) return <EmptyWidget widgetId="week_over_week_shifts" title={ru ? 'Динамика за неделю' : 'Week-over-Week Shifts'} />;
 
   // ✅ FIX: use item.isInverse flag from data instead of brittle metric-name string matching.
   // Previously: const churnLabels = ['Churn Signals', 'Сигналы оттока'];
@@ -25,9 +26,9 @@ export function WeekOverWeekShifts() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="week_over_week_shifts">
           {ru ? 'Динамика за неделю' : 'Week-over-Week Shifts'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? `Сравнение с предыдущим окном (${range.days} дн.)` : `Compared with the previous ${range.days}-day window`}
         </span>
@@ -89,7 +90,7 @@ export function SentimentByTopic() {
   const [showAll, setShowAll] = useState(false);
   const sentimentByTopic = data.sentimentByTopic[lang] ?? [];
 
-  if (!sentimentByTopic.length) return <EmptyWidget title={ru ? 'Тональность по темам' : 'Sentiment by Topic'} />;
+  if (!sentimentByTopic.length) return <EmptyWidget widgetId="sentiment_by_topic" title={ru ? 'Тональность по темам' : 'Sentiment by Topic'} />;
 
   // ✅ GENERIC: compute top positive and top negative topics dynamically
   const sortedByPos = [...sentimentByTopic].sort((a, b) => b.positive - a.positive);
@@ -101,9 +102,9 @@ export function SentimentByTopic() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="sentiment_by_topic">
           {ru ? 'Тональность по темам' : 'Sentiment by Topic'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Что радует, а что раздражает' : 'What makes people happy vs. frustrated'}
         </span>
@@ -196,7 +197,7 @@ export function ContentPerformance() {
   const topPosts = data.topPosts[lang] ?? [];
   const contentTypePerformance = data.contentTypePerformance[lang] ?? [];
 
-  if (!topPosts.length && !contentTypePerformance.length) return <EmptyWidget title={ru ? 'Эффективность контента' : 'Content Performance'} />;
+  if (!topPosts.length && !contentTypePerformance.length) return <EmptyWidget widgetId="content_performance" title={ru ? 'Эффективность контента' : 'Content Performance'} />;
 
   // ✅ GENERIC: sort copies, not originals (avoid shared-state mutation)
   // ✅ GENERIC: compute strategy insight dynamically from data
@@ -207,9 +208,9 @@ export function ContentPerformance() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="content_performance">
           {ru ? 'Эффективность контента' : 'Content Performance'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Какой контент работает лучше всего' : 'What content works best'}
         </span>

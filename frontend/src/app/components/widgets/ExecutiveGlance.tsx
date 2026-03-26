@@ -5,6 +5,7 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 function selectedWindowLabel(days: number, ru: boolean): string {
   if (days === 1) {
@@ -45,7 +46,7 @@ export function CommunityHealthScore() {
     return () => clearTimeout(timer);
   }, [currentScore]);
 
-  if (!healthComponents.length) return <EmptyWidget title={ru ? 'Климат сообщества' : 'Community Climate'} />;
+  if (!healthComponents.length) return <EmptyWidget widgetId="community_health_score" title={ru ? 'Климат сообщества' : 'Community Climate'} />;
 
   const circumference = 2 * Math.PI * 54;
   const strokeDashoffset = circumference - (animatedScore / 100) * circumference;
@@ -54,9 +55,9 @@ export function CommunityHealthScore() {
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+          <WidgetTitle widgetId="community_health_score">
             {ru ? 'Климат сообщества' : 'Community Climate'}
-          </h3>
+          </WidgetTitle>
           <p className="text-xs text-gray-500 mt-0.5">
             {ru ? 'Объяснимый индекс по интенту, тону и разнообразию тем' : 'Explainable index from intent, tone, and topic diversity'}
           </p>
@@ -220,16 +221,16 @@ export function TrendingTopicsFeed() {
     return 'No change';
   };
 
-  if (!visibleTopics.length) return <EmptyWidget title={ru ? 'Тренды прямо сейчас' : 'Trending Now'} />;
+  if (!visibleTopics.length) return <EmptyWidget widgetId="trending_topics_feed" title={ru ? 'Тренды прямо сейчас' : 'Trending Now'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2 flex-wrap">
           <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-          <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+          <WidgetTitle widgetId="trending_topics_feed">
             {ru ? 'Тренды прямо сейчас' : 'Trending Now'}
-          </h3>
+          </WidgetTitle>
           <div className="flex items-center gap-1 ml-1">
             <button
               onClick={() => setMode('trending')}
@@ -330,11 +331,9 @@ export function CommunityBrief() {
               <BarChart3 className="w-4.5 h-4.5 text-white" style={{ width: '18px', height: '18px' }} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
-                  {ru ? 'Снимок сообщества' : 'Community Snapshot'}
-                </h3>
-              </div>
+              <WidgetTitle widgetId="community_brief">
+                {ru ? 'Снимок сообщества' : 'Community Snapshot'}
+              </WidgetTitle>
               <p className="text-xs text-gray-500 mt-0.5">
                 {ru ? `Обновлено ${brief.updatedMinutesAgo} мин назад · проанализировано ${brief.messagesAnalyzed.toLocaleString()} единиц` : `Updated ${brief.updatedMinutesAgo} min ago · ${brief.messagesAnalyzed.toLocaleString()} analyzed units`}
               </p>

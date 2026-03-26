@@ -4,6 +4,7 @@ import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGri
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAudienceDetailData, useAudienceMemberDetail, useAudienceMessagesFeed } from '../services/detailData';
 import type { AudienceMember } from '../types/data';
+import { PageInfoButton, type PageInfoCopy } from '../components/ui/PageInfoButton';
 
 const typeColors: Record<string, string> = {
   General: '#3b82f6', Work: '#f59e0b', Family: '#ec4899',
@@ -33,6 +34,42 @@ const integrationMapRU: Record<string, string> = {
 };
 
 const genderFilters = ['All', 'Male', 'Female'] as const;
+
+function audienceInfoCopy(lang: 'en' | 'ru'): PageInfoCopy {
+  return lang === 'ru'
+    ? {
+      summary: 'Объясняет, как эта страница собирает участников, считает их сигналы и показывает профиль аудитории.',
+      title: 'Как формируется аудитория',
+      overview: 'Страница аудитории строится из user-level summaries за выбранный диапазон дат и показывает, кто чаще всего участвует в разговорах, в каких каналах они активны и какие темы у них доминируют.',
+      sectionTitle: 'Что лежит в основе',
+      items: [
+        'Каждый участник собирается из сводки по userId и нормализуется в единый профиль для этой страницы.',
+        'Карточка объединяет число сообщений, каналы участия, главные темы, тональность и вычисляемый help score.',
+        'Фильтр по полу и сортировка помогают по-разному смотреть на одну и ту же аудиторию, но не меняют исходные сигналы.',
+        'При открытии участника страница подгружает его профиль, каналы, активность и реальные сообщения в том же выбранном диапазоне дат.',
+      ],
+      noteTitle: 'Как читать страницу',
+      note: 'Высокий help score и большой объём сообщений означают заметность в разговоре, но это не всегда формальное лидерство. Смотрите их вместе с каналами и темами человека.',
+      ariaLabel: 'Объяснить, как формируется страница аудитории',
+      badgeLabel: 'О странице',
+    }
+    : {
+      summary: 'Explains how this page assembles members, computes their signals, and presents the audience profile.',
+      title: 'How Audience Is Built',
+      overview: 'The Audience page is built from user-level summaries inside the selected date range and shows who participates most, where they show up, and which topics define them.',
+      sectionTitle: 'What it uses',
+      items: [
+        'Each member starts from a backend user summary keyed by userId and is normalized into one profile for this page.',
+        'The card combines message volume, channel participation, top topics, sentiment mix, and a computed help score.',
+        'Gender filters and sorting offer different views of the same audience without changing the underlying signals.',
+        'Opening a member loads their profile, channels, activity, and real messages from the same selected date range.',
+      ],
+      noteTitle: 'How to read it',
+      note: 'A high help score and a large message count show visibility in the conversation, but they do not automatically mean formal leadership. Read them together with the member’s channels and topics.',
+      ariaLabel: 'Explain how the audience page is built',
+      badgeLabel: 'Page guide',
+    };
+}
 
 // ── COMPONENT ──
 
@@ -122,9 +159,12 @@ export function AudiencePage() {
         <div className="px-6 py-5 border-b border-gray-200">
           <div className="flex items-center justify-between mb-1">
             <div>
-              <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
-                {ru ? 'Аудитория' : 'Audience'}
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
+                  {ru ? 'Аудитория' : 'Audience'}
+                </h1>
+                <PageInfoButton copy={audienceInfoCopy(lang)} />
+              </div>
               <p className="text-xs text-gray-500 mt-0.5">
                 {allAudience.length} {ru ? 'участников отслеживается' : 'members tracked'} &middot;
                 {' '}{genderStats.Male} {ru ? 'мужчин' : 'male'} &middot; {genderStats.Female} {ru ? 'женщин' : 'female'}
