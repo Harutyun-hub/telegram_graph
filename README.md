@@ -109,6 +109,7 @@ Backend:
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `OPENAI_API_KEY`
+- `APP_ROLE` optional, default `all` for the current single-service deployment; use `web` only when a separate worker service is running background jobs, and `worker` on that dedicated worker
 - `ANALYTICS_API_REQUIRE_AUTH` default `false`
 - `ANALYTICS_API_KEY_FRONTEND` for the frontend proxy
 - `ANALYTICS_API_KEY_OPENCLAW` for OpenClaw/server-to-server calls
@@ -142,6 +143,7 @@ The current release remains compatible with the GitHub `main` / Railway deployme
 - no change to the frontend Caddy reverse proxy contract
 - no new Railway manifest or service split
 - no new dependency requirements beyond the existing backend/frontend stacks
+- background jobs still run in the default single-service deploy; set `APP_ROLE=web` only if Railway also runs a separate `APP_ROLE=worker` instance
 
 Operational note:
 

@@ -49,7 +49,7 @@ class ScraperSchedulerService:
         self._background_tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
-        self.scheduler.start()
+        self._ensure_scheduler_started()
         settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=15)
         self.interval_minutes = int(settings.get("interval_minutes", 15))
         self.desired_active = bool(settings.get("is_active", False))
@@ -60,6 +60,10 @@ class ScraperSchedulerService:
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
         )
+
+    def _ensure_scheduler_started(self) -> None:
+        if not self.scheduler.running:
+            self.scheduler.start()
 
     async def shutdown(self) -> None:
         try:
@@ -196,6 +200,7 @@ class ScraperSchedulerService:
                 self.running_now = False
 
     async def start(self) -> dict:
+        self._ensure_scheduler_started()
         self.desired_active = True
         self._upsert_interval_job()
         persisted = self.db.save_scraper_scheduler_settings(
@@ -223,6 +228,7 @@ class ScraperSchedulerService:
             self.interval_minutes = 1
 
         if self.desired_active:
+            self._ensure_scheduler_started()
             self._upsert_interval_job()
 
         persisted = self.db.save_scraper_scheduler_settings(
