@@ -67,7 +67,19 @@ from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
-APP_ROLE = os.getenv("APP_ROLE", "web").strip().lower()
+def _normalize_app_role(value: str | None) -> str:
+    role = str(value or "").strip().lower()
+    if role in {"web", "worker", "all"}:
+        return role
+    # Preserve the historical single-service deployment shape by default.
+    return "all"
+
+
+def _should_run_background_jobs(role: str | None = None) -> bool:
+    return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
+
+
+APP_ROLE = _normalize_app_role(os.getenv("APP_ROLE"))
 RUN_STARTUP_WARMERS = str(os.getenv("RUN_STARTUP_WARMERS", "true")).strip().lower() in {"1", "true", "yes", "on"}
 _SERVER_TIMING_PATHS = {
     "/api/dashboard",
@@ -82,7 +94,7 @@ async def app_lifespan(_app: FastAPI):
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
-    if APP_ROLE == "worker":
+    if _should_run_background_jobs():
         scheduler = get_scraper_scheduler()
         await scheduler.startup()
         _start_question_cards_scheduler()
@@ -97,7 +109,7 @@ async def app_lifespan(_app: FastAPI):
             if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_opportunity_cards_once(force=False))
     else:
-        logger.info("Web runtime ready | startup warmers disabled")
+        logger.info("Web-only runtime ready | background jobs disabled")
 
     try:
         yield
