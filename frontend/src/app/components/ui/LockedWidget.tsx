@@ -1,13 +1,16 @@
 import { Lock } from 'lucide-react';
+import type { AdminWidgetId } from '../../admin/catalog';
 import { useLanguage } from '../../contexts/LanguageContext';
+import { WidgetTitle } from './WidgetTitle';
 
 interface LockedWidgetProps {
+  widgetId: AdminWidgetId;
   title: string;
   minDays?: number;
   reason: 'minimum_window' | 'not_connected';
 }
 
-export function LockedWidget({ title, minDays = 15, reason }: LockedWidgetProps) {
+export function LockedWidget({ widgetId, title, minDays = 15, reason }: LockedWidgetProps) {
   const { lang } = useLanguage();
   const ru = lang === 'ru';
   const message = reason === 'minimum_window'
@@ -16,9 +19,7 @@ export function LockedWidget({ title, minDays = 15, reason }: LockedWidgetProps)
 
   return (
     <div className="bg-white rounded-xl border border-dashed border-gray-300 p-6">
-      <h3 className="text-gray-900 mb-3" style={{ fontSize: '1.05rem' }}>
-        {title}
-      </h3>
+      <WidgetTitle widgetId={widgetId} className="mb-3">{title}</WidgetTitle>
       <div className="flex flex-col items-center justify-center py-10 text-center">
         <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
           <Lock className="w-5 h-5 text-gray-400" />

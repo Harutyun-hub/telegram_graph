@@ -2,6 +2,7 @@ import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Toolti
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W19: EMERGING INTERESTS RADAR
@@ -21,7 +22,7 @@ export function EmergingInterests() {
   const ru = lang === 'ru';
   const emergingInterests = data.emergingInterests[lang] ?? [];
 
-  if (!emergingInterests.length) return <EmptyWidget title={ru ? 'Зарождающиеся интересы' : 'Emerging Interests'} />;
+  if (!emergingInterests.length) return <EmptyWidget widgetId="emerging_interests" title={ru ? 'Зарождающиеся интересы' : 'Emerging Interests'} />;
 
   const oLabels = oppLabels[lang];
 
@@ -29,9 +30,9 @@ export function EmergingInterests() {
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
-          <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+          <WidgetTitle widgetId="emerging_interests">
             {ru ? 'Зарождающиеся интересы' : 'Emerging Interests'}
-          </h3>
+          </WidgetTitle>
           <span className="bg-purple-100 text-purple-700 text-xs px-2 py-0.5 rounded-full" style={{ fontWeight: 500 }}>
             {emergingInterests.length} {ru ? 'новых' : 'new'}
           </span>
@@ -80,7 +81,7 @@ export function RetentionRiskGauge() {
   const retentionFactors = data.retentionFactors[lang] ?? [];
   const churnSignals = data.churnSignals[lang] ?? [];
 
-  if (!retentionFactors.length && !churnSignals.length) return <EmptyWidget title={ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'} />;
+  if (!retentionFactors.length && !churnSignals.length) return <EmptyWidget widgetId="retention_risk_gauge" title={ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'} />;
 
   const continuityScore = retentionFactors.length > 0
     ? Math.round(retentionFactors[0]?.overallScore ?? (retentionFactors.reduce((acc, f) => acc + f.score * f.weight, 0) / retentionFactors.reduce((acc, f) => acc + f.weight, 0)))
@@ -93,9 +94,9 @@ export function RetentionRiskGauge() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="retention_risk_gauge">
           {ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'}
-        </h3>
+        </WidgetTitle>
         <span className={`text-xs px-2 py-0.5 rounded-full ${continuityScore >= 70 ? 'bg-emerald-100 text-emerald-700' : continuityScore >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 600 }}>
           {ru ? 'Возврат:' : 'Continuity:'} {continuityScore}/100
         </span>
@@ -159,7 +160,7 @@ export function CommunityGrowthFunnel() {
   const ru = lang === 'ru';
   const growthFunnel = data.growthFunnel[lang] ?? [];
 
-  if (!growthFunnel.length) return <EmptyWidget title={ru ? 'Воронка вовлечённости' : 'Engagement Funnel'} />;
+  if (!growthFunnel.length) return <EmptyWidget widgetId="community_growth_funnel" title={ru ? 'Воронка вовлечённости' : 'Engagement Funnel'} />;
 
   // ✅ FIX: use role field for semantic stage lookup — no more brittle positional indices
   // Previously: growthFunnel[1], growthFunnel[3] — breaks if stages are reordered or added
@@ -179,9 +180,9 @@ export function CommunityGrowthFunnel() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="community_growth_funnel">
           {ru ? 'Воронка вовлечённости' : 'Engagement Funnel'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? 'Прогресс участников' : 'Member progression'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -256,7 +257,7 @@ export function DecisionStageTracker() {
   const ru = lang === 'ru';
   const decisionStages = data.decisionStages[lang] ?? [];
 
-  if (!decisionStages.length) return <EmptyWidget title={ru ? 'Этапы пути участников' : 'Member Journey Stages'} />;
+  if (!decisionStages.length) return <EmptyWidget widgetId="decision_stage_tracker" title={ru ? 'Этапы пути участников' : 'Member Journey Stages'} />;
 
   // ✅ GENERIC: compute fastest-growing stage and max pct dynamically
   const maxPct = Math.max(...decisionStages.map(s => s.pct), 1);
@@ -265,9 +266,9 @@ export function DecisionStageTracker() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="decision_stage_tracker">
           {ru ? 'Этапы пути участников' : 'Member Journey Stages'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Где каждый находится в своей истории с Арменией?' : 'Where is everyone in their Armenia story?'}
         </span>
@@ -327,7 +328,7 @@ export function NewVsReturningVoice() {
   const topNewTopics = data.topNewTopics[lang] ?? [];
   const voiceData = data.voiceData;
 
-  if (!voiceData.length) return <EmptyWidget title={ru ? 'Новые vs. постоянные голоса' : 'New vs. Returning Voices'} />;
+  if (!voiceData.length) return <EmptyWidget widgetId="new_vs_returning_voice" title={ru ? 'Новые vs. постоянные голоса' : 'New vs. Returning Voices'} />;
 
   const latestWeek = voiceData[voiceData.length - 1];
   const total = latestWeek.newVoices + latestWeek.returning;
@@ -355,9 +356,9 @@ export function NewVsReturningVoice() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
-          {ru ? 'Н��вые vs. постоянные голоса' : 'New vs. Returning Voices'}
-        </h3>
+        <WidgetTitle widgetId="new_vs_returning_voice">
+          {ru ? 'Новые vs. постоянные голоса' : 'New vs. Returning Voices'}
+        </WidgetTitle>
         <span className={`text-xs px-2 py-0.5 rounded-full ${trend > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 500 }}>
           {newPct}% {ru ? 'новых на этой неделе' : 'new this week'}
         </span>

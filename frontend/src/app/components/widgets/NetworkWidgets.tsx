@@ -6,6 +6,7 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W12: TOP CHANNELS & GROUPS
@@ -27,7 +28,7 @@ export function TopChannels() {
   const ru = lang === 'ru';
   const communityChannels = data.communityChannels;
 
-  if (!communityChannels.length) return <EmptyWidget title={ru ? 'Топ-каналы сообщества' : 'Top Community Channels'} />;
+  if (!communityChannels.length) return <EmptyWidget widgetId="top_channels" title={ru ? 'Топ-каналы сообщества' : 'Top Community Channels'} />;
 
   const labels = typeLabels[lang];
 
@@ -47,9 +48,9 @@ export function TopChannels() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="top_channels">
           {ru ? 'Топ-каналы сообщества' : 'Top Community Channels'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{topChannels.length} {ru ? 'активных групп' : 'active groups'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -112,14 +113,14 @@ export function KeyVoices() {
   const ru = lang === 'ru';
   const keyVoices = data.keyVoices[lang] ?? [];
 
-  if (!keyVoices.length) return <EmptyWidget title={ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'} />;
+  if (!keyVoices.length) return <EmptyWidget widgetId="key_voices" title={ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="key_voices">
           {ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? `Активные комментаторы за ${range.days} дн.` : `Active commenters in the selected ${range.days}-day window`}
         </span>
@@ -273,7 +274,7 @@ export function RecommendationTracker() {
   const ru = lang === 'ru';
   const recommendations = data.recommendations[lang] ?? [];
 
-  if (!recommendations.length) return <EmptyWidget title={ru ? 'Рекомендации сообщества' : 'Community Recommendations'} />;
+  if (!recommendations.length) return <EmptyWidget widgetId="recommendation_tracker" title={ru ? 'Рекомендации сообщества' : 'Community Recommendations'} />;
 
   // ✅ GENERIC: compute top 2 categories by mention count dynamically
   const catTotals: Record<string, number> = {};
@@ -283,9 +284,9 @@ export function RecommendationTracker() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="recommendation_tracker">
           {ru ? 'Рекомендации сообщества' : 'Community Recommendations'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? 'Самые популярные советы' : 'Most shared suggestions'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -422,7 +423,7 @@ export function InformationVelocity() {
   const ru = lang === 'ru';
   const viralTopics = data.viralTopics[lang] ?? [];
 
-  if (!viralTopics.length) return <EmptyWidget title={ru ? 'Скорость распространения информации' : 'Information Velocity'} />;
+  if (!viralTopics.length) return <EmptyWidget widgetId="information_velocity" title={ru ? 'Скорость распространения информации' : 'Information Velocity'} />;
 
   const velConfig = velocityConfig[lang];
 
@@ -439,9 +440,9 @@ export function InformationVelocity() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="information_velocity">
           {ru ? 'Скорость распространения информации' : 'Information Velocity'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Как быстро темы распространяются по каналам' : 'How fast topics spread across channels'}
         </span>

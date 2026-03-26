@@ -3,6 +3,7 @@ import { Home } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W26: BUSINESS OPPORTUNITY SIGNALS
@@ -14,7 +15,7 @@ export function BusinessOpportunityTracker() {
   const ru = lang === 'ru';
   const opportunities = data.businessOpportunityBriefs[lang] ?? [];
 
-  if (!opportunities.length) return <EmptyWidget title={ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'} />;
+  if (!opportunities.length) return <EmptyWidget widgetId="business_opportunity_tracker" title={ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'} />;
 
   const confidenceLabel = (value: string) => {
     if (value === 'high') return ru ? 'Высокая' : 'High';
@@ -46,9 +47,9 @@ export function BusinessOpportunityTracker() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="business_opportunity_tracker">
           {ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -118,7 +119,7 @@ export function JobMarketPulse() {
   const jobSeeking = data.jobSeeking[lang] ?? [];
   const jobTrends = data.jobTrends[lang] ?? [];
 
-  if (!jobSeeking.length) return <EmptyWidget title={ru ? 'Рынок труда и занятость' : 'Job & Work Landscape'} />;
+  if (!jobSeeking.length) return <EmptyWidget widgetId="job_market_pulse" title={ru ? 'Рынок труда и занятость' : 'Job & Work Landscape'} />;
 
   // ✅ GENERIC: dynamic max divisor + top role computed from data
   const maxJobPct = Math.max(...jobSeeking.map(j => j.pct), 1);
@@ -128,9 +129,9 @@ export function JobMarketPulse() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="job_market_pulse">
           {ru ? 'Рынок труда и занятость' : 'Job & Work Landscape'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? 'Как работает сообщество' : 'How the community works'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">

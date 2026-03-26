@@ -3,7 +3,7 @@ import { Eye, Brain, Target, Users, BarChart3, GitBranch, Heart, ChevronDown, Ch
 import { useLanguage } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
 import { useAdminConfig } from '../contexts/AdminConfigContext';
-import { ADMIN_WIDGET_DEFINITIONS } from '../admin/catalog';
+import { ADMIN_WIDGET_DEFINITIONS, type AdminWidgetId } from '../admin/catalog';
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 import { WIDGET_TIMEFRAME_POLICY } from '../dashboard/widgetTimeframePolicy';
 import { LockedWidget } from '../components/ui/LockedWidget';
@@ -142,10 +142,10 @@ export function DashboardPage() {
     const policy = WIDGET_TIMEFRAME_POLICY[widgetId];
     if (!policy) return node;
     if (!policy.rangeAware) {
-      return <LockedWidget title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason={policy.lockedReason} />;
+      return <LockedWidget widgetId={widgetId as AdminWidgetId} title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason={policy.lockedReason} />;
     }
     if (range.days < policy.minDays) {
-      return <LockedWidget title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason="minimum_window" />;
+      return <LockedWidget widgetId={widgetId as AdminWidgetId} title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason="minimum_window" />;
     }
     return node;
   };

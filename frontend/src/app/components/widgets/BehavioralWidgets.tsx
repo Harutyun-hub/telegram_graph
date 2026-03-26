@@ -5,6 +5,7 @@ import { AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W8: PROBLEM TRACKER
@@ -24,14 +25,14 @@ export function ProblemTracker() {
   const [expandedEvidenceKey, setExpandedEvidenceKey] = useState('');
   const problemBriefs = data.problemBriefs?.[lang] ?? [];
 
-  if (!problemBriefs.length) return <EmptyWidget title={ru ? 'Трекер проблем' : 'Problem Tracker'} />;
+  if (!problemBriefs.length) return <EmptyWidget widgetId="problem_tracker" title={ru ? 'Трекер проблем' : 'Problem Tracker'} />;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="problem_tracker">
           {ru ? 'Трекер проблем' : 'Problem Tracker'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? 'Болевые точки из разговоров' : 'Pain points from community chatter'}
         </span>
@@ -203,9 +204,9 @@ export function ServiceGapDetector() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="service_gap_detector">
           {ru ? 'Детектор пробелов в услугах' : 'Service Gap Detector'}
-        </h3>
+        </WidgetTitle>
         {hasRenderableRows && (
           <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
             {aiRows.filter((s) => s.gap >= 80).length} {ru ? 'критических пробелов' : 'critical gaps'}
@@ -308,7 +309,7 @@ export function SatisfactionByArea() {
   const ru = lang === 'ru';
   const satisfactionAreas = data.satisfactionAreas[lang] ?? [];
 
-  if (!satisfactionAreas.length) return <EmptyWidget title={ru ? 'Радар удовлетворённости жизнью' : 'Life Satisfaction Radar'} />;
+  if (!satisfactionAreas.length) return <EmptyWidget widgetId="satisfaction_by_area" title={ru ? 'Радар удовлетворённости жизнью' : 'Life Satisfaction Radar'} />;
 
   const sorted = [...satisfactionAreas].sort((a, b) => b.satisfaction - a.satisfaction);
   // Compute top 3 loves and bottom 3 pain points dynamically
@@ -318,9 +319,9 @@ export function SatisfactionByArea() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="satisfaction_by_area">
           {ru ? 'Радар удовлетворённости жизнью' : 'Life Satisfaction Radar'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">{ru ? 'По сферам жизни' : 'Community satisfaction by area'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
@@ -385,7 +386,7 @@ export function MoodOverTime() {
   const moodConfig = data.moodConfig[lang] ?? [];
   const moodData = data.moodData;
 
-  if (!moodData.length || !moodConfig.length) return <EmptyWidget title={ru ? 'Настроения сообщества' : 'Community Mood'} />;
+  if (!moodData.length || !moodConfig.length) return <EmptyWidget widgetId="mood_over_time" title={ru ? 'Настроения сообщества' : 'Community Mood'} />;
 
   const latestWeek = moodData[moodData.length - 1];
   const firstWeek = moodData[0];
@@ -408,9 +409,9 @@ export function MoodOverTime() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="mood_over_time">
           {ru ? 'Настроения сообщества' : 'Community Mood'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
           {positiveShare}% {ru ? 'позитивных' : 'positive'}
         </span>
@@ -473,7 +474,7 @@ export function EmotionalUrgencyIndex() {
   const ru = lang === 'ru';
   const urgencySignals = data.urgencySignals[lang] ?? [];
 
-  if (!urgencySignals.length) return <EmptyWidget title={ru ? 'Индекс эмоциональной срочности' : 'Emotional Urgency Index'} />;
+  if (!urgencySignals.length) return <EmptyWidget widgetId="emotional_urgency_index" title={ru ? 'Индекс эмоциональной срочности' : 'Emotional Urgency Index'} />;
 
   const critical = urgencySignals.filter((s) => s.urgency === 'critical');
   const high = urgencySignals.filter((s) => s.urgency === 'high');
@@ -482,9 +483,9 @@ export function EmotionalUrgencyIndex() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="emotional_urgency_index">
           {ru ? 'Индекс эмоциональной срочности' : 'Emotional Urgency Index'}
-        </h3>
+        </WidgetTitle>
         <div className="flex items-center gap-2">
           <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700" style={{ fontWeight: 500, fontSize: '10px' }}>
             {critical.length} {ru ? 'критических' : 'critical'}

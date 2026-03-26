@@ -4,6 +4,7 @@ import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tool
 import { useLanguage } from '../contexts/LanguageContext';
 import { useChannelDetail, useChannelPostsFeed, useChannelsDetailData } from '../services/detailData';
 import type { ChannelDetail } from '../types/data';
+import { PageInfoButton, type PageInfoCopy } from '../components/ui/PageInfoButton';
 
 const typeColors: Record<string, string> = {
   General: '#3b82f6',
@@ -30,6 +31,42 @@ const messageTypeMapRU: Record<string, string> = {
   Discussion: 'Обсуждение', Question: 'Вопрос', Recommendation: 'Рекомендация',
   Complaint: 'Жалоба', 'Info Sharing': 'Инфо', 'Photo/Video': 'Фото/Видео',
 };
+
+function channelsInfoCopy(lang: 'en' | 'ru'): PageInfoCopy {
+  return lang === 'ru'
+    ? {
+      summary: 'Объясняет, как эта страница собирает каналы, считает метрики и ранжирует их.',
+      title: 'Как формируются каналы',
+      overview: 'Страница каналов собирает Telegram-группы из выбранного диапазона дат и превращает их в карточки с ключевыми сигналами активности, масштаба и вовлечённости.',
+      sectionTitle: 'Что лежит в основе',
+      items: [
+        'Каждая строка канала строится из сводки по каналу за выбранное окно дат.',
+        'Карточка объединяет число участников, средний дневной объём сообщений, 7-дневный рост и оценку вовлечённости.',
+        'В деталях канала показываются ключевые темы, распределение типов сообщений, ведущие участники и недавние публикации.',
+        'Сортировка переключает приоритет между вовлечённостью, размером канала и ростом, а не меняет сами исходные данные.',
+      ],
+      noteTitle: 'Как читать страницу',
+      note: 'Вовлечённость здесь важнее одного только размера канала. Небольшая группа может быть выше в списке, если она активнее и быстрее растёт.',
+      ariaLabel: 'Объяснить, как формируется страница каналов',
+      badgeLabel: 'О странице',
+    }
+    : {
+      summary: 'Explains how this page assembles channels, scores their metrics, and ranks them.',
+      title: 'How Channels Are Built',
+      overview: 'The Channels page turns Telegram group summaries from the selected date range into cards that show the main signals of scale, activity, and engagement.',
+      sectionTitle: 'What it uses',
+      items: [
+        'Each channel row is built from a backend channel summary for the selected date window.',
+        'The card combines member count, estimated daily message volume, 7-day growth, and engagement score.',
+        'Channel detail expands into top topics, message-type mix, leading voices, and recent posts.',
+        'Sorting changes the ranking priority between engagement, size, and growth without changing the underlying data.',
+      ],
+      noteTitle: 'How to read it',
+      note: 'Engagement matters more than size alone on this page. A smaller group can rank above a bigger one if it is more active and growing faster.',
+      ariaLabel: 'Explain how the channels page is built',
+      badgeLabel: 'Page guide',
+    };
+}
 
 // ── COMPONENT ──
 
@@ -107,9 +144,12 @@ export function ChannelsPage() {
         <div className="px-6 py-5 border-b border-gray-200">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
-                {ru ? 'Каналы' : 'Channels'}
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-gray-900" style={{ fontSize: '1.25rem', fontWeight: 600 }}>
+                  {ru ? 'Каналы' : 'Channels'}
+                </h1>
+                <PageInfoButton copy={channelsInfoCopy(lang)} />
+              </div>
               <p className="text-xs text-gray-500 mt-0.5">
                 {allChannels.length} {ru ? 'Telegram-групп отслеживается' : 'Telegram groups tracked'} &middot; {(totalMembers / 1000).toFixed(1)}K {ru ? 'участников всего' : 'total members'}
               </p>

@@ -5,6 +5,7 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
 import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
+import { WidgetTitle } from '../ui/WidgetTitle';
 
 // ============================================================
 // W14: COMMUNITY PERSONA GALLERY
@@ -23,7 +24,7 @@ export function PersonaGallery() {
   const personas = data.personas[lang] ?? [];
   const labels = profileLabels[lang];
 
-  if (!personas.length) return <EmptyWidget title={ru ? 'Персоны сообщества' : 'Community Personas'} />;
+  if (!personas.length) return <EmptyWidget widgetId="persona_gallery" title={ru ? 'Персоны сообщества' : 'Community Personas'} />;
 
   // ✅ FIX: compute max size dynamically so bars never overflow
   const maxPersonaSize = Math.max(...personas.map(p => p.size), 1);
@@ -31,9 +32,9 @@ export function PersonaGallery() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="persona_gallery">
           {ru ? 'Персоны сообщества' : 'Community Personas'}
-        </h3>
+        </WidgetTitle>
         {/* ✅ FIX: use personas.length instead of hardcoded "6" */}
         <span className="text-xs text-gray-500">
           {ru ? `${personas.length} поведенческих кластеров` : `${personas.length} behavioral clusters`}
@@ -106,7 +107,7 @@ export function InterestRadar() {
   const ru = lang === 'ru';
   const interestData = data.interests[lang] ?? [];
 
-  if (!interestData.length) return <EmptyWidget title={ru ? 'Интересы сообщества' : 'Community Interests'} />;
+  if (!interestData.length) return <EmptyWidget widgetId="interest_radar" title={ru ? 'Интересы сообщества' : 'Community Interests'} />;
 
   // ✅ GENERIC: compute top 2 interests dynamically
   const sorted = [...interestData].sort((a, b) => b.score - a.score);
@@ -142,9 +143,9 @@ export function InterestRadar() {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       <div className="flex items-center justify-between mb-1">
-        <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
+        <WidgetTitle widgetId="interest_radar">
           {ru ? 'Интересы сообщества' : 'Community Interests'}
-        </h3>
+        </WidgetTitle>
         <span className="text-xs text-gray-500">
           {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
         </span>
