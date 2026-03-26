@@ -59,10 +59,10 @@ function topicsInfoCopy(lang: 'en' | 'ru'): PageInfoCopy {
     : {
       summary: 'Explains where topics come from, how they are grouped, and how this page ranks them.',
       title: 'How Topics Are Built',
-      overview: 'Topics on this page are not created manually. They come from the analyzed topic label behind community posts and comments in the selected date range, then get assembled into cards for easier review.',
+      overview: 'Topics on this page are not created manually. They are derived from the themes detected in community posts and comments within the selected date range, then grouped into cards for easier review.',
       sectionTitle: 'What it uses',
       items: [
-        'Each topic starts from a backend topic label or sourceTopic linked to analyzed messages.',
+        'Each topic starts from the detected theme attached to analyzed messages.',
         'Every topic card combines mentions, growth, sentiment mix, distinct participants, channel spread, and evidence examples.',
         'The tab groups are navigation buckets built from the underlying topic category so the list is easier to filter.',
         'Opening a topic loads its trend history, top channels, and the evidence or question feed for the same selected date range.',

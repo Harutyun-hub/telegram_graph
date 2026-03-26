@@ -56,7 +56,7 @@ function channelsInfoCopy(lang: 'en' | 'ru'): PageInfoCopy {
       overview: 'The Channels page turns Telegram group summaries from the selected date range into cards that show the main signals of scale, activity, and engagement.',
       sectionTitle: 'What it uses',
       items: [
-        'Each channel row is built from a backend channel summary for the selected date window.',
+        'Each channel row is built from the channel summary calculated for the selected date window.',
         'The card combines member count, estimated daily message volume, 7-day growth, and engagement score.',
         'Channel detail expands into top topics, message-type mix, leading voices, and recent posts.',
         'Sorting changes the ranking priority between engagement, size, and growth without changing the underlying data.',
