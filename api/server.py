@@ -34,10 +34,28 @@ import config
 config.validate()
 
 from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
+
+try:
+    import orjson
+except ImportError:  # pragma: no cover - optional dependency in local dev
+    orjson = None
+
+try:
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+except ImportError:  # pragma: no cover - optional dependency in local dev
+    sentry_sdk = None
+    FastApiIntegration = None
+
+if orjson is not None:
+    from fastapi.responses import ORJSONResponse
+else:  # pragma: no cover - exercised when orjson isn't installed locally
+    ORJSONResponse = None
 
 from api.aggregator import (
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
@@ -81,26 +99,80 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
 
 APP_ROLE = _normalize_app_role(os.getenv("APP_ROLE"))
 RUN_STARTUP_WARMERS = str(os.getenv("RUN_STARTUP_WARMERS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+SENTRY_DSN = str(os.getenv("SENTRY_DSN", "")).strip()
+SENTRY_TRACES_SAMPLE_RATE = max(0.0, min(float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.05")), 1.0))
+_DASHBOARD_RESPONSE_DROP_KEYS = {"trendData", "voiceData", "integrationLevels", "housingHotTopics"}
 _SERVER_TIMING_PATHS = {
     "/api/dashboard",
     "/api/topics",
     "/api/topics/detail",
     "/api/topics/evidence",
 }
+_orjson_dashboard_enabled = ORJSONResponse is not None
+_orjson_dashboard_verified = ORJSONResponse is None
+
+
+def _init_sentry() -> None:
+    if not SENTRY_DSN:
+        logger.info("Sentry disabled | SENTRY_DSN missing")
+        return
+    if sentry_sdk is None or FastApiIntegration is None:
+        logger.warning("Sentry requested but sentry-sdk is not installed")
+        return
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv("SENTRY_ENVIRONMENT", os.getenv("RAILWAY_ENVIRONMENT", "production")),
+        traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+        send_default_pii=False,
+        integrations=[FastApiIntegration(transaction_style="endpoint")],
+    )
+    logger.info(f"Sentry enabled | traces_sample_rate={SENTRY_TRACES_SAMPLE_RATE}")
+
+
+def _trim_dashboard_payload(snapshot: dict) -> dict:
+    return {key: value for key, value in snapshot.items() if key not in _DASHBOARD_RESPONSE_DROP_KEYS}
+
+
+def _dashboard_response(payload: dict) -> JSONResponse:
+    global _orjson_dashboard_enabled, _orjson_dashboard_verified
+    if _orjson_dashboard_enabled and ORJSONResponse is not None and orjson is not None:
+        if not _orjson_dashboard_verified:
+            try:
+                orjson.dumps(payload)
+            except Exception as exc:
+                _orjson_dashboard_enabled = False
+                logger.warning(f"ORJSON dashboard response disabled due to serialization mismatch: {exc}")
+                return JSONResponse(content=payload)
+            _orjson_dashboard_verified = True
+        return ORJSONResponse(content=payload)
+    return JSONResponse(content=payload)
+
+
+_init_sentry()
 
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    startup_started_at = time.perf_counter()
+    startup_phases: dict[str, float] = {}
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
     if _should_run_background_jobs():
+        scheduler_started_at = time.perf_counter()
         scheduler = get_scraper_scheduler()
+        startup_phases["schedulerInitMs"] = round((time.perf_counter() - scheduler_started_at) * 1000, 2)
+        scheduler_boot_at = time.perf_counter()
         await scheduler.startup()
+        startup_phases["schedulerStartupMs"] = round((time.perf_counter() - scheduler_boot_at) * 1000, 2)
+
+        cards_scheduler_started_at = time.perf_counter()
         _start_question_cards_scheduler()
         _start_behavioral_cards_scheduler()
         _start_opportunity_cards_scheduler()
+        startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
         if RUN_STARTUP_WARMERS:
+            warmers_started_at = time.perf_counter()
             asyncio.create_task(_warm_dashboard_cache())
             if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_question_cards_once(force=False))
@@ -108,8 +180,25 @@ async def app_lifespan(_app: FastAPI):
                 asyncio.create_task(_materialize_behavioral_cards_once(force=False))
             if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_opportunity_cards_once(force=False))
+            startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
     else:
         logger.info("Web-only runtime ready | background jobs disabled")
+
+    startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
+    logger.info(
+        json.dumps(
+            {
+                "level": "info",
+                "message": "startup_completed",
+                "role": APP_ROLE,
+                "background_jobs_enabled": _should_run_background_jobs(),
+                "run_startup_warmers": RUN_STARTUP_WARMERS,
+                "phases": startup_phases,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    )
 
     try:
         yield
@@ -207,6 +296,18 @@ async def request_metrics_middleware(request: Request, call_next):
         query_ms = getattr(request.state, "query_ms", None)
         if isinstance(query_ms, (int, float)):
             payload["query_ms"] = round(float(query_ms), 2)
+        dashboard_meta = getattr(request.state, "dashboard_meta", None)
+        if isinstance(dashboard_meta, dict):
+            for src_key, dst_key in (
+                ("cacheStatus", "dashboard_cache_status"),
+                ("buildElapsedSeconds", "dashboard_build_elapsed_seconds"),
+                ("buildMode", "dashboard_build_mode"),
+                ("tierTimes", "dashboard_tier_times"),
+                ("refreshFailureCount", "dashboard_refresh_failure_count"),
+            ):
+                value = dashboard_meta.get(src_key)
+                if value not in (None, "", []):
+                    payload[dst_key] = value
         logger.info(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 
 
@@ -1182,7 +1283,7 @@ async def dashboard(
 ):
     """
     Full dashboard data — matches the frontend's AppData interface.
-    Cached for 5 minutes. Call POST /api/cache/clear to refresh.
+    Cached for 15 minutes by default. Call POST /api/cache/clear to refresh.
     """
     try:
         freshness = _dashboard_freshness_snapshot(force_refresh=False)
@@ -1199,8 +1300,9 @@ async def dashboard(
             query_started_at,
             cache_status=str(dashboard_runtime_meta.get("cacheStatus") or ""),
         )
+        trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
         response = {
-            "data": dashboard_data,
+            "data": trimmed_dashboard_data,
             "meta": {
                 "from": ctx.from_date.isoformat(),
                 "to": ctx.to_date.isoformat(),
@@ -1218,6 +1320,7 @@ async def dashboard(
                 "isStale": dashboard_runtime_meta.get("isStale", False),
                 "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
                 "buildMode": dashboard_runtime_meta.get("buildMode"),
+                "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
                 "freshness": {
                     "status": freshness.get("health", {}).get("status"),
                     "generatedAt": freshness.get("generated_at"),
@@ -1226,7 +1329,8 @@ async def dashboard(
         }
         response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
         response["meta"]["responseSerializeMs"] = 0
-        return response
+        request.state.dashboard_meta = response["meta"]
+        return _dashboard_response(response)
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

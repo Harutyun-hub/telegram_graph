@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -34,12 +35,15 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 # ── Cache + reliability config ───────────────────────────────────────────────
-CACHE_TTL_SECONDS = int(os.getenv("DASH_CACHE_TTL_SECONDS", "300"))
+CACHE_TTL_SECONDS = int(os.getenv("DASH_CACHE_TTL_SECONDS", "900"))
 STALE_WHILE_REVALIDATE = _env_flag("DASH_STALE_WHILE_REVALIDATE_ENABLED", True)
 PARALLEL_ENABLED = _env_flag("DASH_PARALLEL_ENABLED", True)
 PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4")), 8))
 TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "10.0")))
+REFRESH_TIMEOUT_SECONDS = max(5.0, float(os.getenv("DASH_REFRESH_TIMEOUT_SECONDS", "30.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
+MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
+REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
 
 # If one of these tiers falls back during refresh, prefer preserving an
@@ -58,6 +62,18 @@ _cache_lock = threading.Lock()
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, Any]] = {}
 _tier_executor_lock = threading.Lock()
+_refresh_state_lock = threading.Lock()
+
+
+@dataclass
+class DashboardRefreshState:
+    inflight: bool = False
+    event: threading.Event = field(default_factory=threading.Event)
+    failure_count: int = 0
+    last_error: str | None = None
+
+
+_refresh_states: Dict[str, DashboardRefreshState] = {}
 
 
 def _new_tier_executor() -> ThreadPoolExecutor:
@@ -65,6 +81,13 @@ def _new_tier_executor() -> ThreadPoolExecutor:
         max_workers=PARALLEL_MAX_WORKERS,
         thread_name_prefix="dash-tier",
     )
+
+
+def _shutdown_executor(executor: ThreadPoolExecutor, *, wait: bool) -> None:
+    try:
+        executor.shutdown(wait=wait, cancel_futures=True)
+    except TypeError:  # Python 3.8 compatibility
+        executor.shutdown(wait=wait)
 
 # Module-level thread pool — reused across all dashboard builds.
 # Replaces per-request ThreadPoolExecutor to avoid thread creation overhead
@@ -88,7 +111,7 @@ def _replace_tier_executor(stale_executor: ThreadPoolExecutor) -> None:
         if stale_executor is not _tier_executor:
             return
         _tier_executor = _new_tier_executor()
-    stale_executor.shutdown(wait=False, cancel_futures=True)
+    _shutdown_executor(stale_executor, wait=False)
 
 
 def _fallback_tiers(tier_times: Dict[str, Optional[float]]) -> list[str]:
@@ -174,6 +197,101 @@ def invalidate_cache() -> None:
         _cache_entries.clear()
     with _detail_cache_lock:
         _detail_cache.clear()
+
+
+def _get_refresh_state(cache_key: str) -> DashboardRefreshState:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _refresh_states[cache_key] = state
+        return state
+
+
+def _acquire_refresh_slot(cache_key: str) -> tuple[DashboardRefreshState, bool]:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _refresh_states[cache_key] = state
+        if state.inflight:
+            return state, False
+        state.inflight = True
+        state.event.clear()
+        return state, True
+
+
+def _release_refresh_slot(cache_key: str) -> None:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            return
+        state.inflight = False
+        state.event.set()
+
+
+def _refresh_state_snapshot(cache_key: str) -> dict[str, Any]:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            return {"refreshFailureCount": 0, "refreshInFlight": False}
+        return {
+            "refreshFailureCount": int(state.failure_count),
+            "refreshInFlight": bool(state.inflight),
+            "refreshLastError": state.last_error,
+        }
+
+
+def _record_refresh_success(cache_key: str) -> None:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            return
+        state.failure_count = 0
+        state.last_error = None
+
+
+def _record_refresh_failure(cache_key: str, error: Exception | str) -> int:
+    message = str(error)
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _refresh_states[cache_key] = state
+        state.failure_count += 1
+        state.last_error = message
+        failure_count = state.failure_count
+    if failure_count >= REFRESH_FAILURE_ALERT_THRESHOLD:
+        logger.error(
+            f"Dashboard refresh threshold exceeded | key={cache_key} failures={failure_count} error={message}"
+        )
+    else:
+        logger.warning(f"Dashboard refresh failed | key={cache_key} failures={failure_count} error={message}")
+    return failure_count
+
+
+def _cache_entry_age_seconds(entry: DashboardCacheEntry | None, now: float) -> float | None:
+    if entry is None:
+        return None
+    return max(0.0, now - entry[0])
+
+
+def _can_serve_stale(entry: DashboardCacheEntry | None, now: float) -> bool:
+    if entry is None:
+        return False
+    ts, snapshot, _meta = entry
+    return bool(snapshot) and (now - ts) < MAX_STALE_SECONDS
+
+
+def _with_refresh_state(cache_key: str, meta: DashboardCacheMeta, *, stale_age_seconds: float | None = None) -> DashboardCacheMeta:
+    enriched = dict(meta)
+    enriched.update(_refresh_state_snapshot(cache_key))
+    if stale_age_seconds is not None:
+        enriched["staleAgeSeconds"] = round(stale_age_seconds, 3)
+    return enriched
 
 
 def _fallback_for_tier(name: str) -> dict:
@@ -473,6 +591,7 @@ def _snapshot_meta(
     mode: str,
     cache_status: str,
     is_stale: bool = False,
+    refresh_failure_count: int = 0,
 ) -> DashboardCacheMeta:
     return {
         "tierTimes": dict(tier_times),
@@ -482,6 +601,7 @@ def _snapshot_meta(
         "buildMode": mode,
         "cacheStatus": cache_status,
         "isStale": is_stale,
+        "refreshFailureCount": refresh_failure_count,
     }
 
 
@@ -494,37 +614,41 @@ def _default_dashboard_context() -> DashboardDateContext:
     return build_dashboard_date_context(start_date.isoformat(), end_date.isoformat())
 
 
-def get_dashboard_snapshot(
-    ctx: Optional[DashboardDateContext] = None,
-    force_refresh: bool = False,
-) -> tuple[dict, DashboardCacheMeta]:
-    """Assemble full AppData snapshot with simple per-range caching."""
-    resolved_ctx = ctx or _default_dashboard_context()
-    cache_key = resolved_ctx.cache_key
-    now = time.time()
+def _build_snapshot_with_timeout(
+    ctx: DashboardDateContext,
+) -> tuple[dict, Dict[str, Optional[float]], float, str]:
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
+    future = executor.submit(_build_snapshot, ctx, True)
+    try:
+        return future.result(timeout=REFRESH_TIMEOUT_SECONDS)
+    except FuturesTimeout as exc:
+        future.cancel()
+        raise TimeoutError(
+            f"Dashboard rebuild exceeded {REFRESH_TIMEOUT_SECONDS:.1f}s timeout"
+        ) from exc
+    finally:
+        _shutdown_executor(executor, wait=False)
 
-    with _cache_lock:
-        entry = _cache_entries.get(cache_key)
-        if entry is not None and not force_refresh and _is_cache_valid(cache_key, now):
-            logger.debug(f"Serving dashboard data from range cache | key={cache_key}")
-            _ts, snapshot, meta = entry
-            if not _should_bypass_cached_snapshot(snapshot, meta):
-                return snapshot, dict(meta)
-            logger.warning(
-                "Bypassing cached dashboard snapshot because a critical tier was degraded "
-                f"| key={cache_key} degraded={meta.get('degradedTiers', [])}"
-            )
-        stale_snapshot = entry[1] if entry is not None else None
-        stale_meta = dict(entry[2]) if entry is not None else None
+
+def _refresh_dashboard_snapshot(
+    cache_key: str,
+    ctx: DashboardDateContext,
+    *,
+    stale_entry: DashboardCacheEntry | None = None,
+) -> tuple[dict, DashboardCacheMeta]:
+    stale_snapshot = stale_entry[1] if stale_entry is not None else None
+    stale_meta = dict(stale_entry[2]) if stale_entry is not None else None
+    stale_ts = stale_entry[0] if stale_entry is not None else None
 
     try:
-        data, tier_times, elapsed, mode = _build_snapshot(resolved_ctx, use_timeouts=True)
+        data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx)
         build_meta = _snapshot_meta(
             tier_times=tier_times,
             elapsed=elapsed,
             mode=mode,
             cache_status="refresh_success",
             is_stale=False,
+            refresh_failure_count=0,
         )
         critical_degraded = _critical_fallback_tiers(build_meta.get("degradedTiers", []))
 
@@ -537,7 +661,11 @@ def get_dashboard_snapshot(
                     new_snapshot=data,
                     tier_times=tier_times,
                 )
-            if preserve_existing and stale_snapshot is not None:
+            if preserve_existing and stale_snapshot is not None and stale_ts is not None:
+                failure_count = _record_refresh_failure(
+                    cache_key,
+                    f"critical tier fallback preserved previous cache: {fallback_tiers}",
+                )
                 logger.warning(
                     "Dashboard rebuild preserved previous range cache because critical tiers fell back "
                     f"({fallback_tiers}); key={cache_key} elapsed={elapsed}s mode={mode}"
@@ -546,29 +674,148 @@ def get_dashboard_snapshot(
                 preserved_meta["cacheStatus"] = "preserved_previous_on_fallback"
                 preserved_meta["isStale"] = True
                 preserved_meta["suppressedDegradedTiers"] = fallback_tiers
-                return stale_snapshot, preserved_meta
+                preserved_meta["refreshFailureCount"] = failure_count
+                _cache_entries[cache_key] = (stale_ts, stale_snapshot, preserved_meta)
+                return stale_snapshot, _with_refresh_state(
+                    cache_key,
+                    preserved_meta,
+                    stale_age_seconds=max(0.0, time.time() - stale_ts),
+                )
 
             if critical_degraded:
+                failure_count = _record_refresh_failure(
+                    cache_key,
+                    f"critical degraded tiers during refresh: {critical_degraded}",
+                )
                 logger.warning(
                     "Dashboard rebuild completed with critical degraded tiers; returning uncached snapshot "
                     f"| key={cache_key} degraded={critical_degraded} elapsed={elapsed}s mode={mode}"
                 )
                 build_meta["cacheStatus"] = "refresh_success_uncached_degraded"
+                build_meta["refreshFailureCount"] = failure_count
             else:
+                _record_refresh_success(cache_key)
+                build_meta["refreshFailureCount"] = 0
                 _cache_entries[cache_key] = (time.time(), data, build_meta)
 
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
-        return data, build_meta
-    except Exception as e:
-        if stale_snapshot is not None:
-            logger.warning(f"Dashboard rebuild failed for range {cache_key}; serving stale cache instead: {e}")
+        return data, _with_refresh_state(cache_key, build_meta)
+    except Exception as exc:
+        failure_count = _record_refresh_failure(cache_key, exc)
+        if stale_snapshot is not None and stale_ts is not None:
+            logger.warning(f"Dashboard rebuild failed for range {cache_key}; serving stale cache instead: {exc}")
             failure_meta = dict(stale_meta or {})
             failure_meta["cacheStatus"] = "stale_on_error"
             failure_meta["isStale"] = True
-            failure_meta["refreshError"] = str(e)
-            return stale_snapshot, failure_meta
-        logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {e}")
+            failure_meta["refreshError"] = str(exc)
+            failure_meta["refreshFailureCount"] = failure_count
+            with _cache_lock:
+                _cache_entries[cache_key] = (stale_ts, stale_snapshot, failure_meta)
+            return stale_snapshot, _with_refresh_state(
+                cache_key,
+                failure_meta,
+                stale_age_seconds=max(0.0, time.time() - stale_ts),
+            )
+        logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
         raise
+
+
+def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateContext) -> None:
+    with _cache_lock:
+        stale_entry = _cache_entries.get(cache_key)
+    try:
+        _refresh_dashboard_snapshot(cache_key, ctx, stale_entry=stale_entry)
+    except Exception as exc:
+        logger.error(f"Background dashboard refresh failed | key={cache_key} error={exc}")
+    finally:
+        _release_refresh_slot(cache_key)
+
+
+def _ensure_background_refresh(cache_key: str, ctx: DashboardDateContext) -> bool:
+    _state, leader = _acquire_refresh_slot(cache_key)
+    if not leader:
+        return False
+    thread = threading.Thread(
+        target=_background_refresh_dashboard_snapshot,
+        args=(cache_key, ctx),
+        daemon=True,
+        name=f"dash-refresh-{cache_key}",
+    )
+    thread.start()
+    return True
+
+
+def get_dashboard_snapshot(
+    ctx: Optional[DashboardDateContext] = None,
+    force_refresh: bool = False,
+) -> tuple[dict, DashboardCacheMeta]:
+    """Assemble full AppData snapshot with cache, stale fallback, and single-flight refresh."""
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+        if entry is not None and not force_refresh and _is_cache_valid(cache_key, now):
+            logger.debug(f"Serving dashboard data from range cache | key={cache_key}")
+            _ts, snapshot, meta = entry
+            if not _should_bypass_cached_snapshot(snapshot, meta):
+                return snapshot, _with_refresh_state(cache_key, meta)
+            logger.warning(
+                "Bypassing cached dashboard snapshot because a critical tier was degraded "
+                f"| key={cache_key} degraded={meta.get('degradedTiers', [])}"
+            )
+        stale_entry = entry if _can_serve_stale(entry, now) else None
+
+    stale_age_seconds = _cache_entry_age_seconds(stale_entry, now)
+    if stale_entry is not None and STALE_WHILE_REVALIDATE and not force_refresh:
+        refresh_started = _ensure_background_refresh(cache_key, resolved_ctx)
+        stale_meta = dict(stale_entry[2])
+        stale_meta["cacheStatus"] = (
+            "stale_while_revalidate" if refresh_started else "stale_while_revalidate_inflight"
+        )
+        stale_meta["isStale"] = True
+        return stale_entry[1], _with_refresh_state(
+            cache_key,
+            stale_meta,
+            stale_age_seconds=stale_age_seconds,
+        )
+
+    state, leader = _acquire_refresh_slot(cache_key)
+    if not leader:
+        if state.event.wait(timeout=WAIT_FOR_REFRESH_SECONDS):
+            with _cache_lock:
+                refreshed_entry = _cache_entries.get(cache_key)
+            if refreshed_entry is not None:
+                refreshed_now = time.time()
+                if _is_cache_valid(cache_key, refreshed_now):
+                    return refreshed_entry[1], _with_refresh_state(cache_key, refreshed_entry[2])
+                if _can_serve_stale(refreshed_entry, refreshed_now):
+                    refreshed_meta = dict(refreshed_entry[2])
+                    refreshed_meta["cacheStatus"] = "waited_for_refresh_stale"
+                    refreshed_meta["isStale"] = True
+                    return refreshed_entry[1], _with_refresh_state(
+                        cache_key,
+                        refreshed_meta,
+                        stale_age_seconds=_cache_entry_age_seconds(refreshed_entry, refreshed_now),
+                    )
+        if stale_entry is not None:
+            stale_meta = dict(stale_entry[2])
+            stale_meta["cacheStatus"] = "stale_refresh_wait_timeout"
+            stale_meta["isStale"] = True
+            return stale_entry[1], _with_refresh_state(
+                cache_key,
+                stale_meta,
+                stale_age_seconds=stale_age_seconds,
+            )
+        raise TimeoutError(
+            f"Dashboard refresh did not complete within {WAIT_FOR_REFRESH_SECONDS:.1f}s and no stale snapshot is available"
+        )
+
+    try:
+        return _refresh_dashboard_snapshot(cache_key, resolved_ctx, stale_entry=stale_entry)
+    finally:
+        _release_refresh_slot(cache_key)
 
 
 def get_dashboard_data(
