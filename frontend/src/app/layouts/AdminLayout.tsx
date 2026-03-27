@@ -12,6 +12,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import type { Lang } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { useAuth } from '../contexts/AuthContext';
 import { AIAssistant } from '../components/AIAssistant';
 import {
   differenceInDaysInclusive,
@@ -127,10 +128,9 @@ function AccountMenu({ ru, onSettings, onLogout, onClose }: {
             <User className="w-6 h-6 text-white" />
           </div>
           <div>
-            <p className="text-gray-900" style={{ fontWeight: 600 }}>Rakib</p>
-            <p className="text-xs text-gray-500">admin@armentel.io</p>
+            <p className="text-gray-900" style={{ fontWeight: 600 }}>Admin</p>
             <span className="inline-flex items-center gap-1 mt-1 text-xs text-blue-700 bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full" style={{ fontWeight: 500 }}>
-              <Shield className="w-3 h-3" />{ru ? 'Менеджер' : 'Community Manager'}
+              <Shield className="w-3 h-3" />{ru ? 'Администратор' : 'Administrator'}
             </span>
           </div>
         </div>
@@ -185,6 +185,7 @@ function BellIcon({ count }: { count: number }) {
 export function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { logout } = useAuth();
   const { lang, setLang } = useLanguage();
   const {
     loading,
@@ -293,7 +294,12 @@ export function AdminLayout() {
   const markAllRead = useCallback(() => setNotifications(p => p.map(n => ({ ...n, read: true }))), []);
   const markRead = useCallback((id: number) => setNotifications(p => p.map(n => n.id === id ? { ...n, read: true } : n)), []);
   const dismissNotif = useCallback((id: number, e: React.MouseEvent) => { e.stopPropagation(); setNotifications(p => p.filter(n => n.id !== id)); }, []);
-  const handleLogout = useCallback(() => { setShowAccount(false); setDrawerOpen(false); navigate('/'); }, [navigate]);
+  const handleLogout = useCallback(() => {
+    logout();
+    setShowAccount(false);
+    setDrawerOpen(false);
+    navigate('/login', { replace: true });
+  }, [logout, navigate]);
   const goSettings = useCallback(() => navigate('/settings'), [navigate]);
 
   const activeRange = QUICK_RANGES.find((preset) => preset.id === range.presetId);
@@ -389,8 +395,8 @@ export function AdminLayout() {
               <User className="w-4 h-4 text-white" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-white text-sm" style={{ fontWeight: 500 }}>Rakib</p>
-              <p className="text-slate-400 text-xs truncate">{ru ? 'Менеджер сообщества' : 'Community Manager'}</p>
+              <p className="text-white text-sm" style={{ fontWeight: 500 }}>Admin</p>
+              <p className="text-slate-400 text-xs truncate">{ru ? 'Администратор' : 'Administrator'}</p>
             </div>
           </div>
         </div>
@@ -478,8 +484,8 @@ export function AdminLayout() {
                   <User className="w-4 h-4 text-white" />
                 </div>
                 <div className="text-left">
-                  <p className="text-sm text-gray-900" style={{ fontWeight: 600 }}>Rakib</p>
-                  <p className="text-xs text-gray-500">{ru ? 'Менеджер' : 'Manager'}</p>
+                  <p className="text-sm text-gray-900" style={{ fontWeight: 600 }}>Admin</p>
+                  <p className="text-xs text-gray-500">{ru ? 'Администратор' : 'Administrator'}</p>
                 </div>
               </button>
               <AnimatePresence>
@@ -710,8 +716,8 @@ export function AdminLayout() {
                     <User className="w-5 h-5 text-white" />
                   </div>
                   <div>
-                    <p className="text-white text-sm" style={{ fontWeight: 600 }}>Rakib</p>
-                    <p className="text-slate-400 text-xs">{ru ? 'Менеджер сообщества' : 'Community Manager'}</p>
+                    <p className="text-white text-sm" style={{ fontWeight: 600 }}>Admin</p>
+                    <p className="text-slate-400 text-xs">{ru ? 'Администратор' : 'Administrator'}</p>
                   </div>
                 </div>
               </div>
