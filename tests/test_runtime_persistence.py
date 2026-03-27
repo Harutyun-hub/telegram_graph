@@ -30,8 +30,9 @@ class _FakeRuntimeBucket:
     def update(self, path: str, body: bytes, _options: dict) -> None:
         self.files[path] = body
 
-    def upload(self, path: str, body: bytes, _options: dict) -> None:
-        if self.fail_duplicate_upload and path in self.files:
+    def upload(self, path: str, body: bytes, options: dict) -> None:
+        upsert = str(options.get("upsert", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if self.fail_duplicate_upload and path in self.files and not upsert:
             raise RuntimeError("Duplicate")
         self.files[path] = body
 
@@ -94,7 +95,7 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertFalse(saved)
 
-    def test_save_runtime_json_overwrites_duplicate_by_replacing_object(self) -> None:
+    def test_save_runtime_json_overwrites_duplicate_with_upsert(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.fail_duplicate_upload = True
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": True}}}).encode("utf-8")
@@ -114,6 +115,17 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertTrue(saved)
         self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"compressed-payload")
+
+    def test_save_runtime_blob_overwrites_duplicate_with_upsert(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.fail_duplicate_upload = True
+        bucket.files["dashboard-cache/v1/test.json.gz"] = b"old"
+        writer = _make_writer(bucket)
+
+        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"new-payload")
+
+        self.assertTrue(saved)
+        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"new-payload")
 
     def test_read_runtime_blob_returns_timeout_status(self) -> None:
         bucket = _FakeRuntimeBucket()

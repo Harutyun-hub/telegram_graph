@@ -175,15 +175,8 @@ class SupabaseWriter:
             self._ensure_runtime_bucket()
             bucket = self.client.storage.from_(self._runtime_bucket_name)
             body = json.dumps(data, ensure_ascii=True).encode("utf-8")
-            file_options = {"content-type": "application/json"}
-            try:
-                bucket.upload(key, body, file_options)
-            except Exception as exc:
-                if "duplicate" not in str(exc).lower():
-                    raise
-                # Overwrite existing runtime JSON by replacing the object.
-                bucket.remove([key])
-                bucket.upload(key, body, file_options)
+            file_options = {"content-type": "application/json", "upsert": "true"}
+            bucket.upload(key, body, file_options)
             verify = self.read_runtime_json(key)
             if verify["status"] != "ok":
                 logger.error(
@@ -266,14 +259,8 @@ class SupabaseWriter:
         try:
             self._ensure_runtime_bucket()
             bucket = self.client.storage.from_(self._runtime_bucket_name)
-            file_options = {"content-type": content_type}
-            try:
-                bucket.upload(key, payload, file_options)
-            except Exception as exc:
-                if "duplicate" not in str(exc).lower():
-                    raise
-                bucket.remove([key])
-                bucket.upload(key, payload, file_options)
+            file_options = {"content-type": content_type, "upsert": "true"}
+            bucket.upload(key, payload, file_options)
             return True
         except Exception as exc:
             logger.error("Runtime blob write failed | path={} error={}", key, exc)
