@@ -239,6 +239,34 @@ def _eta_confidence(run_history: list[dict], running_now: bool) -> str:
     return "medium" if running_now else "low"
 
 
+def freshness_cache_ttl_seconds() -> int:
+    return _CACHE_TTL_SECONDS
+
+
+def get_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
+    global _CACHE, _CACHE_TS
+    now = datetime.now(timezone.utc)
+    if _CACHE and _CACHE_TS and (now - _CACHE_TS).total_seconds() < _CACHE_TTL_SECONDS:
+        return dict(_CACHE), _CACHE_TS
+    return None, _CACHE_TS
+
+
+def prime_freshness_snapshot(snapshot: dict, *, cached_at: Optional[datetime] = None) -> None:
+    global _CACHE, _CACHE_TS
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+
+    ts = cached_at or _parse_iso(snapshot.get("generated_at")) or datetime.now(timezone.utc)
+    _CACHE = dict(snapshot)
+    _CACHE_TS = ts
+
+
+def clear_cached_freshness_snapshot() -> None:
+    global _CACHE, _CACHE_TS
+    _CACHE = None
+    _CACHE_TS = None
+
+
 def get_freshness_snapshot(
     supabase_writer,
     *,

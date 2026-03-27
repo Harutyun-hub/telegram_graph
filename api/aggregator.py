@@ -826,6 +826,54 @@ def get_dashboard_data(
     return snapshot
 
 
+def peek_dashboard_snapshot(ctx: Optional[DashboardDateContext] = None) -> tuple[dict | None, DashboardCacheMeta | None, str]:
+    """Inspect the in-memory dashboard cache without triggering a rebuild."""
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+
+    if entry is None:
+        return None, None, "missing"
+
+    snapshot = entry[1]
+    meta = dict(entry[2])
+    if _is_cache_valid(cache_key, now) and not _should_bypass_cached_snapshot(snapshot, meta):
+        return snapshot, _with_refresh_state(cache_key, meta), "fresh"
+
+    if _can_serve_stale(entry, now):
+        stale_meta = dict(meta)
+        stale_meta["isStale"] = True
+        stale_meta.setdefault("cacheStatus", "memory_stale")
+        return snapshot, _with_refresh_state(
+            cache_key,
+            stale_meta,
+            stale_age_seconds=_cache_entry_age_seconds(entry, now),
+        ), "stale"
+
+    return None, _with_refresh_state(cache_key, meta), "expired"
+
+
+def prime_dashboard_snapshot(
+    ctx: DashboardDateContext,
+    snapshot: dict,
+    meta: DashboardCacheMeta,
+    *,
+    cached_at_ts: float | None = None,
+) -> None:
+    """Seed the in-memory dashboard cache from a trusted external snapshot."""
+    timestamp = float(cached_at_ts) if cached_at_ts is not None else time.time()
+    with _cache_lock:
+        _cache_entries[ctx.cache_key] = (timestamp, dict(snapshot), dict(meta))
+
+
+def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
+    """Trigger a single-flight background refresh for a dashboard cache key."""
+    return _ensure_background_refresh(ctx.cache_key, ctx)
+
+
 # ── Detail page queries (independent cache) ──────────────────────────────────
 
 def _get_cached_detail_value(

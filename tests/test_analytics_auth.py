@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -28,31 +26,32 @@ class AnalyticsAuthTests(unittest.TestCase):
     def setUp(self) -> None:
         server._analytics_rate_limit_buckets.clear()
 
-    def _dashboard_context(self) -> SimpleNamespace:
-        return SimpleNamespace(
-            from_date=date(2026, 3, 15),
-            to_date=date(2026, 3, 22),
-            days=7,
-            is_operational=False,
-            range_label="Last 7 Days",
-            cache_key="2026-03-15:2026-03-22",
-        )
-
-    def _dashboard_snapshot(self) -> tuple[dict, dict]:
-        return (
-            {"communityHealth": {"score": 50}},
-            {
-                "cacheStatus": "test",
+    def _dashboard_payload(self) -> dict:
+        return {
+            "data": {"communityHealth": {"score": 50}},
+            "meta": {
+                "from": "2026-03-15",
+                "to": "2026-03-22",
+                "requestedFrom": "2026-03-15",
+                "requestedTo": "2026-03-22",
+                "days": 7,
+                "mode": "intelligence",
+                "rangeLabel": "2026-03-15..2026-03-22",
+                "trustedEndDate": "2026-03-22",
                 "degradedTiers": [],
                 "suppressedDegradedTiers": [],
                 "tierTimes": {},
                 "snapshotBuiltAt": "2026-03-22T00:00:00Z",
+                "cacheStatus": "test",
                 "isStale": False,
                 "buildElapsedSeconds": 0.01,
                 "buildMode": "test",
                 "refreshFailureCount": 0,
+                "cacheSource": "memory",
+                "freshnessSource": "memory",
+                "freshness": {"status": "healthy", "generatedAt": "2026-03-22T00:00:00Z"},
             },
-        )
+        }
 
     def test_health_stays_public_when_auth_enabled(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", True), \
@@ -65,10 +64,7 @@ class AnalyticsAuthTests(unittest.TestCase):
     def test_dashboard_allows_unauthenticated_access_when_auth_disabled(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
-             patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
-             patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
-             patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
+             patch.object(server, "_build_dashboard_response_payload", return_value=self._dashboard_payload()):
             response = self.client.get("/api/dashboard")
 
         self.assertEqual(response.status_code, 200)
@@ -89,10 +85,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
              patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
-             patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
-             patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
-             patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
+             patch.object(server, "_build_dashboard_response_payload", return_value=self._dashboard_payload()):
             response = self.client.get(
                 "/api/dashboard",
                 headers={"Authorization": "Bearer frontend-secret"},
@@ -105,10 +98,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
              patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
-             patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
-             patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
-             patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
+             patch.object(server, "_build_dashboard_response_payload", return_value=self._dashboard_payload()):
             response = self.client.get(
                 "/api/dashboard",
                 headers={"Authorization": "Bearer openclaw-secret"},
@@ -148,10 +138,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", True), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_WINDOW_SECONDS", 60), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_MAX_REQUESTS", 1), \
-             patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
-             patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
-             patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
+             patch.object(server, "_build_dashboard_response_payload", return_value=self._dashboard_payload()):
             first = self.client.get("/api/dashboard", headers={"Authorization": "Bearer frontend-secret"})
             second = self.client.get("/api/dashboard", headers={"Authorization": "Bearer frontend-secret"})
 

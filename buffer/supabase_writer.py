@@ -9,6 +9,7 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
 import ssl
+import time
 from urllib.request import urlopen
 from loguru import logger
 import config
@@ -249,6 +250,70 @@ class SupabaseWriter:
 
         return {"status": "ok", "payload": parsed, "error": ""}
 
+    def save_runtime_blob(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> bool:
+        """Persist a binary blob to runtime-config storage bucket."""
+        key = str(path or "").strip()
+        if not key:
+            return False
+
+        payload = bytes(body or b"")
+        try:
+            self._ensure_runtime_bucket()
+            bucket = self.client.storage.from_(self._runtime_bucket_name)
+            file_options = {"content-type": content_type}
+            try:
+                bucket.upload(key, payload, file_options)
+            except Exception as exc:
+                if "duplicate" not in str(exc).lower():
+                    raise
+                bucket.remove([key])
+                bucket.upload(key, payload, file_options)
+            return True
+        except Exception as exc:
+            logger.error("Runtime blob write failed | path={} error={}", key, exc)
+            return False
+
+    def read_runtime_blob(self, path: str, *, timeout_seconds: float = 5.0) -> dict:
+        """Load runtime-config blob with timeout and status metadata."""
+        key = str(path or "").strip()
+        if not key:
+            return {
+                "status": "invalid_path",
+                "body": b"",
+                "error": "Runtime blob path is empty",
+                "elapsed_ms": 0.0,
+            }
+
+        started_at = time.perf_counter()
+        try:
+            self._ensure_runtime_bucket()
+            raw = self._read_runtime_blob_bytes(key, timeout_seconds=max(0.1, float(timeout_seconds)))
+        except TimeoutError as exc:
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            logger.warning("Runtime blob read timed out | path={} timeout_s={} error={}", key, timeout_seconds, exc)
+            return {"status": "timeout", "body": b"", "error": str(exc), "elapsed_ms": elapsed_ms}
+        except Exception as exc:
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            status = self._classify_runtime_read_error(exc)
+            if status == "missing":
+                logger.info("Runtime blob missing | path={}", key)
+            else:
+                logger.warning("Runtime blob unreadable | path={} error={}", key, exc)
+            mapped_status = "missing" if status == "missing" else "error"
+            return {"status": mapped_status, "body": b"", "error": str(exc), "elapsed_ms": elapsed_ms}
+
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        if not raw:
+            logger.warning("Runtime blob unreadable | path={} error=empty response body", key)
+            return {"status": "error", "body": b"", "error": "Empty response body", "elapsed_ms": elapsed_ms}
+        return {"status": "ok", "body": raw, "error": "", "elapsed_ms": elapsed_ms}
+
     @staticmethod
     def _classify_runtime_read_error(error: Exception) -> str:
         status_code = getattr(error, "status_code", None)
@@ -295,6 +360,33 @@ class SupabaseWriter:
             return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
 
         return {"status": "ok", "payload": parsed, "error": ""}
+
+    def _read_runtime_blob_bytes(self, path: str, timeout_seconds: float) -> bytes:
+        key = str(path or "").strip()
+        if not key:
+            raise ValueError("Runtime blob path is empty")
+
+        if certifi is not None:
+            try:
+                signed = self.client.storage.from_(self._runtime_bucket_name).create_signed_url(
+                    key,
+                    max(60, int(timeout_seconds) + 30),
+                )
+                signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
+                if signed_url:
+                    context = ssl.create_default_context(cafile=certifi.where())
+                    with urlopen(signed_url, timeout=timeout_seconds, context=context) as response:
+                        return response.read()
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                low = str(exc).lower()
+                if "timed out" in low or "timeout" in low:
+                    raise TimeoutError(str(exc)) from exc
+                logger.warning("Runtime blob signed read failed; falling back to authenticated download | path={} error={}", key, exc)
+
+        return self.client.storage.from_(self._runtime_bucket_name).download(key)
+
     def list_runtime_files(self, folder: str) -> list[dict]:
         """List files under a runtime-config folder path."""
         path = str(folder or "").strip().strip("/")

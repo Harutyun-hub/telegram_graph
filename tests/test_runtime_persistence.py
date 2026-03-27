@@ -106,6 +106,25 @@ class RuntimePersistenceTests(unittest.TestCase):
         self.assertTrue(saved)
         self.assertEqual(stored["widgets"]["w1"]["enabled"], False)
 
+    def test_save_runtime_blob_persists_binary_payload(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        writer = _make_writer(bucket)
+
+        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"compressed-payload")
+
+        self.assertTrue(saved)
+        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"compressed-payload")
+
+    def test_read_runtime_blob_returns_timeout_status(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        writer = _make_writer(bucket)
+
+        with patch.object(writer, "_read_runtime_blob_bytes", side_effect=TimeoutError("timed out")):
+            result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["body"], b"")
+
     def test_update_admin_config_returns_500_when_persistence_cannot_be_verified(self) -> None:
         payload = server.AdminConfigPatchRequest(runtime={"openaiModel": "gpt-4o-mini"})
 
