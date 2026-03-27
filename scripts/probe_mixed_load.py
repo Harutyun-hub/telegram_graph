@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import statistics
 import threading
 import time
@@ -11,6 +12,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - optional dependency in local tooling
+    certifi = None
 
 
 BASE_URL = os.getenv("PRODUCTION_BASE_URL", "").strip().rstrip("/")
@@ -46,7 +52,8 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None) ->
     if params:
         url = f"{url}?{urlencode(params, doseq=True)}"
     request = Request(url, method=method, headers=_headers())
-    with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+    context = ssl.create_default_context(cafile=certifi.where()) if certifi is not None else None
+    with urlopen(request, timeout=TIMEOUT_SECONDS, context=context) as response:
         return int(response.status), response.read()
 
 
