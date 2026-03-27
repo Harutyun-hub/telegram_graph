@@ -915,15 +915,20 @@ def _normalize_candidates(rows: list[dict], kind: str) -> list[dict]:
         if len(evidence_rows) < 2:
             continue
 
-        now = datetime.now(timezone.utc)
+        parsed_timestamps = [_parse_ts(s.get("timestamp")) for s in evidence_rows if _as_str(s.get("timestamp"), "").strip()]
+        row_latest_ts = _parse_ts(row.get("latestAt"))
+        reference_now = max(
+            [dt for dt in parsed_timestamps if dt is not None] + ([row_latest_ts] if row_latest_ts is not None else []),
+            default=datetime.now(timezone.utc),
+        )
         user_keys = {
             (_as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}")
             for s in evidence_rows
         }
         user_keys = {u for u in user_keys if u}
         channels = {_as_str(s.get("channel"), "unknown").strip().lower() for s in evidence_rows if _as_str(s.get("channel"), "").strip()}
-        signals7d = sum(1 for s in evidence_rows if (now - _parse_ts(s.get("timestamp"))).days < 7)
-        signals_prev7d = sum(1 for s in evidence_rows if 7 <= (now - _parse_ts(s.get("timestamp"))).days < 14)
+        signals7d = sum(1 for s in evidence_rows if (reference_now - _parse_ts(s.get("timestamp"))).days < 7)
+        signals_prev7d = sum(1 for s in evidence_rows if 7 <= (reference_now - _parse_ts(s.get("timestamp"))).days < 14)
 
         latest_ts = ""
         if evidence_rows:

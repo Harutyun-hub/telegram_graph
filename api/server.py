@@ -63,6 +63,7 @@ from api.aggregator import (
     CACHE_TTL_SECONDS as DASHBOARD_CACHE_TTL_SECONDS,
     MAX_STALE_SECONDS as DASHBOARD_MAX_STALE_SECONDS,
     CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
+    DetailRefreshUnavailableError,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
@@ -88,6 +89,17 @@ from api.admin_runtime import (
     save_admin_config_raw,
 )
 from api import db
+from api.runtime_executors import (
+    background_executor_workers,
+    is_draining as runtime_is_draining,
+    log_executor_configuration,
+    mark_draining as mark_runtime_draining,
+    request_executor_workers,
+    run_background,
+    run_request,
+    shutdown_background_executor,
+    shutdown_request_executor,
+)
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
@@ -150,6 +162,26 @@ def _init_sentry() -> None:
         integrations=[FastApiIntegration(transaction_style="endpoint")],
     )
     logger.info(f"Sentry enabled | traces_sample_rate={SENTRY_TRACES_SAMPLE_RATE}")
+
+
+def _should_run_scraper_scheduler() -> bool:
+    return _should_run_background_jobs() and bool(config.ENABLE_SCRAPER_SCHEDULER)
+
+
+def _should_run_any_card_materializers() -> bool:
+    return _should_run_background_jobs() and bool(config.ENABLE_CARD_MATERIALIZERS)
+
+
+def _should_run_question_card_materializer() -> bool:
+    return _should_run_any_card_materializers() and bool(config.ENABLE_QUESTION_CARD_MATERIALIZER)
+
+
+def _should_run_behavioral_card_materializer() -> bool:
+    return _should_run_any_card_materializers() and bool(config.ENABLE_BEHAVIORAL_CARD_MATERIALIZER)
+
+
+def _should_run_opportunity_card_materializer() -> bool:
+    return _should_run_any_card_materializers() and bool(config.ENABLE_OPPORTUNITY_CARD_MATERIALIZER)
 
 
 def _trim_dashboard_payload(snapshot: dict) -> dict:
@@ -682,33 +714,39 @@ async def app_lifespan(_app: FastAPI):
     startup_started_at = time.perf_counter()
     startup_phases: dict[str, float] = {}
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
+    mark_runtime_draining(False)
+    log_executor_configuration()
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
-    if _should_run_background_jobs():
+    if _should_run_scraper_scheduler():
         scheduler_started_at = time.perf_counter()
         scheduler = get_scraper_scheduler()
         startup_phases["schedulerInitMs"] = round((time.perf_counter() - scheduler_started_at) * 1000, 2)
         scheduler_boot_at = time.perf_counter()
         await scheduler.startup()
         startup_phases["schedulerStartupMs"] = round((time.perf_counter() - scheduler_boot_at) * 1000, 2)
+    else:
+        logger.info("Scraper scheduler disabled for this runtime")
 
+    if _should_run_any_card_materializers():
         cards_scheduler_started_at = time.perf_counter()
         _start_question_cards_scheduler()
         _start_behavioral_cards_scheduler()
         _start_opportunity_cards_scheduler()
         startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
-        if RUN_STARTUP_WARMERS:
-            warmers_started_at = time.perf_counter()
-            asyncio.create_task(_warm_dashboard_cache())
-            if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
-                asyncio.create_task(_materialize_question_cards_once(force=False))
-            if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
-                asyncio.create_task(_materialize_behavioral_cards_once(force=False))
-            if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
-                asyncio.create_task(_materialize_opportunity_cards_once(force=False))
-            startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
     else:
-        logger.info("Web-only runtime ready | background jobs disabled")
+        logger.info("Recurring card materializers disabled for this runtime")
+
+    if RUN_STARTUP_WARMERS:
+        warmers_started_at = time.perf_counter()
+        asyncio.create_task(_warm_dashboard_cache())
+        if _should_run_question_card_materializer() and config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
+            asyncio.create_task(_materialize_question_cards_once(force=False))
+        if _should_run_behavioral_card_materializer() and config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
+            asyncio.create_task(_materialize_behavioral_cards_once(force=False))
+        if _should_run_opportunity_card_materializer() and config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
+            asyncio.create_task(_materialize_opportunity_cards_once(force=False))
+        startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
 
     startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
     logger.info(
@@ -718,7 +756,11 @@ async def app_lifespan(_app: FastAPI):
                 "message": "startup_completed",
                 "role": APP_ROLE,
                 "background_jobs_enabled": _should_run_background_jobs(),
+                "scraper_scheduler_enabled": _should_run_scraper_scheduler(),
+                "card_materializers_enabled": _should_run_any_card_materializers(),
                 "run_startup_warmers": RUN_STARTUP_WARMERS,
+                "requestExecutorWorkers": request_executor_workers(),
+                "backgroundExecutorWorkers": background_executor_workers(),
                 "phases": startup_phases,
             },
             ensure_ascii=True,
@@ -731,6 +773,7 @@ async def app_lifespan(_app: FastAPI):
     finally:
         global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler
         global scraper_scheduler, supabase_writer
+        mark_runtime_draining(True)
         if question_cards_scheduler is not None:
             try:
                 question_cards_scheduler.shutdown(wait=False)
@@ -750,8 +793,10 @@ async def app_lifespan(_app: FastAPI):
                 pass
             opportunity_cards_scheduler = None
         if scraper_scheduler is not None:
-            await scraper_scheduler.shutdown()
+            await scraper_scheduler.shutdown(wait_for_cycle_seconds=30.0)
             scraper_scheduler = None
+        shutdown_background_executor(wait=True)
+        shutdown_request_executor(wait=True)
         supabase_writer = None
         db.close()
         logger.info("API server shut down — Neo4j driver closed")
@@ -786,6 +831,7 @@ def _format_server_timing(request: Request, total_ms: float) -> str:
 def _record_query_timing(request: Request, started_at: float, *, cache_status: Optional[str] = None) -> None:
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     request.state.query_ms = round(elapsed_ms, 2)
+    request.state.executor_class = "request"
     if cache_status:
         request.state.cache_status = cache_status
 
@@ -822,6 +868,9 @@ async def request_metrics_middleware(request: Request, call_next):
         query_ms = getattr(request.state, "query_ms", None)
         if isinstance(query_ms, (int, float)):
             payload["query_ms"] = round(float(query_ms), 2)
+        executor_class = getattr(request.state, "executor_class", None)
+        if executor_class:
+            payload["executorClass"] = executor_class
         dashboard_meta = getattr(request.state, "dashboard_meta", None)
         if isinstance(dashboard_meta, dict):
             for src_key, dst_key in (
@@ -1520,8 +1569,7 @@ def _build_dashboard_response_payload(
 async def _warm_dashboard_cache() -> None:
     """Warm dashboard cache in background after startup."""
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: _build_dashboard_response_payload(None, None))
+        await run_background(lambda: _build_dashboard_response_payload(None, None))
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")
@@ -1529,12 +1577,11 @@ async def _warm_dashboard_cache() -> None:
 
 async def _materialize_question_cards_once(force: bool = False) -> None:
     """Run question-card materialization off the request path."""
+    if not _should_run_question_card_materializer():
+        logger.info("Question cards materialization skipped | disabled=true")
+        return
     try:
-        loop = asyncio.get_running_loop()
-        cards = await loop.run_in_executor(
-            None,
-            lambda: question_briefs.refresh_question_briefs(force=force),
-        )
+        cards = await run_background(lambda: question_briefs.refresh_question_briefs(force=force))
         logger.info(f"Question cards materialization completed | cards={len(cards)}")
     except Exception as e:
         logger.warning(f"Question cards materialization failed: {e}")
@@ -1542,12 +1589,11 @@ async def _materialize_question_cards_once(force: bool = False) -> None:
 
 async def _materialize_behavioral_cards_once(force: bool = False) -> None:
     """Run behavioral-card materialization off the request path."""
+    if not _should_run_behavioral_card_materializer():
+        logger.info("Behavioral cards materialization skipped | disabled=true")
+        return
     try:
-        loop = asyncio.get_running_loop()
-        payload = await loop.run_in_executor(
-            None,
-            lambda: behavioral_briefs.refresh_behavioral_briefs(force=force),
-        )
+        payload = await run_background(lambda: behavioral_briefs.refresh_behavioral_briefs(force=force))
         problems = len(payload.get("problemBriefs") or []) if isinstance(payload, dict) else 0
         services = len(payload.get("serviceGapBriefs") or []) if isinstance(payload, dict) else 0
         logger.info(f"Behavioral cards materialization completed | problem_cards={problems} service_cards={services}")
@@ -1557,12 +1603,11 @@ async def _materialize_behavioral_cards_once(force: bool = False) -> None:
 
 async def _materialize_opportunity_cards_once(force: bool = False) -> None:
     """Run opportunity-card materialization off the request path."""
+    if not _should_run_opportunity_card_materializer():
+        logger.info("Opportunity cards materialization skipped | disabled=true")
+        return
     try:
-        loop = asyncio.get_running_loop()
-        cards = await loop.run_in_executor(
-            None,
-            lambda: opportunity_briefs.refresh_opportunity_briefs(force=force),
-        )
+        cards = await run_background(lambda: opportunity_briefs.refresh_opportunity_briefs(force=force))
         logger.info(f"Opportunity cards materialization completed | cards={len(cards)}")
     except Exception as e:
         logger.warning(f"Opportunity cards materialization failed: {e}")
@@ -1571,6 +1616,8 @@ async def _materialize_opportunity_cards_once(force: bool = False) -> None:
 def _start_question_cards_scheduler() -> None:
     """Start recurring question-card materialization scheduler."""
     global question_cards_scheduler
+    if not _should_run_question_card_materializer():
+        return
 
     interval = max(15, int(config.QUESTION_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -1591,6 +1638,8 @@ def _start_question_cards_scheduler() -> None:
 def _start_behavioral_cards_scheduler() -> None:
     """Start recurring W8/W9 card materialization scheduler."""
     global behavioral_cards_scheduler
+    if not _should_run_behavioral_card_materializer():
+        return
 
     interval = max(15, int(config.BEHAVIORAL_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -1611,6 +1660,8 @@ def _start_behavioral_cards_scheduler() -> None:
 def _start_opportunity_cards_scheduler() -> None:
     """Start recurring business-opportunity card materialization scheduler."""
     global opportunity_cards_scheduler
+    if not _should_run_opportunity_card_materializer():
+        return
 
     interval = max(15, int(config.OPPORTUNITY_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -1981,6 +2032,8 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
 @app.get("/readyz")
 async def readyz():
     """Cheap readiness probe that avoids database work."""
+    if runtime_is_draining():
+        raise HTTPException(status_code=503, detail="draining")
     return {"status": "ready", "role": APP_ROLE}
 
 
@@ -2005,12 +2058,8 @@ async def dashboard(
     Cached for 15 minutes by default. Call POST /api/cache/clear to refresh.
     """
     try:
-        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        response = await loop.run_in_executor(
-            None,
-            lambda: _build_dashboard_response_payload(from_date, to_date),
-        )
+        response = await run_request(lambda: _build_dashboard_response_payload(from_date, to_date))
         _record_query_timing(
             request,
             query_started_at,
@@ -2051,11 +2100,13 @@ async def topics(
     """Topics detail page — paginated."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await loop.run_in_executor(None, lambda: get_topics_page(page, size, ctx))
+        payload = await run_request(lambda: get_topics_page(page, size, ctx))
         _record_query_timing(request, query_started_at)
         return payload
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Topics endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2072,15 +2123,17 @@ async def topic_detail(
     """Single topic detail payload with evidence and trend series."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await loop.run_in_executor(None, lambda: get_topic_detail(topic, category, ctx))
+        payload = await run_request(lambda: get_topic_detail(topic, category, ctx))
         _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Topic detail endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topic detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2104,10 +2157,8 @@ async def topic_evidence(
         if normalized_view not in {"all", "questions"}:
             raise HTTPException(status_code=422, detail="view must be 'all' or 'questions'.")
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await loop.run_in_executor(
-            None,
+        payload = await run_request(
             lambda: get_topic_evidence_page(topic, category, normalized_view, page, size, focus_id, ctx),
         )
         _record_query_timing(request, query_started_at)
@@ -2116,6 +2167,9 @@ async def topic_evidence(
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Topic evidence endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topic evidence endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2123,14 +2177,20 @@ async def topic_evidence(
 
 @app.get("/api/channels", dependencies=[Depends(require_analytics_access)])
 async def channels(
+    request: Request,
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
 ):
     """Channels detail page."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: get_channels_page(ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_channels_page(ctx))
+        _record_query_timing(request, query_started_at)
+        return payload
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Channels endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2138,6 +2198,7 @@ async def channels(
 
 @app.get("/api/channels/detail", dependencies=[Depends(require_analytics_access)])
 async def channel_detail(
+    request: Request,
     channel: str = Query(..., min_length=1),
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
@@ -2145,13 +2206,17 @@ async def channel_detail(
     """Single channel detail payload with recent posts and distributions."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        payload = await loop.run_in_executor(None, lambda: get_channel_detail(channel, ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_channel_detail(channel, ctx))
+        _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Channel detail endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Channel detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2159,6 +2224,7 @@ async def channel_detail(
 
 @app.get("/api/channels/posts", dependencies=[Depends(require_analytics_access)])
 async def channel_posts(
+    request: Request,
     channel: str = Query(..., min_length=1),
     page: int = Query(0, ge=0),
     size: int = Query(20, ge=1, le=50),
@@ -2168,13 +2234,17 @@ async def channel_posts(
     """Paginated recent posts feed for a selected channel."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        payload = await loop.run_in_executor(None, lambda: get_channel_posts_page(channel, page, size, ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_channel_posts_page(channel, page, size, ctx))
+        _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Channel posts endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Channel posts endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2185,29 +2255,32 @@ async def graph_data(payload: GraphRequest):
     """Graph dataset for /graph page (server-side Neo4j)."""
     try:
         filters = payload.model_dump(exclude_none=True)
-        graph = graph_dashboard.get_graph_data(filters)
-        freshness = get_freshness_snapshot(
-            get_supabase_writer(),
-            scheduler_status=get_current_scraper_scheduler_status(),
-        )
-        if not isinstance(graph, dict):
+        def _build_graph() -> dict[str, Any]:
+            graph = graph_dashboard.get_graph_data(filters)
+            freshness = get_freshness_snapshot(
+                get_supabase_writer(),
+                scheduler_status=get_current_scraper_scheduler_status(),
+            )
+            if not isinstance(graph, dict):
+                return graph
+            meta_existing = graph.get("meta")
+            meta_dict = dict(meta_existing) if isinstance(meta_existing, dict) else {}
+            meta_dict["freshness"] = {
+                "status": freshness.get("health", {}).get("status"),
+                "score": freshness.get("health", {}).get("score"),
+                "generatedAt": freshness.get("generated_at"),
+                "lastScrapeAt": freshness.get("pipeline", {}).get("scrape", {}).get("last_scrape_at"),
+                "lastProcessAt": freshness.get("pipeline", {}).get("process", {}).get("last_process_at"),
+                "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
+                "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
+                "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
+                "analyticsWindowDays": freshness.get("drift", {}).get("analytics_window_days"),
+                "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
+            }
+            graph["meta"] = meta_dict
             return graph
-        meta_existing = graph.get("meta")
-        meta_dict = dict(meta_existing) if isinstance(meta_existing, dict) else {}
-        meta_dict["freshness"] = {
-            "status": freshness.get("health", {}).get("status"),
-            "score": freshness.get("health", {}).get("score"),
-            "generatedAt": freshness.get("generated_at"),
-            "lastScrapeAt": freshness.get("pipeline", {}).get("scrape", {}).get("last_scrape_at"),
-            "lastProcessAt": freshness.get("pipeline", {}).get("process", {}).get("last_process_at"),
-            "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
-            "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
-            "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
-            "analyticsWindowDays": freshness.get("drift", {}).get("analytics_window_days"),
-            "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
-        }
-        graph["meta"] = meta_dict
-        return graph
+
+        return await run_request(_build_graph)
     except Exception as e:
         logger.error(f"Graph data endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2223,11 +2296,13 @@ async def node_details(
     """Detailed panel data for a graph node."""
     try:
         channel_filters = [c.strip() for c in (channels or "").split(",") if c.strip()]
-        details = graph_dashboard.get_node_details(
-            nodeId,
-            nodeType,
-            timeframe=timeframe,
-            channels=channel_filters,
+        details = await run_request(
+            lambda: graph_dashboard.get_node_details(
+                nodeId,
+                nodeType,
+                timeframe=timeframe,
+                channels=channel_filters,
+            )
         )
         if not details:
             raise HTTPException(status_code=404, detail="Node not found")
@@ -2245,7 +2320,7 @@ async def search_graph(query: str = Query("", min_length=0, max_length=200), lim
     try:
         if not (query or "").strip():
             return []
-        return graph_dashboard.search_graph(query, limit)
+        return await run_request(lambda: graph_dashboard.search_graph(query, limit))
     except Exception as e:
         logger.error(f"Graph search endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2255,7 +2330,7 @@ async def search_graph(query: str = Query("", min_length=0, max_length=200), lim
 async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top trending topics for graph filters."""
     try:
-        return graph_dashboard.get_trending_topics(limit, timeframe)
+        return await run_request(lambda: graph_dashboard.get_trending_topics(limit, timeframe))
     except Exception as e:
         logger.error(f"Trending topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2265,7 +2340,7 @@ async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str =
 async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top channels by post activity (graph context)."""
     try:
-        return graph_dashboard.get_top_channels(limit, timeframe)
+        return await run_request(lambda: graph_dashboard.get_top_channels(limit, timeframe))
     except Exception as e:
         logger.error(f"Top channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2275,7 +2350,7 @@ async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Qu
 async def all_channels_graph():
     """All channels list for graph filters."""
     try:
-        return graph_dashboard.get_all_channels()
+        return await run_request(graph_dashboard.get_all_channels)
     except Exception as e:
         logger.error(f"All channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2285,7 +2360,7 @@ async def all_channels_graph():
 async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Compatibility endpoint: returns top channels in legacy shape."""
     try:
-        return graph_dashboard.get_top_channels(limit, timeframe)
+        return await run_request(lambda: graph_dashboard.get_top_channels(limit, timeframe))
     except Exception as e:
         logger.error(f"Top brands compatibility endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2295,7 +2370,7 @@ async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str
 async def all_brands_compat():
     """Compatibility endpoint: returns all channels in legacy shape."""
     try:
-        return graph_dashboard.get_all_channels()
+        return await run_request(graph_dashboard.get_all_channels)
     except Exception as e:
         logger.error(f"All brands compatibility endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2305,7 +2380,7 @@ async def all_brands_compat():
 async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
     """Sentiment distribution for graph side panels/filters."""
     try:
-        return graph_dashboard.get_sentiment_distribution(timeframe)
+        return await run_request(lambda: graph_dashboard.get_sentiment_distribution(timeframe))
     except Exception as e:
         logger.error(f"Sentiment distribution endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2315,7 +2390,7 @@ async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
 async def graph_insights(timeframe: str = Query("Last 7 Days")):
     """Narrative summary for graph context."""
     try:
-        return graph_dashboard.get_graph_insights(timeframe)
+        return await run_request(lambda: graph_dashboard.get_graph_insights(timeframe))
     except Exception as e:
         logger.error(f"Graph insights endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2328,11 +2403,7 @@ async def insight_cards(payload: InsightCardsRequest):
         audience = (payload.audience or "analyst").strip().lower()
         if audience not in {"analyst", "executive"}:
             audience = "analyst"
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: insights.get_insight_cards(payload.filters or {}, audience),
-        )
+        return await run_request(lambda: insights.get_insight_cards(payload.filters or {}, audience))
     except Exception as e:
         logger.error(f"Insight cards endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2512,8 +2583,7 @@ async def freshness_snapshot(force: bool = Query(False)):
 async def taxonomy_quality_snapshot():
     """Enterprise taxonomy quality snapshot with sign-off gates."""
     try:
-        loop = asyncio.get_running_loop()
-        snapshot = await loop.run_in_executor(None, _taxonomy_quality_snapshot)
+        snapshot = await run_request(_taxonomy_quality_snapshot)
         snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
         return snapshot
     except Exception as e:
@@ -2529,8 +2599,6 @@ async def trending_widget_quality_snapshot(
     """QA snapshot for the Trending widget read model and evidence integrity."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-
         def _build_snapshot() -> dict[str, Any]:
             writer = get_supabase_writer()
             proposal_rows = writer.list_topic_proposals(status="pending", limit=500)
@@ -2574,7 +2642,7 @@ async def trending_widget_quality_snapshot(
                 "proposalQueue": proposal_summary,
             }
 
-        return await loop.run_in_executor(None, _build_snapshot)
+        return await run_request(_build_snapshot)
     except Exception as e:
         logger.error(f"Trending widget quality endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2793,6 +2861,7 @@ async def reload_taxonomy_promotions():
 
 @app.get("/api/audience", dependencies=[Depends(require_analytics_access)])
 async def audience(
+    request: Request,
     page: int = Query(0, ge=0),
     size: int = Query(500, ge=1, le=1000),
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -2801,8 +2870,13 @@ async def audience(
     """Audience detail page — paginated."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: get_audience_page(page, size, ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_audience_page(page, size, ctx))
+        _record_query_timing(request, query_started_at)
+        return payload
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Audience endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Audience endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2810,6 +2884,7 @@ async def audience(
 
 @app.get("/api/audience/detail", dependencies=[Depends(require_analytics_access)])
 async def audience_detail(
+    request: Request,
     user_id: str = Query(..., alias="userId", min_length=1),
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
@@ -2817,13 +2892,17 @@ async def audience_detail(
     """Single audience-member detail payload."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        payload = await loop.run_in_executor(None, lambda: get_audience_detail(user_id, ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_audience_detail(user_id, ctx))
+        _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Audience detail endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Audience detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2831,6 +2910,7 @@ async def audience_detail(
 
 @app.get("/api/audience/messages", dependencies=[Depends(require_analytics_access)])
 async def audience_messages(
+    request: Request,
     user_id: str = Query(..., alias="userId", min_length=1),
     page: int = Query(0, ge=0),
     size: int = Query(20, ge=1, le=50),
@@ -2840,13 +2920,17 @@ async def audience_messages(
     """Paginated recent messages feed for a selected audience member."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        loop = asyncio.get_running_loop()
-        payload = await loop.run_in_executor(None, lambda: get_audience_messages_page(user_id, page, size, ctx))
+        query_started_at = time.perf_counter()
+        payload = await run_request(lambda: get_audience_messages_page(user_id, page, size, ctx))
+        _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
         return payload
     except HTTPException:
         raise
+    except DetailRefreshUnavailableError as e:
+        logger.warning(f"Audience messages endpoint degraded: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Audience messages endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2872,11 +2956,7 @@ async def clear_cache():
 async def debug_refresh_question_briefs():
     """Force-refresh question cards and return stage diagnostics."""
     try:
-        loop = asyncio.get_running_loop()
-        diagnostics = await loop.run_in_executor(
-            None,
-            lambda: question_briefs.refresh_question_briefs_with_diagnostics(force=True),
-        )
+        diagnostics = await run_background(lambda: question_briefs.refresh_question_briefs_with_diagnostics(force=True))
         return {
             "success": True,
             "cardsProduced": diagnostics.get("cardsProduced", 0),
@@ -2892,9 +2972,7 @@ async def debug_refresh_question_briefs():
 async def debug_refresh_behavioral_briefs():
     """Force-refresh behavioral cards and return stage diagnostics."""
     try:
-        loop = asyncio.get_running_loop()
-        diagnostics = await loop.run_in_executor(
-            None,
+        diagnostics = await run_background(
             lambda: behavioral_briefs.refresh_behavioral_briefs_with_diagnostics(force=True),
         )
         return {
@@ -2913,9 +2991,7 @@ async def debug_refresh_behavioral_briefs():
 async def debug_refresh_opportunity_briefs():
     """Force-refresh opportunity cards and return stage diagnostics."""
     try:
-        loop = asyncio.get_running_loop()
-        diagnostics = await loop.run_in_executor(
-            None,
+        diagnostics = await run_background(
             lambda: opportunity_briefs.refresh_opportunity_briefs_with_diagnostics(force=True),
         )
         return {

@@ -5,16 +5,29 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+import threading
 import time
 
 from loguru import logger
 from telethon import TelegramClient
 
 import config
+from api.runtime_executors import run_background
 from scraper.channel_scraper import scrape_channel
 from scraper.comment_scraper import scrape_comments_for_post
 from processor.intent_extractor import extract_intents, extract_post_intents
 from ingester.neo4j_writer import Neo4jWriter
+
+_writer_lock = threading.Lock()
+_shared_background_writer: Neo4jWriter | None = None
+
+
+def _get_background_writer() -> Neo4jWriter:
+    global _shared_background_writer
+    with _writer_lock:
+        if _shared_background_writer is None:
+            _shared_background_writer = Neo4jWriter()
+        return _shared_background_writer
 
 
 async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
@@ -74,6 +87,7 @@ def _run_ai_process_and_sync_blocking(
     sync_limit: int,
 ) -> dict:
     """Blocking AI + Neo4j sync stage (intended for background thread)."""
+    stage_started_at = time.monotonic()
     result: dict = {
         "ai_analysis_saved": 0,
         "posts_processed": 0,
@@ -156,9 +170,8 @@ def _run_ai_process_and_sync_blocking(
     if not posts_to_sync:
         return result
 
-    writer: Neo4jWriter | None = None
     try:
-        writer = Neo4jWriter()
+        writer = _get_background_writer()
         for post in posts_to_sync:
             if time.monotonic() >= sync_deadline:
                 result["sync_timeout"] = True
@@ -183,12 +196,6 @@ def _run_ai_process_and_sync_blocking(
     except Exception as e:
         logger.error(f"Neo4j writer init failed: {e}")
         result["sync_error"] = str(e)
-    finally:
-        if writer:
-            try:
-                writer.close()
-            except Exception:
-                pass
 
     # One-pass reconciliation for historic post-analysis sync mismatches.
     try:
@@ -198,6 +205,7 @@ def _run_ai_process_and_sync_blocking(
         logger.warning(f"Post-analysis reconciliation failed: {e}")
         result["post_analysis_reconciled"] = 0
 
+    result["sync_duration_seconds"] = round(max(0.0, time.monotonic() - stage_started_at), 2)
     return result
 
 
@@ -217,8 +225,7 @@ async def run_ai_process_and_sync(
         sync_limit=max(1, int(sync_limit)),
     )
 
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, task)
+    return await run_background(task)
 
 
 async def run_full_cycle(client: TelegramClient, supabase_writer) -> dict:

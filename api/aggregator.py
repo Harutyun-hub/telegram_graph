@@ -25,6 +25,7 @@ from api.dashboard_dates import DashboardDateContext, build_dashboard_date_conte
 from api import opportunity_briefs
 from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
+from api.runtime_executors import submit_background
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -45,6 +46,14 @@ WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECON
 MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+DETAIL_MAX_STALE_SECONDS = max(
+    DETAIL_CACHE_TTL_SECONDS,
+    int(os.getenv("DETAIL_MAX_STALE_SECONDS", "1800")),
+)
+DETAIL_REFRESH_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("DETAIL_REFRESH_TIMEOUT_SECONDS", "8.0")),
+)
 
 # If one of these tiers falls back during refresh, prefer preserving an
 # existing healthy cache instead of replacing it with an empty/degraded view.
@@ -61,6 +70,7 @@ _cache_lock = threading.Lock()
 
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, Any]] = {}
+_detail_refresh_state_lock = threading.Lock()
 _tier_executor_lock = threading.Lock()
 _refresh_state_lock = threading.Lock()
 
@@ -74,6 +84,11 @@ class DashboardRefreshState:
 
 
 _refresh_states: Dict[str, DashboardRefreshState] = {}
+_detail_refresh_states: Dict[str, DashboardRefreshState] = {}
+
+
+class DetailRefreshUnavailableError(RuntimeError):
+    """Raised when a detail cache cannot be refreshed and has no serveable stale value."""
 
 
 def _new_tier_executor() -> ThreadPoolExecutor:
@@ -197,6 +212,8 @@ def invalidate_cache() -> None:
         _cache_entries.clear()
     with _detail_cache_lock:
         _detail_cache.clear()
+    with _detail_refresh_state_lock:
+        _detail_refresh_states.clear()
 
 
 def _get_refresh_state(cache_key: str) -> DashboardRefreshState:
@@ -882,32 +899,128 @@ def _get_cached_detail_value(
     ttl_seconds: int = DETAIL_CACHE_TTL_SECONDS,
 ) -> Any:
     now = time.time()
-    stale: Any = None
+    entry: Tuple[float, Any] | None = None
 
     with _detail_cache_lock:
         entry = _detail_cache.get(cache_key)
-        if entry is not None:
-            ts, data = entry
-            stale = data
-            if (now - ts) < ttl_seconds:
-                return data
+
+    stale = entry[1] if entry is not None else None
+    stale_age = max(0.0, now - entry[0]) if entry is not None else None
+
+    if entry is not None and stale_age is not None and stale_age < ttl_seconds:
+        logger.debug("Detail cache hit | key={} cacheState=fresh age_s={}", cache_key, round(stale_age, 3))
+        return stale
+
+    if entry is not None and stale_age is not None and stale_age < DETAIL_MAX_STALE_SECONDS:
+        logger.warning("Detail cache serving stale | key={} cacheState=stale age_s={}", cache_key, round(stale_age, 3))
+        _refresh_detail_cache_async(cache_key, builder)
+        return stale
 
     try:
-        fresh = builder()
-        if isinstance(stale, list) and len(stale) > 0 and isinstance(fresh, list) and len(fresh) == 0:
-            logger.warning(f"Detail query {cache_key} returned empty payload; serving stale cache")
-            return stale
-        if stale is not None and fresh is None:
-            logger.warning(f"Detail query {cache_key} returned empty detail payload; serving stale cache")
-            return stale
-        with _detail_cache_lock:
-            _detail_cache[cache_key] = (time.time(), fresh)
+        fresh = _build_detail_with_timeout(cache_key, builder, DETAIL_REFRESH_TIMEOUT_SECONDS)
+        if _should_keep_existing_detail_cache(stale, fresh):
+            logger.warning("Detail refresh produced empty payload; preserving previous cache | key={}", cache_key)
+            if stale is not None:
+                return stale
+            raise DetailRefreshUnavailableError(f"No usable detail payload for {cache_key}")
+        _store_detail_cache_value(cache_key, fresh)
+        logger.info("Detail cache refreshed synchronously | key={} cacheState={}", cache_key, "miss" if entry is None else "expired")
         return fresh
-    except Exception as e:
-        if stale is not None:
-            logger.warning(f"Detail query {cache_key} failed; serving stale cache instead: {e}")
+    except Exception as exc:
+        if entry is not None and stale_age is not None and stale_age < DETAIL_MAX_STALE_SECONDS:
+            logger.warning("Detail refresh failed; serving stale cache | key={} error={}", cache_key, exc)
+            _refresh_detail_cache_async(cache_key, builder)
             return stale
-        raise
+        raise DetailRefreshUnavailableError(f"Detail payload unavailable for {cache_key}: {exc}") from exc
+
+
+def _get_detail_refresh_state(cache_key: str) -> DashboardRefreshState:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _detail_refresh_states[cache_key] = state
+        return state
+
+
+def _acquire_detail_refresh_slot(cache_key: str) -> tuple[DashboardRefreshState, bool]:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _detail_refresh_states[cache_key] = state
+        if state.inflight:
+            return state, False
+        state.inflight = True
+        state.event.clear()
+        return state, True
+
+
+def _release_detail_refresh_slot(cache_key: str) -> None:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            return
+        state.inflight = False
+        state.event.set()
+
+
+def _should_keep_existing_detail_cache(stale: Any, fresh: Any) -> bool:
+    if isinstance(stale, list) and stale and isinstance(fresh, list) and not fresh:
+        return True
+    if stale is not None and fresh is None:
+        return True
+    return False
+
+
+def _store_detail_cache_value(cache_key: str, value: Any) -> None:
+    with _detail_cache_lock:
+        _detail_cache[cache_key] = (time.time(), value)
+
+
+def _build_detail_with_timeout(cache_key: str, builder: Callable[[], Any], timeout_seconds: float) -> Any:
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detail-refresh")
+    future = executor.submit(builder)
+    try:
+        return future.result(timeout=max(0.1, float(timeout_seconds)))
+    except FuturesTimeout as exc:
+        future.cancel()
+        logger.warning("Detail refresh timed out | key={} timeout_s={}", cache_key, timeout_seconds)
+        raise TimeoutError(f"refresh timed out after {timeout_seconds}s") from exc
+    finally:
+        _shutdown_executor(executor, wait=False)
+
+
+def _refresh_detail_cache_async(cache_key: str, builder: Callable[[], Any]) -> bool:
+    _state, acquired = _acquire_detail_refresh_slot(cache_key)
+    if not acquired:
+        return False
+
+    def _worker() -> None:
+        try:
+            fresh = builder()
+            with _detail_cache_lock:
+                existing = _detail_cache.get(cache_key)
+                stale = existing[1] if existing is not None else None
+            if _should_keep_existing_detail_cache(stale, fresh):
+                logger.warning("Detail background refresh skipped empty payload | key={}", cache_key)
+                return
+            _store_detail_cache_value(cache_key, fresh)
+            logger.info("Detail cache refreshed in background | key={}", cache_key)
+        except Exception as exc:
+            logger.warning("Detail background refresh failed | key={} error={}", cache_key, exc)
+        finally:
+            _release_detail_refresh_slot(cache_key)
+
+    try:
+        submit_background(_worker)
+        return True
+    except Exception as exc:
+        logger.warning("Detail background refresh could not be scheduled | key={} error={}", cache_key, exc)
+        _release_detail_refresh_slot(cache_key)
+        return False
 
 
 def get_topics_page(

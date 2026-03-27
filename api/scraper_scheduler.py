@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -45,6 +46,8 @@ class ScraperSchedulerService:
         self._run_history = deque(maxlen=12)
 
         self._run_lock = asyncio.Lock()
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
         self._client: Optional[TelegramClient] = None
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -65,11 +68,13 @@ class ScraperSchedulerService:
         if not self.scheduler.running:
             self.scheduler.start()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, wait_for_cycle_seconds: float = 30.0) -> None:
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
             pass
+
+        await self.wait_for_idle(timeout_seconds=wait_for_cycle_seconds)
 
         if self._client:
             try:
@@ -83,6 +88,14 @@ class ScraperSchedulerService:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
+
+    async def wait_for_idle(self, *, timeout_seconds: float = 30.0) -> bool:
+        try:
+            await asyncio.wait_for(self._idle_event.wait(), timeout=max(0.1, float(timeout_seconds)))
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for scheduler idle state | timeout_s={}", timeout_seconds)
+            return False
 
     def _upsert_interval_job(self) -> None:
         try:
@@ -154,24 +167,32 @@ class ScraperSchedulerService:
 
         async with self._run_lock:
             self.running_now = True
+            self._idle_event.clear()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            logger.info(
+                "Scheduler cycle started | mode=normal interval_minutes={} executorClass=background",
+                self.interval_minutes,
+            )
 
             try:
                 client = await self._get_or_create_client()
+                cycle_started_at = time.monotonic()
                 result = await run_full_cycle(client, self.db)
+                result["cycle_duration_seconds"] = round(max(0.0, time.monotonic() - cycle_started_at), 2)
                 self.last_mode = "normal"
                 self.last_result = result
                 self.last_success_at = datetime.now(timezone.utc)
                 self._record_success_run(result=result, mode="normal")
-                logger.success(f"Pipeline cycle completed: {result}")
+                logger.success("Pipeline cycle completed | mode=normal result={}", result)
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"Pipeline cycle failed: {e}")
             finally:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._idle_event.set()
 
     async def _run_catchup_cycle(self) -> None:
         if self._run_lock.locked():
@@ -180,24 +201,29 @@ class ScraperSchedulerService:
 
         async with self._run_lock:
             self.running_now = True
+            self._idle_event.clear()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            logger.info("Scheduler cycle started | mode=catchup executorClass=background")
 
             try:
                 client = await self._get_or_create_client()
+                cycle_started_at = time.monotonic()
                 result = await run_catchup_cycle(client, self.db)
+                result["cycle_duration_seconds"] = round(max(0.0, time.monotonic() - cycle_started_at), 2)
                 self.last_mode = "catchup"
                 self.last_result = result
                 self.last_success_at = datetime.now(timezone.utc)
                 self._record_success_run(result=result, mode="catchup")
-                logger.success(f"Catch-up cycle completed: {result}")
+                logger.success("Catch-up cycle completed | mode=catchup result={}", result)
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"Catch-up cycle failed: {e}")
             finally:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._idle_event.set()
 
     async def start(self) -> dict:
         self._ensure_scheduler_started()
