@@ -16,6 +16,7 @@ class _FakeRuntimeBucket:
         self.files: dict[str, bytes] = {}
         self.download_overrides: dict[str, bytes | Exception] = {}
         self.fail_duplicate_upload = False
+        self.signed_url_calls = 0
 
     def download(self, path: str) -> bytes:
         override = self.download_overrides.get(path)
@@ -29,6 +30,10 @@ class _FakeRuntimeBucket:
 
     def update(self, path: str, body: bytes, _options: dict) -> None:
         self.files[path] = body
+
+    def create_signed_url(self, _path: str, _expires_in: int) -> dict:
+        self.signed_url_calls += 1
+        raise RuntimeError("signed-url-should-not-be-used")
 
     def upload(self, path: str, body: bytes, options: dict) -> None:
         upsert = str(options.get("upsert", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -136,6 +141,17 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "timeout")
         self.assertEqual(result["body"], b"")
+
+    def test_read_runtime_blob_prefers_authenticated_download(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["dashboard-cache/v1/test.json.gz"] = b"cached"
+        writer = _make_writer(bucket)
+
+        result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["body"], b"cached")
+        self.assertEqual(bucket.signed_url_calls, 0)
 
     def test_update_admin_config_returns_500_when_persistence_cannot_be_verified(self) -> None:
         payload = server.AdminConfigPatchRequest(runtime={"openaiModel": "gpt-4o-mini"})

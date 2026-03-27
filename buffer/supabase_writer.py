@@ -5,6 +5,7 @@ Central data access layer. All other modules call this — never
 touch Supabase directly from scrapers or processors.
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
@@ -353,9 +354,26 @@ class SupabaseWriter:
         if not key:
             raise ValueError("Runtime blob path is empty")
 
+        bucket = self.client.storage.from_(self._runtime_bucket_name)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(bucket.download, key)
+                return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as exc:
+            raise TimeoutError(f"authenticated download timed out after {timeout_seconds}s") from exc
+        except Exception as exc:
+            status = self._classify_runtime_read_error(exc)
+            if status == "missing":
+                raise
+            logger.warning(
+                "Runtime blob authenticated download failed; falling back to signed read | path={} error={}",
+                key,
+                exc,
+            )
+
         if certifi is not None:
             try:
-                signed = self.client.storage.from_(self._runtime_bucket_name).create_signed_url(
+                signed = bucket.create_signed_url(
                     key,
                     max(60, int(timeout_seconds) + 30),
                 )
