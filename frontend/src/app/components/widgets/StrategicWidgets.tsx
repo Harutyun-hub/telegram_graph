@@ -27,6 +27,7 @@ function topicTileSpec(value: number, minValue: number, maxValue: number) {
       tileClass: 'col-span-2 md:col-span-4 xl:col-span-5 row-span-3',
       titleClass: 'text-base md:text-[17px]',
       lineClamp: 2,
+      compactMeta: false,
       showMeta: true,
       showSnippet: true,
     };
@@ -36,6 +37,7 @@ function topicTileSpec(value: number, minValue: number, maxValue: number) {
       tileClass: 'col-span-2 md:col-span-3 xl:col-span-4 row-span-2',
       titleClass: 'text-sm md:text-[15px]',
       lineClamp: 2,
+      compactMeta: false,
       showMeta: true,
       showSnippet: false,
     };
@@ -45,14 +47,16 @@ function topicTileSpec(value: number, minValue: number, maxValue: number) {
       tileClass: 'col-span-1 md:col-span-3 xl:col-span-3 row-span-2',
       titleClass: 'text-xs md:text-sm',
       lineClamp: 2,
+      compactMeta: false,
       showMeta: true,
       showSnippet: false,
     };
   }
   return {
     tileClass: 'col-span-1 md:col-span-2 xl:col-span-2 row-span-1',
-    titleClass: 'text-xs',
+    titleClass: 'text-[11px]',
     lineClamp: 1,
+    compactMeta: true,
     showMeta: false,
     showSnippet: false,
   };
@@ -191,15 +195,19 @@ export function TopicLandscape() {
             >
               <div className="absolute left-0 top-0 w-full h-1" style={{ backgroundColor: accentColor }} />
 
-              <div className="flex h-full flex-col justify-between gap-1">
+              <div className={spec.compactMeta ? 'grid h-full min-h-0 grid-rows-[auto_1fr_auto] gap-1' : 'flex h-full min-h-0 flex-col gap-1'}>
                 <span
-                  className={`${spec.titleClass} text-gray-900 leading-tight`}
+                  className={`${spec.titleClass} shrink-0 text-gray-900 ${spec.compactMeta ? 'block truncate leading-[1.2]' : 'break-words leading-tight'}`}
                   style={{
                     fontWeight: 600,
-                    display: '-webkit-box',
-                    WebkitLineClamp: spec.lineClamp,
-                    WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden',
+                    ...(spec.compactMeta
+                      ? {}
+                      : {
+                          display: '-webkit-box',
+                          WebkitLineClamp: spec.lineClamp,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                        }),
                   }}
                   title={topic.name}
                 >
@@ -221,32 +229,43 @@ export function TopicLandscape() {
                   </span>
                 )}
 
-                <div className="flex items-end justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[11px] text-gray-600">
+                {spec.compactMeta ? (
+                  <div className="mt-auto flex items-center justify-between gap-2">
+                    <div className="min-w-0 text-[11px] text-gray-600">
                       {topic.value.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}
                     </div>
-                    {spec.showMeta && (
-                      <div className="text-[10px] text-gray-500">
-                        {ru ? 'категория' : 'category'}: {topic.category}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="text-right">
-                    <div className="text-[10px] text-gray-500" style={{ fontWeight: 600 }}>
-                      {ru ? '7д Δ' : '7d Δ'}
-                    </div>
-                    <div className={`text-xs ${growthClass}`} style={{ fontWeight: 700 }}>
+                    <div className={`shrink-0 text-[11px] ${growthClass}`} style={{ fontWeight: 700 }}>
                       {growthLabel}
                     </div>
-                    {spec.showMeta && (
-                      <div className="text-[10px] text-gray-500">
-                        {topic.growthReliable ? (ru ? 'статистика достаточна' : 'evidence sufficient') : (ru ? 'мало данных' : 'low evidence')}
-                      </div>
-                    )}
                   </div>
-                </div>
+                ) : (
+                  <div className="mt-auto flex items-end justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-gray-600">
+                        {topic.value.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}
+                      </div>
+                      {spec.showMeta && (
+                        <div className="text-[10px] text-gray-500">
+                          {ru ? 'категория' : 'category'}: {topic.category}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="text-right">
+                      <div className="text-[10px] text-gray-500" style={{ fontWeight: 600 }}>
+                        {ru ? '7д Δ' : '7d Δ'}
+                      </div>
+                      <div className={`text-xs ${growthClass}`} style={{ fontWeight: 700 }}>
+                        {growthLabel}
+                      </div>
+                      {spec.showMeta && (
+                        <div className="text-[10px] text-gray-500">
+                          {topic.growthReliable ? (ru ? 'статистика достаточна' : 'evidence sufficient') : (ru ? 'мало данных' : 'low evidence')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </Link>
           );
