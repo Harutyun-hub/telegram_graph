@@ -7,13 +7,17 @@ export interface AdminRuntimeConfig {
   questionBriefsModel: string;
   behavioralBriefsModel: string;
   opportunityBriefsModel: string;
+  topicOverviewsModel: string;
   questionBriefsPromptVersion: string;
   behavioralBriefsPromptVersion: string;
   opportunityBriefsPromptVersion: string;
+  topicOverviewsPromptVersion: string;
+  topicOverviewsRefreshMinutes: string;
   aiPostPromptStyle: 'compact' | 'full';
   featureQuestionBriefsAi: boolean;
   featureBehavioralBriefsAi: boolean;
   featureOpportunityBriefsAi: boolean;
+  featureTopicOverviewsAi: boolean;
 }
 
 export interface AdminConfig {
