@@ -106,6 +106,19 @@ class AnalyticsAuthTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    def test_dashboard_timeout_returns_503(self) -> None:
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(
+                 server,
+                 "_build_dashboard_response_payload",
+                 side_effect=TimeoutError("Dashboard refresh did not complete within 32.0s and no stale snapshot is available"),
+             ):
+            response = self.client.get("/api/dashboard?from=2026-03-10&to=2026-03-24")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("warming this date range", response.text)
+
     def test_freshness_is_protected(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", True), \
              patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \

@@ -43,6 +43,10 @@ PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4"
 TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "10.0")))
 REFRESH_TIMEOUT_SECONDS = max(5.0, float(os.getenv("DASH_REFRESH_TIMEOUT_SECONDS", "30.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
+WAIT_FOR_EMPTY_REFRESH_SECONDS = max(
+    WAIT_FOR_REFRESH_SECONDS,
+    float(os.getenv("DASH_WAIT_FOR_EMPTY_REFRESH_SECONDS", str(REFRESH_TIMEOUT_SECONDS + 2.0))),
+)
 MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
@@ -800,7 +804,8 @@ def get_dashboard_snapshot(
 
     state, leader = _acquire_refresh_slot(cache_key)
     if not leader:
-        if state.event.wait(timeout=WAIT_FOR_REFRESH_SECONDS):
+        wait_timeout = WAIT_FOR_REFRESH_SECONDS if stale_entry is not None else WAIT_FOR_EMPTY_REFRESH_SECONDS
+        if state.event.wait(timeout=wait_timeout):
             with _cache_lock:
                 refreshed_entry = _cache_entries.get(cache_key)
             if refreshed_entry is not None:
@@ -826,7 +831,7 @@ def get_dashboard_snapshot(
                 stale_age_seconds=stale_age_seconds,
             )
         raise TimeoutError(
-            f"Dashboard refresh did not complete within {WAIT_FOR_REFRESH_SECONDS:.1f}s and no stale snapshot is available"
+            f"Dashboard refresh did not complete within {wait_timeout:.1f}s and no stale snapshot is available"
         )
 
     try:
