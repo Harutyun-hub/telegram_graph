@@ -29,11 +29,11 @@ export function ProblemTracker() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="problem_tracker">
           {ru ? 'Трекер проблем' : 'Problem Tracker'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Болевые точки из разговоров' : 'Pain points from community chatter'}
         </span>
       </div>
@@ -203,12 +203,12 @@ export function ServiceGapDetector() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="service_gap_detector">
           {ru ? 'Детектор пробелов в услугах' : 'Service Gap Detector'}
         </WidgetTitle>
         {hasRenderableRows && (
-          <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
+          <span className="self-start text-xs text-emerald-600 sm:self-auto" style={{ fontWeight: 500 }}>
             {aiRows.filter((s) => s.gap >= 80).length} {ru ? 'критических пробелов' : 'critical gaps'}
           </span>
         )}
@@ -318,11 +318,11 @@ export function SatisfactionByArea() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="satisfaction_by_area">
           {ru ? 'Радар удовлетворённости жизнью' : 'Life Satisfaction Radar'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? 'По сферам жизни' : 'Community satisfaction by area'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'По сферам жизни' : 'Community satisfaction by area'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -408,11 +408,11 @@ export function MoodOverTime() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="mood_over_time">
           {ru ? 'Настроения сообщества' : 'Community Mood'}
         </WidgetTitle>
-        <span className="text-xs text-emerald-600" style={{ fontWeight: 500 }}>
+        <span className="self-start text-xs text-emerald-600 sm:self-auto" style={{ fontWeight: 500 }}>
           {positiveShare}% {ru ? 'позитивных' : 'positive'}
         </span>
       </div>
@@ -482,11 +482,11 @@ export function EmotionalUrgencyIndex() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="emotional_urgency_index">
           {ru ? 'Индекс эмоциональной срочности' : 'Emotional Urgency Index'}
         </WidgetTitle>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700" style={{ fontWeight: 500, fontSize: '10px' }}>
             {critical.length} {ru ? 'критических' : 'critical'}
           </span>

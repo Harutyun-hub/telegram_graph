@@ -31,12 +31,12 @@ export function PersonaGallery() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="persona_gallery">
           {ru ? 'Персоны сообщества' : 'Community Personas'}
         </WidgetTitle>
         {/* ✅ FIX: use personas.length instead of hardcoded "6" */}
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? `${personas.length} поведенческих кластеров` : `${personas.length} behavioral clusters`}
         </span>
       </div>
@@ -142,11 +142,11 @@ export function InterestRadar() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="interest_radar">
           {ru ? 'Интересы сообщества' : 'Community Interests'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
         </span>
       </div>

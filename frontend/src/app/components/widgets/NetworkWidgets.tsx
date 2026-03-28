@@ -47,11 +47,11 @@ export function TopChannels() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="top_channels">
           {ru ? 'Топ-каналы сообщества' : 'Top Community Channels'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{topChannels.length} {ru ? 'активных групп' : 'active groups'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{topChannels.length} {ru ? 'активных групп' : 'active groups'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -117,11 +117,11 @@ export function KeyVoices() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="key_voices">
           {ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? `Активные комментаторы за ${range.days} дн.` : `Active commenters in the selected ${range.days}-day window`}
         </span>
       </div>
@@ -283,11 +283,11 @@ export function RecommendationTracker() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="recommendation_tracker">
           {ru ? 'Рекомендации сообщества' : 'Community Recommendations'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? 'Самые популярные советы' : 'Most shared suggestions'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'Самые популярные советы' : 'Most shared suggestions'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -439,11 +439,11 @@ export function InformationVelocity() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="information_velocity">
           {ru ? 'Скорость распространения информации' : 'Information Velocity'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Как быстро темы распространяются по каналам' : 'How fast topics spread across channels'}
         </span>
       </div>

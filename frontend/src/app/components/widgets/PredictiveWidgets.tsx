@@ -28,8 +28,8 @@ export function EmergingInterests() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-2">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <WidgetTitle widgetId="emerging_interests">
             {ru ? 'Зарождающиеся интересы' : 'Emerging Interests'}
           </WidgetTitle>
@@ -37,7 +37,7 @@ export function EmergingInterests() {
             {emergingInterests.length} {ru ? 'новых' : 'new'}
           </span>
         </div>
-        <span className="text-xs text-gray-500">{ru ? 'Темы < 14 дней' : 'Topics <14 days old'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'Темы < 14 дней' : 'Topics <14 days old'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -93,11 +93,11 @@ export function RetentionRiskGauge() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="retention_risk_gauge">
           {ru ? 'Непрерывность активности и сигналы риска' : 'Activity Continuity & Risk Signals'}
         </WidgetTitle>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${continuityScore >= 70 ? 'bg-emerald-100 text-emerald-700' : continuityScore >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 600 }}>
+        <span className={`self-start text-xs px-2 py-0.5 rounded-full sm:self-auto ${continuityScore >= 70 ? 'bg-emerald-100 text-emerald-700' : continuityScore >= 50 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 600 }}>
           {ru ? 'Возврат:' : 'Continuity:'} {continuityScore}/100
         </span>
       </div>
@@ -179,11 +179,11 @@ export function CommunityGrowthFunnel() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="community_growth_funnel">
           {ru ? 'Воронка вовлечённости' : 'Engagement Funnel'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? 'Прогресс участников' : 'Member progression'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'Прогресс участников' : 'Member progression'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -265,11 +265,11 @@ export function DecisionStageTracker() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="decision_stage_tracker">
           {ru ? 'Этапы пути участников' : 'Member Journey Stages'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Где каждый находится в своей истории с Арменией?' : 'Where is everyone in their Armenia story?'}
         </span>
       </div>
@@ -355,11 +355,11 @@ export function NewVsReturningVoice() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="new_vs_returning_voice">
           {ru ? 'Новые vs. постоянные голоса' : 'New vs. Returning Voices'}
         </WidgetTitle>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${trend > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 500 }}>
+        <span className={`self-start text-xs px-2 py-0.5 rounded-full sm:self-auto ${trend > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`} style={{ fontWeight: 500 }}>
           {newPct}% {ru ? 'новых на этой неделе' : 'new this week'}
         </span>
       </div>
