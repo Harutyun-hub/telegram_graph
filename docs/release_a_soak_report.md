@@ -50,11 +50,14 @@
 | Time (+04) | Check | Result | Notes |
 | --- | --- | --- | --- |
 | 2026-03-28 16:16 | Initial smoke | PASS | `readyz`, dashboard, topics, and freshness all returned `200` |
-|  | Default dashboard | PENDING |  |
-|  | Topics list | PENDING |  |
-|  | Topics detail | PENDING |  |
-|  | Topics evidence | PENDING |  |
-|  | Historical range check 1 | PENDING |  |
+| 2026-03-29 00:03 | Default dashboard | WARN | `200`, but `29.70s`; response metadata showed `cacheSource=rebuild`, `cacheStatus=refresh_success` |
+| 2026-03-29 00:03 | Topics list | WARN | `200`, but `15.05s` |
+| 2026-03-29 00:03 | Historical range check 1 | WARN | `200`, but `37.57s`; metadata showed `cacheSource=rebuild`, `cacheStatus=refresh_success` |
+| 2026-03-29 00:40 | Default dashboard | PASS | `200` in `1.31s`; metadata showed `cacheSource=memory`, `cacheStatus=memory_fresh` |
+| 2026-03-29 00:40 | Topics list | PASS | `200` in `3.24s` |
+| 2026-03-29 00:40 | Topics detail | PENDING |  |
+| 2026-03-29 00:40 | Topics evidence | PENDING |  |
+| 2026-03-29 00:40 | Historical range check 1 | PASS | `200` in `7.30s`; metadata showed `cacheSource=fastpath`, `cacheStatus=historical_fastpath_while_revalidate` |
 |  | Historical range check 2 | PENDING |  |
 |  | Historical range check 3 | PENDING |  |
 
@@ -66,7 +69,7 @@ For each sampled uncached range, record:
 
 | Range | First Request | First Latency | Degraded Fast Path | Follow-up Cached Within 60s | Notes |
 | --- | --- | --- | --- | --- | --- |
-| TBD | PENDING | PENDING | PENDING | PENDING |  |
+| `2026-02-18` to `2026-03-04` | `200` | `7.30s` | `YES` | PENDING | `degradedTiers=["predictive","comparative","network"]`, `cacheSource=fastpath`, `persistedReadStatus=hit` |
 | TBD | PENDING | PENDING | PENDING | PENDING |  |
 | TBD | PENDING | PENDING | PENDING | PENDING |  |
 
@@ -80,7 +83,8 @@ Record every anomaly during the soak:
 
 | Time (+04) | Area | Symptom | Impact | Action |
 | --- | --- | --- | --- | --- |
-|  |  |  |  |  |
+| 2026-03-29 00:03 | Dashboard / topics / AI pipeline | Dashboard and historical dashboard were slow (`29.70s` and `37.57s`), topics took `15.05s`, and live logs showed OpenAI `429 insufficient_quota` failures | Service remained available, but performance and AI enrichment were degraded | Held Release A, investigated quota issue, and rechecked after OpenAI fix |
+| 2026-03-29 00:40 | AI pipeline recovery | Logs showed `AI analysis complete — saved=8`, `Post AI analysis complete — saved=16`, and the scheduler cycle completed with `ai_failed_items=0` | AI enrichment recovered; user-facing latency returned to expected Phase 1 range on sampled endpoints | Continue soak; no rollback |
 
 ## Decision Gate
 - `PASS` only if the full 72-hour window meets all Release A thresholds.
