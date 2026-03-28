@@ -248,12 +248,16 @@ def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
     return result
 
 
+def _exclude_thread_anchors(query):
+    return query.neq("entry_kind", "thread_anchor")
 def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
     return _paginate(
-        lambda from_idx, to_idx: _supabase().client.table("telegram_posts")
-        .select("id, posted_at", count="exact")
-        .gte("posted_at", ctx.start_at.isoformat())
-        .lt("posted_at", ctx.end_at.isoformat())
+        lambda from_idx, to_idx: _exclude_thread_anchors(
+            _supabase().client.table("telegram_posts")
+            .select("id, posted_at", count="exact")
+            .gte("posted_at", ctx.start_at.isoformat())
+            .lt("posted_at", ctx.end_at.isoformat())
+        )
         .order("posted_at", desc=False)
         .range(from_idx, to_idx)
     )

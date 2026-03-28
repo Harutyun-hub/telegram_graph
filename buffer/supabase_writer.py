@@ -620,23 +620,23 @@ class SupabaseWriter:
 
     def get_posts_with_comments_pending(self, limit: int = 50) -> list[dict]:
         """Fetch posts that have comments but haven't had comments scraped yet."""
-        res = self.client.table("telegram_posts") \
+        query = self.client.table("telegram_posts") \
             .select("id, channel_id, telegram_message_id") \
             .eq("has_comments", True) \
             .is_("comments_scraped_at", "null") \
-            .limit(limit) \
-            .execute()
+            .neq("entry_kind", "thread_anchor")
+        res = query.limit(limit).execute()
         return res.data or []
 
     def get_posts_with_comments_pending_for_channel(self, channel_uuid: str, limit: int = 50) -> list[dict]:
         """Fetch pending comment-scrape posts for a specific channel."""
-        res = self.client.table("telegram_posts") \
+        query = self.client.table("telegram_posts") \
             .select("id, channel_id, telegram_message_id") \
             .eq("channel_id", channel_uuid) \
             .eq("has_comments", True) \
             .is_("comments_scraped_at", "null") \
-            .limit(limit) \
-            .execute()
+            .neq("entry_kind", "thread_anchor")
+        res = query.limit(limit).execute()
         return res.data or []
 
     def mark_post_processed(self, post_uuid: str):
