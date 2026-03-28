@@ -1,4 +1,4 @@
-import { Download, FileImage, Table, FileText, ChevronDown } from 'lucide-react';
+import { Download, FileImage, Table, FileText } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 
 interface ExportButtonProps {
@@ -24,20 +24,21 @@ export function ExportButton({ graphData, onExportImage }: ExportButtonProps) {
   const exportCSV = () => {
     if (!graphData?.nodes || !graphData?.links) return;
 
-    const nodesHeader = 'ID,Name,Type,Connections\n';
+    const nodesHeader = 'ID,Name,Type,Mentions,Connections\n';
     const nodesRows = graphData.nodes.map((node: any) => {
       const connections = graphData.links.filter((l: any) => 
-        l.source.id === node.id || l.target.id === node.id
+        (typeof l.source === 'object' ? l.source.id : l.source) === node.id
+          || (typeof l.target === 'object' ? l.target.id : l.target) === node.id
       ).length;
-      return `"${node.id}","${node.name}","${node.type}",${connections}`;
+      return `"${node.id}","${node.name}","${node.type}",${node.mentionCount || 0},${connections}`;
     }).join('\n');
     const nodesCSV = nodesHeader + nodesRows;
 
-    const linksHeader = 'Source,Target,Weight\n';
+    const linksHeader = 'Source,Target,Type,Weight\n';
     const linksRows = graphData.links.map((link: any) => {
       const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
       const targetId = typeof link.target === 'object' ? link.target.id : link.target;
-      return `"${sourceId}","${targetId}",${link.weight || 1}`;
+      return `"${sourceId}","${targetId}","${link.type || 'related'}",${link.value || 1}`;
     }).join('\n');
     const linksCSV = linksHeader + linksRows;
 
@@ -115,7 +116,7 @@ export function ExportButton({ graphData, onExportImage }: ExportButtonProps) {
               onClick={exportJSON}
               className="w-full px-4 py-2.5 flex items-center gap-3 text-white/80 hover:bg-white/5 transition-colors text-sm"
             >
-              <FileText className="w-4 h-4 text-purple-400" />
+              <FileText className="w-4 h-4 text-slate-300" />
               JSON
             </button>
           </div>

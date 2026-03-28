@@ -2,9 +2,10 @@ import { ZoomIn, ZoomOut, Maximize2, RotateCcw } from 'lucide-react';
 
 interface FloatingControlsProps {
   graphRef: React.RefObject<any>;
+  rightOffset?: number;
 }
 
-export function FloatingControls({ graphRef }: FloatingControlsProps) {
+export function FloatingControls({ graphRef, rightOffset = 16 }: FloatingControlsProps) {
   const handleZoomIn = () => {
     if (graphRef.current) {
       graphRef.current.zoomIn();
@@ -30,7 +31,7 @@ export function FloatingControls({ graphRef }: FloatingControlsProps) {
   };
 
   return (
-    <div className="absolute bottom-4 right-4 flex flex-col gap-2 z-40">
+    <div className="absolute bottom-4 flex flex-col gap-2 z-40" style={{ right: `${rightOffset}px` }}>
       <div className="bg-slate-950/40 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl p-2">
         <button 
           onClick={handleZoomIn}

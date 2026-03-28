@@ -243,11 +243,18 @@ class AdminConfigPatchRequest(BaseModel):
 class GraphRequest(BaseModel):
     mode: Optional[str] = Field(default=None, max_length=64)
     timeframe: Optional[str] = Field(default="Last 7 Days", max_length=64)
+    from_date: Optional[str] = Field(default=None, max_length=10)
+    to_date: Optional[str] = Field(default=None, max_length=10)
     channels: Optional[List[str]] = None
     brandSource: Optional[List[str]] = None
     sentiment: Optional[List[str]] = None
     sentiments: Optional[List[str]] = None
     topics: Optional[List[str]] = None
+    category: Optional[str] = Field(default=None, max_length=120)
+    signalFocus: Optional[str] = Field(default=None, max_length=32)
+    sourceDetail: Optional[str] = Field(default=None, max_length=32)
+    rankingMode: Optional[str] = Field(default=None, max_length=32)
+    minMentions: Optional[int] = Field(default=None, ge=1, le=100)
     layers: Optional[List[str]] = None
     insightMode: Optional[str] = Field(default=None, max_length=64)
     sourceProfile: Optional[str] = Field(default=None, max_length=64)
@@ -1428,15 +1435,26 @@ async def node_details(
     nodeType: str = Query(...),
     timeframe: Optional[str] = Query(default="Last 7 Days"),
     channels: Optional[str] = Query(default=None),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    sentiments: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    signalFocus: Optional[str] = Query(default=None),
 ):
     """Detailed panel data for a graph node."""
     try:
         channel_filters = [c.strip() for c in (channels or "").split(",") if c.strip()]
+        sentiment_filters = [label.strip() for label in (sentiments or "").split(",") if label.strip()]
         details = graph_dashboard.get_node_details(
             nodeId,
             nodeType,
             timeframe=timeframe,
             channels=channel_filters,
+            from_date=from_date,
+            to_date=to_date,
+            sentiments=sentiment_filters,
+            category=category,
+            signalFocus=signalFocus,
         )
         if not details:
             raise HTTPException(status_code=404, detail="Node not found")
