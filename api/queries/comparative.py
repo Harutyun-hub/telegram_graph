@@ -81,6 +81,14 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def _safe_str(value: Any, fallback: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return fallback
+    return str(value)
+
+
 def _normalize_sentiment_label(value: Any) -> str | None:
     if value is None:
         return None
@@ -248,12 +256,19 @@ def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
     return result
 
 
+def _exclude_thread_anchors(query):
+    query.params = query.params.add("or", "(entry_kind.is.null,entry_kind.neq.thread_anchor)")
+    return query
+
+
 def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
     return _paginate(
-        lambda from_idx, to_idx: _supabase().client.table("telegram_posts")
-        .select("id, posted_at", count="exact")
-        .gte("posted_at", ctx.start_at.isoformat())
-        .lt("posted_at", ctx.end_at.isoformat())
+        lambda from_idx, to_idx: _exclude_thread_anchors(
+            _supabase().client.table("telegram_posts")
+            .select("id, posted_at", count="exact")
+            .gte("posted_at", ctx.start_at.isoformat())
+            .lt("posted_at", ctx.end_at.isoformat())
+        )
         .order("posted_at", desc=False)
         .range(from_idx, to_idx)
     )
@@ -791,6 +806,7 @@ def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)-[:IN_CHANNEL]->(ch:Channel)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         OPTIONAL MATCH (p)-[:TAGGED]->(t:Topic)
         WITH p, ch, collect(t.name)[..3] AS topics
         RETURN p.uuid AS uuid,
@@ -810,6 +826,7 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         WITH coalesce(p.media_type, 'text') AS mediaType,
              count(p) AS count,
              avg(p.views) AS avgViews,
@@ -828,9 +845,21 @@ def get_vitality_indicators() -> dict:
         MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
         RETURN count(u) AS n
     """) or {}).get("n", 0)
-    total_topics = (run_single("MATCH (t:Topic) RETURN count(t) AS n") or {}).get("n", 0)
-    total_posts = (run_single("MATCH (p:Post) RETURN count(p) AS n") or {}).get("n", 0)
-    total_comments = (run_single("MATCH (c:Comment) RETURN count(c) AS n") or {}).get("n", 0)
+    total_topics = (run_single("""
+        MATCH (p:Post)-[:TAGGED]->(t:Topic)
+        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+        RETURN count(DISTINCT t) AS n
+    """) or {}).get("n", 0)
+    total_posts = (run_single("""
+        MATCH (p:Post)
+        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+        RETURN count(p) AS n
+    """) or {}).get("n", 0)
+    total_comments = (run_single("""
+        MATCH (c:Comment)-[:REPLIES_TO]->(p:Post)
+        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+        RETURN count(c) AS n
+    """) or {}).get("n", 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {
@@ -1021,6 +1050,264 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
     start_idx = max(0, int(page)) * max(1, int(size))
     end_idx = start_idx + max(1, int(size))
     return filtered[start_idx:end_idx]
+
+
+def _topic_overview_quality_tier(
+    *,
+    mentions: int,
+    evidence_count: int,
+    distinct_users: int,
+    distinct_channels: int,
+) -> str:
+    if mentions >= 8 and evidence_count >= 8 and distinct_users >= 3 and distinct_channels >= 2:
+        return "high"
+    if mentions >= 4 and evidence_count >= 4 and distinct_channels >= 2:
+        return "medium"
+    return "low"
+
+
+def _map_topic_overview_evidence(rows: Any, *, limit: int) -> list[dict]:
+    output: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        evidence_id = str(row.get("id") or "").strip()
+        if not text or not evidence_id:
+            continue
+        output.append(
+            {
+                "id": evidence_id,
+                "type": str(row.get("type") or "message").strip() or "message",
+                "author": str(row.get("author") or "unknown").strip() or "unknown",
+                "channel": str(row.get("channel") or "unknown").strip() or "unknown",
+                "text": text[:1200],
+                "timestamp": str(row.get("timestamp") or "").strip(),
+                "reactions": _safe_int(row.get("reactions")),
+                "replies": _safe_int(row.get("replies")),
+            }
+        )
+        if len(output) >= max(1, int(limit)):
+            break
+    return output
+
+
+def get_topic_overview_candidates(
+    ctx: DashboardDateContext | None = None,
+    *,
+    limit: int = 24,
+    evidence_limit: int = 5,
+    question_limit: int = 3,
+) -> list[dict]:
+    """Compact per-topic inputs for background topic-overview materialization."""
+    resolved_ctx = ctx or _default_detail_context()
+    safe_limit = max(1, min(int(limit), 48))
+    safe_evidence_limit = max(1, min(int(evidence_limit), 8))
+    safe_question_limit = max(0, min(int(question_limit), 5))
+
+    rows = run_query("""
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+        WHERE coalesce(t.proposed, false) = false
+          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+        CALL (t) {
+            CALL {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                WHERE p.posted_at >= datetime($start)
+                  AND p.posted_at < datetime($end)
+                OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+                OPTIONAL MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WITH p, ch, max(toLower(coalesce(s.label, ''))) AS sentimentLabel
+                RETURN {
+                    id: coalesce(p.uuid, 'post:' + elementId(p)),
+                    type: 'message',
+                    contentType: 'post',
+                    author: coalesce(ch.username, ch.title, 'unknown'),
+                    channel: coalesce(ch.title, ch.username, 'unknown'),
+                    text: left(coalesce(p.text, ''), 1200),
+                    timestamp: toString(p.posted_at),
+                    occurredAt: p.posted_at,
+                    actorKey: coalesce(ch.username, ch.title, 'unknown'),
+                    reactions: coalesce(p.views, 0),
+                    replies: coalesce(p.comment_count, 0),
+                    sentimentLabel: coalesce(sentimentLabel, ''),
+                    isQuestion: p.text IS NOT NULL AND trim(p.text) <> '' AND p.text CONTAINS '?'
+                } AS event
+                UNION ALL
+                WITH t
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                WHERE c.posted_at >= datetime($start)
+                  AND c.posted_at < datetime($end)
+                OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+                OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+                OPTIONAL MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+                WITH c, u, ch, max(toLower(coalesce(s.label, ''))) AS sentimentLabel
+                RETURN {
+                    id: coalesce(c.uuid, 'comment:' + elementId(c)),
+                    type: 'reply',
+                    contentType: 'comment',
+                    author: coalesce(toString(u.telegram_user_id), 'anonymous'),
+                    channel: coalesce(ch.title, ch.username, 'unknown'),
+                    text: left(coalesce(c.text, ''), 1200),
+                    timestamp: toString(c.posted_at),
+                    occurredAt: c.posted_at,
+                    actorKey: coalesce(toString(u.telegram_user_id), coalesce(ch.username, ch.title, 'anonymous')),
+                    reactions: 0,
+                    replies: 0,
+                    sentimentLabel: coalesce(sentimentLabel, ''),
+                    isQuestion: c.text IS NOT NULL AND trim(c.text) <> '' AND c.text CONTAINS '?'
+                } AS event
+            }
+            WITH event
+            WHERE event.text IS NOT NULL AND trim(event.text) <> ''
+            ORDER BY event.occurredAt DESC, event.id DESC
+            RETURN collect(event) AS currentRows
+        }
+        CALL (t) {
+            CALL {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                WHERE p.posted_at >= datetime($previous_start)
+                  AND p.posted_at < datetime($previous_end)
+                RETURN 1 AS hit
+                UNION ALL
+                WITH t
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                WHERE c.posted_at >= datetime($previous_start)
+                  AND c.posted_at < datetime($previous_end)
+                RETURN 1 AS hit
+            }
+            RETURN count(hit) AS prevMentions
+        }
+        WITH t, cat, currentRows, prevMentions
+        WHERE size(currentRows) > 0
+        CALL {
+            WITH currentRows
+            UNWIND currentRows AS row
+            WITH row.channel AS channel, count(*) AS mentions
+            WHERE channel <> '' AND channel <> 'unknown'
+            ORDER BY mentions DESC, channel ASC
+            RETURN collect(channel)[..3] AS topChannels
+        }
+        WITH t, cat, currentRows, prevMentions, topChannels,
+             size([row IN currentRows WHERE row.contentType = 'post' | 1]) AS postCount,
+             size([row IN currentRows WHERE row.contentType = 'comment' | 1]) AS commentCount,
+             size([row IN currentRows WHERE row.sentimentLabel = 'positive' | 1]) AS positiveScore,
+             size([row IN currentRows WHERE row.sentimentLabel = 'neutral' | 1]) AS neutralScore,
+             size([row IN currentRows WHERE row.sentimentLabel IN ['negative', 'urgent', 'sarcastic'] | 1]) AS negativeScore,
+             size(reduce(acc = [], row IN currentRows | CASE WHEN row.actorKey <> '' AND NOT (row.actorKey IN acc) THEN acc + row.actorKey ELSE acc END)) AS distinctUsers,
+             size(reduce(acc = [], row IN currentRows | CASE WHEN row.channel <> '' AND row.channel <> 'unknown' AND NOT (row.channel IN acc) THEN acc + row.channel ELSE acc END)) AS distinctChannels,
+             [row IN currentRows[..$evidence_limit] | {
+                 id: row.id,
+                 type: row.type,
+                 author: row.author,
+                 channel: row.channel,
+                 text: row.text,
+                 timestamp: row.timestamp,
+                 reactions: row.reactions,
+                 replies: row.replies
+             }] AS evidence,
+             [row IN currentRows WHERE row.isQuestion | {
+                 id: row.id,
+                 type: row.type,
+                 author: row.author,
+                 channel: row.channel,
+                 text: row.text,
+                 timestamp: row.timestamp,
+                 reactions: row.reactions,
+                 replies: row.replies
+             }][..$question_limit] AS questionEvidence,
+             head([row IN currentRows | {
+                 id: row.id,
+                 type: row.type,
+                 author: row.author,
+                 channel: row.channel,
+                 text: row.text,
+                 timestamp: row.timestamp,
+                 reactions: row.reactions,
+                 replies: row.replies
+             }]) AS sampleEvidence,
+             head(currentRows).timestamp AS latestAt,
+             size(currentRows) AS mentionCount
+        WITH t, cat, postCount, commentCount, mentionCount, prevMentions, latestAt, topChannels,
+             sampleEvidence, evidence, questionEvidence, distinctUsers, distinctChannels,
+             positiveScore, neutralScore, negativeScore,
+             positiveScore + neutralScore + negativeScore AS sentimentTotal
+        RETURN t.name AS name,
+               cat.name AS category,
+               postCount,
+               commentCount,
+               mentionCount,
+               prevMentions AS prev7Mentions,
+               latestAt,
+               topChannels,
+               sampleEvidence,
+               evidence,
+               questionEvidence,
+               mentionCount AS evidenceCount,
+               distinctUsers,
+               distinctChannels,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * positiveScore / sentimentTotal)) ELSE 0 END AS sentimentPositive,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * neutralScore / sentimentTotal)) ELSE 0 END AS sentimentNeutral,
+               CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * negativeScore / sentimentTotal)) ELSE 0 END AS sentimentNegative,
+               CASE
+                   WHEN prevMentions > 0 THEN round(100.0 * (mentionCount - prevMentions) / prevMentions, 1)
+                   WHEN mentionCount > 0 THEN 100.0
+                   ELSE 0.0
+               END AS growth7dPct
+        ORDER BY mentionCount DESC, distinctUsers DESC, distinctChannels DESC, name ASC
+        LIMIT $limit
+    """, {
+        **_range_params(resolved_ctx),
+        "noise": sorted(_NOISY_TOPIC_KEYS),
+        "limit": safe_limit,
+        "evidence_limit": safe_evidence_limit,
+        "question_limit": safe_question_limit,
+    })
+
+    candidates: list[dict] = []
+    for row in rows:
+        decorated = _decorate_topics_page_row(row)
+        if not _is_topics_page_row_allowed(decorated):
+            continue
+        evidence = _map_topic_overview_evidence(row.get("evidence"), limit=safe_evidence_limit)
+        if not evidence:
+            continue
+        question_rows = row.get("questionEvidence") if safe_question_limit > 0 else []
+        question_evidence = _map_topic_overview_evidence(question_rows, limit=max(1, safe_question_limit or 1))
+        mentions = _safe_int(decorated.get("mentionCount"), _safe_int(decorated.get("currentMentions")))
+        previous_mentions = _safe_int(decorated.get("prev7Mentions"), _safe_int(decorated.get("previousMentions")))
+        distinct_users = _safe_int(decorated.get("distinctUsers"))
+        distinct_channels = _safe_int(decorated.get("distinctChannels"))
+        evidence_count = _safe_int(decorated.get("evidenceCount"), len(evidence))
+        candidates.append(
+            {
+                "topic": _safe_str(decorated.get("name"), ""),
+                "sourceTopic": _safe_str(decorated.get("sourceTopic"), _safe_str(decorated.get("name"), "")),
+                "category": _safe_str(decorated.get("category"), "General"),
+                "topicGroup": _safe_str(decorated.get("topicGroup"), ""),
+                "mentions": mentions,
+                "previousMentions": previous_mentions,
+                "growth": _safe_int(round(float(row.get("growth7dPct") or 0.0))),
+                "distinctUsers": distinct_users,
+                "distinctChannels": distinct_channels,
+                "evidenceCount": evidence_count,
+                "latestAt": _safe_str(row.get("latestAt"), ""),
+                "topChannels": [_safe_str(ch) for ch in (row.get("topChannels") or []) if _safe_str(ch)],
+                "sentimentPositive": _safe_int(row.get("sentimentPositive")),
+                "sentimentNeutral": _safe_int(row.get("sentimentNeutral")),
+                "sentimentNegative": _safe_int(row.get("sentimentNegative")),
+                "qualityTier": _topic_overview_quality_tier(
+                    mentions=mentions,
+                    evidence_count=evidence_count,
+                    distinct_users=distinct_users,
+                    distinct_channels=distinct_channels,
+                ),
+                "evidence": evidence,
+                "questionEvidence": question_evidence,
+            }
+        )
+    return candidates
 
 
 def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: DashboardDateContext | None = None) -> dict | None:

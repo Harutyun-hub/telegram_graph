@@ -78,7 +78,7 @@ class ScraperSchedulerService:
 
         if self._client:
             try:
-                self._client.disconnect()
+                await self._client.disconnect()
             except Exception:
                 pass
             self._client = None

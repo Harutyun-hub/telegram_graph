@@ -104,7 +104,7 @@ from api.runtime_executors import (
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
-from scraper.channel_metadata import get_full_channel_metadata
+from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
 from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -1748,19 +1748,29 @@ def _normalize_channel_username(raw: str) -> str:
         return ""
 
     value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^www\.", "", value, flags=re.IGNORECASE)
     lowered = value.lower()
     if lowered.startswith("t.me/"):
         value = value[5:]
     elif lowered.startswith("telegram.me/"):
         value = value[12:]
 
-    value = value.split("?", 1)[0].split("#", 1)[0]
+    value = value.split("?", 1)[0].split("#", 1)[0].strip()
     if value.startswith("@"):
         value = value[1:]
-    if "/" in value:
-        value = value.split("/", 1)[0]
 
-    return value.strip().lower().lstrip("@")
+    segments = [segment.strip() for segment in value.split("/") if segment.strip()]
+    if not segments:
+        return ""
+
+    candidate = segments[0]
+    if candidate.lower() == "c":
+        candidate = segments[1] if len(segments) > 1 else ""
+
+    candidate = candidate.strip().lower().lstrip("@")
+    if not USERNAME_RE.match(candidate):
+        return ""
+    return candidate
 
 
 def _canonical_channel_username(handle: str) -> str:
@@ -1772,24 +1782,26 @@ async def _try_enrich_channel_metadata(
     channel_uuid: str,
     canonical_username: str,
     fallback_title: Optional[str] = None,
-) -> None:
+) -> dict | None:
     """
-    Best-effort Telegram metadata enrichment for a channel source.
+    Best-effort Telegram source resolution for a source row.
 
-    This fills telegram_channel_id (and title where available) right after source
-    creation/activation so users don't have to wait for the scraper cycle.
+    This keeps source creation fast while allowing immediate type resolution when
+    the current process has an authorized Telegram session.
     """
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         import os
     except Exception as e:
-        logger.warning(f"Telethon unavailable for metadata enrichment: {e}")
-        return
+        logger.warning(f"Telethon unavailable for source resolution: {e}")
+        return None
 
     username = _canonical_channel_username(canonical_username)
     if not username:
-        return
+        return None
+
+    writer = get_supabase_writer()
 
     # Check for session string from environment (Railway deployment)
     session_string = os.getenv("TELEGRAM_SESSION_STRING")
@@ -1811,18 +1823,47 @@ async def _try_enrich_channel_metadata(
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            logger.warning(f"Metadata enrichment skipped for {username}: Telegram session is not authorized")
-            return
+            logger.info(f"Source resolution deferred for {username}: Telegram session is not authorized")
+            return None
 
-        metadata = await get_full_channel_metadata(client, username=username)
+        entity = await client.get_entity(username)
+        metadata, _entity = await resolve_source_metadata(client, username=username, entity=entity)
         if not metadata.get("channel_title") and fallback_title:
             metadata["channel_title"] = fallback_title
 
-        get_supabase_writer().update_channel_metadata(channel_uuid, metadata)
+        writer.update_channel(channel_uuid, metadata)
+        return writer.get_channel_by_id(channel_uuid)
     except Exception as e:
-        logger.warning(f"Metadata enrichment failed for {username}: {e}")
+        logger.warning(f"Source resolution failed for {username}: {e}")
+        try:
+            entity = await client.get_entity(username)
+            metadata = minimal_source_metadata_from_entity(
+                entity,
+                username=username,
+                fallback_title=fallback_title,
+            )
+            writer.update_channel(channel_uuid, metadata)
+        except Exception:
+            writer.update_channel(
+                channel_uuid,
+                {
+                    "source_type": "pending",
+                    "resolution_status": "error",
+                    "last_resolution_error": str(e)[:500],
+                },
+            )
+        return writer.get_channel_by_id(channel_uuid)
     finally:
-        client.disconnect()
+        await client.disconnect()
+
+
+def _pending_source_payload(*, channel_title: str) -> dict:
+    return {
+        "source_type": "pending",
+        "resolution_status": "pending",
+        "last_resolution_error": None,
+        "channel_title": channel_title,
+    }
 
 
 def _validate_channel_username(username: str) -> None:
@@ -2554,6 +2595,8 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
                 update_payload["channel_title"] = provided_title
             elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
                 update_payload["channel_title"] = normalized_handle
+            if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
+                update_payload.update(_pending_source_payload(channel_title=update_payload.get("channel_title") or channel_title))
             action = "exists"
             if not existing.get("is_active", False):
                 update_payload["is_active"] = True
@@ -2561,29 +2604,29 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
 
             updated = writer.update_channel(existing["id"], update_payload)
             if updated:
-                await _try_enrich_channel_metadata(
+                inline_resolved = await _try_enrich_channel_metadata(
                     updated["id"],
                     updated.get("channel_username") or canonical_username,
                     updated.get("channel_title"),
                 )
-                updated = writer.get_channel_by_id(updated["id"]) or updated
+                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
             return {"action": action, "item": updated}
 
         created = writer.create_channel(
             {
                 "channel_username": canonical_username,
-                "channel_title": channel_title,
                 "is_active": True,
                 "scrape_depth_days": payload.scrape_depth_days,
                 "scrape_comments": payload.scrape_comments,
+                **_pending_source_payload(channel_title=channel_title),
             }
         )
-        await _try_enrich_channel_metadata(
+        inline_resolved = await _try_enrich_channel_metadata(
             created["id"],
             created.get("channel_username") or canonical_username,
             created.get("channel_title"),
         )
-        created = writer.get_channel_by_id(created["id"]) or created
+        created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
         return {"action": "created", "item": created}
     except HTTPException:
         raise
@@ -2614,12 +2657,20 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 
         updated = writer.update_channel(channel_id, update_payload)
         if updated and updated.get("is_active"):
-            await _try_enrich_channel_metadata(
+            if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                writer.update_channel(
+                    channel_id,
+                    _pending_source_payload(
+                        channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip() or ""
+                    ),
+                )
+                updated = writer.get_channel_by_id(channel_id) or updated
+            inline_resolved = await _try_enrich_channel_metadata(
                 updated["id"],
                 updated.get("channel_username") or "",
                 updated.get("channel_title"),
             )
-            updated = writer.get_channel_by_id(updated["id"]) or updated
+            updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
         return {"item": updated}
     except HTTPException:
         raise

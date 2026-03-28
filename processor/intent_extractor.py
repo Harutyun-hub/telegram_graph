@@ -734,13 +734,24 @@ def extract_intents(
         if post_id:
             post_context = post_map.get(str(post_id), {})
             post_excerpt = _trim_text(post_context.get("text", ""), max(180, message_char_limit))
-            post_context_section = (
-                f"\nPOST CONTEXT:\n"
-                f"  Post ID            : {post_id}\n"
-                f"  Telegram Message ID: {post_context.get('telegram_message_id')}\n"
-                f"  Posted At          : {post_context.get('posted_at')}\n"
-                f"  Parent Post Excerpt: {post_excerpt}\n"
-            )
+            if str(post_context.get("entry_kind") or "").strip().lower() == "thread_anchor":
+                post_context_section = (
+                    f"\nTHREAD CONTEXT:\n"
+                    f"  Thread Anchor ID   : {post_id}\n"
+                    f"  Telegram Top ID    : {post_context.get('telegram_message_id')}\n"
+                    f"  Root Posted At     : {post_context.get('posted_at')}\n"
+                    f"  Thread Messages    : {post_context.get('thread_message_count')}\n"
+                    f"  Thread Participants: {post_context.get('thread_participant_count')}\n"
+                    f"  Root Excerpt       : {post_excerpt}\n"
+                )
+            else:
+                post_context_section = (
+                    f"\nPOST CONTEXT:\n"
+                    f"  Post ID            : {post_id}\n"
+                    f"  Telegram Message ID: {post_context.get('telegram_message_id')}\n"
+                    f"  Posted At          : {post_context.get('posted_at')}\n"
+                    f"  Parent Post Excerpt: {post_excerpt}\n"
+                )
 
         # Fetch user profile to enrich AI context
         profile_section = ""
@@ -763,8 +774,13 @@ def extract_intents(
                 pass
 
         scope_key = _comment_scope_key(telegram_user_id, channel_id, post_id)
+        source_label = (
+            "Telegram public supergroup"
+            if str(post_map.get(str(post_id), {}).get("entry_kind") or "").strip().lower() == "thread_anchor"
+            else "Telegram public channel"
+        )
         user_context = (
-            f"Channel: Telegram public channel\n"
+            f"Channel: {source_label}\n"
             f"Post ID: {post_id or 'unknown'}\n"
             f"Messages analyzed: {min(len(user_comments), config.AI_BATCH_SIZE)}\n"
             f"User ID: {telegram_user_id}\n"
@@ -1032,6 +1048,43 @@ Schema:
 """
 
 
+THREAD_POST_SYSTEM_PROMPT_COMPACT = """You analyze one Telegram public supergroup thread.
+Treat it as a user conversation thread, not as an official channel post.
+Return STRICT JSON only (no markdown).
+
+Schema:
+{
+  "primary_intent": "<thread-level dominant intent>",
+  "intent_confidence": <0.0-1.0>,
+  "evidence_quotes": ["<original language>"],
+  "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
+  "sentiment_score": <-1.0 to 1.0>,
+  "emotional_tone": "<dominant thread mood>",
+  "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
+  "topics": [
+    {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>"}
+  ],
+  "entities": [
+    {"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}
+  ],
+  "social_signals": {
+    "geopolitical_alignment": "Pro_Russia|Pro_West|Pro_Armenia|Pro_Azerbaijan|Nationalist|Anti_Government|Neutral|Ambiguous|unknown",
+    "collective_memory": "<or null>",
+    "in_out_group": "<or null>",
+    "migration_intent": "Yes|No|Implied",
+    "diaspora_signals": "Yes|No",
+    "authority_attitude": "Deferential|Critical|Dismissive|Fearful|Admiring|Humorous|unknown"
+  },
+  "demographics": {
+    "language": "<ISO 639-1>",
+    "inferred_gender": "male|female|unknown",
+    "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown",
+    "confidence": "high|medium|low"
+  }
+}
+"""
+
+
 POST_BATCH_SYSTEM_PROMPT_COMPACT = """You analyze MULTIPLE Telegram channel posts.
 Each post MUST be analyzed independently.
 Never merge or transfer evidence between posts.
@@ -1083,6 +1136,7 @@ ADMIN_PROMPT_DEFAULTS = {
     "extraction.strict_taxonomy_prompt": STRICT_TAXONOMY_PROMPT,
     "extraction.post_system_prompt": POST_SYSTEM_PROMPT,
     "extraction.post_system_prompt_compact": POST_SYSTEM_PROMPT_COMPACT,
+    "extraction.thread_post_system_prompt_compact": THREAD_POST_SYSTEM_PROMPT_COMPACT,
     "extraction.post_batch_system_prompt_compact": POST_BATCH_SYSTEM_PROMPT_COMPACT,
 }
 
@@ -1105,6 +1159,48 @@ def _runtime_ai_post_prompt_style() -> str:
     value = get_admin_runtime_value("aiPostPromptStyle", config.AI_POST_PROMPT_STYLE)
     style = str(value).strip().lower() if value is not None else ""
     return style if style in {"compact", "full"} else str(config.AI_POST_PROMPT_STYLE or "compact").strip().lower()
+
+
+def _post_entry_kind(post: dict) -> str:
+    value = str(post.get("entry_kind") or "broadcast_post").strip().lower()
+    return value or "broadcast_post"
+
+
+def _is_thread_anchor(post: dict) -> bool:
+    return _post_entry_kind(post) == "thread_anchor"
+
+
+def _should_skip_post_analysis(post: dict) -> bool:
+    text = str(post.get("text") or "").strip()
+    if _is_thread_anchor(post):
+        thread_message_count = int(post.get("thread_message_count") or 0)
+        return len(text) < 20 and thread_message_count <= 1
+    return (not text) or len(text) < 20
+
+
+def _thread_post_user_context(post: dict, supabase_writer) -> str:
+    context_limit = max(4, int(getattr(config, "AI_THREAD_SUMMARY_CONTEXT_MESSAGES", 12)))
+    message_char_limit = max(120, int(config.AI_MESSAGE_CHAR_LIMIT))
+    comments = supabase_writer.get_comments_for_post(post["id"], limit=context_limit)
+    sections: list[str] = []
+    for index, comment in enumerate(comments, start=1):
+        label = "ROOT" if comment.get("is_thread_root") else f"MSG {index}"
+        user_id = comment.get("telegram_user_id") or "anonymous"
+        sections.append(
+            f"[{label} | USER {user_id} | {str(comment.get('posted_at') or '')[:16]}]\n"
+            f"{_trim_text(comment.get('text', ''), message_char_limit)}"
+        )
+
+    thread_messages = "\n\n".join(sections) if sections else _trim_text(post.get("text", ""), message_char_limit)
+    return (
+        "Analyze this Telegram public supergroup thread as a conversation summary.\n\n"
+        f"Thread Anchor ID: {post.get('id')}\n"
+        f"Telegram Top Message ID: {post.get('telegram_message_id')}\n"
+        f"Thread Message Count: {int(post.get('thread_message_count') or 0)}\n"
+        f"Thread Participant Count: {int(post.get('thread_participant_count') or 0)}\n"
+        f"Last Activity At: {post.get('last_activity_at') or post.get('posted_at')}\n\n"
+        f"THREAD CONTEXT:\n{thread_messages}"
+    )
 
 
 def _build_post_analysis_row(post: dict, parsed: dict) -> dict:
@@ -1136,18 +1232,21 @@ def _persist_post_analysis(post: dict, parsed: dict, supabase_writer) -> None:
     )
 
 
-def _analyze_single_post_payload(post: dict) -> dict:
+def _analyze_single_post_payload(post: dict, supabase_writer) -> dict:
+    is_thread_anchor = _is_thread_anchor(post)
     prompt_style = _runtime_ai_post_prompt_style()
     compact_prompt = _runtime_prompt("extraction.post_system_prompt_compact", POST_SYSTEM_PROMPT_COMPACT)
     full_prompt = _runtime_prompt("extraction.post_system_prompt", POST_SYSTEM_PROMPT)
+    thread_prompt = _runtime_prompt("extraction.thread_post_system_prompt_compact", THREAD_POST_SYSTEM_PROMPT_COMPACT)
     strict_taxonomy_prompt = _runtime_prompt("extraction.strict_taxonomy_prompt", STRICT_TAXONOMY_PROMPT)
-    base_prompt = compact_prompt if prompt_style == "compact" else full_prompt
+    base_prompt = thread_prompt if is_thread_anchor else (compact_prompt if prompt_style == "compact" else full_prompt)
     prompt_candidates = [base_prompt]
-    if base_prompt != compact_prompt:
+    if (not is_thread_anchor) and base_prompt != compact_prompt:
         prompt_candidates.append(compact_prompt)
 
     text = post.get("text", "")
     post_text = _trim_text(text, max(200, int(config.AI_MESSAGE_CHAR_LIMIT) * 3))
+    user_context = _thread_post_user_context(post, supabase_writer) if is_thread_anchor else f"Analyze this channel post:\n\n{post_text}"
     parsed = None
     last_error = None
 
@@ -1160,7 +1259,7 @@ def _analyze_single_post_payload(post: dict) -> dict:
             parsed = _normalize_payload(
                 _request_json(
                     system_prompt=system_prompt,
-                    user_context=f"Analyze this channel post:\n\n{post_text}",
+                    user_context=user_context,
                     max_tokens=max(250, int(config.AI_POST_MAX_TOKENS)),
                     request_label=f"post {post.get('id')} prompt#{index}",
                 )
@@ -1252,13 +1351,12 @@ def _analyze_post_batch_payload(posts: list[dict]) -> dict[str, dict]:
 
 
 def _process_single_post(post: dict, supabase_writer) -> bool:
-    text = post.get("text", "")
-    if not text or len(text.strip()) < 20:
+    if _should_skip_post_analysis(post):
         supabase_writer.mark_post_processed(post["id"])
         return False
 
     try:
-        parsed = _analyze_single_post_payload(post)
+        parsed = _analyze_single_post_payload(post, supabase_writer)
         _persist_post_analysis(post, parsed, supabase_writer)
         _clear_failure_scope(supabase_writer, scope_type="post", scope_key=str(post["id"]))
         return True
@@ -1304,8 +1402,7 @@ def extract_post_intents(
 
     processable_posts: list[dict] = []
     for post in posts:
-        text = post.get("text", "")
-        if not text or len(text.strip()) < 20:
+        if _should_skip_post_analysis(post):
             supabase_writer.mark_post_processed(post["id"])
             continue
         processable_posts.append(post)
@@ -1387,6 +1484,10 @@ def extract_post_intents(
                     stats["failed_posts"] = int(stats["failed_posts"]) + 1
                 continue
 
+            if any(_is_thread_anchor(post) for post in chunk):
+                _fallback_chunk_to_single(chunk)
+                continue
+
             try:
                 parsed_by_post_id = _analyze_post_batch_payload(chunk)
                 _handle_chunk_success(chunk, parsed_by_post_id)
@@ -1401,9 +1502,14 @@ def extract_post_intents(
         deadline_reached = False
 
         def _analyze_chunk(chunk: list[dict]) -> dict[str, dict]:
+            if any(_is_thread_anchor(post) for post in chunk):
+                return {
+                    str(post.get("id")): _analyze_single_post_payload(post, supabase_writer)
+                    for post in chunk
+                }
             if len(chunk) == 1:
                 post = chunk[0]
-                return {str(post.get("id")): _analyze_single_post_payload(post)}
+                return {str(post.get("id")): _analyze_single_post_payload(post, supabase_writer)}
             return _analyze_post_batch_payload(chunk)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:

@@ -227,7 +227,8 @@ SET   ch.username           = $channel_username,
       ch.title              = $channel_title,
       ch.member_count       = $member_count,
       ch.description        = $channel_description,
-      ch.telegram_channel_id = $telegram_channel_id
+      ch.telegram_channel_id = $telegram_channel_id,
+      ch.source_type         = $channel_source_type
 
 // ── Post Node ──
 MERGE (p:Post {uuid: $post_uuid})
@@ -239,7 +240,14 @@ SET   p.telegram_message_id = $telegram_message_id,
       p.forwards             = $forwards,
       p.reactions            = $reactions,
       p.comment_count        = $comment_count,
-      p.media_type           = $media_type
+      p.media_type           = $media_type,
+      p.entry_kind           = $entry_kind,
+      p.thread_message_count = $thread_message_count,
+      p.thread_participant_count = $thread_participant_count,
+      p.last_activity_at     = CASE
+                                 WHEN $last_activity_at IS NULL OR $last_activity_at = '' THEN NULL
+                                 ELSE datetime($last_activity_at)
+                               END
 
 // ── Post → Channel (anchor relationship) ──
 MERGE (p)-[:IN_CHANNEL]->(ch)
@@ -684,6 +692,7 @@ def _channel_post_params(channel: dict, post: dict) -> dict:
         "channel_title":          channel.get("channel_title"),
         "channel_description":    channel.get("description"),
         "telegram_channel_id":    channel.get("telegram_channel_id"),
+        "channel_source_type":    channel.get("source_type") or "channel",
         "member_count":           channel.get("member_count"),
         "post_uuid":              post["id"],
         "telegram_message_id":    post.get("telegram_message_id"),
@@ -694,6 +703,10 @@ def _channel_post_params(channel: dict, post: dict) -> dict:
         "reactions":              reactions,
         "comment_count":          post.get("comment_count", 0),
         "media_type":             post.get("media_type"),
+        "entry_kind":             post.get("entry_kind") or "broadcast_post",
+        "thread_message_count":   post.get("thread_message_count"),
+        "thread_participant_count": post.get("thread_participant_count"),
+        "last_activity_at":       str(post.get("last_activity_at") or ""),
     }
 
 
