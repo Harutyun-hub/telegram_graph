@@ -64,6 +64,7 @@ from api.aggregator import (
     MAX_STALE_SECONDS as DASHBOARD_MAX_STALE_SECONDS,
     CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
     DetailRefreshUnavailableError,
+    build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
@@ -139,6 +140,14 @@ _FRESHNESS_PERSISTED_PATH = "freshness-cache/v1/latest.json.gz"
 _SUPABASE_CACHE_READ_TIMEOUT_SECONDS = max(1.0, float(os.getenv("SUPABASE_CACHE_READ_TIMEOUT_SECONDS", "5")))
 _SUPABASE_CACHE_WRITE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("SUPABASE_CACHE_WRITE_TIMEOUT_SECONDS", "5")))
 _DEFAULT_DASHBOARD_LOOKBACK_DAYS = 14
+_HISTORICAL_FASTPATH_ENABLED = str(
+    os.getenv("DASH_HISTORICAL_FASTPATH_ENABLED", "true")
+).strip().lower() in {"1", "true", "yes", "on"}
+_HISTORICAL_FASTPATH_SKIP_TIERS = {
+    item.strip().lower()
+    for item in os.getenv("DASH_HISTORICAL_FASTPATH_SKIP_TIERS", "network,comparative,predictive").split(",")
+    if item.strip()
+}
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
 _dashboard_refresh_control_lock = threading.Lock()
@@ -670,6 +679,10 @@ def _build_dashboard_api_payload(
         "data": trimmed_dashboard_data,
         "meta": response_meta,
     }
+
+
+def _should_use_historical_fastpath(*, default_request: bool) -> bool:
+    return bool(_HISTORICAL_FASTPATH_ENABLED and not default_request and _HISTORICAL_FASTPATH_SKIP_TIERS)
 
 
 def _newer_snapshot_choice(
@@ -1541,6 +1554,56 @@ def _build_dashboard_response_payload(
                 else f"{cache_source}_stale_refresh_inflight"
             ),
         )
+
+    if _should_use_historical_fastpath(default_request=default_request):
+        try:
+            dashboard_data, dashboard_runtime_meta = build_dashboard_snapshot_once(
+                ctx,
+                skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
+                cache_status="historical_fastpath_uncached",
+            )
+            critical_degraded = {
+                str(name).strip()
+                for name in (dashboard_runtime_meta.get("degradedTiers") or [])
+                if str(name).strip()
+            }.intersection(DASHBOARD_CRITICAL_TIERS)
+            if not critical_degraded:
+                refresh_started = _ensure_background_dashboard_refresh(
+                    ctx,
+                    trusted_end_date=trusted_end_iso,
+                    write_default_alias=default_request,
+                )
+                logger.info(
+                    "Historical dashboard fastpath served | key={} skipped_tiers={} refresh_started={}",
+                    ctx.cache_key,
+                    sorted(_HISTORICAL_FASTPATH_SKIP_TIERS),
+                    refresh_started,
+                )
+                return _build_dashboard_api_payload(
+                    ctx=ctx,
+                    trusted_end_date=trusted_end_iso,
+                    dashboard_data=dashboard_data,
+                    dashboard_runtime_meta=dashboard_runtime_meta,
+                    requested_from=requested_from,
+                    requested_to=requested_to,
+                    cache_source="fastpath",
+                    freshness_snapshot=freshness_snapshot,
+                    freshness_source=freshness_source,
+                    persisted_read_status=persisted_read_status,
+                    persisted_read_ms=persisted_read_ms,
+                    cache_status_override=(
+                        "historical_fastpath_while_revalidate"
+                        if refresh_started
+                        else "historical_fastpath_refresh_inflight"
+                    ),
+                )
+            logger.warning(
+                "Historical dashboard fastpath fell back to full rebuild because critical tiers degraded | key={} degraded={}",
+                ctx.cache_key,
+                sorted(critical_degraded),
+            )
+        except Exception as exc:
+            logger.warning(f"Historical dashboard fastpath failed | key={ctx.cache_key} error={exc}")
 
     dashboard_data, dashboard_runtime_meta = get_dashboard_snapshot(ctx, force_refresh=True)
     if _should_persist_dashboard_snapshot(dashboard_runtime_meta):

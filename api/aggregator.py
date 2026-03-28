@@ -543,10 +543,23 @@ def _run_tier_builder(fn: Callable[[], dict]) -> Tuple[dict, float]:
 
 
 def _build_snapshot_sequential(ctx: DashboardDateContext) -> Tuple[dict, Dict[str, Optional[float]]]:
+    return _build_snapshot_sequential_with_skips(ctx, skipped_tiers=None)
+
+
+def _build_snapshot_sequential_with_skips(
+    ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None,
+) -> Tuple[dict, Dict[str, Optional[float]]]:
     data: dict = {}
     tier_times: Dict[str, Optional[float]] = {}
+    skip_set = skipped_tiers or set()
 
     for name, builder in _ordered_tiers(ctx):
+        if name in skip_set:
+            tier_times[name] = None
+            data.update(_fallback_for_tier(name))
+            continue
         t0 = time.time()
         payload = builder()
         tier_times[name] = round(time.time() - t0, 3)
@@ -558,11 +571,23 @@ def _build_snapshot_sequential(ctx: DashboardDateContext) -> Tuple[dict, Dict[st
     return data, tier_times
 
 
-def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]]]:
+def _build_snapshot_parallel(
+    ctx: DashboardDateContext,
+    use_timeouts: bool = True,
+    *,
+    skipped_tiers: set[str] | None = None,
+) -> Tuple[dict, Dict[str, Optional[float]]]:
     ordered = _ordered_tiers(ctx)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
-    executor, futures = _submit_tier_futures(ordered)
+    skip_set = skipped_tiers or set()
+    runnable = [(name, builder) for name, builder in ordered if name not in skip_set]
+    executor, futures = _submit_tier_futures(runnable)
+
+    for name in skip_set:
+        tier_payloads[name] = _fallback_for_tier(name)
+        tier_times[name] = None
+
     for name, future in futures.items():
         try:
             if use_timeouts:
@@ -592,14 +617,26 @@ def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = Tru
     return data, tier_times
 
 
-def _build_snapshot(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
+def _build_snapshot(
+    ctx: DashboardDateContext,
+    use_timeouts: bool = True,
+    *,
+    skipped_tiers: set[str] | None = None,
+) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
     mode = "parallel" if PARALLEL_ENABLED else "sequential"
     t0 = time.time()
 
     if PARALLEL_ENABLED:
-        data, tier_times = _build_snapshot_parallel(ctx, use_timeouts=use_timeouts)
+        data, tier_times = _build_snapshot_parallel(
+            ctx,
+            use_timeouts=use_timeouts,
+            skipped_tiers=skipped_tiers,
+        )
     else:
-        data, tier_times = _build_snapshot_sequential(ctx)
+        data, tier_times = _build_snapshot_sequential_with_skips(
+            ctx,
+            skipped_tiers=skipped_tiers,
+        )
 
     elapsed = round(time.time() - t0, 3)
     return data, tier_times, elapsed, mode
@@ -637,9 +674,11 @@ def _default_dashboard_context() -> DashboardDateContext:
 
 def _build_snapshot_with_timeout(
     ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
-    future = executor.submit(_build_snapshot, ctx, True)
+    future = executor.submit(_build_snapshot, ctx, True, skipped_tiers=skipped_tiers)
     try:
         return future.result(timeout=REFRESH_TIMEOUT_SECONDS)
     except FuturesTimeout as exc:
@@ -846,6 +885,37 @@ def get_dashboard_data(
 ) -> dict:
     snapshot, _meta = get_dashboard_snapshot(ctx, force_refresh=force_refresh)
     return snapshot
+
+
+def build_dashboard_snapshot_once(
+    ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None = None,
+    cache_status: str = "refresh_success_uncached",
+) -> tuple[dict, DashboardCacheMeta]:
+    """Build a one-off dashboard snapshot without mutating the shared cache."""
+    data, tier_times, elapsed, mode = _build_snapshot_with_timeout(
+        ctx,
+        skipped_tiers=skipped_tiers,
+    )
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=elapsed,
+        mode=mode,
+        cache_status=cache_status,
+        is_stale=False,
+        refresh_failure_count=0,
+    )
+    if skipped_tiers:
+        meta["skippedTiers"] = sorted(skipped_tiers)
+    logger.info(
+        "Dashboard one-off snapshot built | key={} elapsed={}s mode={} skipped_tiers={}",
+        ctx.cache_key,
+        elapsed,
+        mode,
+        sorted(skipped_tiers or []),
+    )
+    return data, meta
 
 
 def peek_dashboard_snapshot(ctx: Optional[DashboardDateContext] = None) -> tuple[dict | None, DashboardCacheMeta | None, str]:

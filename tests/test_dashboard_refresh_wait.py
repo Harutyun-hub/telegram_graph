@@ -62,6 +62,29 @@ class DashboardRefreshWaitTests(unittest.TestCase):
         self.assertEqual(runtime_meta.get("cacheStatus"), "refresh_success")
         self.assertEqual(runtime_meta.get("refreshFailureCount"), 0)
 
+    def test_one_off_snapshot_can_skip_optional_tiers_without_priming_cache(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+
+        with patch.object(aggregator, "_build_snapshot_with_timeout") as build_mock:
+            build_mock.return_value = (
+                {"communityHealth": {"score": 72}, "communityChannels": [], "weeklyShifts": []},
+                {"pulse": 1.2, "network": None, "comparative": None, "derived": 0.0},
+                1.8,
+                "parallel",
+            )
+            payload, runtime_meta = aggregator.build_dashboard_snapshot_once(
+                ctx,
+                skipped_tiers={"network", "comparative"},
+                cache_status="historical_fastpath_uncached",
+            )
+
+        self.assertEqual(payload["communityHealth"]["score"], 72)
+        self.assertEqual(runtime_meta.get("cacheStatus"), "historical_fastpath_uncached")
+        self.assertEqual(sorted(runtime_meta.get("skippedTiers") or []), ["comparative", "network"])
+        self.assertEqual(sorted(runtime_meta.get("degradedTiers") or []), ["comparative", "network"])
+        with aggregator._cache_lock:
+            self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
+
 
 if __name__ == "__main__":
     unittest.main()

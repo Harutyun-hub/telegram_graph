@@ -99,6 +99,7 @@ class DashboardPersistedCacheTests(unittest.TestCase):
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
              patch.object(server, "build_dashboard_date_context", return_value=ctx), \
+             patch.object(server, "_should_use_historical_fastpath", return_value=False), \
              patch.object(server, "get_dashboard_snapshot", return_value=rebuilt) as rebuild_mock, \
              patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
             payload = server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
@@ -107,6 +108,29 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["persistedReadStatus"], "miss")
         rebuild_mock.assert_called_once_with(ctx, force_refresh=True)
         persist_mock.assert_called_once()
+
+    def test_missing_historical_snapshot_uses_fastpath_and_background_refresh(self) -> None:
+        ctx = self._ctx()
+        fast_meta = self._meta(cache_status="historical_fastpath_uncached")
+        fast_meta["degradedTiers"] = ["network", "comparative"]
+        fast_meta["skippedTiers"] = ["comparative", "network"]
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
+             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
+             patch.object(server, "_should_use_historical_fastpath", return_value=True), \
+             patch.object(server, "build_dashboard_snapshot_once", return_value=(self._snapshot(), fast_meta)) as fastpath_mock, \
+             patch.object(server, "_ensure_background_dashboard_refresh", return_value=True) as refresh_mock, \
+             patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
+            payload = server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
+
+        self.assertEqual(payload["meta"]["cacheSource"], "fastpath")
+        self.assertEqual(payload["meta"]["cacheStatus"], "historical_fastpath_while_revalidate")
+        self.assertEqual(payload["meta"]["degradedTiers"], ["network", "comparative"])
+        fastpath_mock.assert_called_once()
+        refresh_mock.assert_called_once()
+        rebuild_mock.assert_not_called()
 
 
 if __name__ == "__main__":
