@@ -257,8 +257,7 @@ def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
 
 
 def _exclude_thread_anchors(query):
-    query.params = query.params.add("or", "(entry_kind.is.null,entry_kind.neq.thread_anchor)")
-    return query
+    return query.neq("entry_kind", "thread_anchor")
 
 
 def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:

@@ -626,8 +626,8 @@ class SupabaseWriter:
         query = self.client.table("telegram_posts") \
             .select("id, channel_id, telegram_message_id") \
             .eq("has_comments", True) \
-            .is_("comments_scraped_at", "null")
-        query.params = query.params.add("or", "(entry_kind.is.null,entry_kind.neq.thread_anchor)")
+            .is_("comments_scraped_at", "null") \
+            .neq("entry_kind", "thread_anchor")
         res = query.limit(limit).execute()
         return res.data or []
 
@@ -637,8 +637,8 @@ class SupabaseWriter:
             .select("id, channel_id, telegram_message_id") \
             .eq("channel_id", channel_uuid) \
             .eq("has_comments", True) \
-            .is_("comments_scraped_at", "null")
-        query.params = query.params.add("or", "(entry_kind.is.null,entry_kind.neq.thread_anchor)")
+            .is_("comments_scraped_at", "null") \
+            .neq("entry_kind", "thread_anchor")
         res = query.limit(limit).execute()
         return res.data or []
 
