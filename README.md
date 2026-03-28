@@ -138,12 +138,13 @@ Frontend:
 
 ## Railway Compatibility
 
-The current release remains compatible with the GitHub `main` / Railway deployment shape:
+Release A remains intentionally compatible with the current Railway single-service backend shape:
 
 - no change to the frontend Caddy reverse proxy contract
 - no new Railway manifest or service split
 - no new dependency requirements beyond the existing backend/frontend stacks
-- background jobs still run in the default single-service deploy; set `APP_ROLE=web` only if Railway also runs a separate `APP_ROLE=worker` instance
+- background jobs still run in the default single-service deploy with `APP_ROLE=all`
+- recurring card materializers remain intentionally disabled in production during the stabilization window
 
 Operational note:
 
@@ -165,26 +166,39 @@ Analytics auth rollout:
 Immediate rollback:
 
 - if there is an outage, set `ANALYTICS_API_REQUIRE_AUTH=false` and redeploy
+- if a Release A deployment regresses, redeploy the recorded `pre-release-a-stable` artifacts and revert any env changes introduced with that release
+
+Future architecture note:
+
+- `web + worker + Redis` is a planned Release B/C target, not the current live production posture
+- do not flip production to `APP_ROLE=web` unless a separate worker service exists and has passed staging validation
 
 ## Validation Commands
 
-Backend syntax / import checks:
+Backend QA:
 
 ```bash
-python3 -m compileall api buffer ingester processor scripts tests
+make qa-backend
 ```
 
-Backend tests:
+Frontend build QA:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+make qa-frontend
 ```
 
-Frontend production build:
+Smoke checks against a deployed environment:
 
 ```bash
-npm --prefix frontend run build
+DEPLOY_BASE_URL=https://your-app.example.com \
+ANALYTICS_API_KEY_FRONTEND=... \
+make smoke-check
 ```
+
+GitHub release gate recommendation:
+
+- protect `main` with the `quality-gate` status check from `.github/workflows/ci.yml`
+- use `.github/workflows/deployment-smoke.yml` or `.github/workflows/post-deploy-warmup.yml` after deploys instead of relying on ad hoc curls
 
 ## Operational Scripts
 
@@ -193,6 +207,8 @@ Relevant maintenance scripts for the current analytics stack:
 - `scripts/reset_topic_analytics_window.py` — resets and rebuilds the clean analytics window
 - `scripts/validate_topic_mentions.py` — validates direct-message mention counts
 - `scripts/remove_redundant_general_topic_links.py` — removes redundant `General` taxonomy links when a stronger category exists
+- `scripts/probe_mixed_load.py` — runs the Phase 1 mixed-load validation probe
+- `scripts/run_smoke_checks.py` — reusable post-deploy smoke validation for readiness, dashboard, topics, and freshness
 
 ## Documentation
 

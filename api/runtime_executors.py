@@ -4,7 +4,7 @@ import asyncio
 import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 from loguru import logger
 
