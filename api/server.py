@@ -412,12 +412,12 @@ def _persist_freshness_snapshot_sync(snapshot: dict) -> dict[str, Any]:
         content_type="application/gzip",
     )
     elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-    level = "info" if ok else "warning"
+    level = "INFO" if ok else "WARNING"
     logger.log(
         level,
         json.dumps(
             {
-                "level": level,
+                "level": level.lower(),
                 "message": "freshness_snapshot_persisted",
                 "ok": ok,
                 "persistedWriteMs": elapsed_ms,

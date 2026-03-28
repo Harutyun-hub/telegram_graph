@@ -82,6 +82,18 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
 
 
 class RuntimePersistenceTests(unittest.TestCase):
+    def test_persist_freshness_snapshot_uses_valid_log_level(self) -> None:
+        snapshot = {"generated_at": "2026-03-28T07:54:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "get_supabase_writer") as writer_mock, \
+             patch.object(server.logger, "log") as log_mock:
+            writer_mock.return_value.save_runtime_blob.return_value = True
+
+            result = server._persist_freshness_snapshot_sync(snapshot)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(log_mock.call_args[0][0], "INFO")
+
     def test_get_runtime_json_reads_via_authenticated_download(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": False}}}).encode("utf-8")
