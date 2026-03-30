@@ -19,6 +19,21 @@ def _env_csv(name: str, default: str = "") -> list:
     raw = os.getenv(name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
 
+
+def _environment_name() -> str:
+    return str(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or ""
+    ).strip().lower()
+
+
+ENVIRONMENT_NAME = _environment_name()
+IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
+IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
+IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_API_ID       = int(os.getenv("TELEGRAM_API_ID", 0))
 TELEGRAM_API_HASH     = os.getenv("TELEGRAM_API_HASH", "")
@@ -63,6 +78,7 @@ ANALYTICS_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ANALYTICS_RATE_LIMIT_WINDOW
 ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQUESTS", "120"))
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 SCRAPECREATORS_API_KEY = os.getenv("SCRAPECREATORS_API_KEY", "").strip()
 ENABLE_SCRAPER_SCHEDULER = _env_bool("ENABLE_SCRAPER_SCHEDULER", True)
 ENABLE_CARD_MATERIALIZERS = _env_bool("ENABLE_CARD_MATERIALIZERS", True)

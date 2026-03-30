@@ -109,6 +109,8 @@ from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
 from scraper.channel_metadata import get_full_channel_metadata
+from social.store import SocialStore
+from social.runtime import SocialRuntimeService
 from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -1032,6 +1034,37 @@ class ScraperSchedulerUpdateRequest(BaseModel):
     interval_minutes: int = Field(..., ge=1, le=1440)
 
 
+class SocialAccountUpsertRequest(BaseModel):
+    platform: str = Field(..., min_length=1, max_length=32)
+    account_handle: Optional[str] = Field(default=None, max_length=256)
+    account_external_id: Optional[str] = Field(default=None, max_length=256)
+    domain: Optional[str] = Field(default=None, max_length=256)
+    is_active: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SocialEntityCreateRequest(BaseModel):
+    legacy_company_id: str = Field(..., min_length=1, max_length=64)
+    is_active: Optional[bool] = None
+    accounts: List[SocialAccountUpsertRequest] = Field(default_factory=list)
+
+
+class SocialEntityUpdateRequest(BaseModel):
+    is_active: Optional[bool] = None
+    metadata: Optional[Dict[str, Any]] = None
+    accounts: List[SocialAccountUpsertRequest] = Field(default_factory=list)
+
+
+class SocialRuntimeRetryRequest(BaseModel):
+    stage: str = Field(..., min_length=1, max_length=32)
+    scope_key: str = Field(..., min_length=1, max_length=512)
+
+
+class SocialRuntimeReplayRequest(BaseModel):
+    stage: str = Field(default="analysis", min_length=1, max_length=32)
+    activity_uids: List[str] = Field(..., min_length=1)
+
+
 class AdminConfigPatchRequest(BaseModel):
     widgets: Optional[Dict[str, Dict[str, Any]]] = None
     prompts: Optional[Dict[str, Any]] = None
@@ -1080,6 +1113,8 @@ class TopicProposalReviewRequest(BaseModel):
 
 supabase_writer: SupabaseWriter | None = None
 scraper_scheduler: ScraperSchedulerService | None = None
+social_store_writer: SocialStore | None = None
+social_runtime_service: SocialRuntimeService | None = None
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
@@ -1164,6 +1199,42 @@ def get_scraper_scheduler() -> ScraperSchedulerService:
     if scraper_scheduler is None:
         scraper_scheduler = ScraperSchedulerService(get_supabase_writer())
     return scraper_scheduler
+
+
+def get_social_store() -> SocialStore:
+    global social_store_writer
+    if social_store_writer is None:
+        social_store_writer = SocialStore()
+    return social_store_writer
+
+
+def get_social_runtime() -> SocialRuntimeService:
+    global social_runtime_service
+    if social_runtime_service is None:
+        social_runtime_service = SocialRuntimeService(get_social_store())
+    return social_runtime_service
+
+
+def get_current_social_runtime_status() -> dict[str, Any]:
+    if social_runtime_service is None:
+        return {
+            "status": "stopped",
+            "is_active": False,
+            "interval_minutes": 360,
+            "running_now": False,
+            "last_run_started_at": None,
+            "last_run_finished_at": None,
+            "last_success_at": None,
+            "next_run_at": None,
+            "last_error": None,
+            "last_result": None,
+            "run_history": [],
+            "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
+            "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
+            "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
+            "worker_id": None,
+        }
+    return social_runtime_service.status()
 
 
 def get_current_scraper_scheduler_status() -> dict[str, Any]:
@@ -1441,6 +1512,33 @@ def _load_admin_config() -> dict[str, Any]:
     except HTTPException:
         logger.warning("Admin config contains invalid values; falling back to defaults")
         return _default_admin_config()
+
+
+def _extract_bearer_token(raw_value: Optional[str]) -> str:
+    if not raw_value:
+        return ""
+    scheme, _, token = str(raw_value).partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+async def require_operator_access(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    admin_api_key = str(getattr(config, "ADMIN_API_KEY", "") or "").strip()
+    admin_token = _extract_bearer_token(authorization)
+
+    if admin_api_key:
+        if admin_token and hmac.compare_digest(admin_token, admin_api_key):
+            return {"id": "admin-api-key", "auth": "api_key"}
+        raise HTTPException(status_code=401, detail="Operator access required")
+
+    if bool(getattr(config, "IS_LOCKED_ENV", False)):
+        raise HTTPException(status_code=401, detail="Operator access required")
+
+    logger.warning("Operator route accessed via local-development bypass")
+    return {"id": "local-dev", "auth": "local_dev"}
 
 
 def _admin_config_response() -> dict[str, Any]:
@@ -2729,6 +2827,145 @@ async def update_admin_config(payload: AdminConfigPatchRequest):
         raise
     except Exception as e:
         logger.error(f"Update admin config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/overview", dependencies=[Depends(require_operator_access)])
+async def get_social_overview():
+    try:
+        overview = get_social_store().get_overview()
+        overview["runtime"] = get_current_social_runtime_status()
+        return overview
+    except Exception as e:
+        logger.error(f"Social overview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/activities", dependencies=[Depends(require_operator_access)])
+async def list_social_activities(
+    limit: int = Query(100, ge=1, le=500),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+):
+    try:
+        items = get_social_store().list_activities(limit=limit, entity_id=entity_id, platform=platform)
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social activities error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/entities", dependencies=[Depends(require_operator_access)])
+async def list_social_entities():
+    try:
+        items = get_social_store().list_entities()
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social entities error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/entities", dependencies=[Depends(require_operator_access)])
+async def create_social_entity(payload: SocialEntityCreateRequest):
+    try:
+        store = get_social_store()
+        entity = store.ensure_entity_from_company(payload.legacy_company_id)
+        if payload.is_active is not None or payload.accounts:
+            entity = store.update_entity(
+                entity["id"],
+                is_active=payload.is_active,
+                accounts=[account.model_dump() for account in payload.accounts],
+            )
+        return {"item": entity}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Create social entity error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/social/entities/{entity_id}", dependencies=[Depends(require_operator_access)])
+async def update_social_entity(entity_id: str, payload: SocialEntityUpdateRequest):
+    try:
+        store = get_social_store()
+        existing = store.get_entity(entity_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Social entity not found")
+        if payload.is_active is None and payload.metadata is None and not payload.accounts:
+            raise HTTPException(status_code=400, detail="No update fields provided")
+        item = store.update_entity(
+            entity_id,
+            is_active=payload.is_active,
+            metadata=payload.metadata,
+            accounts=[account.model_dump() for account in payload.accounts],
+        )
+        return {"item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update social entity error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/runtime/status", dependencies=[Depends(require_operator_access)])
+async def get_social_runtime_status():
+    return get_current_social_runtime_status()
+
+
+@app.post("/api/social/runtime/run-once", dependencies=[Depends(require_operator_access)])
+async def run_social_runtime_once():
+    try:
+        return await get_social_runtime().run_once()
+    except Exception as e:
+        logger.error(f"Social runtime run-once error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/runtime/failures", dependencies=[Depends(require_operator_access)])
+async def list_social_runtime_failures(
+    dead_letter_only: bool = Query(False),
+    stage: Optional[str] = Query(default=None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    try:
+        items = get_social_store().list_failures(
+            dead_letter_only=dead_letter_only,
+            stage=stage,
+            limit=limit,
+        )
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social runtime failures error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/runtime/retry", dependencies=[Depends(require_operator_access)])
+async def retry_social_runtime_failure(payload: SocialRuntimeRetryRequest):
+    try:
+        return await get_social_runtime().retry_failure(stage=payload.stage, scope_key=payload.scope_key)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() or "no active failure" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Social runtime retry error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/runtime/replay", dependencies=[Depends(require_operator_access)])
+async def replay_social_runtime_items(payload: SocialRuntimeReplayRequest):
+    try:
+        return await get_social_runtime().replay_activities(
+            stage=payload.stage,
+            activity_uids=payload.activity_uids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Social runtime replay error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
