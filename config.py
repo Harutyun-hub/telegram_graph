@@ -53,6 +53,7 @@ ANALYTICS_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ANALYTICS_RATE_LIMIT_WINDOW
 ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQUESTS", "120"))
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
 ENABLE_SCRAPER_SCHEDULER = _env_bool("ENABLE_SCRAPER_SCHEDULER", True)
+REQUIRE_TELEGRAM_CREDENTIALS = _env_bool("REQUIRE_TELEGRAM_CREDENTIALS", not IS_STAGING)
 ENABLE_CARD_MATERIALIZERS = _env_bool("ENABLE_CARD_MATERIALIZERS", True)
 ENABLE_QUESTION_CARD_MATERIALIZER = _env_bool(
     "ENABLE_QUESTION_CARD_MATERIALIZER",
@@ -198,9 +199,10 @@ AI_CATCHUP_SYNC_LIMIT = int(os.getenv("AI_CATCHUP_SYNC_LIMIT", "320"))
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
     missing = []
-    if not TELEGRAM_API_ID:        missing.append("TELEGRAM_API_ID")
-    if not TELEGRAM_API_HASH:      missing.append("TELEGRAM_API_HASH")
-    if not TELEGRAM_PHONE:         missing.append("TELEGRAM_PHONE")
+    if REQUIRE_TELEGRAM_CREDENTIALS:
+        if not TELEGRAM_API_ID:        missing.append("TELEGRAM_API_ID")
+        if not TELEGRAM_API_HASH:      missing.append("TELEGRAM_API_HASH")
+        if not TELEGRAM_PHONE:         missing.append("TELEGRAM_PHONE")
     if not SUPABASE_URL:           missing.append("SUPABASE_URL")
     if not SUPABASE_SERVICE_ROLE_KEY: missing.append("SUPABASE_SERVICE_ROLE_KEY")
     if not NEO4J_URI:              missing.append("NEO4J_URI")

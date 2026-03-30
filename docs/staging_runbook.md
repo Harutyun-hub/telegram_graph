@@ -45,6 +45,7 @@
   - `ADMIN_API_KEY`
   - `SENTRY_DSN`
   - `SENTRY_ENVIRONMENT=staging`
+- Telegram secrets are optional for staging only when scraper runtime is disabled.
 - Required frontend secrets:
   - `VITE_API_BASE_URL`
   - `VITE_SENTRY_DSN`
@@ -56,6 +57,11 @@
 - Do not reuse production Telegram sessions.
 - Do not enable live scraping by default.
 - Do not point staging services at production write targets.
+- Default safe staging boot:
+  - `APP_ROLE=web`
+  - `RUN_STARTUP_WARMERS=false`
+  - `ENABLE_SCRAPER_SCHEDULER=false`
+  - `REQUIRE_TELEGRAM_CREDENTIALS=false`
 
 ## Observability
 - Confirm Railway logs are accessible for both staging services.
