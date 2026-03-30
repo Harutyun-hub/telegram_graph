@@ -722,6 +722,7 @@ def _build_dashboard_api_payload(
     persisted_read_status: str | None = None,
     persisted_read_ms: float | None = None,
     cache_status_override: str | None = None,
+    default_resolution_path: str | None = None,
 ) -> dict[str, Any]:
     trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
     origin_cache_status = dashboard_runtime_meta.get("cacheStatus")
@@ -753,6 +754,8 @@ def _build_dashboard_api_payload(
             "generatedAt": freshness_snapshot.get("generated_at") if isinstance(freshness_snapshot, dict) else None,
         },
     }
+    if default_resolution_path:
+        response_meta["defaultResolutionPath"] = default_resolution_path
     if origin_cache_status and cache_status_override and cache_status_override != origin_cache_status:
         response_meta["originCacheStatus"] = origin_cache_status
     response_meta["responseBytes"] = -1
@@ -1525,6 +1528,7 @@ def _build_dashboard_response_payload(
                     freshness_source=None,
                     persisted_read_status=persisted_read_status,
                     persisted_read_ms=persisted_read_ms,
+                    default_resolution_path="persisted_alias",
                     cache_status_override=(
                         "persisted_stale_while_revalidate" if dashboard_meta.get("isStale") and refresh_started
                         else "persisted_stale_refresh_inflight" if dashboard_meta.get("isStale")
@@ -1560,6 +1564,7 @@ def _build_dashboard_response_payload(
             cache_source="memory",
             freshness_snapshot=freshness_snapshot,
             freshness_source=freshness_source,
+            default_resolution_path="memory" if default_request else None,
             cache_status_override="memory_fresh",
         )
 
@@ -1594,6 +1599,7 @@ def _build_dashboard_response_payload(
                 freshness_source=freshness_source,
                 persisted_read_status=persisted_read_status,
                 persisted_read_ms=persisted_read_ms,
+                default_resolution_path="persisted_exact" if default_request else None,
                 cache_status_override="persisted_fresh",
             )
 
@@ -1630,6 +1636,11 @@ def _build_dashboard_response_payload(
             freshness_source=freshness_source,
             persisted_read_status=persisted_read_status,
             persisted_read_ms=persisted_read_ms,
+            default_resolution_path=(
+                "persisted_exact" if default_request and cache_source == "persisted"
+                else "memory" if default_request and cache_source == "memory"
+                else None
+            ),
             cache_status_override=(
                 f"{cache_source}_stale_while_revalidate"
                 if refresh_started
@@ -1668,6 +1679,7 @@ def _build_dashboard_response_payload(
                 freshness_source=freshness_source,
                 persisted_read_status="recent_fallback_hit",
                 persisted_read_ms=round(float(persisted_read_ms or 0.0) + float(recent_default_snapshot.get("readMs") or 0.0), 2),
+                default_resolution_path="persisted_recent_fallback",
                 cache_status_override=(
                     "persisted_recent_fallback_while_revalidate"
                     if refresh_started
@@ -1746,6 +1758,7 @@ def _build_dashboard_response_payload(
         freshness_source=freshness_source,
         persisted_read_status=persisted_read_status,
         persisted_read_ms=persisted_read_ms,
+        default_resolution_path="rebuild" if default_request else None,
     )
 
 
