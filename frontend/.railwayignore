@@ -1,0 +1,4 @@
+*
+!Caddyfile
+!dist/
+!dist/**
