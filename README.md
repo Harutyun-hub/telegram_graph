@@ -128,6 +128,7 @@ Frontend:
 
 - `VITE_API_BASE_URL` default `/api`
 - `BACKEND_ANALYTICS_API_KEY_FRONTEND` runtime secret for Caddy proxy injection
+- `BACKEND_URL` runtime backend target for Caddy reverse proxy
 
 ## AI Systems
 
@@ -153,6 +154,7 @@ Operational note:
   `OPENAI_MODEL`, `QUESTION_BRIEFS_MODEL`, `QUESTION_BRIEFS_TRIAGE_MODEL`, `QUESTION_BRIEFS_SYNTHESIS_MODEL`, `BEHAVIORAL_BRIEFS_MODEL`, `BEHAVIORAL_BRIEFS_PROMPT_VERSION`
 
 The frontend still expects `/api/*` to be reverse-proxied to the backend through `BACKEND_URL` in Railway.
+- In Railway staging/production, `BACKEND_URL` should use the internal Railway backend URL, not the public `up.railway.app` URL.
 
 Analytics auth rollout:
 

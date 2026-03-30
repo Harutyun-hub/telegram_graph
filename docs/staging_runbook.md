@@ -4,6 +4,7 @@
 - `staging` is the pre-production integration branch.
 - It deploys to a separate Railway staging project and uses non-production data.
 - Production stays on `main` after main realignment is complete.
+- Current status: staging is operational, but it is **not yet trustworthy as pre-production** until it is isolated from production-grade data/services.
 
 ## Current Branch Model
 - `feature/*` -> `staging` -> `main`
@@ -31,6 +32,16 @@
   - no worker
   - no Redis
 
+## Day 1 Blocker
+- Move staging off production-grade data/services before treating staging as a valid QA environment.
+- Required isolation targets:
+  - isolated staging Supabase/Postgres
+  - isolated staging Neo4j
+- Until this is complete:
+  - do not trust staging writes
+  - do not use staging as release evidence for `main`
+  - do not start Release B validation
+
 ## Staging Secrets
 - Repository owner is the default owner for all staging secrets until an ops owner exists.
 - Required backend secrets:
@@ -47,10 +58,14 @@
   - `SENTRY_ENVIRONMENT=staging`
 - Telegram secrets are optional for staging only when scraper runtime is disabled.
 - Required frontend secrets:
-  - `VITE_API_BASE_URL`
-  - `VITE_SENTRY_DSN`
-  - `VITE_SENTRY_ENVIRONMENT=staging`
-  - `VITE_SENTRY_RELEASE`
+  - `BACKEND_URL`
+  - `BACKEND_ANALYTICS_API_KEY_FRONTEND`
+  - `VITE_SUPABASE_URL`
+  - `VITE_SUPABASE_ANON_KEY`
+- Frontend deployment note:
+  - `BACKEND_URL` must be the Railway internal backend URL, not the public `up.railway.app` URL
+  - `BACKEND_ANALYTICS_API_KEY_FRONTEND` must match backend `ANALYTICS_API_KEY_FRONTEND`
+  - keep browser-facing API traffic on `/api` through Caddy reverse proxy
 
 ## Staging Data Policy
 - Use separate staging Supabase and Neo4j targets.
@@ -62,6 +77,11 @@
   - `RUN_STARTUP_WARMERS=false`
   - `ENABLE_SCRAPER_SCHEDULER=false`
   - `REQUIRE_TELEGRAM_CREDENTIALS=false`
+
+## Merge Order
+- Social merges into `staging` first.
+- Graph merges into `staging` only after Social staging smoke passes.
+- Do not merge Social and Graph together in one integration step.
 
 ## Observability
 - Confirm Railway logs are accessible for both staging services.
@@ -99,3 +119,4 @@
   - staging backend and frontend deploy with `SUCCESS`
   - staging smoke checks pass
   - staging observability is confirmed working
+  - staging isolation from production-grade data/services is complete
