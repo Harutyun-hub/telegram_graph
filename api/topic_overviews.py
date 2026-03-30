@@ -15,6 +15,7 @@ from loguru import logger
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.dashboard_dates import DashboardDateContext
+from api.runtime_executors import submit_background
 from buffer.supabase_writer import SupabaseWriter
 
 try:
@@ -60,6 +61,8 @@ _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, dict]] = {}
+_inflight_lock = threading.Lock()
+_inflight_generations: set[str] = set()
 _client = OpenAI(api_key=config.OPENAI_API_KEY) if (OpenAI and config.OPENAI_API_KEY) else None
 
 
@@ -157,6 +160,8 @@ def get_admin_prompt_defaults() -> dict[str, str]:
 def invalidate_topic_overviews_cache() -> None:
     with _cache_lock:
         _cache.clear()
+    with _inflight_lock:
+        _inflight_generations.clear()
 
 
 def _cache_valid(saved_at: float) -> bool:
@@ -188,9 +193,13 @@ def _load_persisted_item(path: str) -> dict | None:
     payload = store.get_runtime_json(path, default={})
     if not isinstance(payload, dict):
         return None
-    if not isinstance(payload.get("overview"), dict):
+    overview = payload.get("overview")
+    if not isinstance(overview, dict):
         return None
-    return payload["overview"]
+    status = _as_str(overview.get("status")).strip().lower()
+    if status == "fallback":
+        return None
+    return overview
 
 
 def _save_persisted_item(path: str, overview: dict) -> None:
@@ -293,6 +302,88 @@ def _normalize_ai_item(parsed: dict, topic: str, category: str, detail_payload: 
     }
 
 
+def _acquire_generation_slot(cache_key: str) -> bool:
+    with _inflight_lock:
+        if cache_key in _inflight_generations:
+            return False
+        _inflight_generations.add(cache_key)
+        return True
+
+
+def _release_generation_slot(cache_key: str) -> None:
+    with _inflight_lock:
+        _inflight_generations.discard(cache_key)
+
+
+def _generate_overview(topic: str, category: str, detail_payload: dict, ctx: DashboardDateContext) -> dict:
+    payload = {
+        "window": _window_payload(ctx),
+        "topic": {
+            "name": topic,
+            "category": category,
+            "mentions": _as_int(detail_payload.get("mentionCount") or detail_payload.get("mentions") or 0),
+            "previousMentions": _as_int(detail_payload.get("prev7Mentions") or detail_payload.get("previousMentions") or 0),
+            "growthPct": _as_int(detail_payload.get("growth7dPct") or 0),
+            "distinctUsers": _as_int(detail_payload.get("distinctUsers") or detail_payload.get("userCount") or 0),
+            "distinctChannels": _as_int(detail_payload.get("distinctChannels") or 0),
+            "sentiment": {
+                "positive": _as_int(detail_payload.get("sentimentPositive") or 0),
+                "neutral": _as_int(detail_payload.get("sentimentNeutral") or 0),
+                "negative": _as_int(detail_payload.get("sentimentNegative") or 0),
+            },
+            "topChannels": [_as_str(ch) for ch in (detail_payload.get("topChannels") or [])[:3]],
+            "latestAt": _as_str((detail_payload.get("sampleEvidence") or {}).get("timestamp")),
+        },
+        "evidence": [
+            {
+                "id": _as_str(ev.get("id"), ""),
+                "text": _trim_text(ev.get("text"), 220),
+                "channel": _as_str(ev.get("channel"), "unknown"),
+                "timestamp": _as_str(ev.get("timestamp"), ""),
+            }
+            for ev in (detail_payload.get("evidence") or [])[: int(config.TOPIC_OVERVIEWS_EVIDENCE_PER_TOPIC)]
+            if isinstance(ev, dict)
+        ],
+        "questionEvidence": [
+            {
+                "id": _as_str(ev.get("id"), ""),
+                "text": _trim_text(ev.get("text"), 180),
+                "channel": _as_str(ev.get("channel"), "unknown"),
+                "timestamp": _as_str(ev.get("timestamp"), ""),
+            }
+            for ev in (detail_payload.get("questionEvidence") or [])[: int(config.TOPIC_OVERVIEWS_QUESTION_LIMIT)]
+            if isinstance(ev, dict)
+        ],
+    }
+    parsed = _chat_json(system_prompt=_runtime_prompt(), user_payload=payload)
+    overview = _normalize_ai_item(parsed, topic, category, detail_payload, ctx)
+    if overview is None:
+        overview = _fallback_item(topic, category, detail_payload, ctx)
+    return overview
+
+
+def _schedule_generation(cache_key: str, path: str, topic: str, category: str, detail_payload: dict, ctx: DashboardDateContext) -> None:
+    if not _acquire_generation_slot(cache_key):
+        return
+
+    def _worker() -> None:
+        try:
+            overview = _generate_overview(topic, category, detail_payload, ctx)
+            if _as_str(overview.get("status")).strip().lower() != "fallback":
+                _save_persisted_item(path, overview)
+            _save_cached_item(cache_key, overview)
+        except Exception as exc:
+            logger.warning("Topic overview generation failed | topic={} category={} error={}", topic, category, exc)
+        finally:
+            _release_generation_slot(cache_key)
+
+    try:
+        submit_background(_worker)
+    except Exception as exc:
+        logger.warning("Topic overview generation could not be scheduled | topic={} category={} error={}", topic, category, exc)
+        _release_generation_slot(cache_key)
+
+
 def _chat_json(*, system_prompt: str, user_payload: dict) -> dict:
     if not _client:
         return {}
@@ -343,58 +434,8 @@ def get_topic_overview(
         return _save_cached_item(cache_key, overview)
 
     if not _client or not _runtime_feature_enabled():
-        overview = _fallback_item(topic, resolved_category, detail_payload, ctx)
-        _save_persisted_item(path, overview)
-        return _save_cached_item(cache_key, overview)
+        return _save_cached_item(cache_key, _fallback_item(topic, resolved_category, detail_payload, ctx))
 
-    payload = {
-        "window": _window_payload(ctx),
-        "topic": {
-            "name": topic,
-            "category": resolved_category,
-            "mentions": _as_int(detail_payload.get("mentionCount") or detail_payload.get("mentions") or 0),
-            "previousMentions": _as_int(detail_payload.get("prev7Mentions") or detail_payload.get("previousMentions") or 0),
-            "growthPct": _as_int(detail_payload.get("growth7dPct") or 0),
-            "distinctUsers": _as_int(detail_payload.get("distinctUsers") or detail_payload.get("userCount") or 0),
-            "distinctChannels": _as_int(detail_payload.get("distinctChannels") or 0),
-            "sentiment": {
-                "positive": _as_int(detail_payload.get("sentimentPositive") or 0),
-                "neutral": _as_int(detail_payload.get("sentimentNeutral") or 0),
-                "negative": _as_int(detail_payload.get("sentimentNegative") or 0),
-            },
-            "topChannels": [_as_str(ch) for ch in (detail_payload.get("topChannels") or [])[:3]],
-            "latestAt": _as_str((detail_payload.get("sampleEvidence") or {}).get("timestamp")),
-        },
-        "evidence": [
-            {
-                "id": _as_str(ev.get("id"), ""),
-                "text": _trim_text(ev.get("text"), 220),
-                "channel": _as_str(ev.get("channel"), "unknown"),
-                "timestamp": _as_str(ev.get("timestamp"), ""),
-            }
-            for ev in (detail_payload.get("evidence") or [])[: int(config.TOPIC_OVERVIEWS_EVIDENCE_PER_TOPIC)]
-            if isinstance(ev, dict)
-        ],
-        "questionEvidence": [
-            {
-                "id": _as_str(ev.get("id"), ""),
-                "text": _trim_text(ev.get("text"), 180),
-                "channel": _as_str(ev.get("channel"), "unknown"),
-                "timestamp": _as_str(ev.get("timestamp"), ""),
-            }
-            for ev in (detail_payload.get("questionEvidence") or [])[: int(config.TOPIC_OVERVIEWS_QUESTION_LIMIT)]
-            if isinstance(ev, dict)
-        ],
-    }
-
-    try:
-        parsed = _chat_json(system_prompt=_runtime_prompt(), user_payload=payload)
-        overview = _normalize_ai_item(parsed, topic, resolved_category, detail_payload, ctx)
-        if overview is None:
-            overview = _fallback_item(topic, resolved_category, detail_payload, ctx)
-    except Exception as exc:
-        logger.warning("Topic overview generation failed | topic={} category={} error={}", topic, resolved_category, exc)
-        overview = _fallback_item(topic, resolved_category, detail_payload, ctx)
-
-    _save_persisted_item(path, overview)
-    return _save_cached_item(cache_key, overview)
+    fallback = _save_cached_item(cache_key, _fallback_item(topic, resolved_category, detail_payload, ctx))
+    _schedule_generation(cache_key, path, topic, resolved_category, detail_payload, ctx)
+    return fallback

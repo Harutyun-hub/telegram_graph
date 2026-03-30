@@ -71,14 +71,31 @@ class TopicOverviewTests(unittest.TestCase):
             }
         }
 
-        with patch.object(topic_overviews, "_chat_json", return_value=parsed) as chat_mock:
+        with patch.object(topic_overviews, "_load_persisted_item", return_value=None), \
+             patch.object(topic_overviews, "_save_persisted_item"), \
+             patch.object(topic_overviews, "_chat_json", return_value=parsed) as chat_mock, \
+             patch.object(topic_overviews, "submit_background", side_effect=lambda fn: fn()):
             first = topic_overviews.get_topic_overview(detail["name"], detail["category"], detail_payload=detail, ctx=self._ctx())
             second = topic_overviews.get_topic_overview(detail["name"], detail["category"], detail_payload=detail, ctx=self._ctx())
 
-        self.assertEqual(first["status"], "ready")
-        self.assertEqual(first["summaryEn"], parsed["overview"]["summaryEn"])
+        self.assertEqual(first["status"], "fallback")
+        self.assertEqual(first["summaryEn"], "Fallback summary")
         self.assertEqual(second["summaryEn"], parsed["overview"]["summaryEn"])
         self.assertEqual(chat_mock.call_count, 1)
+
+    def test_get_topic_overview_schedules_single_background_generation(self) -> None:
+        detail = _detail_payload()
+        scheduled: list[object] = []
+
+        with patch.object(topic_overviews, "_load_persisted_item", return_value=None), \
+             patch.object(topic_overviews, "_save_persisted_item"), \
+             patch.object(topic_overviews, "submit_background", side_effect=lambda fn: scheduled.append(fn)):
+            first = topic_overviews.get_topic_overview(detail["name"], detail["category"], detail_payload=detail, ctx=self._ctx())
+            second = topic_overviews.get_topic_overview(detail["name"], detail["category"], detail_payload=detail, ctx=self._ctx())
+
+        self.assertEqual(first["status"], "fallback")
+        self.assertEqual(second["status"], "fallback")
+        self.assertEqual(len(scheduled), 1)
 
 
 class TopicDetailOverviewEndpointTests(unittest.TestCase):
