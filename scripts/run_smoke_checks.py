@@ -38,7 +38,7 @@ def wait_for_ready(base_url: str, timeout_seconds: int) -> None:
     raise SystemExit(f"Timed out waiting for readiness at {ready_url}: {last_error}")
 
 
-def run_smoke_checks(base_url: str, analytics_token: str) -> None:
+def run_smoke_checks(base_url: str, analytics_token: str, admin_token: str = "") -> None:
     checks = [
         ("readyz", f"{base_url}/readyz", {}),
         (
@@ -58,6 +58,15 @@ def run_smoke_checks(base_url: str, analytics_token: str) -> None:
         ),
     ]
 
+    if admin_token:
+        checks.append(
+            (
+                "operator_scheduler",
+                f"{base_url}/api/scraper/scheduler",
+                {"Authorization": f"Bearer {admin_token}"},
+            )
+        )
+
     for label, url, headers in checks:
         try:
             status = _request(url, headers=headers, timeout=20)
@@ -72,6 +81,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run deployment smoke checks.")
     parser.add_argument("--base-url", default=_env("DEPLOY_BASE_URL") or _env("PRODUCTION_BASE_URL"))
     parser.add_argument("--analytics-token", default=_env("ANALYTICS_API_KEY_FRONTEND"))
+    parser.add_argument("--admin-token", default=_env("ADMIN_API_KEY"))
     parser.add_argument("--wait-ready", action="store_true")
     parser.add_argument("--ready-timeout-seconds", type=int, default=300)
     parser.add_argument("--label", default="deployment")
@@ -86,7 +96,11 @@ def main() -> int:
     print(f"[smoke] starting {args.label} checks against {base_url}")
     if args.wait_ready:
         wait_for_ready(base_url, timeout_seconds=args.ready_timeout_seconds)
-    run_smoke_checks(base_url, analytics_token=args.analytics_token)
+    run_smoke_checks(
+        base_url,
+        analytics_token=args.analytics_token,
+        admin_token=str(args.admin_token or "").strip(),
+    )
     print(f"[smoke] all {args.label} checks passed")
     return 0
 

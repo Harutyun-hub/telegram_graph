@@ -1,0 +1,34 @@
+name: Staging Post-Deploy Warmup
+
+on:
+  push:
+    branches: ["staging"]
+  workflow_dispatch:
+
+jobs:
+  warmup:
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      DEPLOY_BASE_URL: ${{ secrets.DEPLOY_BASE_URL || secrets.STAGING_BASE_URL }}
+      ANALYTICS_API_KEY_FRONTEND: ${{ secrets.ANALYTICS_API_KEY_FRONTEND }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Skip when staging warmup secrets are not configured
+        if: ${{ env.DEPLOY_BASE_URL == '' || env.ANALYTICS_API_KEY_FRONTEND == '' }}
+        run: echo "Skipping staging warmup because DEPLOY_BASE_URL or ANALYTICS_API_KEY_FRONTEND is not configured."
+
+      - name: Run staging smoke checks
+        if: ${{ env.DEPLOY_BASE_URL != '' && env.ANALYTICS_API_KEY_FRONTEND != '' }}
+        run: |
+          python scripts/run_smoke_checks.py \
+            --label staging \
+            --wait-ready
