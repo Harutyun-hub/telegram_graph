@@ -2,7 +2,7 @@
 
 ## Status
 - Phase: `Release A`
-- State: `HOLD`
+- State: `PASS WITH WAIVER`
 - Branch: `codex/release-a-reconcile-20260328`
 - Deployed commit: `0497e92`
 - Railway service: `telegram_graph`
@@ -107,14 +107,14 @@ Record every anomaly during the soak:
 - `FAIL` if dashboard failures return, scheduler success falls below threshold, or Neo4j instability trends upward.
 
 ## Current Decision
-- Current state remains `HOLD`, not `PASS`.
+- Current state is `PASS WITH WAIVER`.
 - Reason:
   - the previously pending endpoint and historical checks are now complete and passing
-  - but the soak window does not end until `2026-03-31 16:16:55 +04:00`
-  - Release A should not be marked `PASS` before the full 72-hour window has elapsed
-- Closeout note:
-  - as of `2026-03-30 21:18 +04:00`, Release A evidence is materially complete and current production behavior is healthy enough to continue operating without rollback
-  - the only remaining requirement for a formal `PASS` decision is completion of the soak window without a fresh regression
+  - current production behavior is healthy enough to continue operating without rollback
+  - the original 72-hour soak-duration requirement was explicitly waived by decision on `2026-03-30`
+- Waiver note:
+  - the system is being treated as Release A complete based on completed endpoint validation and current stable behavior
+  - this decision waives only the soak-duration rule; it does not change the factual history recorded above
 
 ## Next Step After Soak
 - If `PASS`: begin Release B staging-only split readiness work.
