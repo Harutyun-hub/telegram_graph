@@ -16,7 +16,7 @@
 - Staging now exists and is deployable, but is still provisional until isolated from production-grade data/services.
 
 ## Current Decisions
-- Release A status: `HOLD`, not `PASS`
+- Release A status: `PASS WITH WAIVER`
 - Release B: staging-only, not production-ready yet
 - Release C: blocked until Release B staging validation succeeds
 

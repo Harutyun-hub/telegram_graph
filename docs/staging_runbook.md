@@ -5,6 +5,9 @@
 - It deploys to a separate Railway staging project and uses non-production data.
 - Production stays on `main` after main realignment is complete.
 - Current status: staging is operational, but it is **not yet trustworthy as pre-production** until it is isolated from production-grade data/services.
+- Current temporary decision:
+  - staging backend is still pointed at the same Supabase host and Neo4j cluster/database as production
+  - isolation is deferred for now, so staging must be treated as provisional and non-destructive
 
 ## Current Branch Model
 - `feature/*` -> `staging` -> `main`
@@ -41,6 +44,7 @@
   - do not trust staging writes
   - do not use staging as release evidence for `main`
   - do not start Release B validation
+  - current exception: staging is temporarily left shared by decision, but that does not change the risk posture above
 
 ## Staging Secrets
 - Repository owner is the default owner for all staging secrets until an ops owner exists.

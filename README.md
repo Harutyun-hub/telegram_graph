@@ -73,6 +73,10 @@ cp frontend/.env.example frontend/.env
 
 Fill `.env` with real secrets before running the stack.
 
+Current staging note:
+- the staging Railway environment is temporarily using the same Supabase/Neo4j targets as production by decision
+- do not use staging for destructive testing until isolated staging data targets are introduced
+
 ### 3. Install dependencies
 
 ```bash
