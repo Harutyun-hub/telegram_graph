@@ -225,13 +225,13 @@ export function TrendingTopicsFeed() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="mb-4 flex flex-col items-start gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
           <WidgetTitle widgetId="trending_topics_feed">
             {ru ? 'Тренды прямо сейчас' : 'Trending Now'}
           </WidgetTitle>
-          <div className="flex items-center gap-1 ml-1">
+          <div className="ml-0 flex flex-wrap items-center gap-1 sm:ml-1">
             <button
               onClick={() => setMode('trending')}
               className={`text-xs px-2 py-0.5 rounded-full ${mode === 'trending' ? 'bg-slate-800 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
@@ -249,14 +249,14 @@ export function TrendingTopicsFeed() {
             </button>
           </div>
         </div>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {mode === 'new'
             ? (ru ? 'Новые сигналы' : 'Emerging signals')
             : selectedWindowLabel(range.days, ru)}
         </span>
       </div>
 
-      <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
+      <div className="max-h-[360px] space-y-2.5 overflow-x-hidden overflow-y-auto pr-1">
         {visibleTopics.map((topic) => (
           <Link
             key={topic.id}
@@ -272,13 +272,13 @@ export function TrendingTopicsFeed() {
                     ? `“${topic.sampleQuote}”`
                     : (ru ? 'Откройте тему, чтобы увидеть доказательства из сообщений' : 'Open topic to view message evidence')}
                 </p>
-                <div className="flex items-center gap-3 mt-1.5">
+                <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
                   {mode === 'new' && (
                     <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700" style={{ fontWeight: 600 }}>
                       {ru ? 'Новая' : 'Emerging'}
                     </span>
                   )}
-                  <span className="text-xs px-1.5 py-0.5 rounded" style={{
+                  <span className="inline-flex max-w-full rounded px-1.5 py-0.5 text-xs leading-snug" style={{
                     backgroundColor: (categoryColors[topic.category] ?? '#6b7280') + '15',
                     color: categoryColors[topic.category] ?? '#6b7280',
                     fontWeight: 500,
@@ -287,7 +287,7 @@ export function TrendingTopicsFeed() {
                     {topic.mentions} {ru ? 'упоминаний' : 'mentions'}
                   </span>
                   {topic.trendReliable ? (
-                    <span className={`text-xs ${topic.trend >= 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>
+                    <span className={`text-xs leading-snug ${topic.trend >= 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>
                       {trendDeltaLabel(topic.deltaMentions)}
                     </span>
                   ) : (

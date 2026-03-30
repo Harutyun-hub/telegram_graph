@@ -105,11 +105,11 @@ export function TopicLandscape() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="topic_landscape">
           {ru ? 'Карта тем' : 'Topic Landscape'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Что обсуждают чаще всего' : 'Most discussed topics'}
         </span>
       </div>
@@ -314,11 +314,11 @@ export function ConversationTrends() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="conversation_trends">
           {ru ? 'Динамика разговоров' : 'Conversation Trends'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru ? `Какие темы растут? Что угасает? Траектория строится по выбранному окну (${range.days} дн.).` : `What topics are rising? What's fading? The trajectory follows the selected ${range.days}-day window.`}
@@ -501,11 +501,11 @@ export function QuestionCloud() {
 
   return (
       <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-1">
+        <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
           <WidgetTitle widgetId="question_cloud">
             {ru ? 'Самые частые вопросы' : 'Most Asked Questions'}
           </WidgetTitle>
-          <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
+          <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
         </div>
         <p className="text-xs text-gray-500 mb-4">
           {ru
@@ -604,7 +604,7 @@ export function QuestionAnswerGap() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Разрыв "Вопрос - Ответ"' : 'Question-Answer Gap'}
         </h3>
@@ -697,7 +697,7 @@ export function TopicLifecycle() {
         <WidgetTitle widgetId="topic_lifecycle">
           {ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Рост -> Снижение' : 'Growing -> Declining'}
         </span>
       </div>
