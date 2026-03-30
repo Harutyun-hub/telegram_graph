@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from './api';
 import { groupTopicCategoryForTopicsPage, translateTopicRu } from './topicPresentation';
-import type { AudienceMember, AudienceMessage, ChannelDetail, ChannelPost, PaginatedFeed, TopicDetail, TopicEvidence } from '../types/data';
+import type { AudienceMember, AudienceMessage, ChannelDetail, ChannelPost, PaginatedFeed, TopicDetail, TopicEvidence, TopicOverview } from '../types/data';
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 
 const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -90,6 +90,39 @@ function mapAudienceMessages(rows: any[], prefix: string): AudienceMessage[] {
     .filter((message) => message.text.length > 0);
 }
 
+function mapTopicOverview(row: any, topic: string, category: string): TopicOverview | null {
+  if (!row || typeof row !== 'object') return null;
+  const summaryEn = asStr(row.summaryEn, '').trim();
+  const summaryRu = asStr(row.summaryRu, '').trim();
+  const signalsEn = asArray<string>(row.signalsEn).map((item) => asStr(item, '').trim()).filter(Boolean).slice(0, 3);
+  const signalsRu = asArray<string>(row.signalsRu).map((item) => asStr(item, '').trim()).filter(Boolean).slice(0, 3);
+  const status = asStr(row.status, 'insufficient_evidence').trim() || 'insufficient_evidence';
+  const generatedAt = asStr(row.generatedAt, '');
+  const windowStart = asStr(row.windowStart, '');
+  const windowEnd = asStr(row.windowEnd, '');
+  const windowDays = Math.max(0, asNum(row.windowDays, 0));
+  const evidenceIds = asArray<string>(row.evidenceIds).map((item) => asStr(item, '').trim()).filter(Boolean);
+
+  if (!generatedAt && !windowStart && !windowEnd && !summaryEn && !summaryRu && !signalsEn.length && !signalsRu.length) {
+    return null;
+  }
+
+  return {
+    topic: asStr(row.topic, topic),
+    category: asStr(row.category, category),
+    status,
+    summaryEn,
+    summaryRu,
+    signalsEn,
+    signalsRu,
+    generatedAt,
+    windowStart,
+    windowEnd,
+    windowDays,
+    evidenceIds,
+  };
+}
+
 function toTopicTimelineData(dailyRows: any[], weeklyRows: any[]): { week: string; count: number; isoDate?: string }[] {
   const daily = asArray(dailyRows)
     .map((row: any) => ({
@@ -165,6 +198,7 @@ function adaptTopicRow(t: any, i: number): TopicDetail {
     descriptionRu: '',
     evidence,
     questionEvidence: questionEvidence.length > 0 ? questionEvidence : evidence.filter((ev) => ev.text.includes('?')),
+    overview: mapTopicOverview(t.overview, name, category),
   };
 }
 
@@ -615,7 +649,7 @@ export function useTopicsDetailData() {
   const { range } = useDashboardDateRange();
   const fetcher = useCallback(() => fetchTopicSummaries(range.from, range.to), [range.from, range.to]);
   return useCachedResource<TopicDetail[]>(
-    `radar.details.topics.summary.v4:${range.from}:${range.to}`,
+    `radar.details.topics.summary.v5:${range.from}:${range.to}`,
     fetcher,
     [],
   );
@@ -625,7 +659,7 @@ export function useTopicDetail(topic: string | null, category: string | null) {
   const { range } = useDashboardDateRange();
   const enabled = Boolean(topic);
   const fetcher = useCallback(() => fetchTopicDetailRow(topic || '', category || '', range.from, range.to), [topic, category, range.from, range.to]);
-  const key = enabled ? `radar.details.topic.v6:${range.from}:${range.to}:${topic}:${category || ''}` : null;
+  const key = enabled ? `radar.details.topic.v7:${range.from}:${range.to}:${topic}:${category || ''}` : null;
   return useCachedResource<TopicDetail | null>(key, fetcher, null, enabled);
 }
 
@@ -643,7 +677,7 @@ export function useTopicEvidenceFeed(
       fetchTopicEvidencePage(topic || '', category || '', view, range.from, range.to, page, size, pageFocusId),
     [topic, category, view, range.from, range.to],
   );
-  const key = active ? `radar.feed.topic.v3:${range.from}:${range.to}:${topic}:${category || ''}:${view}:${focusId || ''}` : null;
+  const key = active ? `radar.feed.topic.v4:${range.from}:${range.to}:${topic}:${category || ''}:${view}:${focusId || ''}` : null;
   return usePaginatedResource<TopicEvidence>(
     key,
     fetcher,
