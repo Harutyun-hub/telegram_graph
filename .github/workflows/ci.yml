@@ -38,6 +38,7 @@ jobs:
             config.py \
             api/server.py \
             api/aggregator.py \
+            api/topic_overviews.py \
             api/runtime_executors.py \
             api/queries/comparative.py \
             buffer/supabase_writer.py \
@@ -47,6 +48,7 @@ jobs:
             tests/test_runtime_persistence.py \
             tests/test_runtime_stability.py \
             tests/test_server_runtime_roles.py \
+            tests/test_topic_overviews.py \
             scripts/check_secret_hygiene.py \
             scripts/run_smoke_checks.py
 

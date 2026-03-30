@@ -118,13 +118,17 @@ export function AdminPage() {
     'questionBriefsModel',
     'behavioralBriefsModel',
     'opportunityBriefsModel',
+    'topicOverviewsModel',
     'questionBriefsPromptVersion',
     'behavioralBriefsPromptVersion',
     'opportunityBriefsPromptVersion',
+    'topicOverviewsPromptVersion',
+    'topicOverviewsRefreshMinutes',
     'aiPostPromptStyle',
     'featureQuestionBriefsAi',
     'featureBehavioralBriefsAi',
     'featureOpportunityBriefsAi',
+    'featureTopicOverviewsAi',
   ];
 
   const runtimeDirty = runtimeKeys.some((key) => runtimeDraft[key] !== config.runtime[key]);
@@ -159,6 +163,13 @@ export function AdminPage() {
       descriptionRu: 'Используется карточками AI-бизнес-возможностей.',
     },
     {
+      key: 'topicOverviewsModel' as const,
+      labelEn: 'Topic overviews model',
+      labelRu: 'Модель обзоров тем',
+      descriptionEn: 'Used by the AI overview on the topic detail page.',
+      descriptionRu: 'Используется AI-обзором на странице темы.',
+    },
+    {
       key: 'questionBriefsPromptVersion' as const,
       labelEn: 'Question prompt version',
       labelRu: 'Версия промпта вопросов',
@@ -178,6 +189,20 @@ export function AdminPage() {
       labelRu: 'Версия промпта возможностей',
       descriptionEn: 'Fingerprint label for opportunity-card snapshots.',
       descriptionRu: 'Версия для отпечатка карточек возможностей.',
+    },
+    {
+      key: 'topicOverviewsPromptVersion' as const,
+      labelEn: 'Topic overview prompt version',
+      labelRu: 'Версия промпта обзоров тем',
+      descriptionEn: 'Fingerprint label for topic-overview snapshots.',
+      descriptionRu: 'Версия для отпечатка снапшотов обзоров тем.',
+    },
+    {
+      key: 'topicOverviewsRefreshMinutes' as const,
+      labelEn: 'Topic overview refresh interval (minutes)',
+      labelRu: 'Интервал обновления обзоров тем (минуты)',
+      descriptionEn: 'Used when the backend starts the topic-overview materializer schedule.',
+      descriptionRu: 'Используется при запуске расписания materializer-а обзоров тем на backend.',
     },
   ];
 
@@ -318,9 +343,23 @@ export function AdminPage() {
               const prompts = ADMIN_PROMPT_DEFINITIONS.filter((prompt) => prompt.groupId === group.id);
               return (
                 <div key={group.id}>
-                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-3" style={{ fontWeight: 600 }}>
-                    {ru ? group.labelRu : group.labelEn}
-                  </p>
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wider" style={{ fontWeight: 600 }}>
+                        {ru ? group.labelRu : group.labelEn}
+                      </p>
+                      {(group.descriptionEn || group.descriptionRu) && (
+                        <p className="mt-1 text-xs text-gray-500">
+                          {ru ? group.descriptionRu : group.descriptionEn}
+                        </p>
+                      )}
+                    </div>
+                    {(group.badgeEn || group.badgeRu) && (
+                      <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] text-blue-700 whitespace-nowrap">
+                        {ru ? group.badgeRu : group.badgeEn}
+                      </span>
+                    )}
+                  </div>
                   <div className="space-y-4">
                     {prompts.map((prompt) => (
                       <div key={prompt.key}>
@@ -497,6 +536,13 @@ export function AdminPage() {
                 labelRu: 'Включить AI для карточек возможностей',
                 descriptionEn: 'Controls AI generation for business opportunity cards.',
                 descriptionRu: 'Управляет AI-генерацией карточек бизнес-возможностей.',
+              },
+              {
+                key: 'featureTopicOverviewsAi' as const,
+                labelEn: 'Enable Topic Overview AI',
+                labelRu: 'Включить AI для обзоров тем',
+                descriptionEn: 'Controls background AI generation for topic detail overview cards.',
+                descriptionRu: 'Управляет фоновой AI-генерацией карточек обзора на странице темы.',
               },
             ].map((toggle) => (
               <div key={toggle.key} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50">

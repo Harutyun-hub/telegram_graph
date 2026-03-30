@@ -199,6 +199,10 @@ def _should_run_opportunity_card_materializer() -> bool:
     return _should_run_any_card_materializers() and bool(config.ENABLE_OPPORTUNITY_CARD_MATERIALIZER)
 
 
+def _should_run_topic_overviews_materializer() -> bool:
+    return _should_run_background_jobs() and bool(config.FEATURE_TOPIC_OVERVIEWS_AI)
+
+
 def _trim_dashboard_payload(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key not in _DASHBOARD_RESPONSE_DROP_KEYS}
 
@@ -827,14 +831,22 @@ async def app_lifespan(_app: FastAPI):
     else:
         logger.info("Scraper scheduler disabled for this runtime")
 
+    cards_scheduler_started_at = time.perf_counter()
+    started_cards_scheduler = False
     if _should_run_any_card_materializers():
-        cards_scheduler_started_at = time.perf_counter()
         _start_question_cards_scheduler()
         _start_behavioral_cards_scheduler()
         _start_opportunity_cards_scheduler()
-        startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
+        started_cards_scheduler = True
     else:
         logger.info("Recurring card materializers disabled for this runtime")
+    if _should_run_topic_overviews_materializer():
+        _start_topic_overviews_scheduler()
+        started_cards_scheduler = True
+    else:
+        logger.info("Topic overview materializer disabled for this runtime")
+    if started_cards_scheduler:
+        startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
 
     if RUN_STARTUP_WARMERS:
         warmers_started_at = time.perf_counter()
@@ -845,6 +857,8 @@ async def app_lifespan(_app: FastAPI):
             asyncio.create_task(_materialize_behavioral_cards_once(force=False))
         if _should_run_opportunity_card_materializer() and config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
             asyncio.create_task(_materialize_opportunity_cards_once(force=False))
+        if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
+            asyncio.create_task(_materialize_topic_overviews_once(force=False))
         startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
 
     startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
@@ -857,6 +871,7 @@ async def app_lifespan(_app: FastAPI):
                 "background_jobs_enabled": _should_run_background_jobs(),
                 "scraper_scheduler_enabled": _should_run_scraper_scheduler(),
                 "card_materializers_enabled": _should_run_any_card_materializers(),
+                "topic_overviews_materializer_enabled": _should_run_topic_overviews_materializer(),
                 "run_startup_warmers": RUN_STARTUP_WARMERS,
                 "requestExecutorWorkers": request_executor_workers(),
                 "backgroundExecutorWorkers": background_executor_workers(),
@@ -870,7 +885,7 @@ async def app_lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler
+        global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler, topic_overviews_scheduler
         global scraper_scheduler, supabase_writer
         mark_runtime_draining(True)
         if question_cards_scheduler is not None:
@@ -891,6 +906,12 @@ async def app_lifespan(_app: FastAPI):
             except Exception:
                 pass
             opportunity_cards_scheduler = None
+        if topic_overviews_scheduler is not None:
+            try:
+                topic_overviews_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            topic_overviews_scheduler = None
         if scraper_scheduler is not None:
             await scraper_scheduler.shutdown(wait_for_cycle_seconds=30.0)
             scraper_scheduler = None
@@ -1062,6 +1083,7 @@ scraper_scheduler: ScraperSchedulerService | None = None
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
+topic_overviews_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 _analytics_rate_limit_lock = threading.Lock()
 _analytics_rate_limit_buckets: dict[tuple[str, str], list[float]] = {}
@@ -1823,6 +1845,23 @@ async def _materialize_opportunity_cards_once(force: bool = False) -> None:
         logger.warning(f"Opportunity cards materialization failed: {e}")
 
 
+async def _materialize_topic_overviews_once(force: bool = False) -> None:
+    """Run topic-overview materialization off the request path."""
+    if not _should_run_topic_overviews_materializer():
+        logger.info("Topic overviews materialization skipped | disabled=true")
+        return
+    try:
+        freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+        ctx = _default_dashboard_context(freshness_snapshot)
+        payload = await run_background(
+            lambda: topic_overviews.refresh_topic_overviews(ctx=ctx, force=force),
+        )
+        items = len(payload.get("items") or []) if isinstance(payload, dict) else 0
+        logger.info(f"Topic overviews materialization completed | items={items} window={ctx.cache_key}")
+    except Exception as e:
+        logger.warning(f"Topic overviews materialization failed: {e}")
+
+
 def _start_question_cards_scheduler() -> None:
     """Start recurring question-card materialization scheduler."""
     global question_cards_scheduler
@@ -1887,6 +1926,28 @@ def _start_opportunity_cards_scheduler() -> None:
     scheduler.start()
     opportunity_cards_scheduler = scheduler
     logger.info(f"Opportunity cards scheduler ready | interval={interval}m")
+
+
+def _start_topic_overviews_scheduler() -> None:
+    """Start recurring topic-overview materialization scheduler."""
+    global topic_overviews_scheduler
+    if not _should_run_topic_overviews_materializer():
+        return
+
+    interval = max(15, int(topic_overviews.get_topic_overviews_refresh_minutes()))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _materialize_topic_overviews_once,
+        "interval",
+        minutes=interval,
+        id="topic-overviews-materializer",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    topic_overviews_scheduler = scheduler
+    logger.info(f"Topic overviews scheduler ready | interval={interval}m")
 
 
 def _normalize_channel_username(raw: str) -> str:
@@ -2347,11 +2408,8 @@ async def topic_detail(
         overview = topic_overviews.get_topic_overview(
             str(payload.get("sourceTopic") or payload.get("name") or topic),
             str(payload.get("category") or category or ""),
-            detail_payload=payload,
-            ctx=ctx,
         )
-        if overview is not None:
-            payload = {**payload, "overview": overview}
+        payload = {**payload, "overview": overview}
         return payload
     except HTTPException:
         raise
@@ -3190,6 +3248,7 @@ async def clear_cache():
     question_briefs.invalidate_question_briefs_cache()
     behavioral_briefs.invalidate_behavioral_briefs_cache()
     opportunity_briefs.invalidate_opportunity_briefs_cache()
+    topic_overviews.invalidate_topic_overviews_cache()
     return {
         "success": True,
         "message": "Cache cleared",
@@ -3247,6 +3306,25 @@ async def debug_refresh_opportunity_briefs():
         }
     except Exception as e:
         logger.error(f"Opportunity briefs debug refresh endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/topic-overviews/debug/refresh")
+async def debug_refresh_topic_overviews():
+    """Force-refresh topic overviews and return stage diagnostics."""
+    try:
+        freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+        ctx = _default_dashboard_context(freshness_snapshot)
+        diagnostics = await run_background(
+            lambda: topic_overviews.refresh_topic_overviews_with_diagnostics(ctx=ctx, force=True),
+        )
+        return {
+            "success": True,
+            "itemsProduced": diagnostics.get("stages", {}).get("finalTopics", 0),
+            "diagnostics": diagnostics,
+        }
+    except Exception as e:
+        logger.error(f"Topic overviews debug refresh endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

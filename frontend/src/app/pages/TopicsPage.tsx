@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, TrendingUp, TrendingDown, MessageCircle, ThumbsUp, Hash, X, Clock, User, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, TrendingUp, TrendingDown, MessageCircle, ThumbsUp, Hash, X, Clock, User, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useSearchParams } from 'react-router';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -33,6 +33,17 @@ function formatTopicTrendTooltip(bucket: string, lang: 'en' | 'ru'): string {
   return new Intl.DateTimeFormat(lang === 'ru' ? 'ru-RU' : 'en-US', {
     year: 'numeric',
     month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(date);
+}
+
+function formatOverviewMetaDate(value: string, lang: 'en' | 'ru'): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(lang === 'ru' ? 'ru-RU' : 'en-US', {
+    year: 'numeric',
+    month: 'short',
     day: 'numeric',
     timeZone: 'UTC',
   }).format(date);
@@ -130,11 +141,6 @@ export function TopicsPage() {
     }
   }, [requestedTopic, searchParams, allTopics, selectedTopic?.id]);
 
-  useEffect(() => {
-    if (!requestedTopic || selectedTopic || !selectedTopicDetail) return;
-    setSelectedTopic(selectedTopicDetail);
-  }, [requestedTopic, selectedTopic, selectedTopicDetail]);
-
   const selectTopic = (topic: TopicDetail, view: 'evidence' | 'questions' = proofView, evidenceId?: string) => {
     setSelectedTopic(topic);
     setProofView(view);
@@ -169,7 +175,12 @@ export function TopicsPage() {
       setSelectedTopic(fresh);
     }
   }, [allTopics, selectedTopic]);
+  useEffect(() => {
+    setHighlightEvidenceId('');
+  }, [range.from, range.to]);
   const activeTopic = selectedTopicDetail || selectedTopic;
+  const activeOverview = activeTopic?.overview || null;
+  const overviewState = activeOverview?.status || 'unavailable';
   const {
     data: evidenceFeed,
     loading: evidenceLoading,
@@ -476,6 +487,96 @@ export function TopicsPage() {
                   <Area type="monotone" dataKey="count" stroke={selectedTopic.color} fill={selectedTopic.color + '20'} strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style={{ backgroundColor: `${selectedTopic.color}18` }}
+                  >
+                    <Sparkles className="w-4 h-4" style={{ color: selectedTopic.color }} />
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500" style={{ fontWeight: 700 }}>
+                      {ru ? 'AI-обзор темы' : 'AI Topic Overview'}
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {activeOverview?.windowStart && activeOverview?.windowEnd
+                        ? (ru
+                          ? `Скользящее AI-окно: ${activeOverview.windowStart} — ${activeOverview.windowEnd}`
+                          : `Rolling AI window: ${activeOverview.windowStart} — ${activeOverview.windowEnd}`)
+                        : (ru ? 'Скользящее AI-окно по последним данным' : 'Rolling AI window from trusted recent data')}
+                    </p>
+                  </div>
+                </div>
+                {activeOverview?.status === 'fallback' && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200 flex-shrink-0" style={{ fontWeight: 600 }}>
+                    {ru ? 'Резервный режим' : 'Fallback'}
+                  </span>
+                )}
+              </div>
+
+              {topicDetailLoading && !selectedTopicDetail ? (
+                <div className="mt-3 space-y-2 animate-pulse">
+                  <div className="h-3 rounded bg-slate-100 w-full" />
+                  <div className="h-3 rounded bg-slate-100 w-11/12" />
+                  <div className="grid gap-2 pt-1">
+                    <div className="h-9 rounded-xl bg-slate-50 border border-slate-100" />
+                    <div className="h-9 rounded-xl bg-slate-50 border border-slate-100" />
+                    <div className="h-9 rounded-xl bg-slate-50 border border-slate-100" />
+                  </div>
+                </div>
+              ) : overviewState === 'unavailable' ? (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <p className="text-sm text-slate-700" style={{ fontWeight: 600 }}>
+                    {ru ? 'AI-обзор темы ещё не готов.' : 'AI Topic Overview is not ready yet.'}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {ru
+                      ? 'Детали темы, динамика и доказательства уже доступны. Обзор появится автоматически после фонового обновления.'
+                      : 'Topic evidence, trend, and detail data are already available. The overview will appear automatically after the next background refresh.'}
+                  </p>
+                </div>
+              ) : overviewState === 'insufficient_evidence' ? (
+                <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-3">
+                  <p className="text-sm text-slate-700" style={{ fontWeight: 600 }}>
+                    {ru ? 'Недостаточно недавних сигналов для надёжного обзора.' : 'Not enough recent evidence for a reliable overview yet.'}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {ru
+                      ? 'Карточка появится автоматически, когда в фоновом AI-окне накопится больше подтверждённых сообщений по теме.'
+                      : 'This card will appear automatically once the rolling AI window has enough grounded topic evidence.'}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="mt-3 text-sm text-slate-700 leading-relaxed">
+                    {ru ? activeOverview.summaryRu : activeOverview.summaryEn}
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {(ru ? activeOverview.signalsRu : activeOverview.signalsEn).slice(0, 3).map((signal) => (
+                      <div key={signal} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                        <p className="text-xs text-slate-700 leading-relaxed" style={{ fontWeight: 500 }}>
+                          {signal}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                    <span>
+                      {ru
+                        ? `Основано на скользящем AI-окне ${activeOverview.windowDays || 0} дн.`
+                        : `Based on a rolling ${activeOverview.windowDays || 0}-day AI window.`}
+                    </span>
+                    <span>
+                      {ru ? 'Обновлено ' : 'Updated '}
+                      {formatOverviewMetaDate(activeOverview.generatedAt, lang)}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Top Channels */}

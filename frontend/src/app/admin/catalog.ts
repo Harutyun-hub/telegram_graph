@@ -26,6 +26,10 @@ export interface AdminPromptGroup {
   id: string;
   labelEn: string;
   labelRu: string;
+  descriptionEn?: string;
+  descriptionRu?: string;
+  badgeEn?: string;
+  badgeRu?: string;
 }
 
 export const ADMIN_TIERS: AdminTierDefinition[] = [
@@ -77,6 +81,15 @@ export const ADMIN_PROMPT_GROUPS: AdminPromptGroup[] = [
   { id: 'question_briefs', labelEn: 'Question Briefs', labelRu: 'Карточки вопросов' },
   { id: 'behavioral_briefs', labelEn: 'Behavioral Briefs', labelRu: 'Поведенческие карточки' },
   { id: 'opportunity_briefs', labelEn: 'Opportunity Briefs', labelRu: 'Карточки возможностей' },
+  {
+    id: 'topic_overviews',
+    labelEn: 'Topic Overviews',
+    labelRu: 'Обзоры тем',
+    descriptionEn: 'Controls the AI summary card shown on each topic detail page.',
+    descriptionRu: 'Управляет AI-сводкой, которая показывается на странице каждой темы.',
+    badgeEn: 'Topic Page AI',
+    badgeRu: 'AI темы',
+  },
   { id: 'recommendation_briefs', labelEn: 'Recommendations', labelRu: 'Рекомендации' },
 ];
 
@@ -178,6 +191,14 @@ export const ADMIN_PROMPT_DEFINITIONS: AdminPromptDefinition[] = [
     descriptionRu: 'Формирует финальные карточки бизнес-возможностей.',
   },
   {
+    key: 'topic_overviews.synthesis_prompt',
+    groupId: 'topic_overviews',
+    labelEn: 'Topic overview prompt',
+    labelRu: 'Промпт обзора тем',
+    descriptionEn: 'Builds the AI overview shown on the topic detail page.',
+    descriptionRu: 'Формирует AI-обзор, который показывается на странице темы.',
+  },
+  {
     key: 'recommendation_briefs.extraction_prompt',
     groupId: 'recommendation_briefs',
     labelEn: 'Recommendation extraction prompt',
@@ -192,13 +213,17 @@ export const DEFAULT_ADMIN_RUNTIME: AdminRuntimeConfig = {
   questionBriefsModel: 'gpt-5.4-mini',
   behavioralBriefsModel: 'gpt-5.4-mini',
   opportunityBriefsModel: 'gpt-5.4-mini',
+  topicOverviewsModel: 'gpt-5.4-mini',
   questionBriefsPromptVersion: 'qcards-v2',
   behavioralBriefsPromptVersion: 'behavior-v2',
   opportunityBriefsPromptVersion: 'opportunity-v1',
+  topicOverviewsPromptVersion: 'topic-overview-v2',
+  topicOverviewsRefreshMinutes: '120',
   aiPostPromptStyle: 'compact',
   featureQuestionBriefsAi: true,
   featureBehavioralBriefsAi: true,
   featureOpportunityBriefsAi: true,
+  featureTopicOverviewsAi: true,
 };
 
 export function createDefaultAdminConfig(): AdminConfig {
