@@ -76,6 +76,32 @@ class DetailCacheBehaviorTests(unittest.TestCase):
         self.assertEqual(payload, [{"topic": "cached"}])
         self.assertEqual(cache_mock.call_args.kwargs["ttl_seconds"], aggregator.TOPICS_PAGE_CACHE_TTL_SECONDS)
 
+    def test_topic_detail_injects_overview_fallback_when_backend_payload_has_none(self) -> None:
+        ctx = aggregator._default_dashboard_context()
+        raw_payload = {
+            "name": "Armenian Government Performance",
+            "category": "Government & Leadership",
+            "mentionCount": 155,
+            "currentMentions": 155,
+            "previousMentions": 283,
+            "growth7dPct": -45,
+            "sentimentPositive": 3,
+            "sentimentNegative": 83,
+            "distinctUsers": 53,
+            "distinctChannels": 10,
+            "topChannels": ["Armenian Life", "Channel 2"],
+            "evidence": [{"id": "msg-1", "timestamp": "2026-03-30T07:33:14Z"}],
+        }
+
+        with patch.object(aggregator, "_get_cached_detail_value", return_value=raw_payload):
+            payload = aggregator.get_topic_detail("Armenian Government Performance", "Government & Leadership", ctx)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["overview"]["status"], "fallback")
+        self.assertEqual(payload["overview"]["windowStart"], ctx.from_date.isoformat())
+        self.assertEqual(payload["overview"]["windowEnd"], ctx.to_date.isoformat())
+        self.assertIn("Armenian Government Performance", payload["overview"]["summaryEn"])
+
 
 class _DummySession:
     def __init__(self, *, value=None, error: Exception | None = None):
