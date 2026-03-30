@@ -4,9 +4,9 @@
 - Phase: `Release A`
 - State: `IN_PROGRESS`
 - Branch: `codex/release-a-reconcile-20260328`
-- Deployed commit: `745563e`
+- Deployed commit: `0497e92`
 - Railway service: `telegram_graph`
-- Railway deployment id: `db676846-51d0-4621-852c-d913cabbae49`
+- Railway deployment id: `a8dcaa6e-1b46-443c-baf1-40a68ef23096`
 
 ## Window
 - Soak start: `2026-03-28 16:16:55 +04:00`
@@ -64,6 +64,11 @@
 | 2026-03-30 11:07 | Topics list | WARN | `200`, but `10.34s` |
 | 2026-03-30 11:07 | Freshness | WARN | `200`, but `8.13s` |
 | 2026-03-30 11:07 | Historical range check 1 follow-up | PASS | first request `200` in `10.49s` with `fastpath`; second request `200` in `1.29s` from memory |
+| 2026-03-30 12:01 | Release A fix deploy | PASS | deployed `0497e92` to `telegram_graph`; Railway build and `/api/health` healthcheck passed |
+| 2026-03-30 12:02 | Readiness + freshness | PASS | `/readyz` -> `200` in `0.66s`; `/api/freshness` -> `200` in `0.60s`; health and operational status both `healthy` |
+| 2026-03-30 12:02 | Default dashboard | PASS | `200` in `1.34s`; metadata showed `cacheSource=memory`, `cacheStatus=memory_fresh` |
+| 2026-03-30 12:02 | Topics list | PASS | `200` in `1.28s` for `page=0,size=100` |
+| 2026-03-30 12:02 | Historical range check 1 | HOLD | `200` in `8.16s`; metadata showed `cacheSource=fastpath`, `cacheStatus=historical_fastpath_while_revalidate`, `persistedReadStatus=hit` |
 |  | Historical range check 2 | PENDING |  |
 |  | Historical range check 3 | PENDING |  |
 
