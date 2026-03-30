@@ -137,6 +137,13 @@ export const router = createBrowserRouter([
             },
           },
           {
+            path: "social-media",
+            lazy: async () => {
+              const { SocialActivitiesPage } = await import("./pages/SocialActivitiesPage");
+              return { Component: SocialActivitiesPage };
+            },
+          },
+          {
             path: "sources",
             lazy: async () => {
               const { SourcesPage } = await import("./pages/SourcesPage");

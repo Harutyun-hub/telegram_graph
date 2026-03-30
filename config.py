@@ -44,12 +44,19 @@ TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")  # For Railwa
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SOCIAL_SUPABASE_URL = os.getenv("SOCIAL_SUPABASE_URL", "").strip()
+SOCIAL_SUPABASE_SERVICE_ROLE_KEY = os.getenv("SOCIAL_SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SOCIAL_DATABASE_URL = os.getenv("SOCIAL_DATABASE_URL", "").strip()
 
 # ── Neo4j ─────────────────────────────────────────────────────────────────────
 NEO4J_URI      = os.getenv("NEO4J_URI", "")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+SOCIAL_NEO4J_URI = os.getenv("SOCIAL_NEO4J_URI", "").strip()
+SOCIAL_NEO4J_USERNAME = os.getenv("SOCIAL_NEO4J_USERNAME", "neo4j").strip()
+SOCIAL_NEO4J_PASSWORD = os.getenv("SOCIAL_NEO4J_PASSWORD", "").strip()
+SOCIAL_NEO4J_DATABASE = os.getenv("SOCIAL_NEO4J_DATABASE", "neo4j").strip()
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 # Prefer standard OPENAI_API_KEY, but keep backward compatibility with OpenAI_API.
@@ -69,6 +76,10 @@ ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQU
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
 ENABLE_SCRAPER_SCHEDULER = _env_bool("ENABLE_SCRAPER_SCHEDULER", True)
 REQUIRE_TELEGRAM_CREDENTIALS = _env_bool("REQUIRE_TELEGRAM_CREDENTIALS", not IS_STAGING)
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+ENABLE_DEBUG_ENDPOINTS = _env_bool("ENABLE_DEBUG_ENDPOINTS", not IS_LOCKED_ENV)
+SCRAPECREATORS_API_KEY = os.getenv("SCRAPECREATORS_API_KEY", "").strip()
 ENABLE_CARD_MATERIALIZERS = _env_bool("ENABLE_CARD_MATERIALIZERS", True)
 ENABLE_QUESTION_CARD_MATERIALIZER = _env_bool(
     "ENABLE_QUESTION_CARD_MATERIALIZER",
@@ -210,6 +221,25 @@ AI_NORMAL_SYNC_LIMIT = int(os.getenv("AI_NORMAL_SYNC_LIMIT", "80"))
 AI_CATCHUP_COMMENT_LIMIT = int(os.getenv("AI_CATCHUP_COMMENT_LIMIT", "220"))
 AI_CATCHUP_POST_LIMIT = int(os.getenv("AI_CATCHUP_POST_LIMIT", "120"))
 AI_CATCHUP_SYNC_LIMIT = int(os.getenv("AI_CATCHUP_SYNC_LIMIT", "320"))
+
+# ── Social Media Activities ───────────────────────────────────────────────────
+SOCIAL_FETCH_MAX_PAGES = max(1, int(os.getenv("SOCIAL_FETCH_MAX_PAGES", "3")))
+SOCIAL_FETCH_PAGE_SIZE = max(1, int(os.getenv("SOCIAL_FETCH_PAGE_SIZE", "50")))
+SOCIAL_ANALYSIS_BATCH_SIZE = max(1, min(int(os.getenv("SOCIAL_ANALYSIS_BATCH_SIZE", "8")), 8))
+SOCIAL_ANALYSIS_MODEL = os.getenv("SOCIAL_ANALYSIS_MODEL", OPENAI_MODEL).strip() or OPENAI_MODEL
+SOCIAL_ANALYSIS_PROMPT_VERSION = os.getenv("SOCIAL_ANALYSIS_PROMPT_VERSION", "social-v1").strip() or "social-v1"
+SOCIAL_GRAPH_PROJECTION_VERSION = os.getenv("SOCIAL_GRAPH_PROJECTION_VERSION", "social-graph-v1").strip() or "social-graph-v1"
+SOCIAL_TIKTOK_ENABLED = _env_bool("SOCIAL_TIKTOK_ENABLED", False)
+SOCIAL_RUNTIME_ENABLED = _env_bool("SOCIAL_RUNTIME_ENABLED", False)
+SOCIAL_ACTIVITY_RETENTION_DAYS = max(30, int(os.getenv("SOCIAL_ACTIVITY_RETENTION_DAYS", "365")))
+SOCIAL_PAYLOAD_RETENTION_DAYS = max(7, int(os.getenv("SOCIAL_PAYLOAD_RETENTION_DAYS", "90")))
+SOCIAL_STAGE_CLAIM_LIMIT = max(1, int(os.getenv("SOCIAL_STAGE_CLAIM_LIMIT", "120")))
+SOCIAL_STAGE_LEASE_SECONDS = max(60, int(os.getenv("SOCIAL_STAGE_LEASE_SECONDS", "900")))
+SOCIAL_RETRY_BASE_SECONDS = max(30, int(os.getenv("SOCIAL_RETRY_BASE_SECONDS", "120")))
+SOCIAL_RETRY_MAX_SECONDS = max(
+    SOCIAL_RETRY_BASE_SECONDS,
+    int(os.getenv("SOCIAL_RETRY_MAX_SECONDS", "3600")),
+)
 
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():

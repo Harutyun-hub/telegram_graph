@@ -87,6 +87,12 @@ from api import opportunity_briefs
 from api import question_briefs
 from api import recommendation_briefs
 from api import topic_overviews
+from api.social_api import (
+    probe_social_subsystem_status,
+    router as social_router,
+    shutdown_social_runtime,
+    startup_social_runtime,
+)
 from api.admin_runtime import (
     get_admin_config_runtime_warning,
     load_admin_config_raw,
@@ -125,8 +131,19 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
 
 
+def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
+    if config.IS_STAGING:
+        if role != "web":
+            logger.warning("Staging/testing environment forced to APP_ROLE=web (was {})", role)
+        if warmers_enabled:
+            logger.warning("Staging/testing environment forced to RUN_STARTUP_WARMERS=false")
+        return "web", False
+    return role, warmers_enabled
+
+
 APP_ROLE = _normalize_app_role(os.getenv("APP_ROLE"))
 RUN_STARTUP_WARMERS = str(os.getenv("RUN_STARTUP_WARMERS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+APP_ROLE, RUN_STARTUP_WARMERS = _apply_testing_release_invariants(APP_ROLE, RUN_STARTUP_WARMERS)
 SENTRY_DSN = str(os.getenv("SENTRY_DSN", "")).strip()
 SENTRY_TRACES_SAMPLE_RATE = max(0.0, min(float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.05")), 1.0))
 _DASHBOARD_RESPONSE_DROP_KEYS = {"trendData", "voiceData", "integrationLevels", "housingHotTopics"}
@@ -821,6 +838,30 @@ async def app_lifespan(_app: FastAPI):
     log_executor_configuration()
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
+    social_probe_started_at = time.perf_counter()
+    social_status = probe_social_subsystem_status(force=True)
+    startup_phases["socialProbeMs"] = round((time.perf_counter() - social_probe_started_at) * 1000, 2)
+    logger.info(
+        "Social subsystem | available={} runtime_enabled={} detail={}",
+        bool(social_status.get("available")),
+        bool(config.SOCIAL_RUNTIME_ENABLED),
+        str(social_status.get("detail") or ""),
+    )
+
+    social_runtime_started = False
+    if bool(social_status.get("available")) and config.SOCIAL_RUNTIME_ENABLED and _should_run_background_jobs():
+        social_runtime_boot_at = time.perf_counter()
+        await startup_social_runtime()
+        startup_phases["socialRuntimeStartupMs"] = round((time.perf_counter() - social_runtime_boot_at) * 1000, 2)
+        social_runtime_started = True
+    else:
+        logger.info(
+            "Social runtime inactive | available={} runtime_enabled={} background_jobs_enabled={}",
+            bool(social_status.get("available")),
+            bool(config.SOCIAL_RUNTIME_ENABLED),
+            _should_run_background_jobs(),
+        )
+
     if _should_run_scraper_scheduler():
         scheduler_started_at = time.perf_counter()
         scheduler = get_scraper_scheduler()
@@ -872,6 +913,9 @@ async def app_lifespan(_app: FastAPI):
                 "scraper_scheduler_enabled": _should_run_scraper_scheduler(),
                 "card_materializers_enabled": _should_run_any_card_materializers(),
                 "topic_overviews_materializer_enabled": _should_run_topic_overviews_materializer(),
+                "social_subsystem_available": bool(social_status.get("available")),
+                "social_runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
+                "social_runtime_started": social_runtime_started,
                 "run_startup_warmers": RUN_STARTUP_WARMERS,
                 "requestExecutorWorkers": request_executor_workers(),
                 "backgroundExecutorWorkers": background_executor_workers(),
@@ -915,6 +959,7 @@ async def app_lifespan(_app: FastAPI):
         if scraper_scheduler is not None:
             await scraper_scheduler.shutdown(wait_for_cycle_seconds=30.0)
             scraper_scheduler = None
+        await shutdown_social_runtime()
         shutdown_background_executor(wait=True)
         shutdown_request_executor(wait=True)
         supabase_writer = None
@@ -938,6 +983,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(social_router)
 
 
 def _format_server_timing(request: Request, total_ms: float) -> str:

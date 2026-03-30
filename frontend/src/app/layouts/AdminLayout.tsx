@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Share2, Settings, Search, Bell, User, Hash, Radio,
   Calendar, Users, LogOut, ChevronRight, AlertTriangle, TrendingUp,
   Newspaper, CheckCheck, X, Shield, Menu, Globe, Sparkles, ChevronUp,
+  Megaphone,
   PlusCircle, Loader2,
 } from 'lucide-react';
 import { LogoIcon } from '@/app/components/Logo';
@@ -238,6 +239,7 @@ export function AdminLayout() {
     { label: ru ? 'Каналы' : 'Channels', path: '/channels', icon: Radio },
     { label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
     { label: ru ? 'Граф связей' : 'Graph', path: '/graph', icon: Share2 },
+    { label: 'Social Media', path: '/social-media', icon: Megaphone },
     { label: ru ? 'Источники' : 'Sources', path: '/sources', icon: PlusCircle },
     { label: ru ? 'Админ' : 'Admin', path: '/admin', icon: Shield },
     { label: ru ? 'Настройки' : 'Settings', path: '/settings', icon: Settings },
