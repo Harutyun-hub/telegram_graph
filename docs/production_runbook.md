@@ -1,7 +1,8 @@
 # Production Runbook
 
 ## Release A Posture
-- Source-of-truth stabilization line: `98185fe + c717f87`
+- Source-of-truth stabilization line: `codex/release-a-reconcile-20260328`
+- Release A status: `HOLD`
 - Current production runtime remains single-service:
   - one backend service
   - `APP_ROLE=all`
@@ -47,6 +48,21 @@
   - no day-over-day increase in Neo4j routing, pool, or defunct-connection errors
   - no return of the raw dashboard timeout/failure path on normal or historical user traffic
 
+## Release A Exit Gate
+- `PASS` only when:
+  - all required historical range checks are complete
+  - `/api/topics/detail` and `/api/topics/evidence` validation is complete
+  - the final soak conclusion is written into `docs/release_a_soak_report.md`
+  - no new instability trend appears during the closeout window
+- `HOLD` when:
+  - the runtime is stable enough to stay live
+  - evidence is still incomplete
+  - no fresh regression requires rollback
+- `FAIL` only when:
+  - dashboard failures or readiness failures return
+  - scheduler success falls below threshold
+  - Neo4j instability trends upward again
+
 ## Smoke Commands
 Manual smoke:
 
@@ -83,3 +99,11 @@ make qa-frontend
 - Release B will introduce staging-only `web + worker + Redis` validation and locked-environment gates.
 - Release C will introduce the production split, controlled materializer rollout, and the backup/restore exit gate.
 - Do not treat those future controls as already-live production behavior in Release A documentation or deployment instructions.
+
+## Next Approved Sequence
+1. Close Release A with a written `PASS` or `HOLD` decision.
+2. Move staging off production-grade data/services before trusting it as pre-production.
+3. Realign `main` only after staging isolation and staging smoke are green.
+4. Merge Social into staging first; merge Graph only after Social staging smoke passes.
+5. Start Release B in staging only.
+6. Prepare the Release C cutover runbook during Release B staging validation, before any production split rollout.
