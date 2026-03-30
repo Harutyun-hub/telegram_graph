@@ -86,6 +86,7 @@ from api import behavioral_briefs
 from api import opportunity_briefs
 from api import question_briefs
 from api import recommendation_briefs
+from api import topic_overviews
 from api.admin_runtime import (
     get_admin_config_runtime_warning,
     load_admin_config_raw,
@@ -1099,15 +1100,19 @@ ADMIN_RUNTIME_STRING_KEYS = {
     "questionBriefsModel",
     "behavioralBriefsModel",
     "opportunityBriefsModel",
+    "topicOverviewsModel",
     "questionBriefsPromptVersion",
     "behavioralBriefsPromptVersion",
     "opportunityBriefsPromptVersion",
+    "topicOverviewsPromptVersion",
+    "topicOverviewsRefreshMinutes",
     "aiPostPromptStyle",
 }
 ADMIN_RUNTIME_BOOL_KEYS = {
     "featureQuestionBriefsAi",
     "featureBehavioralBriefsAi",
     "featureOpportunityBriefsAi",
+    "featureTopicOverviewsAi",
 }
 
 
@@ -1118,6 +1123,7 @@ def _admin_prompt_defaults() -> dict[str, str]:
         question_briefs.get_admin_prompt_defaults,
         behavioral_briefs.get_admin_prompt_defaults,
         opportunity_briefs.get_admin_prompt_defaults,
+        topic_overviews.get_admin_prompt_defaults,
         recommendation_briefs.get_admin_prompt_defaults,
     ):
         defaults.update(provider())
@@ -1179,13 +1185,17 @@ def _default_admin_config() -> dict[str, Any]:
             "questionBriefsModel": config.QUESTION_BRIEFS_MODEL,
             "behavioralBriefsModel": config.BEHAVIORAL_BRIEFS_MODEL,
             "opportunityBriefsModel": config.OPPORTUNITY_BRIEFS_MODEL,
+            "topicOverviewsModel": config.TOPIC_OVERVIEWS_MODEL,
             "questionBriefsPromptVersion": config.QUESTION_BRIEFS_PROMPT_VERSION,
             "behavioralBriefsPromptVersion": config.BEHAVIORAL_BRIEFS_PROMPT_VERSION,
             "opportunityBriefsPromptVersion": config.OPPORTUNITY_BRIEFS_PROMPT_VERSION,
+            "topicOverviewsPromptVersion": config.TOPIC_OVERVIEWS_PROMPT_VERSION,
+            "topicOverviewsRefreshMinutes": str(config.TOPIC_OVERVIEWS_REFRESH_MINUTES),
             "aiPostPromptStyle": config.AI_POST_PROMPT_STYLE,
             "featureQuestionBriefsAi": bool(config.FEATURE_QUESTION_BRIEFS_AI),
             "featureBehavioralBriefsAi": bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI),
             "featureOpportunityBriefsAi": bool(config.FEATURE_OPPORTUNITY_BRIEFS_AI),
+            "featureTopicOverviewsAi": bool(config.FEATURE_TOPIC_OVERVIEWS_AI),
         },
     }
 
@@ -1208,11 +1218,15 @@ def _active_ai_runtime_summary() -> dict[str, str | bool]:
         "questionBriefsModel": str(_runtime_value("questionBriefsModel", config.QUESTION_BRIEFS_MODEL)),
         "behavioralBriefsModel": str(_runtime_value("behavioralBriefsModel", config.BEHAVIORAL_BRIEFS_MODEL)),
         "opportunityBriefsModel": str(_runtime_value("opportunityBriefsModel", config.OPPORTUNITY_BRIEFS_MODEL)),
+        "topicOverviewsModel": str(_runtime_value("topicOverviewsModel", config.TOPIC_OVERVIEWS_MODEL)),
         "questionBriefsPromptVersion": str(_runtime_value("questionBriefsPromptVersion", config.QUESTION_BRIEFS_PROMPT_VERSION)),
         "behavioralBriefsPromptVersion": str(_runtime_value("behavioralBriefsPromptVersion", config.BEHAVIORAL_BRIEFS_PROMPT_VERSION)),
         "opportunityBriefsPromptVersion": str(_runtime_value("opportunityBriefsPromptVersion", config.OPPORTUNITY_BRIEFS_PROMPT_VERSION)),
+        "topicOverviewsPromptVersion": str(_runtime_value("topicOverviewsPromptVersion", config.TOPIC_OVERVIEWS_PROMPT_VERSION)),
+        "topicOverviewsRefreshMinutes": str(_runtime_value("topicOverviewsRefreshMinutes", config.TOPIC_OVERVIEWS_REFRESH_MINUTES)),
         "aiPostPromptStyle": str(_runtime_value("aiPostPromptStyle", config.AI_POST_PROMPT_STYLE)),
         "featureExtractionV2": bool(config.FEATURE_EXTRACTION_V2),
+        "featureTopicOverviewsAi": bool(_runtime_value("featureTopicOverviewsAi", config.FEATURE_TOPIC_OVERVIEWS_AI)),
     }
 
 
@@ -2330,6 +2344,14 @@ async def topic_detail(
         _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
+        overview = topic_overviews.get_topic_overview(
+            str(payload.get("sourceTopic") or payload.get("name") or topic),
+            str(payload.get("category") or category or ""),
+            detail_payload=payload,
+            ctx=ctx,
+        )
+        if overview is not None:
+            payload = {**payload, "overview": overview}
         return payload
     except HTTPException:
         raise
