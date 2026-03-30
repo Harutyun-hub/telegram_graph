@@ -58,6 +58,12 @@
 | 2026-03-29 00:40 | Topics detail | PENDING |  |
 | 2026-03-29 00:40 | Topics evidence | PENDING |  |
 | 2026-03-29 00:40 | Historical range check 1 | PASS | `200` in `7.30s`; metadata showed `cacheSource=fastpath`, `cacheStatus=historical_fastpath_while_revalidate` |
+| 2026-03-30 11:06 | Readiness + health | PASS | `/readyz` -> `200` in `2.38s`; `/api/health` -> `200` in `2.37s` with `neo4j=connected` |
+| 2026-03-30 11:07 | Default dashboard | WARN | first request `200` in `28.31s`; metadata showed `cacheSource=rebuild`, `cacheStatus=refresh_success` |
+| 2026-03-30 11:07 | Default dashboard follow-up | PASS | second request `200` in `1.37s`; metadata showed `cacheSource=memory`, `cacheStatus=memory_fresh` |
+| 2026-03-30 11:07 | Topics list | WARN | `200`, but `10.34s` |
+| 2026-03-30 11:07 | Freshness | WARN | `200`, but `8.13s` |
+| 2026-03-30 11:07 | Historical range check 1 follow-up | PASS | first request `200` in `10.49s` with `fastpath`; second request `200` in `1.29s` from memory |
 |  | Historical range check 2 | PENDING |  |
 |  | Historical range check 3 | PENDING |  |
 
@@ -69,7 +75,7 @@ For each sampled uncached range, record:
 
 | Range | First Request | First Latency | Degraded Fast Path | Follow-up Cached Within 60s | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `2026-02-18` to `2026-03-04` | `200` | `7.30s` | `YES` | PENDING | `degradedTiers=["predictive","comparative","network"]`, `cacheSource=fastpath`, `persistedReadStatus=hit` |
+| `2026-02-18` to `2026-03-04` | `200` | `7.30s` on `2026-03-29`, `10.49s` on `2026-03-30` | `YES` | `YES` | first responses used `fastpath`; follow-up on `2026-03-30` returned `memory_fresh` in `1.29s`; `degradedTiers=["predictive","comparative","network"]`, `persistedReadStatus=hit` |
 | TBD | PENDING | PENDING | PENDING | PENDING |  |
 | TBD | PENDING | PENDING | PENDING | PENDING |  |
 
@@ -85,6 +91,7 @@ Record every anomaly during the soak:
 | --- | --- | --- | --- | --- |
 | 2026-03-29 00:03 | Dashboard / topics / AI pipeline | Dashboard and historical dashboard were slow (`29.70s` and `37.57s`), topics took `15.05s`, and live logs showed OpenAI `429 insufficient_quota` failures | Service remained available, but performance and AI enrichment were degraded | Held Release A, investigated quota issue, and rechecked after OpenAI fix |
 | 2026-03-29 00:40 | AI pipeline recovery | Logs showed `AI analysis complete — saved=8`, `Post AI analysis complete — saved=16`, and the scheduler cycle completed with `ai_failed_items=0` | AI enrichment recovered; user-facing latency returned to expected Phase 1 range on sampled endpoints | Continue soak; no rollback |
+| 2026-03-30 11:07 | Dashboard / topics latency caveat | Default dashboard first-hit rebuild took `28.31s`, topics took `10.34s`, and freshness took `8.13s`; logs show repeated slow Neo4j reads/writes but no defunct/routing/pool failures | Service remained available and caches settled correctly, but first-hit and some data-heavy endpoints are still slower than Release A targets | Continue soak, keep Release B paused, and treat status as stable-with-performance-caveats |
 
 ## Decision Gate
 - `PASS` only if the full 72-hour window meets all Release A thresholds.
