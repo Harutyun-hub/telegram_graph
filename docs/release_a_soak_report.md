@@ -2,7 +2,7 @@
 
 ## Status
 - Phase: `Release A`
-- State: `IN_PROGRESS`
+- State: `HOLD`
 - Branch: `codex/release-a-reconcile-20260328`
 - Deployed commit: `0497e92`
 - Railway service: `telegram_graph`
@@ -69,8 +69,11 @@
 | 2026-03-30 12:02 | Default dashboard | PASS | `200` in `1.34s`; metadata showed `cacheSource=memory`, `cacheStatus=memory_fresh` |
 | 2026-03-30 12:02 | Topics list | PASS | `200` in `1.28s` for `page=0,size=100` |
 | 2026-03-30 12:02 | Historical range check 1 | HOLD | `200` in `8.16s`; metadata showed `cacheSource=fastpath`, `cacheStatus=historical_fastpath_while_revalidate`, `persistedReadStatus=hit` |
-|  | Historical range check 2 | PENDING |  |
-|  | Historical range check 3 | PENDING |  |
+| 2026-03-30 21:18 | Readiness + freshness | PASS | `/readyz` -> `200` in `8.92s`; `/api/freshness` -> `200` in `0.46s`; operational status remained `healthy` |
+| 2026-03-30 21:18 | Topics detail | PASS | `200` in `0.71s` for `Armenian Government Performance`; `overview.status=ready`, `evidenceCount=166` |
+| 2026-03-30 21:18 | Topics evidence | PASS | `200` in `0.87s`; `20` evidence rows returned with `hasMore=true` |
+| 2026-03-30 21:18 | Historical range check 2 | PASS | `2026-02-01..2026-02-14`: first request `200` in `9.41s` with `fastpath`; follow-up `200` in `1.07s` from `memory_fresh` |
+| 2026-03-30 21:18 | Historical range check 3 | PASS | `2026-01-15..2026-01-29`: first request `200` in `9.39s` with `fastpath`; follow-up `200` in `1.58s` from `memory_fresh` |
 
 ## Historical Range Validation
 For each sampled uncached range, record:
@@ -81,8 +84,8 @@ For each sampled uncached range, record:
 | Range | First Request | First Latency | Degraded Fast Path | Follow-up Cached Within 60s | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `2026-02-18` to `2026-03-04` | `200` | `7.30s` on `2026-03-29`, `10.49s` on `2026-03-30` | `YES` | `YES` | first responses used `fastpath`; follow-up on `2026-03-30` returned `memory_fresh` in `1.29s`; `degradedTiers=["predictive","comparative","network"]`, `persistedReadStatus=hit` |
-| TBD | PENDING | PENDING | PENDING | PENDING |  |
-| TBD | PENDING | PENDING | PENDING | PENDING |  |
+| `2026-02-01` to `2026-02-14` | `200` | `9.41s` on `2026-03-30` | `YES` | `YES` | first response used `fastpath`; follow-up returned `memory_fresh` in `1.07s` |
+| `2026-01-15` to `2026-01-29` | `200` | `9.39s` on `2026-03-30` | `YES` | `YES` | first response used `fastpath`; follow-up returned `memory_fresh` in `1.58s` |
 
 ## Incident Log
 Record every anomaly during the soak:
@@ -102,6 +105,16 @@ Record every anomaly during the soak:
 - `PASS` only if the full 72-hour window meets all Release A thresholds.
 - `HOLD` if any threshold is uncertain or evidence is incomplete.
 - `FAIL` if dashboard failures return, scheduler success falls below threshold, or Neo4j instability trends upward.
+
+## Current Decision
+- Current state remains `HOLD`, not `PASS`.
+- Reason:
+  - the previously pending endpoint and historical checks are now complete and passing
+  - but the soak window does not end until `2026-03-31 16:16:55 +04:00`
+  - Release A should not be marked `PASS` before the full 72-hour window has elapsed
+- Closeout note:
+  - as of `2026-03-30 21:18 +04:00`, Release A evidence is materially complete and current production behavior is healthy enough to continue operating without rollback
+  - the only remaining requirement for a formal `PASS` decision is completion of the soak window without a fresh regression
 
 ## Next Step After Soak
 - If `PASS`: begin Release B staging-only split readiness work.
