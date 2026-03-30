@@ -50,6 +50,10 @@ WAIT_FOR_EMPTY_REFRESH_SECONDS = max(
 MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+TOPICS_PAGE_CACHE_TTL_SECONDS = max(
+    DETAIL_CACHE_TTL_SECONDS,
+    int(os.getenv("TOPICS_PAGE_CACHE_TTL_SECONDS", "900")),
+)
 DETAIL_MAX_STALE_SECONDS = max(
     DETAIL_CACHE_TTL_SECONDS,
     int(os.getenv("DETAIL_MAX_STALE_SECONDS", "1800")),
@@ -1105,7 +1109,11 @@ def get_topics_page(
 ) -> list[dict]:
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"topics:{resolved_ctx.cache_key}:{page}:{size}"
-    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_topics(page, size, resolved_ctx))
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_all_topics(page, size, resolved_ctx),
+        ttl_seconds=TOPICS_PAGE_CACHE_TTL_SECONDS,
+    )
 
 
 def get_channels_page(ctx: Optional[DashboardDateContext] = None) -> list[dict]:

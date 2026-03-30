@@ -68,6 +68,14 @@ class DetailCacheBehaviorTests(unittest.TestCase):
             with self.assertRaises(aggregator.DetailRefreshUnavailableError):
                 aggregator._get_cached_detail_value(cache_key, lambda: [{"topic": "fresh"}])
 
+    def test_topics_page_uses_extended_topics_cache_ttl(self) -> None:
+        ctx = aggregator._default_dashboard_context()
+        with patch.object(aggregator, "_get_cached_detail_value", return_value=[{"topic": "cached"}]) as cache_mock:
+            payload = aggregator.get_topics_page(page=0, size=100, ctx=ctx)
+
+        self.assertEqual(payload, [{"topic": "cached"}])
+        self.assertEqual(cache_mock.call_args.kwargs["ttl_seconds"], aggregator.TOPICS_PAGE_CACHE_TTL_SECONDS)
+
 
 class _DummySession:
     def __init__(self, *, value=None, error: Exception | None = None):

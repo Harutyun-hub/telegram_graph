@@ -132,6 +132,45 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         refresh_mock.assert_called_once()
         rebuild_mock.assert_not_called()
 
+    def test_default_dashboard_uses_recent_persisted_fallback_when_alias_missing(self) -> None:
+        current_ctx = self._ctx()
+        fallback_ctx = SimpleNamespace(
+            from_date=datetime(2026, 3, 7, tzinfo=timezone.utc).date(),
+            to_date=datetime(2026, 3, 21, tzinfo=timezone.utc).date(),
+            days=15,
+            is_operational=False,
+            range_label="2026-03-07..2026-03-21",
+            cache_key="2026-03-07:2026-03-21",
+        )
+        fallback = {
+            "status": "hit",
+            "readMs": 18.6,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(is_stale=True),
+            "ctx": fallback_ctx,
+            "snapshotBuiltAt": datetime(2026, 3, 21, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-21",
+        }
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=current_ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=current_ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
+             patch.object(server, "_load_recent_default_dashboard_snapshot", return_value=fallback), \
+             patch.object(server, "_ensure_background_dashboard_refresh", return_value=True) as refresh_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
+             patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
+            payload = server._build_dashboard_response_payload(None, None)
+
+        self.assertEqual(payload["meta"]["cacheSource"], "persisted")
+        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_recent_fallback_while_revalidate")
+        self.assertEqual(payload["meta"]["trustedEndDate"], "2026-03-21")
+        self.assertEqual(payload["meta"]["requestedTo"], "2026-03-22")
+        refresh_mock.assert_called_once()
+        prime_mock.assert_called_once()
+        rebuild_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

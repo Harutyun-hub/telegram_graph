@@ -13,6 +13,10 @@ from api import db
 _CACHE: dict | None = None
 _CACHE_TS: Optional[datetime] = None
 _CACHE_TTL_SECONDS = max(30, int(os.getenv("FRESHNESS_CACHE_TTL_SECONDS", "300")))
+_MAX_STALE_SECONDS = max(
+    _CACHE_TTL_SECONDS,
+    int(os.getenv("FRESHNESS_MAX_STALE_SECONDS", "1800")),
+)
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -247,6 +251,18 @@ def get_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
     global _CACHE, _CACHE_TS
     now = datetime.now(timezone.utc)
     if _CACHE and _CACHE_TS and (now - _CACHE_TS).total_seconds() < _CACHE_TTL_SECONDS:
+        return dict(_CACHE), _CACHE_TS
+    return None, _CACHE_TS
+
+
+def freshness_max_stale_seconds() -> int:
+    return _MAX_STALE_SECONDS
+
+
+def get_latest_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
+    global _CACHE, _CACHE_TS
+    now = datetime.now(timezone.utc)
+    if _CACHE and _CACHE_TS and (now - _CACHE_TS).total_seconds() < _MAX_STALE_SECONDS:
         return dict(_CACHE), _CACHE_TS
     return None, _CACHE_TS
 
