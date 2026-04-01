@@ -533,12 +533,12 @@ export function TopicsPage() {
               ) : overviewState === 'unavailable' ? (
                 <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <p className="text-sm text-slate-700" style={{ fontWeight: 600 }}>
-                    {ru ? 'AI-обзор темы временно недоступен в текущей версии бэкенда.' : 'AI Topic Overview is temporarily unavailable in the current backend release.'}
+                    {ru ? 'AI-обзор темы ещё не готов.' : 'AI Topic Overview is not ready yet.'}
                   </p>
                   <p className="text-xs text-slate-500 mt-1">
                     {ru
-                      ? 'Детали темы, динамика и доказательства остаются актуальными. Обзор вернётся автоматически после совместимого обновления бэкенда.'
-                      : 'Topic evidence, trend, and detail data remain valid. The overview card will return automatically after a compatible backend update.'}
+                      ? 'Детали темы, динамика и доказательства уже доступны. Обзор появится автоматически после фонового обновления.'
+                      : 'Topic evidence, trend, and detail data are already available. The overview will appear automatically after the next background refresh.'}
                   </p>
                 </div>
               ) : overviewState === 'insufficient_evidence' ? (

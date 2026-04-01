@@ -5,7 +5,7 @@ import type { AudienceMember, AudienceMessage, ChannelDetail, ChannelPost, Pagin
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 
 const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const SUMMARY_PAGE_SIZE = 500;
+const SUMMARY_PAGE_SIZE = 250;
 const DEFAULT_FEED_PAGE_SIZE = 20;
 
 function asNum(v: any, fallback = 0): number {

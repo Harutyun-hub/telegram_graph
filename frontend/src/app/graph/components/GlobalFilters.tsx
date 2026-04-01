@@ -1,975 +1,422 @@
-import { Calendar, Check, Filter, RotateCcw, ChevronLeft, ChevronDown, Search, Layers, Target } from 'lucide-react';
+import { ChevronLeft, Filter, Radio, RotateCcw, Search, SlidersHorizontal } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Checkbox } from '@/app/components/ui/checkbox';
-import { useState, useEffect, useRef } from 'react';
-import { getAllChannels, getTopChannels, getTrendingTopics, TopChannel, TrendingTopic } from '@/app/graph/services/api';
-import { getNodeColors, getNodeLabel, NodeType } from '@/app/graph/utils/nodeColors';
+import { FreshnessBadge } from '@/app/graph/components/FreshnessBadge';
+import { getAllChannels, type TopChannel } from '@/app/graph/services/api';
+import type { GraphFilters, GraphFreshnessMeta, RankingMode, SourceDetail } from '@/app/graph/services/types';
 
-const TIMEFRAMES = ['Last 24h', 'Last 7 Days', 'Last Month', 'Last 3 Months'];
-const DEFAULT_CONNECTION_STRENGTH = 3;
+const SENTIMENT_OPTIONS = [
+  { value: 'Positive', label: 'Positive', accent: 'border-emerald-400/30 bg-emerald-400/15 text-emerald-100' },
+  { value: 'Neutral', label: 'Neutral', accent: 'border-slate-400/25 bg-slate-300/10 text-slate-100' },
+  { value: 'Negative', label: 'Negative', accent: 'border-rose-400/30 bg-rose-400/15 text-rose-100' },
+  { value: 'Urgent', label: 'Urgent', accent: 'border-orange-400/30 bg-orange-400/15 text-orange-100' },
+] as const;
 
-type InsightTool = 'products' | 'customerNeeds' | 'competitorIntel';
-type InsightMode = 'marketMap' | 'ownership' | 'messageFit' | 'competitorMoves' | 'opportunities';
-type SourceProfile = 'balanced' | 'performance' | 'brandStrategy';
-
-const INSIGHT_MODE_OPTIONS: Array<{ value: InsightMode; label: string; description: string }> = [
-  {
-    value: 'marketMap',
-    label: 'Market Map',
-    description: 'Top themes connecting selected channels',
-  },
-  {
-    value: 'ownership',
-    label: 'Who Owns What',
-    description: 'Topic ownership by channel',
-  },
-  {
-    value: 'messageFit',
-    label: 'Message Fit',
-    description: 'What message works for whom',
-  },
-  {
-    value: 'competitorMoves',
-    label: 'Competitor Moves',
-    description: 'Where competitors are shifting focus',
-  },
-  {
-    value: 'opportunities',
-    label: 'Hidden Opportunities',
-    description: 'Underserved high-potential spaces',
-  },
+const SOURCE_OPTIONS: Array<{ value: SourceDetail; label: string }> = [
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'standard', label: 'Balanced' },
+  { value: 'expanded', label: 'Expanded' },
 ];
 
-const SOURCE_PROFILE_OPTIONS: Array<{ value: SourceProfile; label: string; description: string }> = [
-  {
-    value: 'balanced',
-    label: 'Balanced',
-    description: 'Channel activity weighting',
-  },
-  {
-    value: 'performance',
-    label: 'Performance',
-    description: 'Activity-heavy weighting for channel momentum',
-  },
-  {
-    value: 'brandStrategy',
-    label: 'Channel Strategy',
-    description: 'Channel narrative weighting',
-  },
-];
-
-const INSIGHT_TOOL_OPTIONS: Array<{
-  value: InsightTool;
-  title: string;
-  description: string;
-  colorType: NodeType;
-}> = [
-  {
-    value: 'products',
-    title: 'Products',
-    description: 'Channel topic and intent signals',
-    colorType: 'product',
-  },
-  {
-    value: 'customerNeeds',
-    title: 'Customer Needs',
-    description: 'Audience, pain points, value props, intents',
-    colorType: 'audience',
-  },
-  {
-    value: 'competitorIntel',
-    title: 'Competitor Intel',
-    description: 'Competitive references and overlaps',
-    colorType: 'competitor',
-  },
-];
-
-const MODE_TOOL_PRESETS: Record<InsightMode, Record<InsightTool, boolean>> = {
-  marketMap: {
-    products: false,
-    customerNeeds: false,
-    competitorIntel: false,
-  },
-  ownership: {
-    products: true,
-    customerNeeds: false,
-    competitorIntel: false,
-  },
-  messageFit: {
-    products: false,
-    customerNeeds: true,
-    competitorIntel: false,
-  },
-  competitorMoves: {
-    products: false,
-    customerNeeds: false,
-    competitorIntel: true,
-  },
-  opportunities: {
-    products: false,
-    customerNeeds: true,
-    competitorIntel: true,
-  },
-};
-
-function layersFromInsightTools(tools: Record<InsightTool, boolean>): string[] {
-  const layers = ['topic'];
-  if (tools.products) {
-    layers.push('product');
-  }
-  if (tools.customerNeeds) {
-    layers.push('audience', 'painpoint', 'valueprop', 'intent');
-  }
-  if (tools.competitorIntel) {
-    layers.push('competitor');
-  }
-  return layers;
-}
-
-const SENTIMENTS = [
-  { label: 'Positive', icon: '😊', color: 'text-green-400' },
-  { label: 'Negative', icon: '😞', color: 'text-red-400' },
-  { label: 'Neutral', icon: '😐', color: 'text-gray-400' },
-  { label: 'Urgent', icon: '⚡', color: 'text-orange-400' },
+const SORT_OPTIONS: Array<{ value: RankingMode; label: string }> = [
+  { value: 'volume', label: 'Volume' },
+  { value: 'momentum', label: 'Momentum' },
+  { value: 'spread', label: 'Spread' },
 ];
 
 interface GlobalFiltersProps {
-  onFiltersChange?: (filters: {
-    channels?: string[];
-    timeframe?: string;
-    sentiments?: string[];
-    topics?: string[];
-    connectionStrength?: number;
-    layers?: string[];
-    insightMode?: InsightMode;
-    sourceProfile?: SourceProfile;
-    confidenceThreshold?: number;
-  }) => void;
-  onQuickSelectChannel?: (channelName: string) => void;
-  onDateRangeChange?: (startDate: string, endDate: string) => void;
+  filters: GraphFilters;
+  availableCategories?: string[];
+  freshness?: GraphFreshnessMeta;
+  showFreshnessBadge?: boolean;
+  isCollapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
+  onFiltersChange: (filters: GraphFilters) => void;
   onSearchSelect?: (nodeId: string) => void;
   allNodes?: Array<{ id: string; name: string; type: string }>;
 }
 
-export function GlobalFilters({ onFiltersChange, onQuickSelectChannel, onDateRangeChange, onSearchSelect, allNodes = [] }: GlobalFiltersProps) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [selectedTimeframe, setSelectedTimeframe] = useState('Last 7 Days');
-  const [selectedChannels, setSelectedChannels] = useState<string[]>([]);
-  const [selectedSentiments, setSelectedSentiments] = useState<string[]>([]);
-  const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
-  const [selectedInsightTools, setSelectedInsightTools] = useState<Record<InsightTool, boolean>>({
-    products: false,
-    customerNeeds: false,
-    competitorIntel: false,
-  });
-  const [selectedInsightMode, setSelectedInsightMode] = useState<InsightMode>('marketMap');
-  const [selectedSourceProfile, setSelectedSourceProfile] = useState<SourceProfile>('balanced');
-  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(35);
-  const [connectionStrength, setConnectionStrength] = useState<number>(DEFAULT_CONNECTION_STRENGTH);
-  const [hasUnappliedChanges, setHasUnappliedChanges] = useState(false);
-  const [lastModeAppliedAt, setLastModeAppliedAt] = useState<Date | null>(null);
-  const [lastModeAppliedMessage, setLastModeAppliedMessage] = useState<string>('');
-  const suppressDirtyRef = useRef(false);
+const DEFAULT_FILTERS: GraphFilters = {
+  channels: [],
+  sentiments: [],
+  category: '',
+  signalFocus: 'all',
+  sourceDetail: 'standard',
+  rankingMode: 'volume',
+  minMentions: 2,
+  max_nodes: 20,
+};
 
-  // Search state
+function SectionTitle({ icon, title }: { icon: ReactNode; title: string }) {
+  return (
+    <div className="flex items-center gap-2 text-[12px] font-medium text-white/72">
+      {icon}
+      <span>{title}</span>
+    </div>
+  );
+}
+
+export function GlobalFilters({
+  filters,
+  availableCategories = [],
+  freshness,
+  showFreshnessBadge = true,
+  isCollapsed = false,
+  onCollapsedChange,
+  onFiltersChange,
+  onSearchSelect,
+  allNodes = [],
+}: GlobalFiltersProps) {
+  const [selectedChannels, setSelectedChannels] = useState<string[]>(filters.channels || []);
+  const [selectedSentiments, setSelectedSentiments] = useState<string[]>(filters.sentiments || []);
+  const [selectedCategory, setSelectedCategory] = useState(filters.category || '');
+  const [sourceDetail, setSourceDetail] = useState<SourceDetail>(filters.sourceDetail || 'standard');
+  const [rankingMode, setRankingMode] = useState<RankingMode>(filters.rankingMode || 'volume');
+  const [minMentions, setMinMentions] = useState<number>(filters.minMentions || 2);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<typeof allNodes>([]);
-  
-  // Data from backend
+  const [channelQuery, setChannelQuery] = useState('');
   const [allChannels, setAllChannels] = useState<TopChannel[]>([]);
-  const [allTopics, setAllTopics] = useState<TrendingTopic[]>([]);
-  const [channelsLoading, setChannelsLoading] = useState(true);
-  const [topicsLoading, setTopicsLoading] = useState(true);
-  const isBootstrappingRef = useRef(false);
-  
-  // Pagination
-  const [showAllChannels, setShowAllChannels] = useState(false);
-  const [showAllTopics, setShowAllTopics] = useState(false);
-  
-  // Search - only for topics
-  const [topicSearchQuery, setTopicSearchQuery] = useState('');
+  const [loadingChannels, setLoadingChannels] = useState(true);
 
-  // Handle global search
   useEffect(() => {
-    if (searchQuery.trim().length < 2) {
-      setSearchResults([]);
-      return;
-    }
-
-    const filtered = allNodes.filter(node =>
-      node.name.toLowerCase().includes(searchQuery.toLowerCase())
-    ).slice(0, 5);
-
-    setSearchResults(filtered);
-  }, [searchQuery, allNodes]);
-
-  const handleSearchSelect = (nodeId: string) => {
-    if (onSearchSelect) {
-      onSearchSelect(nodeId);
-    }
-    setSearchQuery('');
-    setSearchResults([]);
-  };
-
-  // Track if filters have changed but not applied
-  useEffect(() => {
-    if (isBootstrappingRef.current) return;
-    if (suppressDirtyRef.current) {
-      suppressDirtyRef.current = false;
-      setHasUnappliedChanges(false);
-      return;
-    }
-    setHasUnappliedChanges(true);
+    setSelectedChannels(filters.channels || []);
+    setSelectedSentiments(filters.sentiments || []);
+    setSelectedCategory(filters.category || '');
+    setSourceDetail(filters.sourceDetail || 'standard');
+    setRankingMode(filters.rankingMode || 'volume');
+    setMinMentions(filters.minMentions || 2);
   }, [
-    selectedChannels,
-    selectedTimeframe,
-    selectedSentiments,
-    selectedTopics,
-    selectedInsightTools,
-    selectedInsightMode,
-    selectedSourceProfile,
-    confidenceThreshold,
-    connectionStrength,
+    filters.category,
+    filters.channels,
+    filters.minMentions,
+    filters.rankingMode,
+    filters.sentiments,
+    filters.sourceDetail,
   ]);
 
-  const applyFilters = (overrides?: {
-    insightMode?: InsightMode;
-    sourceProfile?: SourceProfile;
-    confidenceThreshold?: number;
-    insightTools?: Record<InsightTool, boolean>;
-    connectionStrength?: number;
-  }) => {
-    const nextInsightMode = overrides?.insightMode ?? selectedInsightMode;
-    const nextSourceProfile = overrides?.sourceProfile ?? selectedSourceProfile;
-    const nextConfidence = overrides?.confidenceThreshold ?? confidenceThreshold;
-    const nextInsightTools = overrides?.insightTools ?? selectedInsightTools;
-    const nextConnectionStrength = overrides?.connectionStrength ?? connectionStrength;
-
-    if (onFiltersChange) {
-      onFiltersChange({
-        channels: selectedChannels,
-        timeframe: selectedTimeframe,
-        sentiments: selectedSentiments,
-        topics: selectedTopics,
-        connectionStrength: nextConnectionStrength,
-        layers: layersFromInsightTools(nextInsightTools),
-        insightMode: nextInsightMode,
-        sourceProfile: nextSourceProfile,
-        confidenceThreshold: nextConfidence,
-      });
-    }
-    setHasUnappliedChanges(false);
-  };
-
-  const handleApply = () => {
-    applyFilters();
-  };
-
-  const handleReset = () => {
-    setSelectedChannels([]);
-    setSelectedTimeframe('Last 7 Days');
-    setSelectedSentiments([]);
-    setSelectedTopics([]);
-    setSelectedInsightTools({
-      products: false,
-      customerNeeds: false,
-      competitorIntel: false,
-    });
-    setSelectedInsightMode('marketMap');
-    setSelectedSourceProfile('balanced');
-    setConfidenceThreshold(35);
-    setConnectionStrength(DEFAULT_CONNECTION_STRENGTH);
-    setLastModeAppliedAt(null);
-    setLastModeAppliedMessage('');
-    
-    if (onFiltersChange) {
-      onFiltersChange({
-        channels: [],
-        timeframe: 'Last 7 Days',
-        sentiments: [],
-        topics: [],
-        connectionStrength: DEFAULT_CONNECTION_STRENGTH,
-        layers: ['topic'],
-        insightMode: 'marketMap',
-        sourceProfile: 'balanced',
-        confidenceThreshold: 35,
-      });
-    }
-    setHasUnappliedChanges(false);
-  };
-
-  const handleTimeframeClick = (timeframe: string) => {
-    setSelectedTimeframe(timeframe);
-  };
-
-  const handleChannelToggle = (channelName: string) => {
-    setSelectedChannels(prev => 
-      prev.includes(channelName)
-        ? prev.filter(b => b !== channelName)
-        : [...prev, channelName]
-    );
-  };
-
-  const handleSentimentToggle = (sentiment: string) => {
-    setSelectedSentiments(prev => 
-      prev.includes(sentiment)
-        ? prev.filter(s => s !== sentiment)
-        : [...prev, sentiment]
-    );
-  };
-
-  const handleTopicToggle = (topic: string) => {
-    setSelectedTopics(prev => 
-      prev.includes(topic)
-        ? prev.filter(t => t !== topic)
-        : [...prev, topic]
-    );
-  };
-
-  const handleInsightToolToggle = (tool: InsightTool) => {
-    setSelectedInsightTools((prev) => ({
-      ...prev,
-      [tool]: !prev[tool],
-    }));
-  };
-
-  const handleInsightModeSelect = (mode: InsightMode) => {
-    if (mode === selectedInsightMode) {
-      return;
-    }
-
-    const presetTools = MODE_TOOL_PRESETS[mode];
-    suppressDirtyRef.current = true;
-    setSelectedInsightMode(mode);
-    setSelectedInsightTools(presetTools);
-    applyFilters({ insightMode: mode, insightTools: presetTools });
-    setLastModeAppliedAt(new Date());
-    setLastModeAppliedMessage(`Auto-applied ${INSIGHT_MODE_OPTIONS.find((item) => item.value === mode)?.label || mode}`);
-  };
-
-  const handleSourceProfileSelect = (profile: SourceProfile) => {
-    if (profile === selectedSourceProfile) {
-      return;
-    }
-
-    suppressDirtyRef.current = true;
-    setSelectedSourceProfile(profile);
-    applyFilters({ sourceProfile: profile });
-    setLastModeAppliedAt(new Date());
-    setLastModeAppliedMessage(`Source weighting switched to ${SOURCE_PROFILE_OPTIONS.find((item) => item.value === profile)?.label || profile}`);
-  };
-
-  const handleConnectionStrengthChange = (nextValue: number) => {
-    const safeValue = Math.max(1, Math.min(5, nextValue));
-    if (safeValue === connectionStrength) return;
-
-    suppressDirtyRef.current = true;
-    setConnectionStrength(safeValue);
-    applyFilters({ connectionStrength: safeValue });
-    setLastModeAppliedAt(new Date());
-    setLastModeAppliedMessage(`Detail level switched to ${safeValue <= 2 ? 'Explore' : safeValue >= 4 ? 'Focused' : 'Balanced'}`);
-  };
-
-  const selectedToolCount = Object.values(selectedInsightTools).filter(Boolean).length;
-
-  const changeCount =
-    selectedChannels.length +
-    (selectedTimeframe !== 'Last 7 Days' ? 1 : 0) +
-    selectedSentiments.length +
-    selectedTopics.length +
-    (selectedInsightMode !== 'marketMap' ? 1 : 0) +
-    (selectedSourceProfile !== 'balanced' ? 1 : 0) +
-    (confidenceThreshold !== 35 ? 1 : 0) +
-    (connectionStrength !== DEFAULT_CONNECTION_STRENGTH ? 1 : 0) +
-    selectedToolCount;
-
-  // Fetch channels and topics from backend
   useEffect(() => {
     let cancelled = false;
-    setChannelsLoading(true);
-    setTopicsLoading(true);
-
-    const fetchChannels = async () => {
+    const loadChannels = async () => {
       try {
-        console.log('🔍 Fetching channels from Neo4j...');
-        const [channels, topChannelsInWindow] = await Promise.all([
-          getAllChannels(),
-          getTopChannels(3, selectedTimeframe),
-        ]);
-        if (cancelled) return;
-
-        console.log('✅ Channels fetched:', channels);
-        setAllChannels(channels);
-
-        if (selectedChannels.length === 0) {
-          const defaults = topChannelsInWindow
-            .slice(0, 3)
-            .map((channel) => channel.name)
-            .filter(Boolean);
-
-          if (defaults.length > 0) {
-            isBootstrappingRef.current = true;
-            setSelectedChannels(defaults);
-            if (onFiltersChange) {
-              onFiltersChange({
-                channels: defaults,
-                timeframe: selectedTimeframe,
-                sentiments: selectedSentiments,
-                topics: selectedTopics,
-                connectionStrength,
-                layers: ['topic'],
-                insightMode: 'marketMap',
-                sourceProfile: 'balanced',
-                confidenceThreshold: 35,
-              });
-            }
-            setHasUnappliedChanges(false);
-
-            queueMicrotask(() => {
-              isBootstrappingRef.current = false;
-            });
-          }
-        }
-
-        setChannelsLoading(false);
-      } catch (error) {
-        console.error('❌ Failed to fetch channels:', error);
+        setLoadingChannels(true);
+        const rows = await getAllChannels();
         if (!cancelled) {
-          setChannelsLoading(false);
+          setAllChannels(rows);
+        }
+      } catch (error) {
+        console.error('Failed to load graph channels:', error);
+      } finally {
+        if (!cancelled) {
+          setLoadingChannels(false);
         }
       }
     };
-
-    const fetchTopics = async () => {
-      try {
-        console.log('🔍 Fetching trending topics from Neo4j...');
-        const topics = await getTrendingTopics(10, selectedTimeframe);
-        if (cancelled) return;
-        console.log('✅ Topics fetched:', topics);
-        setAllTopics(topics);
-        setTopicsLoading(false);
-      } catch (error) {
-        console.error('❌ Failed to fetch topics:', error);
-        if (!cancelled) {
-          setTopicsLoading(false);
-        }
-      }
-    };
-
-    fetchChannels();
-    fetchTopics();
-
+    void loadChannels();
     return () => {
       cancelled = true;
     };
-  }, [selectedTimeframe]);
+  }, []);
+
+  const searchResults = useMemo(() => {
+    if (searchQuery.trim().length < 2) return [];
+    const query = searchQuery.trim().toLowerCase();
+    return allNodes
+      .filter((node) => node.name.toLowerCase().includes(query))
+      .slice(0, 6);
+  }, [allNodes, searchQuery]);
+
+  const filteredChannels = useMemo(() => {
+    const query = channelQuery.trim().toLowerCase();
+    return !query
+      ? allChannels
+      : allChannels.filter((channel) => channel.name.toLowerCase().includes(query));
+  }, [allChannels, channelQuery]);
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (selectedChannels.length > 0) count += 1;
+    if (selectedSentiments.length > 0) count += 1;
+    if (selectedCategory) count += 1;
+    if (sourceDetail !== 'standard') count += 1;
+    if (rankingMode !== 'volume') count += 1;
+    if (minMentions > 2) count += 1;
+    return count;
+  }, [minMentions, rankingMode, selectedCategory, selectedChannels.length, selectedSentiments.length, sourceDetail]);
+
+  const toggleSentiment = (value: string) => {
+    setSelectedSentiments((prev) => (
+      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]
+    ));
+  };
+
+  const toggleChannel = (value: string) => {
+    setSelectedChannels((prev) => (
+      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]
+    ));
+  };
+
+  const handleApply = () => {
+    onFiltersChange({
+      channels: selectedChannels,
+      sentiments: selectedSentiments,
+      category: selectedCategory || undefined,
+      signalFocus: filters.signalFocus || 'all',
+      sourceDetail,
+      rankingMode,
+      minMentions,
+      max_nodes: filters.max_nodes || DEFAULT_FILTERS.max_nodes,
+    });
+  };
+
+  const handleReset = () => {
+    setSelectedChannels(DEFAULT_FILTERS.channels || []);
+    setSelectedSentiments(DEFAULT_FILTERS.sentiments || []);
+    setSelectedCategory(DEFAULT_FILTERS.category || '');
+    setSourceDetail(DEFAULT_FILTERS.sourceDetail || 'standard');
+    setRankingMode(DEFAULT_FILTERS.rankingMode || 'volume');
+    setMinMentions(DEFAULT_FILTERS.minMentions || 2);
+    setSearchQuery('');
+    setChannelQuery('');
+    onFiltersChange(DEFAULT_FILTERS);
+  };
+
+  if (isCollapsed) {
+    return (
+      <aside className="absolute left-4 top-4 bottom-4 z-40 w-16 rounded-[24px] border border-white/10 bg-[#0d1524]/90 shadow-2xl backdrop-blur-xl">
+        <div className="flex h-full flex-col items-center justify-between py-4">
+          <button
+            onClick={() => onCollapsedChange?.(false)}
+            className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-500/10 text-cyan-300 transition-colors hover:bg-cyan-500/18"
+            title="Open filters"
+          >
+            <Filter className="h-4.5 w-4.5" />
+          </button>
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-2 py-2.5 text-center text-[10px] text-white/55">
+            {activeFilterCount}
+            <div className="mt-1 text-[9px] uppercase tracking-[0.18em] text-white/35">active</div>
+          </div>
+        </div>
+      </aside>
+    );
+  }
 
   return (
-    <div 
-      className={`absolute left-4 top-4 bottom-4 bg-slate-950/40 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl flex flex-col z-40 overflow-hidden transition-all duration-300 ${
-        isCollapsed ? 'w-12' : 'w-80'
-      }`}
-    >
-      {/* Collapse Button */}
-      {!isCollapsed && (
-        <button
-          onClick={() => setIsCollapsed(true)}
-          className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center transition-colors z-50"
-          title="Collapse filters"
-        >
-          <ChevronLeft className="w-4 h-4 text-white/70" />
-        </button>
-      )}
-
-      {isCollapsed ? (
-        /* Collapsed State */
-        <div className="flex flex-col items-center justify-center h-full gap-4 py-6">
-          <button
-            onClick={() => setIsCollapsed(false)}
-            className="w-10 h-10 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 flex items-center justify-center transition-colors"
-            title="Expand filters"
-          >
-            <Filter className="w-5 h-5 text-cyan-400" />
-          </button>
-          {changeCount > 0 && (
-            <div className="w-6 h-6 rounded-full bg-cyan-500 flex items-center justify-center">
-              <span className="text-white text-xs font-bold">{changeCount}</span>
-            </div>
-          )}
-        </div>
-      ) : (
-        /* Expanded State */
-        <>
-          {/* Header */}
-          <div className="px-6 py-4 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <Filter className="w-5 h-5 text-cyan-400" />
-              <h2 className="text-white/90 font-semibold">Filters</h2>
-            </div>
-            <p className="text-white/50 text-xs mt-1">
-              Configure your community channel intelligence view
-            </p>
-          </div>
-
-          {/* Scrollable Content */}
-          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
-            
-            {/* Search Bar - Global */}
-            <div className="space-y-3">
-              <div className="relative">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search channels or topics..."
-                  className="w-full px-4 py-3 pl-10 rounded-lg bg-white/5 border border-white/10 text-white/90 placeholder:text-white/40 focus:outline-none focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/20 transition-all"
-                />
-                <Search className="absolute left-3 top-3.5 w-4 h-4 text-white/40" />
+    <aside className="absolute left-4 top-4 bottom-4 z-40 w-[320px] overflow-hidden rounded-[28px] border border-white/10 bg-[#0c1422]/92 shadow-[0_26px_80px_rgba(0,0,0,0.48)] backdrop-blur-xl">
+      <div className="flex h-full flex-col">
+        <div className="border-b border-white/10 px-5 py-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-500/12">
+                  <Filter className="h-5 w-5 text-cyan-300" />
+                </div>
+                <h2 className="text-[28px] font-semibold leading-none tracking-[-0.04em] text-white">Filters</h2>
               </div>
-              
-              {/* Search Results Dropdown */}
+              <p className="mt-3 max-w-[190px] text-[13px] leading-6 text-white/52">
+                Narrow the map without taking space away from it.
+              </p>
+              {showFreshnessBadge ? (
+                <div className="mt-4">
+                  <FreshnessBadge freshness={freshness} compact />
+                </div>
+              ) : null}
+            </div>
+
+            <button
+              onClick={() => onCollapsedChange?.(true)}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[16px] border border-white/10 bg-white/5 text-white/70 transition-colors hover:bg-white/10"
+              title="Collapse filters"
+            >
+              <ChevronLeft className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <div className="space-y-5">
+            <section className="border-b border-white/10 pb-5">
+              <div className="rounded-[20px] border border-white/10 bg-white/5 px-4 py-3.5">
+                <div className="flex items-center gap-3">
+                  <Search className="h-5 w-5 text-white/35" />
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search channels or topics..."
+                    className="w-full bg-transparent text-[15px] text-white placeholder:text-white/35 outline-none"
+                  />
+                </div>
+              </div>
               {searchResults.length > 0 && (
-                <div className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
+                <div className="mt-2 overflow-hidden rounded-[18px] border border-white/10 bg-slate-950/75">
                   {searchResults.map((result) => (
                     <button
                       key={result.id}
-                      onClick={() => handleSearchSelect(result.id)}
-                      className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-white/10 transition-colors text-left"
+                      onClick={() => {
+                        setSearchQuery('');
+                        onSearchSelect?.(result.id);
+                      }}
+                      className="w-full border-b border-white/5 px-3.5 py-2.5 text-left transition-colors last:border-b-0 hover:bg-white/5"
                     >
-                      {(() => {
-                        const palette = getNodeColors(result.type as NodeType);
-                        return (
-                          <div
-                            className="w-2.5 h-2.5 rounded-full"
-                            style={{ backgroundColor: palette.core, boxShadow: `0 0 10px ${palette.glow}` }}
-                          />
-                        );
-                      })()}
-                      <div className="flex-1">
-                        <div className="text-white/90 text-sm">{result.name}</div>
-                        <div className="text-white/40 text-xs capitalize">{getNodeLabel(result.type as NodeType)}</div>
-                      </div>
+                      <div className="text-[13px] text-white/90">{result.name}</div>
+                      <div className="mt-1 text-[11px] capitalize text-white/45">{result.type}</div>
                     </button>
                   ))}
                 </div>
               )}
-            </div>
+            </section>
 
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-            
-            {/* Timeframe Section */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-white/70 text-sm">
-                <Calendar className="w-4 h-4" />
-                <span>Time Period</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {TIMEFRAMES.map((timeframe) => (
-                  <button
-                    key={timeframe}
-                    onClick={() => handleTimeframeClick(timeframe)}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                      selectedTimeframe === timeframe
-                        ? 'bg-cyan-500/30 border border-cyan-500/50 text-cyan-300 shadow-lg shadow-cyan-500/20'
-                        : 'bg-white/5 border border-white/10 text-white/60 hover:bg-white/10'
-                    }`}
-                  >
-                    {timeframe}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Insight Question Section */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-white/70 text-sm font-medium">
-                <Target className="w-4 h-4" />
-                <span>Insight Question</span>
-              </div>
-              <div className="px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                <p className="text-cyan-300 text-[11px] leading-relaxed">
-                  Selecting a question auto-applies and updates the graph immediately.
-                </p>
-              </div>
-              <div className="space-y-2">
-                {INSIGHT_MODE_OPTIONS.map((mode) => (
-                  <button
-                    key={mode.value}
-                    onClick={() => handleInsightModeSelect(mode.value)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
-                      selectedInsightMode === mode.value
-                        ? 'bg-cyan-500/20 border-cyan-500/40'
-                        : 'bg-white/5 border-white/10 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className="text-white/90 text-sm font-medium">{mode.label}</div>
-                    <div className="text-white/45 text-[11px] mt-0.5">{mode.description}</div>
-                  </button>
-                ))}
-              </div>
-              {lastModeAppliedAt && (
-                <div className="px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
-                  <p className="text-emerald-300 text-[11px] leading-relaxed">
-                    {lastModeAppliedMessage} at {lastModeAppliedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Source Profile */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Source Weighting</div>
-              <div className="space-y-2">
-                {SOURCE_PROFILE_OPTIONS.map((profile) => (
-                  <button
-                    key={profile.value}
-                    onClick={() => handleSourceProfileSelect(profile.value)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
-                      selectedSourceProfile === profile.value
-                        ? 'bg-cyan-500/20 border-cyan-500/40'
-                        : 'bg-white/5 border-white/10 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className="text-white/90 text-sm font-medium">{profile.label}</div>
-                    <div className="text-white/45 text-[11px] mt-0.5">{profile.description}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Channel Source Section */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Select Channels</div>
-              <div className="space-y-2">
-                {channelsLoading ? (
-                  <div className="text-white/50 text-xs">Loading channels...</div>
-                ) : (
-                  <>
-                    {allChannels
-                      .slice(0, showAllChannels ? allChannels.length : 5)
-                      .map((channel) => (
-                        <label
-                          key={channel.name}
-                          className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer transition-colors group"
-                        >
-                          <Checkbox
-                            checked={selectedChannels.includes(channel.name)}
-                            onCheckedChange={() => handleChannelToggle(channel.name)}
-                            className="border-white/30 data-[state=checked]:bg-cyan-500 data-[state=checked]:border-cyan-500"
-                          />
-                          <div className="flex-1 flex items-center justify-between">
-                            <span className="text-white/80 text-sm group-hover:text-white transition-colors">
-                              {channel.name}
-                            </span>
-                            <span className="text-white/40 text-xs font-mono">
-                              {channel.adCount} posts
-                            </span>
-                          </div>
-                        </label>
-                      ))}
-                    {allChannels.length > 5 && !showAllChannels && (
-                      <button
-                        onClick={() => setShowAllChannels(true)}
-                        className="w-full px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-cyan-400 text-xs font-medium transition-colors flex items-center justify-center gap-2"
-                      >
-                        <ChevronDown className="w-3 h-3" />
-                        Show all {allChannels.length} channels
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-              
-              {selectedChannels.length > 0 && (
-                <div className="mt-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                  <p className="text-cyan-400 text-xs">
-                    ✓ {selectedChannels.length} {selectedChannels.length === 1 ? 'channel' : 'channels'} selected
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Sentiment Section */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Select Sentiments</div>
-              <div className="space-y-2">
-                {SENTIMENTS.map((sentiment) => (
-                  <label
-                    key={sentiment.label}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer transition-colors group"
-                  >
-                    <Checkbox
-                      checked={selectedSentiments.includes(sentiment.label)}
-                      onCheckedChange={() => handleSentimentToggle(sentiment.label)}
-                      className="border-white/30 data-[state=checked]:bg-cyan-500 data-[state=checked]:border-cyan-500"
-                    />
-                    <div className="flex-1 flex items-center justify-between">
-                      <span className="text-white/80 text-sm group-hover:text-white transition-colors">
-                        {sentiment.label}
-                      </span>
-                      <span className={`${sentiment.color} text-xs font-mono`}>
-                        {sentiment.icon}
-                      </span>
-                    </div>
-                  </label>
-                ))}
-              </div>
-              
-              {selectedSentiments.length > 0 && (
-                <div className="mt-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                  <p className="text-cyan-400 text-xs">
-                    ✓ {selectedSentiments.length} {selectedSentiments.length === 1 ? 'sentiment' : 'sentiments'} selected
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Topic Section */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Select Topics</div>
-              <div className="space-y-2">
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={topicSearchQuery}
-                    onChange={(e) => setTopicSearchQuery(e.target.value)}
-                    placeholder="Search topics..."
-                    className="w-full px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 text-white/90 placeholder:text-white/40 focus:outline-none focus:border-cyan-500/50 transition-colors"
-                  />
-                  <Search className="absolute right-3 top-3 w-4 h-4 text-white/60 pointer-events-none" />
-                </div>
-                {topicsLoading ? (
-                  <div className="text-white/50 text-xs">Loading topics...</div>
-                ) : (
-                  allTopics
-                    .filter(topic => topic.name.toLowerCase().includes(topicSearchQuery.toLowerCase()))
-                    .slice(0, showAllTopics ? allTopics.length : 5)
-                    .map((topic) => {
-                      const isSelected = selectedTopics.includes(topic.name);
-                      return (
-                      <button
-                        type="button"
-                        key={topic.name}
-                        aria-pressed={isSelected}
-                        onClick={() => handleTopicToggle(topic.name)}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors group ${
-                          isSelected
-                            ? 'bg-cyan-500/10 border-cyan-500/40'
-                            : 'bg-white/5 border-white/10 hover:bg-white/10'
-                        }`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`flex h-4 w-4 items-center justify-center rounded-sm border ${
-                            isSelected
-                              ? 'border-cyan-500 bg-cyan-500 text-slate-950'
-                              : 'border-white/30 bg-transparent text-transparent'
-                          }`}
-                        >
-                          <Check className="h-3 w-3" strokeWidth={3} />
-                        </span>
-                        <div className="flex-1 min-w-0 flex items-center justify-between gap-3">
-                          <span className="text-left text-white/80 text-sm truncate group-hover:text-white transition-colors">
-                            {topic.name}
-                          </span>
-                          <span className="flex-shrink-0 text-white/40 text-xs font-mono">
-                            {topic.adCount} posts
-                          </span>
-                        </div>
-                      </button>
-                    );
-                    })
-                )}
-                {allTopics.length > 5 && !showAllTopics && (
-                  <button
-                    onClick={() => setShowAllTopics(true)}
-                    className="w-full px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-cyan-400 text-xs font-medium transition-colors flex items-center justify-center gap-2"
-                  >
-                    <ChevronDown className="w-3 h-3" />
-                    Show all {allTopics.length} topics
-                  </button>
-                )}
-              </div>
-              
-              {selectedTopics.length > 0 && (
-                <div className="mt-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                  <p className="text-cyan-400 text-xs">
-                    ✓ {selectedTopics.length} {selectedTopics.length === 1 ? 'topic' : 'topics'} selected
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Data Layers Section */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-white/70 text-sm font-medium">
-                <Layers className="w-4 h-4" />
-                <span>Insight Tools</span>
-              </div>
-              <div className="space-y-2">
-                <div className="px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                  <p className="text-cyan-300 text-xs leading-relaxed">
-                    Core map is always active: Topics with top 3 channel connections.
-                  </p>
-                </div>
-
-                {INSIGHT_TOOL_OPTIONS.map((tool) => {
-                  const palette = getNodeColors(tool.colorType);
-                  const checked = selectedInsightTools[tool.value];
-
+            <section className="border-b border-white/10 pb-5">
+              <SectionTitle icon={<Radio className="h-4 w-4 text-white/55" />} title="Sentiment" />
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {SENTIMENT_OPTIONS.map((option) => {
+                  const active = selectedSentiments.includes(option.value);
                   return (
-                    <label
-                      key={tool.value}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors cursor-pointer ${
-                        checked
-                          ? 'bg-white/8 border-white/20'
-                          : 'bg-white/5 border-white/10 hover:bg-white/10'
+                    <button
+                      key={option.value}
+                      onClick={() => toggleSentiment(option.value)}
+                      className={`rounded-[16px] border px-3 py-2.5 text-[13px] transition-colors ${
+                        active ? option.accent : 'border-white/10 bg-white/5 text-white/75 hover:bg-white/8'
                       }`}
                     >
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={() => handleInsightToolToggle(tool.value)}
-                        className="border-white/30 data-[state=checked]:bg-cyan-500 data-[state=checked]:border-cyan-500"
-                      />
-                      <div
-                        className="w-2.5 h-2.5 rounded-full"
-                        style={{ backgroundColor: palette.core, boxShadow: `0 0 10px ${palette.glow}` }}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-white/90 text-sm truncate">{tool.title}</div>
-                        <div className="text-white/40 text-[11px] truncate">{tool.description}</div>
-                      </div>
-                    </label>
+                      {option.label}
+                    </button>
                   );
                 })}
               </div>
+            </section>
 
-              <div className="mt-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                <p className="text-cyan-400 text-xs">
-                  ✓ {selectedToolCount} {selectedToolCount === 1 ? 'tool' : 'tools'} enabled
-                </p>
+            <section className="border-b border-white/10 pb-5">
+              <SectionTitle icon={<Filter className="h-4 w-4 text-white/55" />} title="Categories" />
+              <div className="mt-3">
+                <select
+                  value={selectedCategory}
+                  onChange={(event) => setSelectedCategory(event.target.value)}
+                  className="w-full rounded-[18px] border border-white/10 bg-white/5 px-3.5 py-3 text-[13px] text-white outline-none"
+                >
+                  <option value="">All categories</option>
+                  {availableCategories.map((category) => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
               </div>
-            </div>
+            </section>
 
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Confidence Threshold Section */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Confidence Threshold</div>
-              <div className="space-y-2">
-                <input
-                  type="range"
-                  min="10"
-                  max="90"
-                  step="5"
-                  value={confidenceThreshold}
-                  onChange={(e) => setConfidenceThreshold(parseInt(e.target.value, 10))}
-                  className="w-full h-2 bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer transition-colors"
-                />
-                <div className="flex items-center justify-between text-white/50 text-xs">
-                  <span>Inclusive</span>
-                  <span>{confidenceThreshold}%</span>
-                  <span>Strict</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Divider */}
-            <div className="h-px bg-white/10" />
-
-            {/* Connection Strength Section */}
-            <div className="space-y-3">
-              <div className="text-white/70 text-sm font-medium">Connection Strength</div>
-              <div className="space-y-2">
-                <input
-                  type="range"
-                  min="1"
-                  max="5"
-                  value={connectionStrength}
-                  onChange={(e) => handleConnectionStrengthChange(parseInt(e.target.value, 10))}
-                  className="w-full h-2 bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer transition-colors group"
-                />
-                <div className="flex items-center justify-between text-white/50 text-xs">
-                  <span>Explore</span>
-                  <span>
-                    {connectionStrength <= 2 ? 'Explore' : connectionStrength >= 4 ? 'Focused' : 'Balanced'}
-                  </span>
-                  <span>Focused</span>
-                </div>
-              </div>
-              
-              {connectionStrength !== DEFAULT_CONNECTION_STRENGTH && (
-                <div className="mt-2 px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/30">
-                  <p className="text-cyan-400 text-xs">
-                    ✓ Detail level set to {connectionStrength <= 2 ? 'Explore' : connectionStrength >= 4 ? 'Focused' : 'Balanced'} ({connectionStrength}/5)
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Info Box */}
-            <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-4">
-              <div className="flex items-start gap-2">
-                <div className="w-5 h-5 rounded-full bg-cyan-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <span className="text-cyan-400 text-xs">💡</span>
-                </div>
+            <section className="border-b border-white/10 pb-5">
+              <SectionTitle icon={<SlidersHorizontal className="h-4 w-4 text-white/55" />} title="Topic Filters" />
+              <div className="mt-3 space-y-3.5">
                 <div>
-                  <p className="text-cyan-400 text-xs font-medium mb-1">Pro Tip</p>
-                  <p className="text-white/70 text-xs leading-relaxed">
-                    Default view starts clean: 3 channels plus key connector topics. Choose an insight question first, then enable tools only when needed.
-                  </p>
+                  <div className="mb-3 flex items-center justify-between text-sm text-white/75">
+                    <span>Topic size threshold</span>
+                    <span className="font-semibold text-cyan-200">{minMentions}</span>
+                  </div>
+                  <div className="rounded-[18px] border border-white/10 bg-white/5 px-3.5 py-3.5">
+                    <input
+                      type="range"
+                      min={1}
+                      max={50}
+                      step={1}
+                      value={minMentions}
+                      onChange={(event) => setMinMentions(Number(event.target.value))}
+                      className="w-full accent-cyan-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  {SOURCE_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setSourceDetail(option.value)}
+                      className={`rounded-[14px] border px-2.5 py-2.5 text-[12px] transition-colors ${
+                        sourceDetail === option.value
+                          ? 'border-cyan-400/35 bg-cyan-500/14 text-cyan-100'
+                          : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/8'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  {SORT_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setRankingMode(option.value)}
+                      className={`rounded-[14px] border px-2.5 py-2.5 text-[12px] transition-colors ${
+                        rankingMode === option.value
+                          ? 'border-orange-400/35 bg-orange-400/14 text-orange-100'
+                          : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/8'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
                 </div>
               </div>
-            </div>
-          </div>
+            </section>
 
-          {/* Footer Actions */}
-          <div className="px-6 py-4 border-t border-white/10 space-y-2">
-            <button
-              onClick={handleApply}
-              disabled={!hasUnappliedChanges && selectedChannels.length === 0}
-              className={`w-full px-4 py-3 rounded-xl font-medium text-sm transition-all ${
-                hasUnappliedChanges || selectedChannels.length > 0
-                  ? 'bg-cyan-500 hover:bg-cyan-600 text-white shadow-lg shadow-cyan-500/30'
-                  : 'bg-white/5 text-white/40 cursor-not-allowed'
-              }`}
-            >
-              {hasUnappliedChanges ? (
-                <span className="flex items-center justify-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                  Apply {changeCount > 0 ? `${changeCount} ${changeCount === 1 ? 'Filter' : 'Filters'}` : 'Changes'}
-                </span>
-              ) : (
-                'Apply Filters'
-              )}
-            </button>
-            
-            <button
-              onClick={handleReset}
-              className="w-full px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 hover:text-white font-medium text-sm transition-all flex items-center justify-center gap-2"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset All
-            </button>
+            <section>
+              <div className="flex items-center justify-between">
+                <SectionTitle icon={<Filter className="h-4 w-4 text-white/55" />} title="Channels" />
+                {selectedChannels.length > 0 && (
+                  <div className="text-xs text-white/40">{selectedChannels.length} selected</div>
+                )}
+              </div>
+
+              <div className="mt-3 rounded-[18px] border border-white/10 bg-white/5 px-3.5 py-2.5">
+                <input
+                  value={channelQuery}
+                  onChange={(event) => setChannelQuery(event.target.value)}
+                  placeholder="Search channels..."
+                  className="w-full bg-transparent text-[13px] text-white placeholder:text-white/32 outline-none"
+                />
+              </div>
+
+              <div className="mt-3 overflow-hidden rounded-[18px] border border-white/10 bg-white/5">
+                <div className="max-h-[300px] overflow-y-auto divide-y divide-white/5">
+                  {loadingChannels && (
+                    <div className="px-3.5 py-3 text-sm text-white/45">Loading channels...</div>
+                  )}
+                  {!loadingChannels && filteredChannels.length === 0 && (
+                    <div className="px-3.5 py-3 text-sm text-white/45">No channels match this search.</div>
+                  )}
+                  {filteredChannels.map((channel) => {
+                    const active = selectedChannels.includes(channel.name);
+                    return (
+                      <label key={channel.id} className="flex cursor-pointer items-center gap-3 px-3.5 py-3 transition-colors hover:bg-white/5">
+                        <Checkbox checked={active} onCheckedChange={() => toggleChannel(channel.name)} />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[14px] text-white/90">{channel.name}</div>
+                          <div className="mt-1 text-[12px] text-white/42">{channel.adCount} posts</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
           </div>
-        </>
-      )}
-    </div>
+        </div>
+
+        <div className="border-t border-white/10 px-5 py-4">
+          <button
+            onClick={handleApply}
+            className="w-full rounded-[24px] bg-cyan-500 px-4 py-3.5 text-[15px] font-medium text-white shadow-[0_16px_30px_rgba(34,211,238,0.25)] transition-colors hover:bg-cyan-400"
+          >
+            {activeFilterCount > 0
+              ? `Apply ${activeFilterCount} Filter${activeFilterCount === 1 ? '' : 's'}`
+              : 'Apply Filters'}
+          </button>
+          <button
+            onClick={handleReset}
+            className="mt-3 flex w-full items-center justify-center gap-2.5 rounded-[20px] border border-white/10 bg-white/5 px-4 py-3 text-[14px] text-white/78 transition-colors hover:bg-white/8"
+          >
+            <RotateCcw className="h-4 w-4" />
+            Reset All
+          </button>
+        </div>
+      </div>
+    </aside>
   );
 }
