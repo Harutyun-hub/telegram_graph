@@ -5,6 +5,7 @@ import type {
   GraphLink,
   NodeDetails,
   DataFreshnessSnapshot,
+  GraphFilters,
 } from '@/app/graph/services/types';
 import type {
   AIClientFilters,
@@ -26,6 +27,7 @@ export type {
   GraphData,
   GraphNode,
   GraphLink,
+  GraphFilters,
   NodeDetails,
   DataFreshnessSnapshot,
   AIClientFilters,
@@ -51,7 +53,7 @@ function normalizeGraphData(data: GraphData): GraphData {
   return {
     nodes: (data.nodes || []).map((node) => ({
       ...node,
-      type: normalizeNodeType(node.type),
+      type: normalizeNodeType(node.type) as GraphNodeType,
     })),
     links: data.links || [],
     meta: data.meta,
@@ -146,23 +148,12 @@ function isMissingEndpointError(error: unknown): boolean {
   );
 }
 
-export async function getGraphData(filters: {
-  timeframe?: string;
-  channels?: string[];
-  brandSource?: string[];
-  connectionStrength?: number;
-  sentiment?: string[];
-  topics?: string[];
-  topN?: number;
-  layers?: string[];
-  insightMode?: string;
-  sourceProfile?: string;
-  confidenceThreshold?: number;
-} = {}): Promise<GraphData> {
+export async function getGraphData(filters: GraphFilters = {}): Promise<GraphData> {
   const payload = {
     ...filters,
-    channels: filters.channels || filters.brandSource || [],
-    brandSource: filters.brandSource || filters.channels || [],
+    channels: filters.channels || [],
+    sentiments: filters.sentiments || [],
+    topics: filters.topics || [],
   };
   try {
     const data = await requestJson<GraphData>('/api/graph', {
@@ -182,15 +173,38 @@ export async function getGraphData(filters: {
 export async function getNodeDetails(
   nodeId: string,
   nodeType: GraphNodeType | string,
-  context: { timeframe?: string; channels?: string[] } = {},
+  context: {
+    timeframe?: string;
+    channels?: string[];
+    from?: string;
+    to?: string;
+    sentiments?: string[];
+    category?: string;
+    signalFocus?: string;
+  } = {},
 ): Promise<NodeDetails> {
   try {
     const params = new URLSearchParams({ nodeId, nodeType: String(nodeType) });
     if (context.timeframe) {
       params.set('timeframe', context.timeframe);
     }
+    if (context.from) {
+      params.set('from', context.from);
+    }
+    if (context.to) {
+      params.set('to', context.to);
+    }
     if (Array.isArray(context.channels) && context.channels.length > 0) {
       params.set('channels', context.channels.join(','));
+    }
+    if (Array.isArray(context.sentiments) && context.sentiments.length > 0) {
+      params.set('sentiments', context.sentiments.join(','));
+    }
+    if (context.category) {
+      params.set('category', context.category);
+    }
+    if (context.signalFocus) {
+      params.set('signalFocus', context.signalFocus);
     }
     const details = await requestJson<NodeDetails>(`/api/node-details?${params.toString()}`);
     return normalizeNodeDetails(details);

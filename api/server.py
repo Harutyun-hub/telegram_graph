@@ -2574,16 +2574,27 @@ async def node_details(
     nodeType: str = Query(...),
     timeframe: Optional[str] = Query(default="Last 7 Days"),
     channels: Optional[str] = Query(default=None),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    sentiments: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    signalFocus: Optional[str] = Query(default=None),
 ):
     """Detailed panel data for a graph node."""
     try:
         channel_filters = [c.strip() for c in (channels or "").split(",") if c.strip()]
+        sentiment_filters = [item.strip() for item in (sentiments or "").split(",") if item.strip()]
         details = await run_request(
             lambda: graph_dashboard.get_node_details(
                 nodeId,
                 nodeType,
                 timeframe=timeframe,
                 channels=channel_filters,
+                from_date=from_date,
+                to_date=to_date,
+                sentiments=sentiment_filters,
+                category=category,
+                signal_focus=signalFocus,
             )
         )
         if not details:
