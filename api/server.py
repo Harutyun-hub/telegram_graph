@@ -2131,6 +2131,264 @@ async def debug_refresh_opportunity_briefs():
         logger.error(f"Opportunity briefs debug refresh endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# KNOWLEDGE BASE (RAG) ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import UploadFile, File, Form
+from api.knowledge_base import (
+    KBVectorStore, GeminiEmbedder, make_kb_components,
+    ingest, hybrid_search, generate_answer,
+    ParseError, UnsupportedFormatError,
+)
+
+def _kb_components() -> tuple[KBVectorStore, GeminiEmbedder]:
+    """Lazy singleton — created on first KB call."""
+    if not config.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="GEMINI_API_KEY is not configured. Add it to your .env and restart.",
+        )
+    return make_kb_components(
+        gemini_api_key=config.GEMINI_API_KEY,
+        storage_path=config.KB_STORAGE_PATH,
+        embed_dim=config.KB_EMBED_DIM,
+    )
+
+
+def _kb_openai_model() -> str:
+    return config.KB_GENERATION_MODEL or config.OPENAI_MODEL
+
+
+# ── Collections ───────────────────────────────────────────────────────────────
+
+class KBCollectionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    description: str = Field("", max_length=300)
+
+
+@app.post("/api/kb/collections", dependencies=[Depends(require_analytics_access)])
+async def kb_create_collection(body: KBCollectionCreate):
+    """Create a named knowledge base collection."""
+    store, _ = _kb_components()
+    try:
+        store.get_or_create_collection(body.name, body.description)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"name": body.name, "description": body.description, "created": True}
+
+
+@app.get("/api/kb/collections", dependencies=[Depends(require_analytics_access)])
+async def kb_list_collections():
+    """List all knowledge base collections with stats."""
+    store, _ = _kb_components()
+    return {"collections": store.list_collections()}
+
+
+@app.delete("/api/kb/collections/{collection_name}", dependencies=[Depends(require_analytics_access)])
+async def kb_delete_collection(collection_name: str):
+    """Delete a collection and all its documents."""
+    store, _ = _kb_components()
+    store.delete_collection(collection_name)
+    return {"deleted": collection_name}
+
+
+# ── Documents ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/kb/collections/{collection_name}/upload", dependencies=[Depends(require_analytics_access)])
+async def kb_upload_document(
+    collection_name: str,
+    file: UploadFile = File(...),
+    doc_title: str = Form(""),
+):
+    """Upload a document (PDF, DOCX, TXT, MD) and index it."""
+    max_bytes = config.KB_UPLOAD_MAX_MB * 1024 * 1024
+    data = await file.read()
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds {config.KB_UPLOAD_MAX_MB}MB limit.")
+
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: ingest(
+                file_path_or_url=file.filename or "upload",
+                collection_name=collection_name,
+                store=store,
+                embedder=embedder,
+                chunk_size=config.KB_CHUNK_SIZE,
+                chunk_overlap=config.KB_CHUNK_OVERLAP,
+                doc_title=doc_title,
+                data=data,
+                filename=file.filename or "",
+            ),
+        )
+    except UnsupportedFormatError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"KB ingest error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return result
+
+
+class KBAddUrlBody(BaseModel):
+    url: str = Field(..., min_length=10, max_length=2048)
+    doc_title: str = Field("", max_length=200)
+
+
+@app.post("/api/kb/collections/{collection_name}/add-url", dependencies=[Depends(require_analytics_access)])
+async def kb_add_url(collection_name: str, body: KBAddUrlBody):
+    """Fetch a URL and index its content."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: ingest(
+                file_path_or_url=body.url,
+                collection_name=collection_name,
+                store=store,
+                embedder=embedder,
+                chunk_size=config.KB_CHUNK_SIZE,
+                chunk_overlap=config.KB_CHUNK_OVERLAP,
+                doc_title=body.doc_title,
+            ),
+        )
+    except ParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"KB add-url error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return result
+
+
+@app.get("/api/kb/collections/{collection_name}/documents", dependencies=[Depends(require_analytics_access)])
+async def kb_list_documents(collection_name: str):
+    """List all documents in a collection."""
+    store, _ = _kb_components()
+    try:
+        from chromadb import errors as chroma_errors
+        coll = store._client.get_collection(collection_name)
+        if coll.count() == 0:
+            return {"documents": []}
+        all_data = coll.get(include=["metadatas"])
+        metas = all_data.get("metadatas", []) or []
+        seen: dict[str, dict] = {}
+        for m in metas:
+            if not m:
+                continue
+            doc_id = m.get("doc_id", "")
+            if doc_id and doc_id not in seen:
+                seen[doc_id] = {
+                    "doc_id": doc_id,
+                    "doc_title": m.get("doc_title", "Unknown"),
+                    "source": m.get("source", ""),
+                    "source_type": m.get("source_type", ""),
+                    "ingested_at": m.get("ingested_at", ""),
+                }
+        docs = list(seen.values())
+        # Count chunks per doc
+        chunk_counts: dict[str, int] = {}
+        for m in metas:
+            if m:
+                did = m.get("doc_id", "")
+                chunk_counts[did] = chunk_counts.get(did, 0) + 1
+        for doc in docs:
+            doc["chunk_count"] = chunk_counts.get(doc["doc_id"], 0)
+        return {"documents": docs}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name}")
+
+
+@app.delete("/api/kb/documents/{doc_id}", dependencies=[Depends(require_analytics_access)])
+async def kb_delete_document(doc_id: str, collection: str = Query(...)):
+    """Delete a document from a collection by doc_id."""
+    store, _ = _kb_components()
+    deleted = store.delete_document(collection, doc_id)
+    return {"doc_id": doc_id, "chunks_deleted": deleted}
+
+
+# ── Query ─────────────────────────────────────────────────────────────────────
+
+class KBAskBody(BaseModel):
+    question: str = Field(..., min_length=3, max_length=500)
+    collection: str = Field("default", min_length=1, max_length=80)
+
+
+@app.post("/api/kb/ask", dependencies=[Depends(require_analytics_access)])
+async def kb_ask(body: KBAskBody):
+    """Answer a question grounded in the knowledge base with citations."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        chunks = await loop.run_in_executor(
+            None,
+            lambda: hybrid_search(store, embedder, body.collection, body.question, config.KB_TOP_K),
+        )
+    except Exception as exc:
+        logger.error(f"KB search error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not chunks:
+        return {
+            "answer": "No relevant content found in this knowledge base for your question.",
+            "citations": [],
+            "confidence": "low_confidence",
+            "caveat": "The collection may be empty. Try uploading documents first.",
+        }
+
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: generate_answer(
+                question=body.question,
+                chunks=chunks,
+                openai_api_key=config.OPENAI_API_KEY,
+                model=_kb_openai_model(),
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"KB generate error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return result
+
+
+@app.get("/api/kb/search", dependencies=[Depends(require_analytics_access)])
+async def kb_search(
+    collection: str = Query(...),
+    q: str = Query(..., min_length=2, max_length=300),
+    top_k: int = Query(5, ge=1, le=20),
+):
+    """Semantic + keyword search returning ranked snippets."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        chunks = await loop.run_in_executor(
+            None,
+            lambda: hybrid_search(store, embedder, collection, q, top_k),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {
+        "query": q,
+        "collection": collection,
+        "results": [
+            {
+                "text": c["text"][:500],
+                "score": c["score"],
+                "doc_title": c.get("metadata", {}).get("doc_title", ""),
+                "page": c.get("metadata", {}).get("page", ""),
+                "source_type": c.get("metadata", {}).get("source_type", ""),
+            }
+            for c in chunks
+        ],
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

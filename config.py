@@ -165,6 +165,16 @@ AI_CATCHUP_COMMENT_LIMIT = int(os.getenv("AI_CATCHUP_COMMENT_LIMIT", "220"))
 AI_CATCHUP_POST_LIMIT = int(os.getenv("AI_CATCHUP_POST_LIMIT", "120"))
 AI_CATCHUP_SYNC_LIMIT = int(os.getenv("AI_CATCHUP_SYNC_LIMIT", "320"))
 
+# ── Knowledge Base (RAG) ──────────────────────────────────────────────────────
+GEMINI_API_KEY         = os.getenv("GEMINI_API_KEY", "")
+KB_STORAGE_PATH        = os.getenv("KB_STORAGE_PATH", "/data/kb")
+KB_EMBED_DIM           = int(os.getenv("KB_EMBED_DIM", "768"))
+KB_TOP_K               = int(os.getenv("KB_TOP_K", "8"))
+KB_CHUNK_SIZE          = int(os.getenv("KB_CHUNK_SIZE", "1500"))
+KB_CHUNK_OVERLAP       = int(os.getenv("KB_CHUNK_OVERLAP", "200"))
+KB_GENERATION_MODEL    = os.getenv("KB_GENERATION_MODEL", "")  # Defaults to OPENAI_MODEL at runtime
+KB_UPLOAD_MAX_MB       = int(os.getenv("KB_UPLOAD_MAX_MB", "50"))
+
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
     missing = []
