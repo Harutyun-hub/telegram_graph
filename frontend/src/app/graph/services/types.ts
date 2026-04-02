@@ -1,55 +1,56 @@
-export type GraphNodeType =
-  | 'channel'
-  | 'brand'
-  | 'topic'
-  | 'product'
-  | 'audience'
-  | 'painpoint'
-  | 'valueprop'
-  | 'intent'
-  | 'competitor'
-  | 'cta'
-  | 'platform'
-  | 'format'
-  | 'engagement'
-  | 'sentiment'
-  | 'timeperiod';
+export type GraphNodeType = 'category' | 'topic' | 'channel';
+
+export type SignalFocus = 'all' | 'asks' | 'needs' | 'fear';
+export type SourceDetail = 'minimal' | 'standard' | 'expanded';
+export type RankingMode = 'volume' | 'momentum' | 'spread';
+
+export interface GraphChannelRef {
+  id: string;
+  name: string;
+  mentions: number;
+}
 
 export interface GraphNode {
   id: string;
   name: string;
-  type: GraphNodeType | string;
+  type: GraphNodeType;
   val: number;
-  color?: string;
-  size?: number;
   category?: string;
-  segmentType?: string;
-  severity?: string;
-  confidence?: number;
-  insightScore?: number;
-  semanticRole?: 'opportunity';
-  opportunityTier?: 'gold' | 'silver';
-  opportunityScore?: number;
-  opportunityEvidenceCount?: number;
-  opportunityActiveDays?: number;
-  opportunityNeedRate?: number;
-  opportunityCompetitorRate?: number;
-  opportunityOwnershipRate?: number;
-  opportunityMomentum?: number;
-  opportunitySpecificity?: number;
-  opportunityEligible?: boolean;
-  topicChannelCoverage?: number;
-  topicBrandCoverage?: number;
+  categoryCount?: number;
+  mentionCount?: number;
+  postCount?: number;
+  commentCount?: number;
+  evidenceCount?: number;
+  distinctUsers?: number;
+  distinctChannels?: number;
+  topicCount?: number;
+  trendPct?: number;
+  dominantSentiment?: 'Positive' | 'Neutral' | 'Negative' | 'Urgent' | string;
+  sentimentPositive?: number;
+  sentimentNeutral?: number;
+  sentimentNegative?: number;
+  urgentSignals?: number;
+  askSignalCount?: number;
+  needSignalCount?: number;
+  fearSignalCount?: number;
+  topChannels?: GraphChannelRef[];
+  sampleEvidenceId?: string | null;
+  lastSeen?: string | null;
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
+  fx?: number | null;
+  fy?: number | null;
+  size?: number;
+  labelVisible?: boolean;
 }
 
 export interface GraphLink {
-  source: string;
-  target: string;
+  source: string | GraphNode;
+  target: string | GraphNode;
   value: number;
-  type?: string;
-  adVolume?: number;
-  avgSentiment?: number;
-  sentimentLabel?: string;
+  type: 'category-topic' | 'channel-category' | string;
 }
 
 export interface GraphFreshnessMeta {
@@ -65,17 +66,21 @@ export interface GraphFreshnessMeta {
 }
 
 export interface GraphMeta {
-  timeframe?: string;
-  since?: string;
-  insightMode?: string;
-  sourceProfile?: string;
-  confidenceThreshold?: number;
-  connectionStrength?: number;
-  layers?: string[];
+  from?: string;
+  to?: string;
+  days?: number;
   selectedChannels?: string[];
-  topicCountConsidered?: number;
-  topicCountReturned?: number;
-  thresholdRelaxed?: boolean;
+  selectedSentiments?: string[];
+  selectedCategory?: string | null;
+  signalFocus?: SignalFocus | string;
+  sourceDetail?: SourceDetail | string;
+  rankingMode?: RankingMode | string;
+  minMentions?: number;
+  availableCategories?: string[];
+  visibleTopicCount?: number;
+  visibleCategoryCount?: number;
+  visibleChannelCount?: number;
+  totalMentions?: number;
   generatedAt?: string;
   freshness?: GraphFreshnessMeta;
 }
@@ -86,12 +91,24 @@ export interface GraphData {
   meta?: GraphMeta;
 }
 
+export interface GraphFilters {
+  from_date?: string;
+  to_date?: string;
+  channels?: string[];
+  sentiments?: string[];
+  topics?: string[];
+  category?: string;
+  signalFocus?: SignalFocus;
+  sourceDetail?: SourceDetail;
+  rankingMode?: RankingMode;
+  minMentions?: number;
+  max_nodes?: number;
+}
+
 export interface NodeDetails {
   id: string;
   name: string;
   type?: string;
-  insight?: string;
-  recommendations?: string;
   [key: string]: any;
 }
 

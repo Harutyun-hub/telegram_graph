@@ -2,6 +2,7 @@ import type { GraphFreshnessMeta } from '@/app/graph/services/types';
 
 interface FreshnessBadgeProps {
   freshness?: GraphFreshnessMeta;
+  compact?: boolean;
 }
 
 function formatRelativeMinutes(value?: number | null): string {
@@ -16,7 +17,12 @@ function formatRelativeMinutes(value?: number | null): string {
   return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
 }
 
-export function FreshnessBadge({ freshness }: FreshnessBadgeProps) {
+function formatStatusLabel(status: string): string {
+  if (!status) return 'Unknown';
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+export function FreshnessBadge({ freshness, compact = false }: FreshnessBadgeProps) {
   if (!freshness) return null;
 
   const status = String(freshness.status || 'unknown').toLowerCase();
@@ -49,12 +55,25 @@ export function FreshnessBadge({ freshness }: FreshnessBadgeProps) {
               bg: 'bg-slate-500/10',
             };
 
+  if (compact) {
+    return (
+      <div className={`inline-flex items-center gap-2 rounded-full border ${tone.border} ${tone.bg} px-3 py-1.5 backdrop-blur-xl`}>
+        <span className={`inline-block h-2 w-2 rounded-full ${tone.dot}`} />
+        <span className="text-[11px] text-white/70">Data freshness:</span>
+        <span className={`text-[11px] font-semibold ${tone.text}`}>{formatStatusLabel(status)}</span>
+        {freshness.latestPostDeltaMinutes != null && (
+          <span className="text-[10px] text-white/45">DB {formatRelativeMinutes(freshness.latestPostDeltaMinutes)}</span>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={`rounded-xl border ${tone.border} ${tone.bg} backdrop-blur-xl px-3 py-2 shadow-xl min-w-64`}>
       <div className="flex items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">
           <span className={`inline-block w-2 h-2 rounded-full ${tone.dot}`} />
-          <span className={`uppercase tracking-wide font-semibold ${tone.text}`}>Data Freshness: {status}</span>
+          <span className={`uppercase tracking-wide font-semibold ${tone.text}`}>Data Freshness: {formatStatusLabel(status)}</span>
         </div>
         <span className="text-white/75 font-medium">Score {freshness.score ?? 'n/a'}</span>
       </div>
