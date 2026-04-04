@@ -8,24 +8,46 @@ import sys
 
 from actions import (
     ask_insights,
+    compare_channels,
+    compare_topics,
+    get_freshness_status,
     get_active_alerts,
     get_declining_topics,
+    get_graph_snapshot,
+    get_node_context,
     get_problem_spikes,
     get_question_clusters,
     get_sentiment_overview,
+    get_topic_detail,
+    get_topic_evidence,
     get_top_topics,
+    investigate_channel,
+    investigate_question,
+    investigate_topic,
+    search_entities,
 )
 from client import AnalyticsAPIError, AnalyticsClient
 from formatters import build_error
 from models import (
     AskInsightsRequest,
     ClientConfig,
+    CompareChannelsRequest,
+    CompareTopicsRequest,
+    GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
+    GetGraphSnapshotRequest,
+    GetNodeContextRequest,
     GetProblemSpikesRequest,
     GetQuestionClustersRequest,
     GetSentimentOverviewRequest,
+    GetTopicDetailRequest,
+    GetTopicEvidenceRequest,
     GetTopTopicsRequest,
+    InvestigateChannelRequest,
+    InvestigateQuestionRequest,
+    InvestigateTopicRequest,
+    SearchEntitiesRequest,
 )
 from pydantic import ValidationError
 
@@ -62,9 +84,63 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("get_active_alerts", parents=[common])
 
+    search = subparsers.add_parser("search_entities", parents=[common])
+    search.add_argument("--query", required=True)
+    search.add_argument("--limit", type=int, default=5)
+
+    topic_detail = subparsers.add_parser("get_topic_detail", parents=[common])
+    topic_detail.add_argument("--topic", required=True)
+    topic_detail.add_argument("--category", default=None)
+    topic_detail.add_argument("--window", default="7d")
+
+    topic_evidence = subparsers.add_parser("get_topic_evidence", parents=[common])
+    topic_evidence.add_argument("--topic", required=True)
+    topic_evidence.add_argument("--category", default=None)
+    topic_evidence.add_argument("--view", default="all")
+    topic_evidence.add_argument("--limit", type=int, default=5)
+    topic_evidence.add_argument("--focus-id", default=None)
+    topic_evidence.add_argument("--window", default="7d")
+
+    freshness = subparsers.add_parser("get_freshness_status", parents=[common])
+    freshness.add_argument("--force", action="store_true")
+
+    graph_snapshot = subparsers.add_parser("get_graph_snapshot", parents=[common])
+    graph_snapshot.add_argument("--window", default="7d")
+    graph_snapshot.add_argument("--category", default=None)
+    graph_snapshot.add_argument("--signal-focus", default="all")
+    graph_snapshot.add_argument("--max-nodes", type=int, default=12)
+
+    node_context = subparsers.add_parser("get_node_context", parents=[common])
+    node_context.add_argument("--entity", required=True)
+    node_context.add_argument("--type", default="auto")
+    node_context.add_argument("--window", default="7d")
+
+    investigate_topic_parser = subparsers.add_parser("investigate_topic", parents=[common])
+    investigate_topic_parser.add_argument("--topic", required=True)
+    investigate_topic_parser.add_argument("--category", default=None)
+    investigate_topic_parser.add_argument("--window", default="7d")
+
+    investigate_channel_parser = subparsers.add_parser("investigate_channel", parents=[common])
+    investigate_channel_parser.add_argument("--channel", required=True)
+    investigate_channel_parser.add_argument("--window", default="7d")
+
+    compare_topics_parser = subparsers.add_parser("compare_topics", parents=[common])
+    compare_topics_parser.add_argument("--topic-a", required=True)
+    compare_topics_parser.add_argument("--topic-b", required=True)
+    compare_topics_parser.add_argument("--window", default="7d")
+
+    compare_channels_parser = subparsers.add_parser("compare_channels", parents=[common])
+    compare_channels_parser.add_argument("--channel-a", required=True)
+    compare_channels_parser.add_argument("--channel-b", required=True)
+    compare_channels_parser.add_argument("--window", default="7d")
+
     insights = subparsers.add_parser("ask_insights", parents=[common])
     insights.add_argument("--window", default="7d")
     insights.add_argument("--question", required=True)
+
+    investigate_question_parser = subparsers.add_parser("investigate_question", parents=[common])
+    investigate_question_parser.add_argument("--window", default="7d")
+    investigate_question_parser.add_argument("--question", required=True)
 
     return parser
 
@@ -96,8 +172,69 @@ def main() -> int:
             payload = get_sentiment_overview(client, GetSentimentOverviewRequest(window=args.window))
         elif args.action == "get_active_alerts":
             payload = get_active_alerts(client, GetActiveAlertsRequest())
+        elif args.action == "search_entities":
+            payload = search_entities(client, SearchEntitiesRequest(query=args.query, limit=args.limit))
+        elif args.action == "get_topic_detail":
+            payload = get_topic_detail(
+                client,
+                GetTopicDetailRequest(window=args.window, topic=args.topic, category=args.category),
+            )
+        elif args.action == "get_topic_evidence":
+            payload = get_topic_evidence(
+                client,
+                GetTopicEvidenceRequest(
+                    window=args.window,
+                    topic=args.topic,
+                    category=args.category,
+                    view=args.view,
+                    limit=args.limit,
+                    focus_id=args.focus_id,
+                ),
+            )
+        elif args.action == "get_freshness_status":
+            payload = get_freshness_status(client, GetFreshnessStatusRequest(force=args.force))
+        elif args.action == "get_graph_snapshot":
+            payload = get_graph_snapshot(
+                client,
+                GetGraphSnapshotRequest(
+                    window=args.window,
+                    category=args.category,
+                    signal_focus=args.signal_focus,
+                    max_nodes=args.max_nodes,
+                ),
+            )
+        elif args.action == "get_node_context":
+            payload = get_node_context(
+                client,
+                GetNodeContextRequest(window=args.window, entity=args.entity, type=args.type),
+            )
+        elif args.action == "investigate_topic":
+            payload = investigate_topic(
+                client,
+                InvestigateTopicRequest(window=args.window, topic=args.topic, category=args.category),
+            )
+        elif args.action == "investigate_channel":
+            payload = investigate_channel(
+                client,
+                InvestigateChannelRequest(window=args.window, channel=args.channel),
+            )
+        elif args.action == "compare_topics":
+            payload = compare_topics(
+                client,
+                CompareTopicsRequest(window=args.window, topic_a=args.topic_a, topic_b=args.topic_b),
+            )
+        elif args.action == "compare_channels":
+            payload = compare_channels(
+                client,
+                CompareChannelsRequest(window=args.window, channel_a=args.channel_a, channel_b=args.channel_b),
+            )
         elif args.action == "ask_insights":
             payload = ask_insights(client, AskInsightsRequest(window=args.window, question=args.question))
+        elif args.action == "investigate_question":
+            payload = investigate_question(
+                client,
+                InvestigateQuestionRequest(window=args.window, question=args.question),
+            )
         else:
             payload = build_error(action=args.action, window=None, error_type="invalid_action", message="Unknown action.")
             _emit(payload, compact=args.json)

@@ -86,6 +86,16 @@ class ClientTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.error_type, "auth_error")
 
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_preserves_backend_not_found_detail(self, mock_urlopen) -> None:
+        mock_urlopen.side_effect = build_http_error(404, {"detail": "Topic not found for the selected window."})
+
+        with self.assertRaises(AnalyticsAPIError) as ctx:
+            self.client.get_topic_detail("Politics", None, "7d")
+
+        self.assertEqual(ctx.exception.error_type, "not_found")
+        self.assertEqual(ctx.exception.message, "Topic not found for the selected window.")
+
     @mock.patch("client.time.sleep", autospec=True)
     @mock.patch("client.urllib_request.urlopen", autospec=True)
     def test_retries_timeout(self, mock_urlopen, mock_sleep) -> None:
@@ -143,6 +153,123 @@ class ClientTests(unittest.TestCase):
             "The analytics backend is taking too long to respond right now. It may be waking up. Please try again in a moment.",
         )
         self.assertEqual(mock_sleep.call_args_list, [mock.call(0.01), mock.call(0.02)])
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_search_entities_builds_expected_url(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse([{"type": "topic", "name": "Residency permits"}])
+
+        payload = self.client.search_entities("permit", 4)
+
+        self.assertEqual(payload[0]["type"], "topic")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/search?query=permit&limit=4")
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_topic_detail_builds_date_range_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"name": "Residency permits"})
+
+        self.client.get_topic_detail("Residency permits", "Documents", "7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/topics/detail?", request.full_url)
+        self.assertIn("topic=Residency+permits", request.full_url)
+        self.assertIn("category=Documents", request.full_url)
+        self.assertIn("from=", request.full_url)
+        self.assertIn("to=", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_topic_evidence_builds_focus_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"items": []})
+
+        self.client.get_topic_evidence(
+            "Residency permits",
+            "Documents",
+            "questions",
+            page=0,
+            size=3,
+            focus_id="comment:123",
+            window="7d",
+        )
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/topics/evidence?", request.full_url)
+        self.assertIn("view=questions", request.full_url)
+        self.assertIn("size=3", request.full_url)
+        self.assertIn("focusId=comment%3A123", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_freshness_status_uses_force_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"health": {"status": "healthy"}})
+
+        payload = self.client.get_freshness_status(True)
+
+        self.assertEqual(payload["health"]["status"], "healthy")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/freshness?force=true")
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_graph_snapshot_posts_graph_payload(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"nodes": [], "meta": {}})
+
+        self.client.get_graph_data("7d", category="Documents", signal_focus="needs", max_nodes=12)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/graph")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"timeframe": "Last 7 Days"', request.data)
+        self.assertIn(b'"category": "Documents"', request.data)
+        self.assertIn(b'"signalFocus": "needs"', request.data)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_node_details_uses_timeframe_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"id": "topic:Residency permits"})
+
+        self.client.get_node_details("topic:Residency permits", "topic", "7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/node-details?", request.full_url)
+        self.assertIn("nodeId=topic%3AResidency+permits", request.full_url)
+        self.assertIn("nodeType=topic", request.full_url)
+        self.assertIn("timeframe=Last+7+Days", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_channel_detail_builds_date_range_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"title": "Docs Chat"})
+
+        self.client.get_channel_detail("Docs Chat", "7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/channels/detail?", request.full_url)
+        self.assertIn("channel=Docs+Chat", request.full_url)
+        self.assertIn("from=", request.full_url)
+        self.assertIn("to=", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_channel_posts_builds_limit_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"items": []})
+
+        self.client.get_channel_posts("Docs Chat", limit=3, page=0, window="7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/channels/posts?", request.full_url)
+        self.assertIn("size=3", request.full_url)
+        self.assertIn("page=0", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_graph_summary_helpers_use_timeframe_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse([{"name": "Docs Chat"}])
+
+        self.client.get_top_channels(4, "7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/top-channels?limit=4&timeframe=Last+7+Days")
+
+        self.client.get_trending_topics(3, "7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/trending-topics?limit=3&timeframe=Last+7+Days")
+
+        self.client.get_graph_insights("7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/graph-insights?timeframe=Last+7+Days")
 
 
 if __name__ == "__main__":

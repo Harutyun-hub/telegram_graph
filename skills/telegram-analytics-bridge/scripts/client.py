@@ -57,6 +57,139 @@ class AnalyticsClient:
             },
         )
 
+    def search_entities(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/search",
+            query={"query": query, "limit": limit},
+        )
+
+    def get_topic_detail(self, topic: str, category: str | None = None, window: str = "7d") -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/topics/detail",
+            query={
+                "topic": topic,
+                "category": category,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
+    def get_topic_evidence(
+        self,
+        topic: str,
+        category: str | None = None,
+        view: str = "all",
+        page: int = 0,
+        size: int = 5,
+        focus_id: str | None = None,
+        window: str = "7d",
+    ) -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/topics/evidence",
+            query={
+                "topic": topic,
+                "category": category,
+                "view": view,
+                "page": page,
+                "size": size,
+                "focusId": focus_id,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
+    def get_freshness_status(self, force: bool = False) -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/freshness",
+            query={"force": "true" if force else "false"},
+        )
+
+    def get_graph_data(
+        self,
+        window: str = "7d",
+        *,
+        category: str | None = None,
+        signal_focus: str | None = None,
+        max_nodes: int = 12,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "timeframe": window_to_timeframe(window),  # type: ignore[arg-type]
+            "sourceDetail": "minimal",
+            "max_nodes": max_nodes,
+        }
+        if category:
+            payload["category"] = category
+        if signal_focus and signal_focus != "all":
+            payload["signalFocus"] = signal_focus
+        return self._request_json("POST", "/api/graph", payload=payload)
+
+    def get_graph_insights(self, window: str = "7d") -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/graph-insights",
+            query={"timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_top_channels(self, limit: int = 5, window: str = "7d") -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/top-channels",
+            query={"limit": limit, "timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_trending_topics(self, limit: int = 5, window: str = "7d") -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/trending-topics",
+            query={"limit": limit, "timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_node_details(self, node_id: str, node_type: str, window: str = "7d") -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/node-details",
+            query={
+                "nodeId": node_id,
+                "nodeType": node_type,
+                "timeframe": window_to_timeframe(window),  # type: ignore[arg-type]
+            },
+        )
+
+    def get_channel_detail(self, channel: str, window: str = "7d") -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/channels/detail",
+            query={"channel": channel, "from": from_date, "to": to_date},
+        )
+
+    def get_channel_posts(
+        self,
+        channel: str,
+        *,
+        limit: int = 5,
+        page: int = 0,
+        window: str = "7d",
+    ) -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/channels/posts",
+            query={
+                "channel": channel,
+                "page": page,
+                "size": limit,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
     def _request_json(
         self,
         method: str,
@@ -148,7 +281,7 @@ class AnalyticsClient:
             message = detail or "The analytics API rejected the request parameters."
             return AnalyticsAPIError(message, error_type="invalid_request", status_code=exc.code)
         if exc.code == 404:
-            message = "The requested analytics endpoint is not available."
+            message = detail or "The requested analytics endpoint is not available."
             return AnalyticsAPIError(message, error_type="not_found", status_code=exc.code)
 
         message = detail or f"The analytics API returned HTTP {exc.code}."
