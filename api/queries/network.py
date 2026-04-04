@@ -167,6 +167,8 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     post_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+          AND coalesce(ch.source_type, 'channel') = 'channel'
+          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         RETURN ch.uuid AS channelId,
                ch.username AS username,
                ch.title AS name,
@@ -183,6 +185,8 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     category_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+          AND coalesce(ch.source_type, 'channel') = 'channel'
+          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
         RETURN ch.uuid AS channelId, category, mentions
@@ -191,6 +195,8 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     comment_rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)<-[:REPLIES_TO]-(c:Comment)
         WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
+          AND coalesce(ch.source_type, 'channel') = 'channel'
+          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         RETURN ch.uuid AS channelId, count(c) AS comments7d
     """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 

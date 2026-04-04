@@ -3,6 +3,7 @@ freshness.py — Pipeline freshness and data-drift snapshot for trust monitoring
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -11,7 +12,7 @@ from api import db
 
 _CACHE: dict | None = None
 _CACHE_TS: Optional[datetime] = None
-_CACHE_TTL_SECONDS = 30
+_CACHE_TTL_SECONDS = max(30, int(os.getenv("FRESHNESS_CACHE_TTL_SECONDS", "300")))
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:

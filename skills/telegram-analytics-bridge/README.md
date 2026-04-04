@@ -87,6 +87,19 @@ Insight synthesis:
 python3 skills/telegram-analytics-bridge/scripts/bridge.py ask_insights --window 7d --question "What is driving concern about residency permits?" --json
 ```
 
+## Phase 2A bounded investigation actions
+
+These actions extend the existing summary skill without changing the deployment model:
+
+- `search_entities`
+- `get_topic_detail`
+- `get_topic_evidence`
+- `get_freshness_status`
+- `investigate_topic`
+- `investigate_question`
+
+`investigate_question` is intentionally capped to low fanout by design. It is not an open-ended autonomous investigation workflow.
+
 ## Manual container testing
 
 Enter the OpenClaw container:
@@ -111,6 +124,30 @@ Run an insight command:
 
 ```bash
 python3 skills/telegram-analytics-bridge/scripts/bridge.py ask_insights --window 7d --question "What is driving concern about residency permits?" --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py search_entities --query "residency permit delays" --limit 5 --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_topic_detail --topic "Residency permits" --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_topic_evidence --topic "Residency permits" --view questions --limit 5 --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_freshness_status --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_topic --topic "Residency permits" --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_question --window 7d --question "What is driving concern about residency permits?" --json
 ```
 
 ## Confirm backend connectivity
@@ -252,6 +289,42 @@ curl -sS \
   -d '{"filters":{"timeframe":"Last 7 Days"},"audience":"analyst"}'
 ```
 
+### `search_entities(query, limit)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py search_entities --query "residency permit delays" --limit 5 --json
+```
+
+### `get_topic_detail(topic, category?, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_topic_detail --topic "Residency permits" --window 7d --json
+```
+
+### `get_topic_evidence(topic, category?, view, limit, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_topic_evidence --topic "Residency permits" --view all --limit 5 --window 7d --json
+```
+
+### `get_freshness_status(force?)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_freshness_status --json
+```
+
+### `investigate_topic(topic, category?, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_topic --topic "Residency permits" --window 7d --json
+```
+
+### `investigate_question(question, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_question --window 7d --question "What is driving concern about residency permits?" --json
+```
+
 ## Recommended agent prompt block
 
 Add this to the existing main OpenClaw agent prompt source in your compose env wiring:
@@ -341,6 +414,15 @@ Check in this order:
 3. the running container has the updated skill files
 4. the runtime process has `ANALYTICS_API_BASE_URL` and `ANALYTICS_API_KEY`
 5. the agent is configured to prefer skill evidence over freeform reasoning for analytics asks
+
+### Investigation actions feel too broad
+
+Phase 2A is intentionally bounded:
+
+- `investigate_topic` uses topic detail, topic evidence, and freshness only
+- `investigate_question` keeps a low request budget and stops once a single plausible topic is identified
+
+If you need deeper workflows later, that belongs in a later phase rather than widening these actions now.
 
 ## Test commands
 

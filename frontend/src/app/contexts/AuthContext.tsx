@@ -1,50 +1,162 @@
-import { createContext, useContext, useState } from 'react';
+import { createContext, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   clearStoredSimpleAuthSession,
+  isSimpleAuthEnabled,
   loadStoredSimpleAuthSession,
   persistSimpleAuthSession,
   type SimpleAuthSession,
   validateSimpleCredentials,
 } from '../auth';
+import { getSupabaseBrowserClient } from '../services/supabaseClient';
+
+type AuthMode = 'supabase' | 'simple' | 'none';
 
 interface AuthContextValue {
   isAuthenticated: boolean;
   username: string | null;
-  login: (username: string, password: string) => boolean;
-  logout: () => void;
+  loading: boolean;
+  authMode: AuthMode;
+  login: (username: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+}
+
+interface AuthState {
+  loading: boolean;
+  session: SimpleAuthSession | null;
+  mode: AuthMode;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<SimpleAuthSession | null>(() => loadStoredSimpleAuthSession());
+function buildSimpleState(session: SimpleAuthSession | null): AuthState {
+  return {
+    loading: false,
+    session,
+    mode: session ? 'simple' : 'none',
+  };
+}
 
-  const login = (username: string, password: string): boolean => {
-    if (!validateSimpleCredentials(username, password)) {
-      return false;
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AuthState>(() => ({
+    loading: true,
+    session: null,
+    mode: 'none',
+  }));
+
+  useEffect(() => {
+    let active = true;
+    const supabase = getSupabaseBrowserClient();
+
+    if (!supabase) {
+      setState(buildSimpleState(loadStoredSimpleAuthSession()));
+      return undefined;
+    }
+
+    const applySupabaseSession = (session: any) => {
+      if (!active) {
+        return;
+      }
+      const username = session?.user?.email || session?.user?.id || null;
+      setState({
+        loading: false,
+        session: username
+          ? {
+              authenticated: true,
+              username,
+            }
+          : null,
+        mode: username ? 'supabase' : 'none',
+      });
+    };
+
+    supabase.auth.getSession()
+      .then(({ data }) => applySupabaseSession(data.session))
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setState(buildSimpleState(loadStoredSimpleAuthSession()));
+      });
+
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      applySupabaseSession(session);
+    });
+
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  const login = async (username: string, password: string): Promise<void> => {
+    const normalizedUsername = username.trim();
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: normalizedUsername,
+        password,
+      });
+      if (error) {
+        throw new Error(error.message || 'Unable to sign in.');
+      }
+      const nextSession: SimpleAuthSession = {
+        authenticated: true,
+        username: data.user?.email || normalizedUsername,
+      };
+      setState({
+        loading: false,
+        session: nextSession,
+        mode: 'supabase',
+      });
+      return;
+    }
+
+    if (!isSimpleAuthEnabled()) {
+      throw new Error('Supabase browser auth is not configured in the frontend environment.');
+    }
+
+    if (!validateSimpleCredentials(normalizedUsername, password)) {
+      throw new Error('Invalid login or password. Please try again.');
     }
 
     const nextSession: SimpleAuthSession = {
       authenticated: true,
-      username,
+      username: normalizedUsername,
     };
-
-    setSession(nextSession);
+    setState({
+      loading: false,
+      session: nextSession,
+      mode: 'simple',
+    });
     persistSimpleAuthSession(nextSession);
-    return true;
   };
 
-  const logout = (): void => {
-    setSession(null);
+  const logout = async (): Promise<void> => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch {
+        // Ignore sign-out transport issues and clear local state anyway.
+      }
+    }
+
     clearStoredSimpleAuthSession();
+    setState({
+      loading: false,
+      session: null,
+      mode: 'none',
+    });
   };
 
   return (
     <AuthContext.Provider
       value={{
-        isAuthenticated: Boolean(session),
-        username: session?.username ?? null,
+        isAuthenticated: Boolean(state.session),
+        username: state.session?.username ?? null,
+        loading: state.loading,
+        authMode: state.mode,
         login,
         logout,
       }}

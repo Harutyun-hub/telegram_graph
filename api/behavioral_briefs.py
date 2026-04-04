@@ -915,19 +915,34 @@ def _normalize_candidates(rows: list[dict], kind: str) -> list[dict]:
         if len(evidence_rows) < 2:
             continue
 
-        now = datetime.now(timezone.utc)
         user_keys = {
             (_as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}")
             for s in evidence_rows
         }
         user_keys = {u for u in user_keys if u}
         channels = {_as_str(s.get("channel"), "unknown").strip().lower() for s in evidence_rows if _as_str(s.get("channel"), "").strip()}
-        signals7d = sum(1 for s in evidence_rows if (now - _parse_ts(s.get("timestamp"))).days < 7)
-        signals_prev7d = sum(1 for s in evidence_rows if 7 <= (now - _parse_ts(s.get("timestamp"))).days < 14)
+        latest_candidates = [
+            _parse_ts(_as_str(s.get("timestamp"), ""))
+            for s in evidence_rows
+            if _as_str(s.get("timestamp"), "").strip()
+        ]
+        row_latest = _as_str(row.get("latestAt"), "").strip()
+        if row_latest:
+            latest_candidates.append(_parse_ts(row_latest))
+        reference_ts = max(latest_candidates, default=datetime.now(timezone.utc))
+        latest_ts = reference_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        latest_ts = ""
-        if evidence_rows:
-            latest_ts = max((_as_str(s.get("timestamp"), "") for s in evidence_rows), default="")
+        signals7d = 0
+        signals_prev7d = 0
+        for signal in evidence_rows:
+            signal_ts = _parse_ts(signal.get("timestamp"))
+            age_days = (reference_ts - signal_ts).total_seconds() / 86400
+            if age_days < 0:
+                age_days = 0
+            if age_days < 7:
+                signals7d += 1
+            elif age_days < 14:
+                signals_prev7d += 1
 
         base = {
             "clusterId": ("pb-" if kind == "problem" else "sg-") + _slugify(topic),

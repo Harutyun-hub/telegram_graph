@@ -54,7 +54,7 @@ async def scrape_comments_for_post(
                 continue
 
             # Extract user info from the sender
-            sender = await _get_sender_info(client, reply)
+            sender = await get_sender_info(client, reply)
 
             # Ensure user exists in Supabase
             if sender["telegram_user_id"]:
@@ -71,6 +71,9 @@ async def scrape_comments_for_post(
                 "text":                 text[:4096],
                 "telegram_user_id":     sender["telegram_user_id"],
                 "posted_at":            reply.date.isoformat(),
+                "message_kind":         "discussion_comment",
+                "is_thread_root":       False,
+                "thread_top_message_id": message_id,
                 "is_processed":         False,
                 "neo4j_synced":         False,
             }
@@ -103,7 +106,7 @@ async def scrape_comments_for_post(
     return comments_found
 
 
-async def _get_sender_info(client: TelegramClient, message: Message) -> dict:
+async def get_sender_info(client: TelegramClient, message: Message) -> dict:
     """
     Extract sender information from a message.
     Returns a dict ready to upsert into telegram_users.

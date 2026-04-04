@@ -1501,7 +1501,7 @@ def get_sentiment_distribution(timeframe: str | None = None) -> list[dict]:
     def build_distribution() -> list[dict[str, Any]]:
         return run_query(
             """
-            CALL (t) {
+            CALL () {
                 MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)

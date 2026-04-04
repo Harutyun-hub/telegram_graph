@@ -8,24 +8,36 @@ import sys
 
 from actions import (
     ask_insights,
+    get_freshness_status,
     get_active_alerts,
     get_declining_topics,
     get_problem_spikes,
     get_question_clusters,
     get_sentiment_overview,
+    get_topic_detail,
+    get_topic_evidence,
     get_top_topics,
+    investigate_question,
+    investigate_topic,
+    search_entities,
 )
 from client import AnalyticsAPIError, AnalyticsClient
 from formatters import build_error
 from models import (
     AskInsightsRequest,
     ClientConfig,
+    GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
     GetProblemSpikesRequest,
     GetQuestionClustersRequest,
     GetSentimentOverviewRequest,
+    GetTopicDetailRequest,
+    GetTopicEvidenceRequest,
     GetTopTopicsRequest,
+    InvestigateQuestionRequest,
+    InvestigateTopicRequest,
+    SearchEntitiesRequest,
 )
 from pydantic import ValidationError
 
@@ -62,9 +74,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("get_active_alerts", parents=[common])
 
+    search = subparsers.add_parser("search_entities", parents=[common])
+    search.add_argument("--query", required=True)
+    search.add_argument("--limit", type=int, default=5)
+
+    topic_detail = subparsers.add_parser("get_topic_detail", parents=[common])
+    topic_detail.add_argument("--topic", required=True)
+    topic_detail.add_argument("--category", default=None)
+    topic_detail.add_argument("--window", default="7d")
+
+    topic_evidence = subparsers.add_parser("get_topic_evidence", parents=[common])
+    topic_evidence.add_argument("--topic", required=True)
+    topic_evidence.add_argument("--category", default=None)
+    topic_evidence.add_argument("--view", default="all")
+    topic_evidence.add_argument("--limit", type=int, default=5)
+    topic_evidence.add_argument("--focus-id", default=None)
+    topic_evidence.add_argument("--window", default="7d")
+
+    freshness = subparsers.add_parser("get_freshness_status", parents=[common])
+    freshness.add_argument("--force", action="store_true")
+
+    investigate_topic_parser = subparsers.add_parser("investigate_topic", parents=[common])
+    investigate_topic_parser.add_argument("--topic", required=True)
+    investigate_topic_parser.add_argument("--category", default=None)
+    investigate_topic_parser.add_argument("--window", default="7d")
+
     insights = subparsers.add_parser("ask_insights", parents=[common])
     insights.add_argument("--window", default="7d")
     insights.add_argument("--question", required=True)
+
+    investigate_question_parser = subparsers.add_parser("investigate_question", parents=[common])
+    investigate_question_parser.add_argument("--window", default="7d")
+    investigate_question_parser.add_argument("--question", required=True)
 
     return parser
 
@@ -96,8 +137,39 @@ def main() -> int:
             payload = get_sentiment_overview(client, GetSentimentOverviewRequest(window=args.window))
         elif args.action == "get_active_alerts":
             payload = get_active_alerts(client, GetActiveAlertsRequest())
+        elif args.action == "search_entities":
+            payload = search_entities(client, SearchEntitiesRequest(query=args.query, limit=args.limit))
+        elif args.action == "get_topic_detail":
+            payload = get_topic_detail(
+                client,
+                GetTopicDetailRequest(window=args.window, topic=args.topic, category=args.category),
+            )
+        elif args.action == "get_topic_evidence":
+            payload = get_topic_evidence(
+                client,
+                GetTopicEvidenceRequest(
+                    window=args.window,
+                    topic=args.topic,
+                    category=args.category,
+                    view=args.view,
+                    limit=args.limit,
+                    focus_id=args.focus_id,
+                ),
+            )
+        elif args.action == "get_freshness_status":
+            payload = get_freshness_status(client, GetFreshnessStatusRequest(force=args.force))
+        elif args.action == "investigate_topic":
+            payload = investigate_topic(
+                client,
+                InvestigateTopicRequest(window=args.window, topic=args.topic, category=args.category),
+            )
         elif args.action == "ask_insights":
             payload = ask_insights(client, AskInsightsRequest(window=args.window, question=args.question))
+        elif args.action == "investigate_question":
+            payload = investigate_question(
+                client,
+                InvestigateQuestionRequest(window=args.window, question=args.question),
+            )
         else:
             payload = build_error(action=args.action, window=None, error_type="invalid_action", message="Unknown action.")
             _emit(payload, compact=args.json)

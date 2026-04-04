@@ -151,7 +151,9 @@ export function DashboardPage() {
   };
   const tierHasVisibleWidgets = (tierId: string) =>
     ADMIN_WIDGET_DEFINITIONS.some((widget) => widget.tierId === tierId && showWidget(widget.id));
-  const visibleWidgetCount = ADMIN_WIDGET_DEFINITIONS.filter((widget) => showWidget(widget.id)).length;
+  const visibleWidgetCount = ADMIN_WIDGET_DEFINITIONS
+    .filter((widget) => tiers.some((tier) => tier.id === widget.tierId) && showWidget(widget.id))
+    .length;
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-6 max-w-[1600px] mx-auto">

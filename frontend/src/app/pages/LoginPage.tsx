@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { AlertCircle, ArrowRight, LockKeyhole, User } from 'lucide-react';
-import { resolveAuthRedirectTarget } from '../auth';
+import { isSimpleAuthEnabled, resolveAuthRedirectTarget } from '../auth';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage, type Lang } from '../contexts/LanguageContext';
 
@@ -19,8 +19,8 @@ const COPY: Record<Lang, {
   en: {
     title: 'Protected Access',
     subtitle: 'Sign in before entering the community intelligence workspace.',
-    usernameLabel: 'Login',
-    usernamePlaceholder: 'Enter your login',
+    usernameLabel: 'Email',
+    usernamePlaceholder: 'Enter your admin email',
     passwordLabel: 'Password',
     passwordPlaceholder: 'Enter your password',
     submit: 'Enter System',
@@ -29,9 +29,9 @@ const COPY: Record<Lang, {
   },
   ru: {
     title: 'Защищённый вход',
-    subtitle: 'Введите логин и пароль, чтобы продолжить.',
-    usernameLabel: 'Логин',
-    usernamePlaceholder: 'Введите логин',
+    subtitle: 'Введите email администратора и пароль, чтобы продолжить.',
+    usernameLabel: 'Email',
+    usernamePlaceholder: 'Введите email администратора',
     passwordLabel: 'Пароль',
     passwordPlaceholder: 'Введите пароль',
     submit: 'Войти в систему',
@@ -45,22 +45,36 @@ export function LoginPage() {
   const location = useLocation();
   const { login } = useAuth();
   const { lang, setLang } = useLanguage();
+  const isSimpleAuth = isSimpleAuthEnabled();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const copy = COPY[lang];
+  const usernameLabel = isSimpleAuth ? (lang === 'ru' ? 'Логин' : 'Login') : copy.usernameLabel;
+  const usernamePlaceholder = isSimpleAuth
+    ? (lang === 'ru' ? 'Введите логин администратора' : 'Enter the admin login')
+    : copy.usernamePlaceholder;
+  const subtitle = isSimpleAuth
+    ? (lang === 'ru'
+        ? 'Введите логин администратора и пароль, чтобы продолжить.'
+        : 'Enter the admin login and password to continue.')
+    : copy.subtitle;
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setSubmitting(true);
 
-    const didLogin = login(username, password);
-    if (!didLogin) {
-      setError(copy.error);
-      return;
+    try {
+      await login(username, password);
+      setError('');
+      navigate(resolveAuthRedirectTarget(location.state), { replace: true });
+    } catch (err) {
+      const message = err instanceof Error && err.message.trim() ? err.message : copy.error;
+      setError(message);
+    } finally {
+      setSubmitting(false);
     }
-
-    setError('');
-    navigate(resolveAuthRedirectTarget(location.state), { replace: true });
   }
 
   return (
@@ -97,7 +111,7 @@ export function LoginPage() {
                 {copy.panelTitle}
               </h1>
               <p className="mt-3 text-sm leading-6 text-slate-500 sm:text-base">
-                {copy.subtitle}
+                {subtitle}
               </p>
             </div>
 
@@ -105,7 +119,7 @@ export function LoginPage() {
               <label className="block">
                 <span className="mb-2 flex items-center gap-2 text-sm text-slate-600" style={{ fontWeight: 600 }}>
                   <User className="h-4 w-4" />
-                  {copy.usernameLabel}
+                  {usernameLabel}
                 </span>
                 <input
                   value={username}
@@ -116,8 +130,9 @@ export function LoginPage() {
                     }
                   }}
                   autoComplete="username"
+                  disabled={submitting}
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
-                  placeholder={copy.usernamePlaceholder}
+                  placeholder={usernamePlaceholder}
                 />
               </label>
 
@@ -136,6 +151,7 @@ export function LoginPage() {
                     }
                   }}
                   autoComplete="current-password"
+                  disabled={submitting}
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
                   placeholder={copy.passwordPlaceholder}
                 />
@@ -150,10 +166,11 @@ export function LoginPage() {
 
               <button
                 type="submit"
+                disabled={submitting}
                 className="flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-base text-white transition hover:opacity-95 focus:outline-none focus:ring-4 focus:ring-blue-500/20"
                 style={{ fontWeight: 700, background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}
               >
-                <span>{copy.submit}</span>
+                <span>{submitting ? 'Signing in...' : copy.submit}</span>
                 <ArrowRight className="h-4 w-4" />
               </button>
             </form>

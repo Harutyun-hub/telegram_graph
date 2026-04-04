@@ -18,3 +18,7 @@ loguru>=0.7.0
 fastapi>=0.111.0
 uvicorn>=0.30.0
 pydantic>=2.7.0
+orjson>=3.10.0
+sentry-sdk[fastapi]>=2.22.0
+redis>=5.0.0
+psycopg[binary]>=3.2.1

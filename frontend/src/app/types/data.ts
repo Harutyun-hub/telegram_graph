@@ -650,6 +650,22 @@ export interface TopicDetail {
   descriptionRu: string;
   evidence: TopicEvidence[];
   questionEvidence?: TopicEvidence[];
+  overview?: TopicOverview | null;
+}
+
+export interface TopicOverview {
+  topic: string;
+  category: string;
+  status: 'ready' | 'fallback' | 'insufficient_evidence' | string;
+  summaryEn: string;
+  summaryRu: string;
+  signalsEn: string[];
+  signalsRu: string[];
+  generatedAt: string;
+  windowStart: string;
+  windowEnd: string;
+  windowDays: number;
+  evidenceIds?: string[];
 }
 
 // ── Pages: Channels ──

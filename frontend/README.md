@@ -39,6 +39,10 @@ Key variable:
 - `VITE_API_BASE_URL`
   - default: `/api`
   - local explicit example: `http://127.0.0.1:8001/api`
+- `VITE_SUPABASE_URL`
+  - required for admin-authenticated AI helper requests
+- `VITE_SUPABASE_ANON_KEY`
+  - required for the browser Supabase session client used by the AI helper
 
 ## Deployment Notes
 
@@ -46,6 +50,7 @@ Key variable:
 - `/api/*` requests are still expected to be reverse-proxied to the backend via `BACKEND_URL`.
 - Railway runtime must also provide `BACKEND_ANALYTICS_API_KEY_FRONTEND` so Caddy can inject the backend Bearer token server-side.
 - The browser must never receive analytics secrets through `VITE_*` variables.
+- The browser may send its own Supabase access token to `/api/ai-helper/*` via `X-Supabase-Authorization`; OpenClaw secrets remain backend-only.
 
 ## Current Dashboard Behavior
 

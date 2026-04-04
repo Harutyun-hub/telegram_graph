@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from api import runtime_coordinator
 from api import server
 
 
@@ -27,6 +28,8 @@ class AnalyticsAuthTests(unittest.TestCase):
 
     def setUp(self) -> None:
         server._analytics_rate_limit_buckets.clear()
+        runtime_coordinator._LOCAL_COUNTERS.clear()
+        runtime_coordinator._LOCAL_LOCKS.clear()
 
     def _dashboard_context(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -35,6 +38,23 @@ class AnalyticsAuthTests(unittest.TestCase):
             days=7,
             is_operational=False,
             range_label="Last 7 Days",
+            cache_key="2026-03-15:2026-03-22",
+        )
+
+    def _dashboard_snapshot(self) -> tuple[dict, dict]:
+        return (
+            {"communityHealth": {"score": 50}},
+            {
+                "cacheStatus": "test",
+                "degradedTiers": [],
+                "suppressedDegradedTiers": [],
+                "tierTimes": {},
+                "snapshotBuiltAt": "2026-03-22T00:00:00Z",
+                "isStale": False,
+                "buildElapsedSeconds": 0.01,
+                "buildMode": "test",
+                "refreshFailureCount": 0,
+            },
         )
 
     def test_health_stays_public_when_auth_enabled(self) -> None:
@@ -51,7 +71,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
              patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
              patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_data", return_value={"communityHealth": {"score": 50}}):
+             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
             response = self.client.get("/api/dashboard")
 
         self.assertEqual(response.status_code, 200)
@@ -75,7 +95,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
              patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
              patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_data", return_value={"communityHealth": {"score": 50}}):
+             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
             response = self.client.get(
                 "/api/dashboard",
                 headers={"Authorization": "Bearer frontend-secret"},
@@ -91,7 +111,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
              patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
              patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_data", return_value={"communityHealth": {"score": 50}}):
+             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
             response = self.client.get(
                 "/api/dashboard",
                 headers={"Authorization": "Bearer openclaw-secret"},
@@ -134,7 +154,7 @@ class AnalyticsAuthTests(unittest.TestCase):
              patch.object(server, "_dashboard_freshness_snapshot", return_value={"health": {"status": "ok"}, "generated_at": "2026-03-22T00:00:00Z"}), \
              patch.object(server, "_trusted_end_date_from_freshness", return_value=date(2026, 3, 22)), \
              patch.object(server, "_default_dashboard_context", return_value=self._dashboard_context()), \
-             patch.object(server, "get_dashboard_data", return_value={"communityHealth": {"score": 50}}):
+             patch.object(server, "get_dashboard_snapshot", return_value=self._dashboard_snapshot()):
             first = self.client.get("/api/dashboard", headers={"Authorization": "Bearer frontend-secret"})
             second = self.client.get("/api/dashboard", headers={"Authorization": "Bearer frontend-secret"})
 

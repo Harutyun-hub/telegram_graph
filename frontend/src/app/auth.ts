@@ -1,11 +1,11 @@
 export const SIMPLE_AUTH_STORAGE_KEY = 'radar.simple-auth.v1';
-export const SIMPLE_AUTH_USERNAME = 'Admin';
-export const SIMPLE_AUTH_PASSWORD = 'A457!dsdhfi850';
 
 export interface SimpleAuthSession {
   authenticated: true;
   username: string;
 }
+
+const viteEnv = import.meta.env as Record<string, string | boolean | undefined>;
 
 interface RedirectStateLike {
   from?: {
@@ -15,12 +15,54 @@ interface RedirectStateLike {
   } | null;
 }
 
+function envString(name: string): string {
+  const value = viteEnv[name];
+  return value == null ? '' : String(value).trim();
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = envString(name);
+  if (!raw) {
+    return fallback;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
+function normalizeSimpleUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function getSimpleAuthCredentials(): { username: string; password: string } | null {
+  const username = envString('VITE_SIMPLE_AUTH_USERNAME');
+  const password = envString('VITE_SIMPLE_AUTH_PASSWORD');
+  if (!username || !password) {
+    return null;
+  }
+  return { username, password };
+}
+
+export function isSimpleAuthEnabled(): boolean {
+  return envBool('VITE_ENABLE_SIMPLE_AUTH', false) && Boolean(getSimpleAuthCredentials());
+}
+
 export function validateSimpleCredentials(username: string, password: string): boolean {
-  return username === SIMPLE_AUTH_USERNAME && password === SIMPLE_AUTH_PASSWORD;
+  const configured = getSimpleAuthCredentials();
+  if (!configured || !isSimpleAuthEnabled()) {
+    return false;
+  }
+
+  const normalizedInputUsername = normalizeSimpleUsername(username);
+  const normalizedConfiguredUsername = normalizeSimpleUsername(configured.username);
+  const passwordCandidates = password === password.trim() ? [password] : [password, password.trim()];
+
+  return (
+    normalizedInputUsername === normalizedConfiguredUsername &&
+    passwordCandidates.includes(configured.password)
+  );
 }
 
 export function loadStoredSimpleAuthSession(): SimpleAuthSession | null {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || !isSimpleAuthEnabled()) {
     return null;
   }
 
@@ -31,7 +73,12 @@ export function loadStoredSimpleAuthSession(): SimpleAuthSession | null {
     }
 
     const parsed = JSON.parse(raw) as Partial<SimpleAuthSession> | null;
-    if (parsed?.authenticated !== true || parsed.username !== SIMPLE_AUTH_USERNAME) {
+    const configured = getSimpleAuthCredentials();
+    if (
+      parsed?.authenticated !== true ||
+      !configured ||
+      normalizeSimpleUsername(parsed.username ?? '') !== normalizeSimpleUsername(configured.username)
+    ) {
       return null;
     }
 

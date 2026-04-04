@@ -15,6 +15,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 import config
+from api.runtime_coordinator import get_runtime_coordinator
 from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
 
 
@@ -73,7 +74,7 @@ class ScraperSchedulerService:
 
         if self._client:
             try:
-                self._client.disconnect()
+                await self._client.disconnect()
             except Exception:
                 pass
             self._client = None
@@ -153,6 +154,14 @@ class ScraperSchedulerService:
             return
 
         async with self._run_lock:
+            coordinator = get_runtime_coordinator()
+            lock_token = coordinator.acquire_lock(
+                "worker:scrape-cycle",
+                ttl_seconds=max(300, int(self.interval_minutes) * 60, config.AI_PROCESS_STAGE_MAX_SECONDS),
+            )
+            if not lock_token:
+                logger.warning("Scraper cycle skipped: runtime coordinator lock is already held")
+                return
             self.running_now = True
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
@@ -170,6 +179,7 @@ class ScraperSchedulerService:
                 self.last_error = str(e)
                 logger.error(f"Pipeline cycle failed: {e}")
             finally:
+                coordinator.release_lock("worker:scrape-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
 
@@ -179,6 +189,17 @@ class ScraperSchedulerService:
             return
 
         async with self._run_lock:
+            coordinator = get_runtime_coordinator()
+            lock_token = coordinator.acquire_lock(
+                "worker:catchup-cycle",
+                ttl_seconds=max(
+                    300,
+                    config.AI_PROCESS_STAGE_MAX_SECONDS + config.AI_SYNC_STAGE_MAX_SECONDS,
+                ),
+            )
+            if not lock_token:
+                logger.warning("Catch-up cycle skipped: runtime coordinator lock is already held")
+                return
             self.running_now = True
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
@@ -196,6 +217,7 @@ class ScraperSchedulerService:
                 self.last_error = str(e)
                 logger.error(f"Catch-up cycle failed: {e}")
             finally:
+                coordinator.release_lock("worker:catchup-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
 

@@ -20,12 +20,17 @@ export interface AdminPromptDefinition {
   labelRu: string;
   descriptionEn: string;
   descriptionRu: string;
+  defaultValue?: string;
 }
 
 export interface AdminPromptGroup {
   id: string;
   labelEn: string;
   labelRu: string;
+  descriptionEn?: string;
+  descriptionRu?: string;
+  badgeEn?: string;
+  badgeRu?: string;
 }
 
 export const ADMIN_TIERS: AdminTierDefinition[] = [
@@ -37,6 +42,7 @@ export const ADMIN_TIERS: AdminTierDefinition[] = [
   { id: 'growth', labelEn: 'Growth, Retention & Journey', labelRu: 'Рост, удержание и путь' },
   { id: 'business', labelEn: 'Business & Opportunity Intelligence', labelRu: 'Бизнес-разведка и возможности' },
   { id: 'analytics', labelEn: 'Performance & Analytics', labelRu: 'Эффективность и аналитика' },
+  { id: 'social', labelEn: 'Social Intelligence', labelRu: 'Social Intelligence' },
 ];
 
 export const ADMIN_WIDGET_DEFINITIONS = [
@@ -68,6 +74,12 @@ export const ADMIN_WIDGET_DEFINITIONS = [
   { id: 'week_over_week_shifts', tierId: 'analytics', labelEn: 'Week-over-Week Shifts', labelRu: 'Изменения неделя к неделе' },
   { id: 'sentiment_by_topic', tierId: 'analytics', labelEn: 'Sentiment by Topic', labelRu: 'Настроения по темам' },
   { id: 'content_performance', tierId: 'analytics', labelEn: 'Content Performance', labelRu: 'Эффективность контента' },
+  { id: 'social_situation_strip', tierId: 'social', labelEn: 'Social Situation Strip', labelRu: 'Сводка Social Media' },
+  { id: 'social_topic_timeline', tierId: 'social', labelEn: 'Social Topic-Sentiment Timeline', labelRu: 'Динамика тем и тональности Social' },
+  { id: 'social_topic_intelligence', tierId: 'social', labelEn: 'Social Topic Intelligence', labelRu: 'Интеллект тем Social' },
+  { id: 'social_ad_intelligence', tierId: 'social', labelEn: 'Social Ad Intelligence', labelRu: 'Рекламная разведка Social' },
+  { id: 'social_audience_response', tierId: 'social', labelEn: 'Social Audience Response', labelRu: 'Реакция аудитории Social' },
+  { id: 'social_competitor_scorecard', tierId: 'social', labelEn: 'Social Competitor Scorecard', labelRu: 'Сравнение конкурентов Social' },
 ] as const satisfies readonly AdminWidgetDefinition[];
 
 export type AdminWidgetId = (typeof ADMIN_WIDGET_DEFINITIONS)[number]['id'];
@@ -77,6 +89,15 @@ export const ADMIN_PROMPT_GROUPS: AdminPromptGroup[] = [
   { id: 'question_briefs', labelEn: 'Question Briefs', labelRu: 'Карточки вопросов' },
   { id: 'behavioral_briefs', labelEn: 'Behavioral Briefs', labelRu: 'Поведенческие карточки' },
   { id: 'opportunity_briefs', labelEn: 'Opportunity Briefs', labelRu: 'Карточки возможностей' },
+  {
+    id: 'topic_overviews',
+    labelEn: 'Topic Overviews',
+    labelRu: 'Обзоры тем',
+    descriptionEn: 'Controls the AI summary card shown on each topic detail page.',
+    descriptionRu: 'Управляет AI-сводкой, которая показывается на странице каждой темы.',
+    badgeEn: 'Topic Page AI',
+    badgeRu: 'AI темы',
+  },
   { id: 'recommendation_briefs', labelEn: 'Recommendations', labelRu: 'Рекомендации' },
 ];
 
@@ -178,6 +199,40 @@ export const ADMIN_PROMPT_DEFINITIONS: AdminPromptDefinition[] = [
     descriptionRu: 'Формирует финальные карточки бизнес-возможностей.',
   },
   {
+    key: 'topic_overviews.synthesis_prompt',
+    groupId: 'topic_overviews',
+    labelEn: 'Topic overview prompt',
+    labelRu: 'Промпт обзора тем',
+    descriptionEn: 'Builds the AI overview shown on the topic detail page.',
+    descriptionRu: 'Формирует AI-обзор, который показывается на странице темы.',
+    defaultValue: `You generate a concise, evidence-grounded, insight-rich overview for one community topic.
+
+The user already sees the chart, mentions, growth, sentiment, and top channels on the page.
+Your job is not to repeat those stats. Your job is to explain what the conversation is actually about, what patterns are emerging, and what matters in the discussion.
+
+Rules:
+1) Use only the provided evidence, question-style evidence, and metrics. Do not invent causes, actors, numbers, or conclusions not supported by the evidence.
+2) Do not restate raw numbers, percentages, trend lines, or channel names unless they are essential to explain a meaningful development that is not otherwise obvious.
+3) Prioritize insight over recap. Focus on the dominant narrative, repeated complaints or concerns, visible tensions, expectations, unresolved questions, and what these signals suggest about the topic.
+4) Synthesize across posts and comments. Highlight recurring patterns, not isolated claims from a single message.
+5) Keep the tone analytical, professional, and useful to a decision-maker.
+6) summaryEn and summaryRu should each be one short paragraph, maximum 2 sentences. They should tell the reader what this topic is really about right now and why it matters.
+7) signalsEn and signalsRu must each contain exactly 3 short bullets. Every bullet must contain a distinct insight, not a reformatted statistic.
+8) Avoid generic bullets such as "discussion remains active", "negative sentiment dominates", "mentions fell", or other observations the user can already see in the UI.
+9) If the evidence is mixed, contradictory, or weak, describe the tension or uncertainty instead of forcing a strong conclusion.
+10) Russian output must be natural and professional, not a literal translation.
+
+Return JSON only:
+{
+  "overview": {
+    "summaryEn": "string",
+    "summaryRu": "string",
+    "signalsEn": ["string", "string", "string"],
+    "signalsRu": ["string", "string", "string"]
+  }
+}`,
+  },
+  {
     key: 'recommendation_briefs.extraction_prompt',
     groupId: 'recommendation_briefs',
     labelEn: 'Recommendation extraction prompt',
@@ -192,17 +247,21 @@ export const DEFAULT_ADMIN_RUNTIME: AdminRuntimeConfig = {
   questionBriefsModel: 'gpt-5.4-mini',
   behavioralBriefsModel: 'gpt-5.4-mini',
   opportunityBriefsModel: 'gpt-5.4-mini',
+  topicOverviewsModel: 'gpt-5.4-mini',
   questionBriefsPromptVersion: 'qcards-v2',
   behavioralBriefsPromptVersion: 'behavior-v2',
   opportunityBriefsPromptVersion: 'opportunity-v1',
+  topicOverviewsPromptVersion: 'topic-overview-v2',
+  topicOverviewsRefreshMinutes: '120',
   aiPostPromptStyle: 'compact',
   featureQuestionBriefsAi: true,
   featureBehavioralBriefsAi: true,
   featureOpportunityBriefsAi: true,
+  featureTopicOverviewsAi: true,
 };
 
 export function createDefaultAdminConfig(): AdminConfig {
-  const prompts = Object.fromEntries(ADMIN_PROMPT_DEFINITIONS.map((prompt) => [prompt.key, '']));
+  const prompts = Object.fromEntries(ADMIN_PROMPT_DEFINITIONS.map((prompt) => [prompt.key, prompt.defaultValue || '']));
   return {
     widgets: Object.fromEntries(ADMIN_WIDGET_DEFINITIONS.map((widget) => [widget.id, { enabled: true }])),
     prompts,

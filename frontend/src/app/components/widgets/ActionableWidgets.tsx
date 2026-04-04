@@ -46,11 +46,11 @@ export function BusinessOpportunityTracker() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="business_opportunity_tracker">
           {ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'AI + доказательства' : 'AI + evidence grounded'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
@@ -128,11 +128,11 @@ export function JobMarketPulse() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="job_market_pulse">
           {ru ? 'Рынок труда и занятость' : 'Job & Work Landscape'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">{ru ? 'Как работает сообщество' : 'How the community works'}</span>
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? 'Как работает сообщество' : 'How the community works'}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru

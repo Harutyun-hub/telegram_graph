@@ -599,6 +599,138 @@ export const WIDGET_EXPLANATIONS = {
       note: 'Смотрите одновременно на средний балл и число публикаций. Формат может выглядеть сильным, но опираться на маленькую выборку.',
     },
   },
+  social_situation_strip: {
+    en: {
+      short: 'Summarizes the current competitor social picture in five fast KPI tiles.',
+      overview: 'This widget gives a 3-second view of how much social activity is being collected, how many ads are active, what tone dominates, and which topic leads the conversation.',
+      metrics: [
+        'Active tracked competitors from the Social entity registry.',
+        'Collected social activities, detected ads, and the dominant topic within the selected range.',
+        'Average sentiment score derived from stored Social analysis results.',
+      ],
+      note: 'Use these tiles as the top-line readout, then open the deeper widgets below for the explanation and evidence behind each number.',
+    },
+    ru: {
+      short: 'Сводит картину по конкурентам в соцсетях к пяти быстрым KPI.',
+      overview: 'Этот виджет даёт 3-секундный обзор: сколько social-активности собрано, сколько рекламных материалов обнаружено, какой тон доминирует и какая тема лидирует в разговоре.',
+      metrics: [
+        'Активные отслеживаемые конкуренты из Social-реестра сущностей.',
+        'Собранные social-активности, обнаруженные объявления и доминирующая тема в выбранном диапазоне.',
+        'Средний sentiment score на основе сохранённых результатов Social-анализа.',
+      ],
+      note: 'Используйте плитки как быстрый верхнеуровневый срез, а затем переходите к нижним виджетам за объяснением и доказательствами.',
+    },
+  },
+  social_topic_timeline: {
+    en: {
+      short: 'Shows when volume changed and whether the tone became more positive or negative.',
+      overview: 'This widget provides the time context for the Social dashboard by showing how activity volume and sentiment mix moved across the selected period.',
+      metrics: [
+        'Daily activity counts within the selected Social date range.',
+        'Positive, neutral, and negative sentiment distribution for each time bucket.',
+        'The strongest recent shift in tone or activity level for the current filter set.',
+      ],
+      note: 'Read this before the detailed topic cards so you know whether a spike is recent, sustained, or already cooling off.',
+    },
+    ru: {
+      short: 'Показывает, когда объём менялся и становился ли тон более позитивным или негативным.',
+      overview: 'Этот виджет даёт временной контекст для Social-дашборда, показывая, как менялись объём активности и состав тональности в выбранном периоде.',
+      metrics: [
+        'Ежедневное количество social-активностей в выбранном диапазоне.',
+        'Распределение позитивной, нейтральной и негативной тональности по каждой временной корзине.',
+        'Самый заметный недавний сдвиг в тоне или объёме для текущего набора фильтров.',
+      ],
+      note: 'Смотрите этот график до детальных карточек тем, чтобы понимать: всплеск только что начался, держится уже давно или уже затухает.',
+    },
+  },
+  social_topic_intelligence: {
+    en: {
+      short: 'Ranks the topics competitors discuss most and shows how people feel about them.',
+      overview: 'This widget turns extracted topic labels into an analyst-friendly ranking so you can see what competitors are talking about, how large each topic is, and what tone surrounds it.',
+      metrics: [
+        'Topic frequency from stored Social analysis payloads.',
+        'Average sentiment and sentiment distribution for each topic.',
+        'Top entities, platforms, and evidence-backed topic summaries.',
+      ],
+      note: 'Each topic card is one click away from the raw evidence so analysts can verify the narrative instead of trusting the label alone.',
+    },
+    ru: {
+      short: 'Ранжирует темы, о которых конкуренты говорят чаще всего, и показывает тон вокруг них.',
+      overview: 'Этот виджет превращает извлечённые topic labels в аналитический рейтинг, чтобы было видно, о чём говорят конкуренты, насколько велика каждая тема и какая тональность её сопровождает.',
+      metrics: [
+        'Частота тем из сохранённых payload-ов Social-анализа.',
+        'Средняя тональность и распределение sentiment по каждой теме.',
+        'Топовые сущности, платформы и краткие summary, подтверждённые доказательствами.',
+      ],
+      note: 'Каждая карточка темы открывает сырой evidence-слой, чтобы аналитик мог проверить вывод, а не просто доверять ярлыку.',
+    },
+  },
+  social_ad_intelligence: {
+    en: {
+      short: 'Shows the competitor ads currently detected in the Social evidence stream.',
+      overview: 'This widget isolates ad-like activity so analysts can see what competitors are promoting, how they frame the offer, and which intent or urgency signals appear most often.',
+      metrics: [
+        'Activities tagged as ads or Google-origin campaign items.',
+        'CTA type, content format, engagement totals, and publish timing.',
+        'AI-extracted intent, products, value propositions, and urgency indicators.',
+      ],
+      note: 'Unlike a normal feed, this view is filtered for ad intelligence, so the card text itself is the evidence behind the insight.',
+    },
+    ru: {
+      short: 'Показывает конкурентные объявления, обнаруженные в Social evidence stream.',
+      overview: 'Этот виджет выделяет рекламоподобную активность, чтобы аналитик видел, что именно продвигают конкуренты, как формулируют оффер и какие intent или urgency-сигналы встречаются чаще всего.',
+      metrics: [
+        'Активности, помеченные как ads, или кампанийные элементы Google.',
+        'Тип CTA, формат контента, суммарная вовлечённость и время публикации.',
+        'AI-извлечённые intent, продукты, value propositions и urgency indicators.',
+      ],
+      note: 'В отличие от обычной ленты, здесь сама карточка уже является доказательством рекламного инсайта.',
+    },
+  },
+  social_audience_response: {
+    en: {
+      short: 'Compares how audiences react to each competitor and what pain points show up most.',
+      overview: 'This widget separates entity-level sentiment from the underlying pain points and customer-intent signals so analysts can see not just whether reaction is good or bad, but what is driving it.',
+      metrics: [
+        'Entity-by-entity sentiment splits across the current filter set.',
+        'Ranked pain points and customer-intent labels extracted from analyzed activities.',
+        'Dominant sentiment and associated entities for each repeated response signal.',
+      ],
+      note: 'This is where the Social system becomes differentiated: it surfaces the specific problems audiences react to, not only generic sentiment.',
+    },
+    ru: {
+      short: 'Сравнивает реакцию аудитории по конкурентам и показывает самые частые pain points.',
+      overview: 'Этот виджет разделяет тональность по сущностям и underlying pain points / customer-intent сигналы, чтобы аналитик видел не только хороший или плохой отклик, но и то, что именно его вызывает.',
+      metrics: [
+        'Разделение sentiment по сущностям в текущем наборе фильтров.',
+        'Ранжированные pain points и customer-intent labels, извлечённые из проанализированных активностей.',
+        'Доминирующая тональность и связанные сущности для каждого повторяющегося response-сигнала.',
+      ],
+      note: 'Именно здесь Social-система начинает отличаться: она показывает конкретные проблемы, на которые реагирует аудитория, а не только общий sentiment.',
+    },
+  },
+  social_competitor_scorecard: {
+    en: {
+      short: 'Compares competitors side by side across core Social intelligence metrics.',
+      overview: 'This widget is the executive comparison table for the Social dashboard. It lets someone quickly see who is most active, who is advertising hardest, what intent dominates, and which topics or propositions define each competitor.',
+      metrics: [
+        'Posts and ads count for each tracked competitor.',
+        'Average sentiment plus top marketing intent, topics, products, and value propositions.',
+        'Expandable evidence rows with recent activities for each competitor.',
+      ],
+      note: 'Use this table for competitor briefing and prioritization. It is built for comparison first, not deep reading.',
+    },
+    ru: {
+      short: 'Сравнивает конкурентов бок о бок по ключевым метрикам Social intelligence.',
+      overview: 'Этот виджет — executive comparison table для Social-дашборда. Он позволяет быстро увидеть, кто активнее всех, кто сильнее давит рекламой, какой intent доминирует и какие темы или ценностные предложения определяют каждого конкурента.',
+      metrics: [
+        'Количество публикаций и объявлений по каждому отслеживаемому конкуренту.',
+        'Средняя тональность плюс топовый marketing intent, темы, продукты и value propositions.',
+        'Раскрывающиеся evidence-строки с недавними активностями по каждому конкуренту.',
+      ],
+      note: 'Используйте эту таблицу для конкурентных брифингов и приоритизации. Она создана прежде всего для сравнения, а не для детального чтения.',
+    },
+  },
 } satisfies Record<AdminWidgetId, WidgetExplanation>;
 
 const registryIds = new Set<AdminWidgetId>(Object.keys(WIDGET_EXPLANATIONS) as AdminWidgetId[]);

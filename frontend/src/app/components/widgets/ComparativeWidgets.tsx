@@ -25,11 +25,11 @@ export function WeekOverWeekShifts() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="week_over_week_shifts">
           {ru ? 'Динамика за неделю' : 'Week-over-Week Shifts'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? `Сравнение с предыдущим окном (${range.days} дн.)` : `Compared with the previous ${range.days}-day window`}
         </span>
       </div>
@@ -101,11 +101,11 @@ export function SentimentByTopic() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="sentiment_by_topic">
           {ru ? 'Тональность по темам' : 'Sentiment by Topic'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Что радует, а что раздражает' : 'What makes people happy vs. frustrated'}
         </span>
       </div>
@@ -207,11 +207,11 @@ export function ContentPerformance() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="content_performance">
           {ru ? 'Эффективность контента' : 'Content Performance'}
         </WidgetTitle>
-        <span className="text-xs text-gray-500">
+        <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {ru ? 'Какой контент работает лучше всего' : 'What content works best'}
         </span>
       </div>

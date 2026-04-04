@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.coverage
 
 # Virtual environment
 venv/
@@ -53,6 +54,3 @@ telegram_session_*_string.txt
 
 # Backup directory
 backups/
-
-# Documentation (keep PLATFORM_IMPROVEMENT_PLAN.md in repo)
-docs/

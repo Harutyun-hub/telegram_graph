@@ -65,6 +65,74 @@ class AskInsightsRequest(WindowedRequest):
         return text
 
 
+class SearchEntitiesRequest(BaseRequestModel):
+    query: str = Field(..., min_length=2, max_length=200)
+    limit: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        text = " ".join(value.split()).strip()
+        if len(text) < 2:
+            raise ValueError("query must be at least 2 characters after trimming")
+        return text
+
+
+class GetTopicDetailRequest(WindowedRequest):
+    topic: str = Field(..., min_length=1, max_length=160)
+    category: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("topic")
+    @classmethod
+    def normalize_topic(cls, value: str) -> str:
+        text = " ".join(value.split()).strip()
+        if not text:
+            raise ValueError("topic is required")
+        return text
+
+    @field_validator("category")
+    @classmethod
+    def normalize_category(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = " ".join(value.split()).strip()
+        return text or None
+
+
+class GetTopicEvidenceRequest(GetTopicDetailRequest):
+    view: Literal["all", "questions"] = "all"
+    limit: int = Field(default=5, ge=1, le=10)
+    focus_id: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("focus_id")
+    @classmethod
+    def normalize_focus_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = " ".join(value.split()).strip()
+        return text or None
+
+
+class GetFreshnessStatusRequest(BaseRequestModel):
+    force: bool = False
+
+
+class InvestigateTopicRequest(GetTopicDetailRequest):
+    pass
+
+
+class InvestigateQuestionRequest(WindowedRequest):
+    question: str = Field(..., min_length=3, max_length=300)
+
+    @field_validator("question")
+    @classmethod
+    def normalize_question(cls, value: str) -> str:
+        text = " ".join(value.split()).strip()
+        if len(text) < 3:
+            raise ValueError("question must be at least 3 characters after trimming")
+        return text
+
+
 class ClientConfig(BaseRequestModel):
     base_url: str = Field(..., min_length=1, max_length=500)
     api_key: str = Field(..., min_length=1, max_length=500)

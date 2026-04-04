@@ -515,7 +515,10 @@ class SupabaseWriter:
         """Fetch oldest unprocessed posts that are currently runnable by the AI stage."""
         return self._paged_unprocessed_rows(
             table_name="telegram_posts",
-            select_columns="id, channel_id, telegram_message_id, text, posted_at",
+            select_columns=(
+                "id, channel_id, telegram_message_id, text, posted_at, "
+                "entry_kind, thread_message_count, thread_participant_count, last_activity_at"
+            ),
             limit=limit,
             scope_type="post",
             scope_key_builder=lambda row: row.get("id"),
@@ -523,23 +526,23 @@ class SupabaseWriter:
 
     def get_posts_with_comments_pending(self, limit: int = 50) -> list[dict]:
         """Fetch posts that have comments but haven't had comments scraped yet."""
-        res = self.client.table("telegram_posts") \
+        query = self.client.table("telegram_posts") \
             .select("id, channel_id, telegram_message_id") \
             .eq("has_comments", True) \
             .is_("comments_scraped_at", "null") \
-            .limit(limit) \
-            .execute()
+            .neq("entry_kind", "thread_anchor")
+        res = query.limit(limit).execute()
         return res.data or []
 
     def get_posts_with_comments_pending_for_channel(self, channel_uuid: str, limit: int = 50) -> list[dict]:
         """Fetch pending comment-scrape posts for a specific channel."""
-        res = self.client.table("telegram_posts") \
+        query = self.client.table("telegram_posts") \
             .select("id, channel_id, telegram_message_id") \
             .eq("channel_id", channel_uuid) \
             .eq("has_comments", True) \
             .is_("comments_scraped_at", "null") \
-            .limit(limit) \
-            .execute()
+            .neq("entry_kind", "thread_anchor")
+        res = query.limit(limit).execute()
         return res.data or []
 
     def mark_post_processed(self, post_uuid: str):
@@ -1600,7 +1603,10 @@ class SupabaseWriter:
             return {}
 
         res = self.client.table("telegram_posts") \
-            .select("id, channel_id, telegram_message_id, text, posted_at") \
+            .select(
+                "id, channel_id, telegram_message_id, text, posted_at, "
+                "entry_kind, thread_message_count, thread_participant_count, last_activity_at"
+            ) \
             .in_("id", ids) \
             .execute()
 
@@ -1609,6 +1615,107 @@ class SupabaseWriter:
             for row in (res.data or [])
             if row.get("id")
         }
+
+    def get_posts_by_message_ids(self, channel_uuid: str, telegram_message_ids: list[int]) -> dict[int, dict]:
+        """Fetch post rows for a source keyed by Telegram message id."""
+        ids = sorted({
+            int(message_id)
+            for message_id in (telegram_message_ids or [])
+            if isinstance(message_id, int) or (isinstance(message_id, str) and str(message_id).strip().isdigit())
+        })
+        if not ids:
+            return {}
+
+        res = self.client.table("telegram_posts") \
+            .select(
+                "id, channel_id, telegram_message_id, text, posted_at, entry_kind, "
+                "thread_message_count, thread_participant_count, last_activity_at"
+            ) \
+            .eq("channel_id", channel_uuid) \
+            .in_("telegram_message_id", ids) \
+            .execute()
+
+        result: dict[int, dict] = {}
+        for row in (res.data or []):
+            value = row.get("telegram_message_id")
+            if value is None:
+                continue
+            try:
+                result[int(value)] = row
+            except Exception:
+                continue
+        return result
+
+    def get_comments_for_post(self, post_uuid: str, limit: int = 25) -> list[dict]:
+        """Fetch ordered comments/messages for a single post/thread anchor."""
+        res = self.client.table("telegram_comments") \
+            .select(
+                "id, post_id, channel_id, telegram_message_id, reply_to_message_id, text, "
+                "telegram_user_id, posted_at, is_thread_root, thread_top_message_id"
+            ) \
+            .eq("post_id", post_uuid) \
+            .order("posted_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        return res.data or []
+
+    def get_comment_thread_stats(self, post_ids: list[str]) -> dict[str, dict]:
+        """Return aggregate message/thread stats for thread anchor posts."""
+        ids = [str(post_id).strip() for post_id in (post_ids or []) if str(post_id).strip()]
+        if not ids:
+            return {}
+
+        res = self.client.table("telegram_comments") \
+            .select("post_id, telegram_user_id, posted_at, is_thread_root") \
+            .in_("post_id", ids) \
+            .execute()
+
+        stats: dict[str, dict] = {
+            post_id: {
+                "message_count": 0,
+                "root_count": 0,
+                "participant_ids": set(),
+                "last_activity_at": None,
+            }
+            for post_id in ids
+        }
+
+        for row in (res.data or []):
+            post_id = str(row.get("post_id") or "").strip()
+            if not post_id:
+                continue
+            bucket = stats.setdefault(
+                post_id,
+                {
+                    "message_count": 0,
+                    "root_count": 0,
+                    "participant_ids": set(),
+                    "last_activity_at": None,
+                },
+            )
+            bucket["message_count"] = int(bucket.get("message_count") or 0) + 1
+            if row.get("is_thread_root"):
+                bucket["root_count"] = int(bucket.get("root_count") or 0) + 1
+            telegram_user_id = row.get("telegram_user_id")
+            if telegram_user_id is not None:
+                try:
+                    bucket["participant_ids"].add(int(telegram_user_id))
+                except Exception:
+                    pass
+            posted_at = row.get("posted_at")
+            if posted_at and (
+                bucket.get("last_activity_at") is None or str(posted_at) > str(bucket.get("last_activity_at"))
+            ):
+                bucket["last_activity_at"] = posted_at
+
+        for post_id, bucket in stats.items():
+            participant_ids = bucket.pop("participant_ids", set())
+            bucket["thread_participant_count"] = len(participant_ids)
+            message_count = int(bucket.get("message_count") or 0)
+            root_count = int(bucket.get("root_count") or 0)
+            bucket["comment_count"] = max(0, message_count - root_count)
+
+        return stats
 
     def get_pipeline_freshness_snapshot(self) -> dict:
         """

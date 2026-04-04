@@ -17,6 +17,7 @@ import {
   Network,
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { apiFetch } from '../services/api';
 import type { TrackedChannel, ChannelStatus } from '../types/data';
 
 type SourceApiItem = {
@@ -28,6 +29,9 @@ type SourceApiItem = {
   is_active: boolean;
   scrape_depth_days: number;
   scrape_comments: boolean;
+  source_type?: 'channel' | 'supergroup' | 'pending' | null;
+  resolution_status?: 'pending' | 'resolved' | 'error' | null;
+  last_resolution_error?: string | null;
   last_scraped_at: string | null;
   created_at: string;
   updated_at: string;
@@ -206,15 +210,29 @@ const typeLabels: Record<string, { en: string; ru: string }> = {
   supergroup: { en: 'Supergroup', ru: 'Супергруппа' },
 };
 
+const TELEGRAM_USERNAME_RE = /^[a-z][a-z0-9_]{4,31}$/i;
+
 function normalizeSourceInput(raw: string): string {
   let value = raw.trim();
+  if (!value) return '';
   value = value.replace(/^https?:\/\//i, '');
-  if (value.toLowerCase().startsWith('t.me/')) value = value.slice(5);
-  if (value.toLowerCase().startsWith('telegram.me/')) value = value.slice(12);
+  value = value.replace(/^www\./i, '');
+  const lowered = value.toLowerCase();
+  if (lowered.startsWith('t.me/')) value = value.slice(5);
+  if (lowered.startsWith('telegram.me/')) value = value.slice(12);
+  value = value.split('?')[0].split('#')[0].trim();
   if (value.startsWith('@')) value = value.slice(1);
-  if (value.includes('/')) value = value.split('/')[0];
-  value = value.split('?')[0].split('#')[0].trim().toLowerCase();
-  return value ? `@${value}` : '';
+  const segments = value.split('/').map((part) => part.trim()).filter(Boolean);
+  if (!segments.length) return '';
+
+  let candidate = segments[0];
+  if (candidate.toLowerCase() === 'c') {
+    candidate = segments[1] || '';
+  }
+
+  candidate = candidate.replace(/^@/, '').trim().toLowerCase();
+  if (!TELEGRAM_USERNAME_RE.test(candidate)) return '';
+  return `@${candidate}`;
 }
 
 function relativeTime(iso: string | null, ru: boolean): string {
@@ -259,7 +277,17 @@ function formatDuration(minutes: number | null | undefined, ru: boolean): string
 function toTrackedChannel(item: SourceApiItem, ru: boolean): TrackedChannel {
   const username = normalizeSourceInput(item.channel_username || '');
   const title = (item.channel_title || '').trim() || username;
-  const description = (item.description || '').trim();
+  const resolutionStatus = String(item.resolution_status || '').trim().toLowerCase();
+  const description = (item.description || item.last_resolution_error || '').trim();
+  const sourceType = String(item.source_type || '').trim().toLowerCase();
+  const status: ChannelStatus = !item.is_active
+    ? 'paused'
+    : resolutionStatus === 'error'
+      ? 'error'
+      : resolutionStatus === 'pending'
+        ? 'pending'
+        : 'active';
+  const type = sourceType === 'supergroup' ? 'supergroup' : 'channel';
 
   return {
     id: item.id,
@@ -268,33 +296,21 @@ function toTrackedChannel(item: SourceApiItem, ru: boolean): TrackedChannel {
     description: description || undefined,
     members: item.member_count ?? 0,
     dailyMessages: 0,
-    status: item.is_active ? 'active' : 'paused',
+    status,
     addedDate: (item.created_at || '').split('T')[0] || new Date().toISOString().split('T')[0],
     lastSync: relativeTime(item.last_scraped_at, ru),
-    type: 'channel',
+    type,
     language: 'RU/EN',
     growth: 0,
   };
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  const normalizedPath = path.startsWith('/api/') ? path.slice(4) : path;
+  return apiFetch<T>(normalizedPath, {
     ...init,
+    includeUserAuth: true,
   });
-
-  if (!response.ok) {
-    let message = `HTTP ${response.status}`;
-    try {
-      const json = await response.json();
-      if (typeof json?.detail === 'string') message = json.detail;
-    } catch {
-      // ignore
-    }
-    throw new Error(message);
-  }
-
-  return (await response.json()) as T;
 }
 
 function AddChannelModal({
@@ -363,7 +379,11 @@ function AddChannelModal({
                   setChannelUsername(e.target.value);
                   setError('');
                 }}
-                placeholder={ru ? '@channel_name или t.me/channel' : '@channel_name or t.me/channel'}
+                placeholder={
+                  ru
+                    ? '@channel_name, t.me/channel или t.me/c/public_name/123'
+                    : '@channel_name, t.me/channel, or t.me/c/public_name/123'
+                }
                 className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
               />
             </div>

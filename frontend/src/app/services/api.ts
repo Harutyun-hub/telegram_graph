@@ -7,24 +7,41 @@
 // live in that separate app. See integration.md Section 7 for details.
 // ================================================================
 
+import { getSupabaseBrowserClient } from './supabaseClient';
+
 // ── Configuration ──────────────────────────────────────────────
 // Prefer VITE_API_BASE_URL for local/prod environments.
-const API_BASE_URL =
-  (import.meta as any)?.env?.VITE_API_BASE_URL?.toString()?.replace(/\/$/, '') ||
-  '/api';
+const viteEnv = import.meta.env as Record<string, string | boolean | undefined>;
+const API_BASE_URL = String(viteEnv.VITE_API_BASE_URL ?? '').replace(/\/$/, '') || '/api';
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
  * Returns an auth token for API calls.
- * Replace with Supabase session token or JWT when connecting backend.
- * Example: return supabase.auth.session()?.access_token ?? '';
+ * This is used only for routes that require a real user session.
  */
-function getAuthToken(): string | null {
-  // TODO: Replace with real auth token retrieval
-  // import { supabase } from './supabaseClient';
-  // const { data: { session } } = await supabase.auth.getSession();
-  // return session?.access_token ?? null;
-  return null;
+async function getAuthToken(): Promise<string | null> {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) {
+    return null;
+  }
+
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getFriendlyErrorMessage(payload: any, fallback: string): string {
+  const helperError = payload?.error;
+  if (helperError && typeof helperError?.message === 'string' && helperError.message.trim()) {
+    return helperError.message.trim();
+  }
+  if (typeof payload?.detail === 'string' && payload.detail.trim()) {
+    return payload.detail.trim();
+  }
+  return fallback;
 }
 
 /**
@@ -33,9 +50,9 @@ function getAuthToken(): string | null {
  */
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit & { timeoutMs?: number } = {},
+  options: RequestInit & { timeoutMs?: number; includeUserAuth?: boolean } = {},
 ): Promise<T> {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, includeUserAuth = false, ...fetchOptions } = options;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -44,9 +61,11 @@ export async function apiFetch<T>(
     ...(fetchOptions.headers as Record<string, string> ?? {}),
   };
 
-  const token = getAuthToken();
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (includeUserAuth) {
+    const token = await getAuthToken();
+    if (token) {
+      headers['X-Supabase-Authorization'] = `Bearer ${token}`;
+    }
   }
 
   try {
@@ -57,9 +76,17 @@ export async function apiFetch<T>(
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
+      const rawBody = await response.text().catch(() => '');
+      let parsedBody: any = null;
+      if (rawBody.trim()) {
+        try {
+          parsedBody = JSON.parse(rawBody);
+        } catch {
+          parsedBody = null;
+        }
+      }
       throw new Error(
-        `API ${response.status}: ${body || response.statusText}`
+        `API ${response.status}: ${getFriendlyErrorMessage(parsedBody, rawBody || response.statusText)}`
       );
     }
 
@@ -91,9 +118,43 @@ export async function askAI(query: string): Promise<{
   answer: string;
   timestamp: string;
 }> {
+  // Deprecated legacy route. The floating helper uses /api/ai-helper/* now.
   return apiFetch('/ai/query', {
     method: 'POST',
     body: JSON.stringify({ query }),
+  });
+}
+
+export interface AIHelperMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp: string;
+}
+
+export async function aiHelperChat(message: string): Promise<AIHelperMessage> {
+  const payload = await apiFetch<{ ok: boolean; message: AIHelperMessage }>('/ai-helper/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+    includeUserAuth: true,
+    timeoutMs: 35_000,
+  });
+  return payload.message;
+}
+
+export async function getAiHelperHistory(limit: number = 50): Promise<AIHelperMessage[]> {
+  const payload = await apiFetch<{ ok: boolean; messages: AIHelperMessage[] }>(`/ai-helper/history?limit=${limit}`, {
+    method: 'GET',
+    includeUserAuth: true,
+    timeoutMs: 20_000,
+  });
+  return Array.isArray(payload?.messages) ? payload.messages : [];
+}
+
+export async function resetAiHelper(): Promise<{ ok: boolean; reset: boolean; timestamp: string }> {
+  return apiFetch('/ai-helper/reset', {
+    method: 'POST',
+    includeUserAuth: true,
+    timeoutMs: 20_000,
   });
 }
 

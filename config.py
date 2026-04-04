@@ -19,6 +19,21 @@ def _env_csv(name: str, default: str = "") -> list:
     raw = os.getenv(name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
 
+
+def _environment_name() -> str:
+    return str(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or ""
+    ).strip().lower()
+
+
+ENVIRONMENT_NAME = _environment_name()
+IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
+IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
+IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_API_ID       = int(os.getenv("TELEGRAM_API_ID", 0))
 TELEGRAM_API_HASH     = os.getenv("TELEGRAM_API_HASH", "")
@@ -29,12 +44,22 @@ TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")  # For Railwa
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SOCIAL_SUPABASE_URL = os.getenv("SOCIAL_SUPABASE_URL", SUPABASE_URL).strip()
+SOCIAL_SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SOCIAL_SUPABASE_SERVICE_ROLE_KEY",
+    SUPABASE_SERVICE_ROLE_KEY,
+).strip()
+SOCIAL_DATABASE_URL = os.getenv("SOCIAL_DATABASE_URL", "").strip()
 
 # ── Neo4j ─────────────────────────────────────────────────────────────────────
 NEO4J_URI      = os.getenv("NEO4J_URI", "")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+SOCIAL_NEO4J_URI = os.getenv("SOCIAL_NEO4J_URI", NEO4J_URI).strip()
+SOCIAL_NEO4J_USERNAME = os.getenv("SOCIAL_NEO4J_USERNAME", NEO4J_USERNAME).strip()
+SOCIAL_NEO4J_PASSWORD = os.getenv("SOCIAL_NEO4J_PASSWORD", NEO4J_PASSWORD).strip()
+SOCIAL_NEO4J_DATABASE = os.getenv("SOCIAL_NEO4J_DATABASE", NEO4J_DATABASE).strip()
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 # Prefer standard OPENAI_API_KEY, but keep backward compatibility with OpenAI_API.
@@ -52,6 +77,20 @@ ANALYTICS_RATE_LIMIT_ENABLED = _env_bool("ANALYTICS_RATE_LIMIT_ENABLED", True)
 ANALYTICS_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ANALYTICS_RATE_LIMIT_WINDOW_SECONDS", "60"))
 ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQUESTS", "120"))
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+ENABLE_DEBUG_ENDPOINTS = _env_bool("ENABLE_DEBUG_ENDPOINTS", not IS_LOCKED_ENV)
+OPENCLAW_GATEWAY_BASE_URL = os.getenv("OPENCLAW_GATEWAY_BASE_URL", "").strip().rstrip("/")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "").strip()
+OPENCLAW_ANALYTICS_AGENT_ID = os.getenv("OPENCLAW_ANALYTICS_AGENT_ID", "").strip()
+OPENCLAW_WEB_SESSION_KEY = os.getenv(
+    "OPENCLAW_WEB_SESSION_KEY",
+    "" if IS_PRODUCTION else "tg-analyst-ru-web-admin",
+).strip()
+OPENCLAW_HELPER_TIMEOUT_SECONDS = float(os.getenv("OPENCLAW_HELPER_TIMEOUT_SECONDS", "30"))
+AI_HELPER_ADMIN_SUPABASE_USER_ID = os.getenv("AI_HELPER_ADMIN_SUPABASE_USER_ID", "").strip()
+AI_HELPER_ADMIN_EMAIL = os.getenv("AI_HELPER_ADMIN_EMAIL", "").strip().lower()
+SCRAPECREATORS_API_KEY = os.getenv("SCRAPECREATORS_API_KEY", "").strip()
 
 # ── Feature Flags ──────────────────────────────────────────────────────────────
 FEATURE_TAXONOMY_V2 = _env_bool("FEATURE_TAXONOMY_V2", True)
@@ -62,6 +101,7 @@ FEATURE_EXTRACTION_V2 = _env_bool("FEATURE_EXTRACTION_V2", True)
 FEATURE_QUESTION_BRIEFS_AI = _env_bool("FEATURE_QUESTION_BRIEFS_AI", True)
 FEATURE_BEHAVIORAL_BRIEFS_AI = _env_bool("FEATURE_BEHAVIORAL_BRIEFS_AI", True)
 FEATURE_OPPORTUNITY_BRIEFS_AI = _env_bool("FEATURE_OPPORTUNITY_BRIEFS_AI", True)
+FEATURE_TOPIC_OVERVIEWS_AI = _env_bool("FEATURE_TOPIC_OVERVIEWS_AI", True)
 
 # ── AI Safety / Performance ────────────────────────────────────────────────────
 AI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "45"))
@@ -78,6 +118,7 @@ AI_FAILURE_BACKOFF_MAX_SECONDS = int(os.getenv("AI_FAILURE_BACKOFF_MAX_SECONDS",
 AI_POST_BATCH_SIZE = int(os.getenv("AI_POST_BATCH_SIZE", "5"))
 AI_POST_BATCH_MAX_TOKENS = int(os.getenv("AI_POST_BATCH_MAX_TOKENS", "2600"))
 AI_MESSAGE_CHAR_LIMIT = int(os.getenv("AI_MESSAGE_CHAR_LIMIT", "700"))
+AI_THREAD_SUMMARY_CONTEXT_MESSAGES = int(os.getenv("AI_THREAD_SUMMARY_CONTEXT_MESSAGES", "12"))
 AI_PROCESS_STAGE_MAX_SECONDS = int(os.getenv("AI_PROCESS_STAGE_MAX_SECONDS", "1200"))
 AI_SYNC_STAGE_MAX_SECONDS = int(os.getenv("AI_SYNC_STAGE_MAX_SECONDS", "900"))
 AI_POST_PROMPT_STYLE = os.getenv("AI_POST_PROMPT_STYLE", "compact").strip().lower()
@@ -144,10 +185,27 @@ OPPORTUNITY_BRIEFS_REFRESH_MINUTES = int(os.getenv("OPPORTUNITY_BRIEFS_REFRESH_M
 OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP = _env_bool("OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP", True)
 OPPORTUNITY_BRIEFS_PROMPT_VERSION = os.getenv("OPPORTUNITY_BRIEFS_PROMPT_VERSION", "opportunity-v1")
 
+TOPIC_OVERVIEWS_MODEL = os.getenv("TOPIC_OVERVIEWS_MODEL", OPENAI_MODEL)
+TOPIC_OVERVIEWS_MAX_TOKENS = int(os.getenv("TOPIC_OVERVIEWS_MAX_TOKENS", "1200"))
+TOPIC_OVERVIEWS_CACHE_TTL_SECONDS = int(os.getenv("TOPIC_OVERVIEWS_CACHE_TTL_SECONDS", "7200"))
+TOPIC_OVERVIEWS_WINDOW_DAYS = int(os.getenv("TOPIC_OVERVIEWS_WINDOW_DAYS", str(GRAPH_ANALYTICS_RETENTION_DAYS)))
+TOPIC_OVERVIEWS_MAX_TOPICS = int(os.getenv("TOPIC_OVERVIEWS_MAX_TOPICS", "24"))
+TOPIC_OVERVIEWS_EVIDENCE_PER_TOPIC = int(os.getenv("TOPIC_OVERVIEWS_EVIDENCE_PER_TOPIC", "5"))
+TOPIC_OVERVIEWS_QUESTION_LIMIT = int(os.getenv("TOPIC_OVERVIEWS_QUESTION_LIMIT", "3"))
+TOPIC_OVERVIEWS_MIN_EVIDENCE = int(os.getenv("TOPIC_OVERVIEWS_MIN_EVIDENCE", "8"))
+TOPIC_OVERVIEWS_MIN_USERS = int(os.getenv("TOPIC_OVERVIEWS_MIN_USERS", "3"))
+TOPIC_OVERVIEWS_MIN_CHANNELS = int(os.getenv("TOPIC_OVERVIEWS_MIN_CHANNELS", "2"))
+TOPIC_OVERVIEWS_MAX_CONCURRENCY = max(1, int(os.getenv("TOPIC_OVERVIEWS_MAX_CONCURRENCY", "2")))
+TOPIC_OVERVIEWS_REFRESH_MINUTES = int(os.getenv("TOPIC_OVERVIEWS_REFRESH_MINUTES", "120"))
+TOPIC_OVERVIEWS_REFRESH_ON_STARTUP = _env_bool("TOPIC_OVERVIEWS_REFRESH_ON_STARTUP", True)
+TOPIC_OVERVIEWS_PROMPT_VERSION = os.getenv("TOPIC_OVERVIEWS_PROMPT_VERSION", "topic-overview-v2")
+
 # Scrape backpressure: when backlog is high, prioritize processing/sync before scraping more.
 SCRAPE_SKIP_WHEN_BACKLOG = _env_bool("SCRAPE_SKIP_WHEN_BACKLOG", True)
 SCRAPE_BACKPRESSURE_UNPROCESSED_POSTS = int(os.getenv("SCRAPE_BACKPRESSURE_UNPROCESSED_POSTS", "250"))
 SCRAPE_BACKPRESSURE_UNPROCESSED_COMMENTS = int(os.getenv("SCRAPE_BACKPRESSURE_UNPROCESSED_COMMENTS", "120"))
+GROUP_MAX_MESSAGES_PER_SOURCE_PER_CYCLE = int(os.getenv("GROUP_MAX_MESSAGES_PER_SOURCE_PER_CYCLE", "400"))
+GROUP_MAX_THREAD_ANCHORS_PER_SOURCE_PER_CYCLE = int(os.getenv("GROUP_MAX_THREAD_ANCHORS_PER_SOURCE_PER_CYCLE", "120"))
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 SCRAPER_INTERVAL_MINUTES   = 15    # How often to check for new posts
@@ -175,6 +233,25 @@ KB_CHUNK_OVERLAP       = int(os.getenv("KB_CHUNK_OVERLAP", "200"))
 KB_GENERATION_MODEL    = os.getenv("KB_GENERATION_MODEL", "")  # Defaults to OPENAI_MODEL at runtime
 KB_UPLOAD_MAX_MB       = int(os.getenv("KB_UPLOAD_MAX_MB", "50"))
 
+# ── Social Media Activities ───────────────────────────────────────────────────
+SOCIAL_FETCH_MAX_PAGES = max(1, int(os.getenv("SOCIAL_FETCH_MAX_PAGES", "3")))
+SOCIAL_FETCH_PAGE_SIZE = max(1, int(os.getenv("SOCIAL_FETCH_PAGE_SIZE", "50")))
+SOCIAL_ANALYSIS_BATCH_SIZE = max(1, min(int(os.getenv("SOCIAL_ANALYSIS_BATCH_SIZE", "8")), 8))
+SOCIAL_ANALYSIS_MODEL = os.getenv("SOCIAL_ANALYSIS_MODEL", OPENAI_MODEL).strip() or OPENAI_MODEL
+SOCIAL_ANALYSIS_PROMPT_VERSION = os.getenv("SOCIAL_ANALYSIS_PROMPT_VERSION", "social-v1").strip() or "social-v1"
+SOCIAL_GRAPH_PROJECTION_VERSION = os.getenv("SOCIAL_GRAPH_PROJECTION_VERSION", "social-graph-v1").strip() or "social-graph-v1"
+SOCIAL_TIKTOK_ENABLED = _env_bool("SOCIAL_TIKTOK_ENABLED", False)
+SOCIAL_RUNTIME_ENABLED = _env_bool("SOCIAL_RUNTIME_ENABLED", True)
+SOCIAL_ACTIVITY_RETENTION_DAYS = max(30, int(os.getenv("SOCIAL_ACTIVITY_RETENTION_DAYS", "365")))
+SOCIAL_PAYLOAD_RETENTION_DAYS = max(7, int(os.getenv("SOCIAL_PAYLOAD_RETENTION_DAYS", "90")))
+SOCIAL_STAGE_CLAIM_LIMIT = max(1, int(os.getenv("SOCIAL_STAGE_CLAIM_LIMIT", "120")))
+SOCIAL_STAGE_LEASE_SECONDS = max(60, int(os.getenv("SOCIAL_STAGE_LEASE_SECONDS", "900")))
+SOCIAL_RETRY_BASE_SECONDS = max(30, int(os.getenv("SOCIAL_RETRY_BASE_SECONDS", "120")))
+SOCIAL_RETRY_MAX_SECONDS = max(
+    SOCIAL_RETRY_BASE_SECONDS,
+    int(os.getenv("SOCIAL_RETRY_MAX_SECONDS", "3600")),
+)
+
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
     missing = []
@@ -188,3 +265,41 @@ def validate():
     if not OPENAI_API_KEY:         missing.append("OPENAI_API_KEY/OpenAI_API")
     if missing:
         raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+
+    if IS_LOCKED_ENV:
+        locked_env_errors: list[str] = []
+        if not ANALYTICS_API_REQUIRE_AUTH:
+            locked_env_errors.append("ANALYTICS_API_REQUIRE_AUTH must be true")
+        if not CORS_ALLOW_ORIGINS or "*" in CORS_ALLOW_ORIGINS:
+            locked_env_errors.append("CORS_ALLOW_ORIGINS must not contain '*'")
+        if not REDIS_URL:
+            locked_env_errors.append("REDIS_URL")
+        if not ADMIN_API_KEY:
+            locked_env_errors.append("ADMIN_API_KEY")
+        if not ANALYTICS_API_KEY_FRONTEND:
+            locked_env_errors.append("ANALYTICS_API_KEY_FRONTEND")
+        if not ANALYTICS_API_KEY_OPENCLAW:
+            locked_env_errors.append("ANALYTICS_API_KEY_OPENCLAW")
+        if locked_env_errors:
+            raise EnvironmentError(
+                "Missing or unsafe locked-environment configuration: "
+                + ", ".join(locked_env_errors)
+            )
+
+    if IS_LOCKED_ENV:
+        ai_helper_missing = []
+        if not OPENCLAW_GATEWAY_BASE_URL:
+            ai_helper_missing.append("OPENCLAW_GATEWAY_BASE_URL")
+        if not OPENCLAW_GATEWAY_TOKEN:
+            ai_helper_missing.append("OPENCLAW_GATEWAY_TOKEN")
+        if not OPENCLAW_ANALYTICS_AGENT_ID:
+            ai_helper_missing.append("OPENCLAW_ANALYTICS_AGENT_ID")
+        if not OPENCLAW_WEB_SESSION_KEY:
+            ai_helper_missing.append("OPENCLAW_WEB_SESSION_KEY")
+        if not AI_HELPER_ADMIN_SUPABASE_USER_ID:
+            ai_helper_missing.append("AI_HELPER_ADMIN_SUPABASE_USER_ID")
+        if ai_helper_missing:
+            raise EnvironmentError(
+                "Missing required locked-environment AI helper environment variables: "
+                + ", ".join(ai_helper_missing)
+            )

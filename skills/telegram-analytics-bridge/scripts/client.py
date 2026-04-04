@@ -57,6 +57,59 @@ class AnalyticsClient:
             },
         )
 
+    def search_entities(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/search",
+            query={"query": query, "limit": limit},
+        )
+
+    def get_topic_detail(self, topic: str, category: str | None = None, window: str = "7d") -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/topics/detail",
+            query={
+                "topic": topic,
+                "category": category,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
+    def get_topic_evidence(
+        self,
+        topic: str,
+        category: str | None = None,
+        view: str = "all",
+        page: int = 0,
+        size: int = 5,
+        focus_id: str | None = None,
+        window: str = "7d",
+    ) -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/topics/evidence",
+            query={
+                "topic": topic,
+                "category": category,
+                "view": view,
+                "page": page,
+                "size": size,
+                "focusId": focus_id,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
+    def get_freshness_status(self, force: bool = False) -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/freshness",
+            query={"force": "true" if force else "false"},
+        )
+
     def _request_json(
         self,
         method: str,
@@ -148,7 +201,7 @@ class AnalyticsClient:
             message = detail or "The analytics API rejected the request parameters."
             return AnalyticsAPIError(message, error_type="invalid_request", status_code=exc.code)
         if exc.code == 404:
-            message = "The requested analytics endpoint is not available."
+            message = detail or "The requested analytics endpoint is not available."
             return AnalyticsAPIError(message, error_type="not_found", status_code=exc.code)
 
         message = detail or f"The analytics API returned HTTP {exc.code}."
