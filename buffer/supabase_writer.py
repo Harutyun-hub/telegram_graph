@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import ssl
 import time
+import uuid
 from urllib.request import urlopen
 from loguru import logger
 import config
@@ -64,6 +65,9 @@ class SupabaseWriter:
         self._failure_table_warning_emitted = False
         self._topic_review_warning_emitted = False
         self._topic_promotion_warning_emitted = False
+        self._resolution_jobs_warning_emitted = False
+        self._resolution_slots_warning_emitted = False
+        self._peer_refs_warning_emitted = False
         self._runtime_bucket_name = "runtime-config"
         self._scheduler_settings_path = "scraper/scheduler_settings.json"
         self.refresh_runtime_topic_aliases()
@@ -92,6 +96,33 @@ class SupabaseWriter:
         self._topic_promotion_warning_emitted = True
         logger.warning(
             "topic_taxonomy_promotions table unavailable; runtime taxonomy promotions are disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_resolution_jobs_table_once(self, error: Exception):
+        if self._resolution_jobs_warning_emitted:
+            return
+        self._resolution_jobs_warning_emitted = True
+        logger.warning(
+            "telegram_source_resolution_jobs table unavailable; source resolution queue is disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_resolution_slots_table_once(self, error: Exception):
+        if self._resolution_slots_warning_emitted:
+            return
+        self._resolution_slots_warning_emitted = True
+        logger.warning(
+            "telegram_session_slots table unavailable; source resolution session pacing is disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_peer_refs_table_once(self, error: Exception):
+        if self._peer_refs_warning_emitted:
+            return
+        self._peer_refs_warning_emitted = True
+        logger.warning(
+            "telegram_channel_peer_refs table unavailable; peer-ref lookup is disabled until migration is applied "
             f"({error})"
         )
 
@@ -151,6 +182,475 @@ class SupabaseWriter:
             {"content-type": "application/json", "upsert": "true"},
         )
         return payload
+
+    # ── Source Resolution ────────────────────────────────────────────────────
+
+    def get_source_resolution_slot(self, slot_key: str) -> dict | None:
+        key = str(slot_key or "").strip() or "primary"
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .select("*") \
+                .eq("slot_key", key) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return None
+
+    def list_source_resolution_slots(self, *, active_only: bool = False) -> list[dict]:
+        try:
+            query = self.client.table("telegram_session_slots") \
+                .select("*") \
+                .order("priority", desc=False)
+            if active_only:
+                query = query.eq("is_active", True)
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return []
+
+    def ensure_source_resolution_slot(
+        self,
+        slot_key: str = "primary",
+        *,
+        is_active: bool = True,
+        priority: int = 100,
+        min_resolve_interval_seconds: int | None = None,
+        max_concurrent_resolves: int = 1,
+    ) -> dict:
+        key = str(slot_key or "").strip() or "primary"
+        existing = self.get_source_resolution_slot(key)
+        if existing:
+            return existing
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "slot_key": key,
+            "is_active": bool(is_active),
+            "priority": int(priority),
+            "min_resolve_interval_seconds": int(
+                min_resolve_interval_seconds or config.SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS
+            ),
+            "max_concurrent_resolves": max(1, int(max_concurrent_resolves)),
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .insert(payload) \
+                .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+        return payload
+
+    def update_source_resolution_slot(self, slot_key: str, payload: dict) -> dict | None:
+        key = str(slot_key or "").strip() or "primary"
+        if not payload:
+            return self.get_source_resolution_slot(key)
+        update_payload = dict(payload)
+        update_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .update(update_payload) \
+                .eq("slot_key", key) \
+                .execute()
+            if res.data:
+                return res.data[0]
+            return self.get_source_resolution_slot(key)
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return None
+
+    def get_channel_peer_ref(self, channel_uuid: str, session_slot: str = "primary") -> dict | None:
+        if not channel_uuid:
+            return None
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("*") \
+                .eq("channel_id", channel_uuid) \
+                .eq("session_slot", session_slot) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+            return None
+
+    def upsert_channel_peer_ref(self, channel_uuid: str, session_slot: str, payload: dict) -> dict | None:
+        if not channel_uuid:
+            return None
+        peer_id = payload.get("peer_id")
+        access_hash = payload.get("access_hash")
+        if peer_id is None or access_hash is None:
+            return None
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row = {
+            "channel_id": channel_uuid,
+            "session_slot": str(session_slot or "").strip() or "primary",
+            "peer_id": int(peer_id),
+            "access_hash": int(access_hash),
+            "resolved_username": (payload.get("resolved_username") or None),
+            "resolved_at": payload.get("resolved_at") or now_iso,
+            "last_verified_at": payload.get("last_verified_at") or now_iso,
+            "updated_at": now_iso,
+            "created_at": now_iso,
+        }
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .upsert(row, on_conflict="channel_id,session_slot") \
+                .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+        return None
+
+    def list_channels_missing_peer_refs(
+        self,
+        *,
+        session_slot: str = "primary",
+        active_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict]:
+        try:
+            channels = self.get_active_channels() if active_only else self.list_channels()
+        except Exception:
+            channels = []
+        if not channels:
+            return []
+
+        refs = {}
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("channel_id, session_slot") \
+                .eq("session_slot", session_slot) \
+                .execute()
+            refs = {
+                str(item.get("channel_id") or ""): item
+                for item in (res.data or [])
+                if item.get("channel_id")
+            }
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+            return []
+
+        missing: list[dict] = []
+        for channel in channels:
+            channel_id = str(channel.get("id") or "").strip()
+            if not channel_id or channel_id in refs:
+                continue
+            missing.append(channel)
+            if len(missing) >= max(1, int(limit)):
+                break
+        return missing
+
+    def get_source_resolution_job(self, channel_uuid: str, job_kind: str = "resolve_metadata") -> dict | None:
+        if not channel_uuid:
+            return None
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .select("*") \
+                .eq("channel_id", channel_uuid) \
+                .eq("job_kind", job_kind) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def list_source_resolution_jobs(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        try:
+            query = self.client.table("telegram_source_resolution_jobs") \
+                .select("*") \
+                .order("priority", desc=False) \
+                .order("next_attempt_at", desc=False)
+            normalized_statuses = [str(value or "").strip() for value in (statuses or []) if str(value or "").strip()]
+            if normalized_statuses:
+                query = query.in_("status", normalized_statuses)
+            if limit is not None:
+                query = query.limit(max(1, int(limit)))
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return []
+
+    def enqueue_source_resolution_job(
+        self,
+        channel_uuid: str,
+        *,
+        job_kind: str = "resolve_metadata",
+        priority: int = 30,
+        next_attempt_at: str | None = None,
+    ) -> dict | None:
+        if not channel_uuid:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "channel_id": channel_uuid,
+            "job_kind": str(job_kind or "").strip() or "resolve_metadata",
+            "priority": int(priority),
+            "status": "pending",
+            "next_attempt_at": next_attempt_at or now_iso,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "last_error_code": None,
+            "last_error_message": None,
+            "finished_at": None,
+            "updated_at": now_iso,
+        }
+        existing = self.get_source_resolution_job(channel_uuid, payload["job_kind"])
+        try:
+            if existing and existing.get("id"):
+                payload["attempt_count"] = int(existing.get("attempt_count") or 0)
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .update(payload) \
+                    .eq("id", existing["id"]) \
+                    .execute()
+            else:
+                payload["attempt_count"] = 0
+                payload["created_at"] = now_iso
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .insert(payload) \
+                    .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+        return existing
+
+    def claim_due_source_resolution_jobs(
+        self,
+        *,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        lease_expires_at = (now + timedelta(seconds=max(30, int(lease_seconds)))).isoformat()
+        due_jobs = []
+        jobs = self.list_source_resolution_jobs(statuses=["pending", "leased"], limit=max(10, int(limit) * 5))
+        for job in jobs:
+            status = str(job.get("status") or "").strip().lower()
+            next_attempt_at = _parse_iso_datetime(job.get("next_attempt_at")) or now
+            lease_expires = _parse_iso_datetime(job.get("lease_expires_at"))
+            lease_active = status == "leased" and lease_expires is not None and lease_expires > now
+            if lease_active:
+                continue
+            if next_attempt_at > now:
+                continue
+            due_jobs.append(job)
+
+        claimed: list[dict] = []
+        for job in due_jobs[:max(1, int(limit))]:
+            token = str(uuid.uuid4())
+            try:
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .update(
+                        {
+                            "status": "leased",
+                            "lease_token": token,
+                            "lease_expires_at": lease_expires_at,
+                            "updated_at": now.isoformat(),
+                            "finished_at": None,
+                        }
+                    ) \
+                    .eq("id", job["id"]) \
+                    .execute()
+                if res.data:
+                    claimed.append(res.data[0])
+            except Exception as e:
+                self._warn_resolution_jobs_table_once(e)
+                break
+        return claimed
+
+    def complete_source_resolution_job(self, job_id: str, *, attempt_count: int | None = None) -> dict | None:
+        if not job_id:
+            return None
+        payload = {
+            "status": "done",
+            "lease_token": None,
+            "lease_expires_at": None,
+            "last_error_code": None,
+            "last_error_message": None,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if attempt_count is not None:
+            payload["attempt_count"] = int(attempt_count)
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(payload) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def requeue_source_resolution_job(
+        self,
+        job_id: str,
+        *,
+        attempt_count: int,
+        next_attempt_at: str,
+        last_error_code: str | None,
+        last_error_message: str | None,
+    ) -> dict | None:
+        if not job_id:
+            return None
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(
+                    {
+                        "status": "pending",
+                        "attempt_count": int(attempt_count),
+                        "next_attempt_at": next_attempt_at,
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "last_error_code": (last_error_code or None),
+                        "last_error_message": (last_error_message or None),
+                        "finished_at": None,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def dead_letter_source_resolution_job(
+        self,
+        job_id: str,
+        *,
+        attempt_count: int,
+        last_error_code: str | None,
+        last_error_message: str | None,
+    ) -> dict | None:
+        if not job_id:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(
+                    {
+                        "status": "dead_letter",
+                        "attempt_count": int(attempt_count),
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "last_error_code": (last_error_code or None),
+                        "last_error_message": (last_error_message or None),
+                        "finished_at": now_iso,
+                        "updated_at": now_iso,
+                    }
+                ) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def get_channels_by_ids(self, channel_ids: list[str]) -> dict[str, dict]:
+        ids = [str(channel_id).strip() for channel_id in (channel_ids or []) if str(channel_id).strip()]
+        if not ids:
+            return {}
+        try:
+            res = self.client.table("telegram_channels") \
+                .select("*") \
+                .in_("id", ids) \
+                .execute()
+            return {
+                str(item.get("id")): item
+                for item in (res.data or [])
+                if item.get("id")
+            }
+        except Exception:
+            return {}
+
+    def get_source_resolution_snapshot(self, *, session_slot: str = "primary") -> dict:
+        now = datetime.now(timezone.utc)
+        jobs = self.list_source_resolution_jobs(limit=5000)
+        due_jobs = 0
+        leased_jobs = 0
+        dead_letter_jobs = 0
+        oldest_due_age_seconds: int | None = None
+
+        for job in jobs:
+            status = str(job.get("status") or "").strip().lower()
+            next_attempt_at = _parse_iso_datetime(job.get("next_attempt_at")) or now
+            lease_expires_at = _parse_iso_datetime(job.get("lease_expires_at"))
+            if status == "dead_letter":
+                dead_letter_jobs += 1
+                continue
+            if status == "leased" and lease_expires_at and lease_expires_at > now:
+                leased_jobs += 1
+                continue
+            if next_attempt_at <= now:
+                due_jobs += 1
+                age_seconds = max(0, int((now - next_attempt_at).total_seconds()))
+                if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
+                    oldest_due_age_seconds = age_seconds
+
+        slots = self.list_source_resolution_slots(active_only=True)
+        cooldown_slots = 0
+        max_cooldown_until: str | None = None
+        for slot in slots:
+            cooldown_until = _parse_iso_datetime(slot.get("cooldown_until"))
+            if cooldown_until and cooldown_until > now:
+                cooldown_slots += 1
+                cooldown_iso = cooldown_until.isoformat()
+                if max_cooldown_until is None or cooldown_iso > max_cooldown_until:
+                    max_cooldown_until = cooldown_iso
+
+        active_pending_sources = 0
+        active_missing_peer_refs = 0
+        active_channels = self.get_active_channels()
+        peer_refs = {}
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("channel_id, session_slot") \
+                .eq("session_slot", session_slot) \
+                .execute()
+            peer_refs = {
+                str(item.get("channel_id") or ""): True
+                for item in (res.data or [])
+                if item.get("channel_id")
+            }
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+
+        for channel in active_channels:
+            resolution_status = str(channel.get("resolution_status") or "").strip().lower()
+            if resolution_status == "pending":
+                active_pending_sources += 1
+            channel_id = str(channel.get("id") or "").strip()
+            if resolution_status == "resolved" and channel_id and channel_id not in peer_refs:
+                active_missing_peer_refs += 1
+
+        return {
+            "slot_key": session_slot,
+            "due_jobs": due_jobs,
+            "leased_jobs": leased_jobs,
+            "dead_letter_jobs": dead_letter_jobs,
+            "cooldown_slots": cooldown_slots,
+            "cooldown_until": max_cooldown_until,
+            "oldest_due_age_seconds": oldest_due_age_seconds,
+            "active_pending_sources": active_pending_sources,
+            "active_missing_peer_refs": active_missing_peer_refs,
+        }
 
     def get_runtime_json(self, path: str, default: dict | None = None) -> dict:
         """Load a JSON object from runtime-config storage bucket."""

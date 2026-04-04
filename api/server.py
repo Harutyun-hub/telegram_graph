@@ -102,6 +102,11 @@ from api.runtime_executors import (
     shutdown_background_executor,
     shutdown_request_executor,
 )
+from api.source_resolution import (
+    build_pending_source_payload,
+    enqueue_missing_peer_ref_backfill,
+    ensure_resolution_job,
+)
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
@@ -1094,6 +1099,29 @@ def get_current_scraper_scheduler_status() -> dict[str, Any]:
                 "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
             },
             "run_history": [],
+            "resolution": {
+                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
+                "running_now": False,
+                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
+                "last_run_started_at": None,
+                "last_run_finished_at": None,
+                "last_success_at": None,
+                "next_run_at": None,
+                "last_error": None,
+                "last_result": None,
+                "run_history": [],
+                "snapshot": {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                },
+            },
             "persisted": None,
         }
     return scraper_scheduler.status()
@@ -2664,14 +2692,22 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
             elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
                 update_payload["channel_title"] = normalized_handle
             if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
-                update_payload.update(_pending_source_payload(channel_title=update_payload.get("channel_title") or channel_title))
+                pending_title = (update_payload.get("channel_title") or channel_title or canonical_username).strip() or canonical_username
+                if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                    update_payload.update(build_pending_source_payload(channel_title=pending_title))
+                else:
+                    update_payload.update(_pending_source_payload(channel_title=pending_title))
             action = "exists"
             if not existing.get("is_active", False):
                 update_payload["is_active"] = True
                 action = "reactivated"
 
             updated = writer.update_channel(existing["id"], update_payload)
-            if updated:
+            if updated and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            elif updated:
                 inline_resolved = await _try_enrich_channel_metadata(
                     updated["id"],
                     updated.get("channel_username") or canonical_username,
@@ -2680,21 +2716,29 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
                 updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
             return {"action": action, "item": updated}
 
+        create_payload = {
+            "channel_username": canonical_username,
+            "is_active": True,
+            "scrape_depth_days": payload.scrape_depth_days,
+            "scrape_comments": payload.scrape_comments,
+        }
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            create_payload.update(build_pending_source_payload(channel_title=channel_title))
+        else:
+            create_payload.update(_pending_source_payload(channel_title=channel_title))
         created = writer.create_channel(
-            {
-                "channel_username": canonical_username,
-                "is_active": True,
-                "scrape_depth_days": payload.scrape_depth_days,
-                "scrape_comments": payload.scrape_comments,
-                **_pending_source_payload(channel_title=channel_title),
-            }
+            create_payload
         )
-        inline_resolved = await _try_enrich_channel_metadata(
-            created["id"],
-            created.get("channel_username") or canonical_username,
-            created.get("channel_title"),
-        )
-        created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            ensure_resolution_job(writer, created)
+            created = writer.get_channel_by_id(created["id"]) or created
+        else:
+            inline_resolved = await _try_enrich_channel_metadata(
+                created["id"],
+                created.get("channel_username") or canonical_username,
+                created.get("channel_title"),
+            )
+            created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
         return {"action": "created", "item": created}
     except HTTPException:
         raise
@@ -2725,25 +2769,77 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 
         updated = writer.update_channel(channel_id, update_payload)
         if updated and updated.get("is_active"):
-            if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
-                writer.update_channel(
-                    channel_id,
-                    _pending_source_payload(
-                        channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip() or ""
-                    ),
+            if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        build_pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            else:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        _pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                inline_resolved = await _try_enrich_channel_metadata(
+                    updated["id"],
+                    updated.get("channel_username") or "",
+                    updated.get("channel_title"),
                 )
-                updated = writer.get_channel_by_id(channel_id) or updated
-            inline_resolved = await _try_enrich_channel_metadata(
-                updated["id"],
-                updated.get("channel_username") or "",
-                updated.get("channel_title"),
-            )
-            updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
+                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
         return {"item": updated}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Update source channel error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sources/resolution")
+async def get_source_resolution_status():
+    """Current source resolution worker status and queue snapshot."""
+    return get_scraper_scheduler().status().get("resolution") or {}
+
+
+@app.post("/api/sources/resolution/run-once")
+async def run_source_resolution_once():
+    """Trigger one immediate source resolution cycle."""
+    try:
+        return await get_scraper_scheduler().run_source_resolution_once()
+    except Exception as e:
+        logger.error(f"Run-once source resolution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sources/resolution/backfill-peer-refs")
+async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
+    """Queue resolution jobs for sources that still lack cached peer refs."""
+    try:
+        capped_limit = max(1, min(int(limit), 1000))
+        queued = enqueue_missing_peer_ref_backfill(
+            get_supabase_writer(),
+            session_slot="primary",
+            active_only=bool(active_only),
+            limit=capped_limit,
+        )
+        return {
+            "queued": queued,
+            "active_only": bool(active_only),
+            "limit": capped_limit,
+            "resolution": get_scraper_scheduler().status().get("resolution") or {},
+        }
+    except Exception as e:
+        logger.error(f"Backfill source peer refs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

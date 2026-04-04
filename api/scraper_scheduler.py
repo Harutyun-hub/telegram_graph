@@ -16,6 +16,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 import config
+from api.source_resolution import run_source_resolution_cycle
 from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
 
 
@@ -32,6 +33,7 @@ class ScraperSchedulerService:
         self.db = supabase_writer
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "scraper_runtime_job"
+        self.resolution_job_id = "source_resolution_runtime_job"
 
         self.interval_minutes = 15
         self.desired_active = False
@@ -44,8 +46,16 @@ class ScraperSchedulerService:
         self.last_result: Optional[dict] = None
         self.last_mode: str = "normal"
         self._run_history = deque(maxlen=12)
+        self.resolution_running_now = False
+        self.resolution_last_run_started_at: Optional[datetime] = None
+        self.resolution_last_run_finished_at: Optional[datetime] = None
+        self.resolution_last_success_at: Optional[datetime] = None
+        self.resolution_last_error: Optional[str] = None
+        self.resolution_last_result: Optional[dict] = None
+        self._resolution_run_history = deque(maxlen=20)
 
         self._run_lock = asyncio.Lock()
+        self._resolution_run_lock = asyncio.Lock()
         self._idle_event = asyncio.Event()
         self._idle_event.set()
         self._client: Optional[TelegramClient] = None
@@ -59,6 +69,8 @@ class ScraperSchedulerService:
 
         if self.desired_active:
             self._upsert_interval_job()
+        if config.FEATURE_SOURCE_RESOLUTION_WORKER:
+            self._upsert_resolution_job()
 
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
@@ -113,6 +125,22 @@ class ScraperSchedulerService:
             misfire_grace_time=120,
         )
 
+    def _upsert_resolution_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.resolution_job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._run_source_resolution_cycle,
+            "interval",
+            minutes=max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
+            id=self.resolution_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+        )
+
     def _next_run_iso(self) -> Optional[str]:
         if not self.desired_active:
             return None
@@ -120,6 +148,20 @@ class ScraperSchedulerService:
         if not job:
             return None
         return _iso(job.next_run_time)
+
+    def _next_resolution_run_iso(self) -> Optional[str]:
+        if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
+            return None
+        job = self.scheduler.get_job(self.resolution_job_id)
+        if not job:
+            return None
+        return _iso(job.next_run_time)
+
+    def _sync_idle_event(self) -> None:
+        if self.running_now or self.resolution_running_now:
+            self._idle_event.clear()
+        else:
+            self._idle_event.set()
 
     async def _get_or_create_client(self) -> TelegramClient:
         if self._client and self._client.is_connected():
@@ -167,7 +209,7 @@ class ScraperSchedulerService:
 
         async with self._run_lock:
             self.running_now = True
-            self._idle_event.clear()
+            self._sync_idle_event()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
@@ -192,7 +234,7 @@ class ScraperSchedulerService:
             finally:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
-                self._idle_event.set()
+                self._sync_idle_event()
 
     async def _run_catchup_cycle(self) -> None:
         if self._run_lock.locked():
@@ -201,7 +243,7 @@ class ScraperSchedulerService:
 
         async with self._run_lock:
             self.running_now = True
-            self._idle_event.clear()
+            self._sync_idle_event()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
@@ -223,7 +265,42 @@ class ScraperSchedulerService:
             finally:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
-                self._idle_event.set()
+                self._sync_idle_event()
+
+    async def _run_source_resolution_cycle(self) -> None:
+        if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
+            return
+        if self._resolution_run_lock.locked():
+            logger.warning("Source resolution cycle skipped: previous run still active")
+            return
+
+        async with self._resolution_run_lock:
+            self.resolution_running_now = True
+            self._sync_idle_event()
+            self.resolution_last_error = None
+            self.resolution_last_run_started_at = datetime.now(timezone.utc)
+            self.resolution_last_run_finished_at = None
+
+            try:
+                client = await self._get_or_create_client()
+                result = await run_source_resolution_cycle(
+                    client=client,
+                    writer=self.db,
+                    session_slot="primary",
+                    max_jobs=config.SOURCE_RESOLUTION_MAX_JOBS_PER_RUN,
+                    min_interval_seconds=config.SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS,
+                )
+                self.resolution_last_result = result
+                self.resolution_last_success_at = datetime.now(timezone.utc)
+                self._record_resolution_run(result=result)
+                logger.success(f"Source resolution cycle completed: {result}")
+            except Exception as e:
+                self.resolution_last_error = str(e)
+                logger.error(f"Source resolution cycle failed: {e}")
+            finally:
+                self.resolution_last_run_finished_at = datetime.now(timezone.utc)
+                self.resolution_running_now = False
+                self._sync_idle_event()
 
     async def start(self) -> dict:
         self._ensure_scheduler_started()
@@ -301,7 +378,41 @@ class ScraperSchedulerService:
         task.add_done_callback(_on_done)
         return self.status()
 
+    async def run_source_resolution_once(self) -> dict:
+        if self.resolution_running_now or not config.FEATURE_SOURCE_RESOLUTION_WORKER:
+            return self.status()
+
+        task = asyncio.create_task(self._run_source_resolution_cycle())
+        self._background_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._background_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                logger.error(f"Manual source resolution run crashed: {exc}")
+
+        task.add_done_callback(_on_done)
+        return self.status()
+
     def status(self, persisted: Optional[dict] = None) -> dict:
+        resolution_snapshot = (
+            self.db.get_source_resolution_snapshot(session_slot="primary")
+            if hasattr(self.db, "get_source_resolution_snapshot")
+            else {
+                "slot_key": "primary",
+                "due_jobs": 0,
+                "leased_jobs": 0,
+                "dead_letter_jobs": 0,
+                "cooldown_slots": 0,
+                "cooldown_until": None,
+                "oldest_due_age_seconds": None,
+                "active_pending_sources": 0,
+                "active_missing_peer_refs": 0,
+            }
+        )
         return {
             "status": "active" if self.desired_active else "stopped",
             "is_active": self.desired_active,
@@ -325,6 +436,19 @@ class ScraperSchedulerService:
                 "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
             },
             "run_history": list(self._run_history),
+            "resolution": {
+                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
+                "running_now": self.resolution_running_now,
+                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
+                "last_run_started_at": _iso(self.resolution_last_run_started_at),
+                "last_run_finished_at": _iso(self.resolution_last_run_finished_at),
+                "last_success_at": _iso(self.resolution_last_success_at),
+                "next_run_at": self._next_resolution_run_iso(),
+                "last_error": self.resolution_last_error,
+                "last_result": self.resolution_last_result,
+                "run_history": list(self._resolution_run_history),
+                "snapshot": resolution_snapshot,
+            },
             "persisted": persisted,
         }
 
@@ -352,6 +476,26 @@ class ScraperSchedulerService:
                 "ai_blocked_items": ai_blocked_items,
                 "ai_deferred_items": ai_deferred_items,
                 "neo4j_synced_posts": int(result.get("posts_synced", 0) or 0),
+                "raw": result,
+            }
+        )
+
+    def _record_resolution_run(self, *, result: dict) -> None:
+        started = self.resolution_last_run_started_at
+        finished = self.resolution_last_success_at
+        duration_minutes: Optional[float] = None
+        if started and finished:
+            duration_minutes = max(0.01, (finished - started).total_seconds() / 60.0)
+
+        self._resolution_run_history.append(
+            {
+                "finished_at": _iso(finished),
+                "duration_minutes": round(duration_minutes, 2) if duration_minutes is not None else None,
+                "jobs_claimed": int(result.get("jobs_claimed", 0) or 0),
+                "jobs_processed": int(result.get("jobs_processed", 0) or 0),
+                "jobs_resolved": int(result.get("jobs_resolved", 0) or 0),
+                "jobs_requeued": int(result.get("jobs_requeued", 0) or 0),
+                "jobs_dead_lettered": int(result.get("jobs_dead_lettered", 0) or 0),
                 "raw": result,
             }
         )
