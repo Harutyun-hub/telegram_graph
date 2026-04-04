@@ -323,11 +323,12 @@ class KBVectorStore:
         self._client = chromadb.PersistentClient(path=storage_path)
 
     def get_or_create_collection(self, name: str, description: str = "") -> Any:
-        meta = {"description": description} if description else {}
-        return self._client.get_or_create_collection(
-            name=name,
-            metadata=meta,
-        )
+        if description:
+            return self._client.get_or_create_collection(
+                name=name,
+                metadata={"description": description},
+            )
+        return self._client.get_or_create_collection(name=name)
 
     def list_collections(self) -> list[dict]:
         cols = self._client.list_collections()
@@ -544,7 +545,7 @@ def generate_answer(
         model=model,
         messages=messages,
         temperature=0.1,
-        max_tokens=800,
+        max_completion_tokens=800,
     )
     answer = resp.choices[0].message.content.strip()
 

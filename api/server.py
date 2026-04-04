@@ -80,8 +80,13 @@ from api.admin_runtime import (
     save_admin_config_raw,
 )
 from api import db
-from api.ai_helper import AIHelperError, get_default_ai_helper_provider
+from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_coordinator import get_runtime_coordinator
+from api.source_resolution import (
+    build_pending_source_payload,
+    enqueue_missing_peer_ref_backfill,
+    ensure_resolution_job,
+)
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
@@ -651,6 +656,29 @@ def get_current_scraper_scheduler_status() -> dict[str, Any]:
                 "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
             },
             "run_history": [],
+            "resolution": {
+                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
+                "running_now": False,
+                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
+                "last_run_started_at": None,
+                "last_run_finished_at": None,
+                "last_success_at": None,
+                "next_run_at": None,
+                "last_error": None,
+                "last_result": None,
+                "run_history": [],
+                "snapshot": {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                },
+            },
             "persisted": None,
         }
     return scraper_scheduler.status()
@@ -825,11 +853,14 @@ def _enforce_analytics_rate_limit(request: Request) -> None:
         raise HTTPException(status_code=429, detail="Rate limit exceeded for analytics API.")
 
 
-def require_analytics_access(
+def _validate_analytics_access(
     request: Request,
-    authorization: Optional[str] = Header(default=None),
+    authorization: Optional[str],
+    *,
+    enforce_rate_limit: bool,
 ) -> None:
-    _enforce_analytics_rate_limit(request)
+    if enforce_rate_limit:
+        _enforce_analytics_rate_limit(request)
 
     if not config.ANALYTICS_API_REQUIRE_AUTH:
         return
@@ -872,6 +903,17 @@ def require_analytics_access(
         )
     )
     raise HTTPException(status_code=401, detail="Invalid analytics API token.")
+
+
+def require_analytics_access(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> None:
+    _validate_analytics_access(
+        request,
+        authorization,
+        enforce_rate_limit=True,
+    )
 
 
 def _extract_bearer_token(raw_value: str | None) -> str:
@@ -1000,6 +1042,44 @@ async def require_operator_access(
 
     operator["auth"] = "supabase"
     return operator
+
+
+async def require_kb_access(
+    request: Request,
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    """
+    KB routes are shared by the browser admin UI and the OpenClaw bridge.
+    Accept either operator/admin auth or analytics bearer tokens without
+    changing the existing contracts for other endpoints.
+    """
+    _enforce_analytics_rate_limit(request)
+
+    if x_supabase_authorization or x_admin_authorization:
+        return await require_operator_access(
+            x_supabase_authorization=x_supabase_authorization,
+            x_admin_authorization=x_admin_authorization,
+            authorization=authorization,
+        )
+
+    try:
+        _validate_analytics_access(
+            request,
+            authorization,
+            enforce_rate_limit=False,
+        )
+        return {"id": "analytics-api", "email": "", "auth": "analytics"}
+    except HTTPException as analytics_exc:
+        try:
+            return await require_operator_access(
+                x_supabase_authorization=x_supabase_authorization,
+                x_admin_authorization=x_admin_authorization,
+                authorization=authorization,
+            )
+        except HTTPException:
+            raise analytics_exc
 
 
 async def require_debug_endpoint_access(
@@ -2484,14 +2564,22 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
             elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
                 update_payload["channel_title"] = normalized_handle
             if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
-                update_payload.update(_pending_source_payload(channel_title=update_payload.get("channel_title") or channel_title))
+                pending_title = (update_payload.get("channel_title") or channel_title or canonical_username).strip() or canonical_username
+                if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                    update_payload.update(build_pending_source_payload(channel_title=pending_title))
+                else:
+                    update_payload.update(_pending_source_payload(channel_title=pending_title))
             action = "exists"
             if not existing.get("is_active", False):
                 update_payload["is_active"] = True
                 action = "reactivated"
 
             updated = writer.update_channel(existing["id"], update_payload)
-            if updated:
+            if updated and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            elif updated:
                 inline_resolved = await _try_enrich_channel_metadata(
                     updated["id"],
                     updated.get("channel_username") or canonical_username,
@@ -2500,21 +2588,29 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
                 updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
             return {"action": action, "item": updated}
 
+        create_payload = {
+            "channel_username": canonical_username,
+            "is_active": True,
+            "scrape_depth_days": payload.scrape_depth_days,
+            "scrape_comments": payload.scrape_comments,
+        }
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            create_payload.update(build_pending_source_payload(channel_title=channel_title))
+        else:
+            create_payload.update(_pending_source_payload(channel_title=channel_title))
         created = writer.create_channel(
-            {
-                "channel_username": canonical_username,
-                "is_active": True,
-                "scrape_depth_days": payload.scrape_depth_days,
-                "scrape_comments": payload.scrape_comments,
-                **_pending_source_payload(channel_title=channel_title),
-            }
+            create_payload
         )
-        inline_resolved = await _try_enrich_channel_metadata(
-            created["id"],
-            created.get("channel_username") or canonical_username,
-            created.get("channel_title"),
-        )
-        created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            ensure_resolution_job(writer, created)
+            created = writer.get_channel_by_id(created["id"]) or created
+        else:
+            inline_resolved = await _try_enrich_channel_metadata(
+                created["id"],
+                created.get("channel_username") or canonical_username,
+                created.get("channel_title"),
+            )
+            created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
         return {"action": "created", "item": created}
     except HTTPException:
         raise
@@ -2545,25 +2641,77 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 
         updated = writer.update_channel(channel_id, update_payload)
         if updated and updated.get("is_active"):
-            if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
-                writer.update_channel(
-                    channel_id,
-                    _pending_source_payload(
-                        channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip() or ""
-                    ),
+            if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        build_pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            else:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        _pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                inline_resolved = await _try_enrich_channel_metadata(
+                    updated["id"],
+                    updated.get("channel_username") or "",
+                    updated.get("channel_title"),
                 )
-                updated = writer.get_channel_by_id(channel_id) or updated
-            inline_resolved = await _try_enrich_channel_metadata(
-                updated["id"],
-                updated.get("channel_username") or "",
-                updated.get("channel_title"),
-            )
-            updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
+                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
         return {"item": updated}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Update source channel error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sources/resolution", dependencies=[Depends(require_operator_access)])
+async def get_source_resolution_status():
+    """Current source resolution worker status and queue snapshot."""
+    return get_scraper_scheduler().status().get("resolution") or {}
+
+
+@app.post("/api/sources/resolution/run-once", dependencies=[Depends(require_operator_access)])
+async def run_source_resolution_once():
+    """Trigger one immediate source resolution cycle."""
+    try:
+        return await get_scraper_scheduler().run_source_resolution_once()
+    except Exception as e:
+        logger.error(f"Run-once source resolution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sources/resolution/backfill-peer-refs", dependencies=[Depends(require_operator_access)])
+async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
+    """Queue resolution jobs for sources that still lack cached peer refs."""
+    try:
+        capped_limit = max(1, min(int(limit), 1000))
+        queued = enqueue_missing_peer_ref_backfill(
+            get_supabase_writer(),
+            session_slot="primary",
+            active_only=bool(active_only),
+            limit=capped_limit,
+        )
+        return {
+            "queued": queued,
+            "active_only": bool(active_only),
+            "limit": capped_limit,
+            "resolution": get_scraper_scheduler().status().get("resolution") or {},
+        }
+    except Exception as e:
+        logger.error(f"Backfill source peer refs error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3011,6 +3159,7 @@ from fastapi import UploadFile, File, Form
 from api.knowledge_base import (
     KBVectorStore, GeminiEmbedder, make_kb_components,
     ingest, hybrid_search, generate_answer,
+    _build_context, _confidence_level,
     ParseError, UnsupportedFormatError,
 )
 
@@ -3021,15 +3170,53 @@ def _kb_components() -> tuple[KBVectorStore, GeminiEmbedder]:
             status_code=503,
             detail="GEMINI_API_KEY is not configured. Add it to your .env and restart.",
         )
-    return make_kb_components(
-        gemini_api_key=config.GEMINI_API_KEY,
-        storage_path=config.KB_STORAGE_PATH,
-        embed_dim=config.KB_EMBED_DIM,
-    )
+    try:
+        return make_kb_components(
+            gemini_api_key=config.GEMINI_API_KEY,
+            storage_path=config.KB_STORAGE_PATH,
+            embed_dim=config.KB_EMBED_DIM,
+        )
+    except ImportError as exc:
+        logger.warning(f"KB runtime unavailable: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Knowledge base runtime dependencies are unavailable. {exc}",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"KB runtime bootstrap failed: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge base runtime is unavailable. Check KB dependencies and configuration, then restart the backend.",
+        ) from exc
 
 
 def _kb_openai_model() -> str:
     return config.KB_GENERATION_MODEL or config.OPENAI_MODEL
+
+
+_kb_openclaw_provider: OpenClawAiHelperProvider | None = None
+_kb_openclaw_lock = threading.Lock()
+
+
+def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
+    """Return a dedicated OpenClaw provider for KB generation, or None if not configured."""
+    global _kb_openclaw_provider
+    if not config.OPENCLAW_GATEWAY_BASE_URL or not config.OPENCLAW_GATEWAY_TOKEN:
+        return None
+    if not config.OPENCLAW_ANALYTICS_AGENT_ID or not config.OPENCLAW_KB_SESSION_KEY:
+        return None
+    with _kb_openclaw_lock:
+        if _kb_openclaw_provider is None:
+            _kb_openclaw_provider = OpenClawAiHelperProvider(
+                base_url=config.OPENCLAW_GATEWAY_BASE_URL,
+                gateway_token=config.OPENCLAW_GATEWAY_TOKEN,
+                agent_id=config.OPENCLAW_ANALYTICS_AGENT_ID,
+                session_key=config.OPENCLAW_KB_SESSION_KEY,
+                timeout_seconds=config.OPENCLAW_HELPER_TIMEOUT_SECONDS,
+            )
+        return _kb_openclaw_provider
 
 
 # ── Collections ───────────────────────────────────────────────────────────────
@@ -3039,7 +3226,7 @@ class KBCollectionCreate(BaseModel):
     description: str = Field("", max_length=300)
 
 
-@app.post("/api/kb/collections", dependencies=[Depends(require_analytics_access)])
+@app.post("/api/kb/collections", dependencies=[Depends(require_kb_access)])
 async def kb_create_collection(body: KBCollectionCreate):
     """Create a named knowledge base collection."""
     store, _ = _kb_components()
@@ -3050,14 +3237,14 @@ async def kb_create_collection(body: KBCollectionCreate):
     return {"name": body.name, "description": body.description, "created": True}
 
 
-@app.get("/api/kb/collections", dependencies=[Depends(require_analytics_access)])
+@app.get("/api/kb/collections", dependencies=[Depends(require_kb_access)])
 async def kb_list_collections():
     """List all knowledge base collections with stats."""
     store, _ = _kb_components()
     return {"collections": store.list_collections()}
 
 
-@app.delete("/api/kb/collections/{collection_name}", dependencies=[Depends(require_analytics_access)])
+@app.delete("/api/kb/collections/{collection_name}", dependencies=[Depends(require_kb_access)])
 async def kb_delete_collection(collection_name: str):
     """Delete a collection and all its documents."""
     store, _ = _kb_components()
@@ -3067,7 +3254,7 @@ async def kb_delete_collection(collection_name: str):
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
-@app.post("/api/kb/collections/{collection_name}/upload", dependencies=[Depends(require_analytics_access)])
+@app.post("/api/kb/collections/{collection_name}/upload", dependencies=[Depends(require_kb_access)])
 async def kb_upload_document(
     collection_name: str,
     file: UploadFile = File(...),
@@ -3111,7 +3298,7 @@ class KBAddUrlBody(BaseModel):
     doc_title: str = Field("", max_length=200)
 
 
-@app.post("/api/kb/collections/{collection_name}/add-url", dependencies=[Depends(require_analytics_access)])
+@app.post("/api/kb/collections/{collection_name}/add-url", dependencies=[Depends(require_kb_access)])
 async def kb_add_url(collection_name: str, body: KBAddUrlBody):
     """Fetch a URL and index its content."""
     store, embedder = _kb_components()
@@ -3137,12 +3324,11 @@ async def kb_add_url(collection_name: str, body: KBAddUrlBody):
     return result
 
 
-@app.get("/api/kb/collections/{collection_name}/documents", dependencies=[Depends(require_analytics_access)])
+@app.get("/api/kb/collections/{collection_name}/documents", dependencies=[Depends(require_kb_access)])
 async def kb_list_documents(collection_name: str):
     """List all documents in a collection."""
     store, _ = _kb_components()
     try:
-        from chromadb import errors as chroma_errors
         coll = store._client.get_collection(collection_name)
         if coll.count() == 0:
             return {"documents": []}
@@ -3175,7 +3361,7 @@ async def kb_list_documents(collection_name: str):
         raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name}")
 
 
-@app.delete("/api/kb/documents/{doc_id}", dependencies=[Depends(require_analytics_access)])
+@app.delete("/api/kb/documents/{doc_id}", dependencies=[Depends(require_kb_access)])
 async def kb_delete_document(doc_id: str, collection: str = Query(...)):
     """Delete a document from a collection by doc_id."""
     store, _ = _kb_components()
@@ -3190,11 +3376,13 @@ class KBAskBody(BaseModel):
     collection: str = Field("default", min_length=1, max_length=80)
 
 
-@app.post("/api/kb/ask", dependencies=[Depends(require_analytics_access)])
+@app.post("/api/kb/ask", dependencies=[Depends(require_kb_access)])
 async def kb_ask(body: KBAskBody):
     """Answer a question grounded in the knowledge base with citations."""
     store, embedder = _kb_components()
     loop = asyncio.get_running_loop()
+
+    # Step 1: Retrieve chunks via hybrid search (unchanged)
     try:
         chunks = await loop.run_in_executor(
             None,
@@ -3212,6 +3400,49 @@ async def kb_ask(body: KBAskBody):
             "caveat": "The collection may be empty. Try uploading documents first.",
         }
 
+    # Step 2: Try OpenClaw for generation, fall back to direct OpenAI
+    provider = _get_kb_openclaw_provider()
+    if provider is not None:
+        try:
+            context = _build_context(chunks)
+            prompt = (
+                "Answer the following question using ONLY the context below. "
+                "Cite sources inline as [Source: <title>, p.<page>]. "
+                "If the answer cannot be found in the context, say so clearly. "
+                "Be concise and direct.\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question: {body.question}"
+            )
+            msg = await provider.chat(prompt)
+            answer = msg.text
+
+            # Build citations and confidence from retrieved chunks
+            top_score = chunks[0]["score"] if chunks else 0.0
+            confidence = _confidence_level(top_score)
+            caveat = (
+                "Note: Retrieved context may not fully address this question."
+                if confidence == "low_confidence" else ""
+            )
+
+            seen: set[tuple] = set()
+            citations = []
+            for chunk in chunks:
+                meta = chunk.get("metadata", {})
+                key = (meta.get("doc_title", ""), meta.get("page", ""))
+                if key not in seen:
+                    seen.add(key)
+                    citations.append({
+                        "doc_title": meta.get("doc_title", "Unknown"),
+                        "page": meta.get("page", "?"),
+                        "doc_id": meta.get("doc_id", ""),
+                        "source": meta.get("source", ""),
+                    })
+
+            return {"answer": answer, "citations": citations, "confidence": confidence, "caveat": caveat}
+        except Exception as exc:
+            logger.warning(f"KB OpenClaw generation failed, falling back to OpenAI: {exc}")
+
+    # Fallback: direct OpenAI (same as original behavior)
     try:
         result = await loop.run_in_executor(
             None,
@@ -3229,7 +3460,7 @@ async def kb_ask(body: KBAskBody):
     return result
 
 
-@app.get("/api/kb/search", dependencies=[Depends(require_analytics_access)])
+@app.get("/api/kb/search", dependencies=[Depends(require_kb_access)])
 async def kb_search(
     collection: str = Query(...),
     q: str = Query(..., min_length=2, max_length=300),

@@ -55,16 +55,17 @@ export async function apiFetch<T>(
   const { timeoutMs = DEFAULT_TIMEOUT_MS, includeUserAuth = false, ...fetchOptions } = options;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const headers = new Headers(fetchOptions.headers ?? undefined);
+  const isFormDataBody = typeof FormData !== 'undefined' && fetchOptions.body instanceof FormData;
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(fetchOptions.headers as Record<string, string> ?? {}),
-  };
+  if (!isFormDataBody && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
 
   if (includeUserAuth) {
     const token = await getAuthToken();
     if (token) {
-      headers['X-Supabase-Authorization'] = `Bearer ${token}`;
+      headers.set('X-Supabase-Authorization', `Bearer ${token}`);
     }
   }
 
@@ -226,17 +227,21 @@ export async function kbCreateCollection(
   return apiFetch('/kb/collections', {
     method: 'POST',
     body: JSON.stringify({ name, description }),
+    includeUserAuth: true,
   });
 }
 
 /** List all collections with stats. */
 export async function kbListCollections(): Promise<{ collections: KBCollection[] }> {
-  return apiFetch('/kb/collections');
+  return apiFetch('/kb/collections', { includeUserAuth: true });
 }
 
 /** Delete a collection and all its documents. */
 export async function kbDeleteCollection(name: string): Promise<{ deleted: string }> {
-  return apiFetch(`/kb/collections/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  return apiFetch(`/kb/collections/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    includeUserAuth: true,
+  });
 }
 
 /** Upload a file to a collection. */
@@ -248,26 +253,12 @@ export async function kbUploadDocument(
   const form = new FormData();
   form.append('file', file);
   if (docTitle) form.append('doc_title', docTitle);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120_000);
-  try {
-    const response = await fetch(`${API_BASE_URL}/kb/collections/${encodeURIComponent(collectionName)}/upload`, {
-      method: 'POST',
-      body: form,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Upload failed ${response.status}: ${body || response.statusText}`);
-    }
-    return response.json();
-  } catch (err: any) {
-    if (err.name === 'AbortError') throw new Error('Upload timed out (>2 min)');
-    throw err;
-  } finally {
-    clearTimeout(timeout);
-  }
+  return apiFetch(`/kb/collections/${encodeURIComponent(collectionName)}/upload`, {
+    method: 'POST',
+    body: form,
+    includeUserAuth: true,
+    timeoutMs: 120_000,
+  });
 }
 
 /** Add a URL to a collection. */
@@ -279,13 +270,16 @@ export async function kbAddUrl(
   return apiFetch(`/kb/collections/${encodeURIComponent(collectionName)}/add-url`, {
     method: 'POST',
     body: JSON.stringify({ url, doc_title: docTitle }),
+    includeUserAuth: true,
     timeoutMs: 60_000,
   });
 }
 
 /** List all documents in a collection. */
 export async function kbListDocuments(collectionName: string): Promise<{ documents: KBDocument[] }> {
-  return apiFetch(`/kb/collections/${encodeURIComponent(collectionName)}/documents`);
+  return apiFetch(`/kb/collections/${encodeURIComponent(collectionName)}/documents`, {
+    includeUserAuth: true,
+  });
 }
 
 /** Delete a document from a collection. */
@@ -295,7 +289,10 @@ export async function kbDeleteDocument(
 ): Promise<{ doc_id: string; chunks_deleted: number }> {
   return apiFetch(
     `/kb/documents/${encodeURIComponent(docId)}?collection=${encodeURIComponent(collectionName)}`,
-    { method: 'DELETE' },
+    {
+      method: 'DELETE',
+      includeUserAuth: true,
+    },
   );
 }
 
@@ -307,6 +304,7 @@ export async function kbAsk(
   return apiFetch('/kb/ask', {
     method: 'POST',
     body: JSON.stringify({ collection: collectionName, question }),
+    includeUserAuth: true,
     timeoutMs: 45_000,
   });
 }
@@ -319,5 +317,6 @@ export async function kbSearch(
 ): Promise<KBSearchResult> {
   return apiFetch(
     `/kb/search?collection=${encodeURIComponent(collectionName)}&q=${encodeURIComponent(query)}&top_k=${topK}`,
+    { includeUserAuth: true },
   );
 }

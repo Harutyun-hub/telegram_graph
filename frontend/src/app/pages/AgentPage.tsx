@@ -10,6 +10,7 @@ import {
   kbUploadDocument, kbAddUrl, kbListDocuments, kbDeleteDocument, kbAsk,
   type KBCollection, type KBDocument, type KBAskResult,
 } from '../services/api';
+import { Alert, AlertDescription } from '../components/ui/alert';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +56,13 @@ const T = {
   errorUpload:   { en: 'Upload failed', ru: 'Ошибка загрузки' },
   confirmDelete: { en: 'Delete this collection and all its documents?', ru: 'Удалить коллекцию и все документы?' },
   selectHint:    { en: 'Select or create a collection on the left to start.', ru: 'Выберите или создайте коллекцию слева.' },
+  loadCollectionsError: { en: 'Unable to load collections.', ru: 'Не удалось загрузить коллекции.' },
+  loadDocumentsError:   { en: 'Unable to load documents for this collection.', ru: 'Не удалось загрузить документы этой коллекции.' },
+  createCollectionError:{ en: 'Unable to create collection.', ru: 'Не удалось создать коллекцию.' },
+  deleteCollectionError:{ en: 'Unable to delete collection.', ru: 'Не удалось удалить коллекцию.' },
+  addUrlError:          { en: 'Unable to add URL.', ru: 'Не удалось добавить URL.' },
+  deleteDocumentError:  { en: 'Unable to delete document.', ru: 'Не удалось удалить документ.' },
+  dismissError:         { en: 'Dismiss error', ru: 'Закрыть ошибку' },
 } as const;
 
 function t(key: keyof typeof T, ru: boolean): string {
@@ -97,6 +105,7 @@ export function AgentPage() {
   const [documents, setDocuments] = useState<KBDocument[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<Record<string, string>>({});
+  const [pageError, setPageError] = useState<string | null>(null);
 
   // URL ingestion
   const [urlValue, setUrlValue] = useState('');
@@ -115,24 +124,63 @@ export function AgentPage() {
     try {
       const { collections: cols } = await kbListCollections();
       setCollections(cols);
-    } catch {
-      setCollections([]);
+      setPageError(null);
+    } catch (err: any) {
+      setPageError(String(err?.message || t('loadCollectionsError', ru)));
     } finally {
       setCollectionsLoading(false);
     }
-  }, []);
+  }, [ru]);
 
   useEffect(() => { loadCollections(); }, [loadCollections]);
+
+  useEffect(() => {
+    if (collectionsLoading) {
+      return;
+    }
+    if (collections.length === 0) {
+      if (selectedCollection !== null) {
+        setSelectedCollection(null);
+        setMessages([]);
+        setDocuments([]);
+      }
+      return;
+    }
+
+    const stillSelected = selectedCollection
+      ? collections.some((collection) => collection.name === selectedCollection)
+      : false;
+
+    if (!stillSelected) {
+      setSelectedCollection(collections[0].name);
+      setMessages([]);
+    }
+  }, [collections, collectionsLoading, selectedCollection]);
 
   // ── Load documents when collection changes ────────────────────────
   useEffect(() => {
     if (!selectedCollection) { setDocuments([]); return; }
+    let cancelled = false;
     setDocsLoading(true);
     kbListDocuments(selectedCollection)
-      .then(({ documents: docs }) => setDocuments(docs))
-      .catch(() => setDocuments([]))
-      .finally(() => setDocsLoading(false));
-  }, [selectedCollection]);
+      .then(({ documents: docs }) => {
+        if (cancelled) return;
+        setDocuments(docs);
+        setPageError(null);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setPageError(String(err?.message || t('loadDocumentsError', ru)));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDocsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCollection, ru]);
 
   // ── Auto-scroll chat ──────────────────────────────────────────────
   useEffect(() => {
@@ -144,13 +192,14 @@ export function AgentPage() {
     e.preventDefault();
     if (!newName.trim()) return;
     setCreating(true);
+    setPageError(null);
     try {
       await kbCreateCollection(newName.trim(), newDesc.trim());
       setNewName(''); setNewDesc(''); setShowNewForm(false);
       await loadCollections();
       setSelectedCollection(newName.trim());
     } catch (err: any) {
-      alert(err.message);
+      setPageError(String(err?.message || t('createCollectionError', ru)));
     } finally {
       setCreating(false);
     }
@@ -159,14 +208,20 @@ export function AgentPage() {
   // ── Delete collection ─────────────────────────────────────────────
   async function handleDeleteCollection(name: string) {
     if (!window.confirm(t('confirmDelete', ru))) return;
-    await kbDeleteCollection(name);
-    if (selectedCollection === name) { setSelectedCollection(null); setMessages([]); }
-    await loadCollections();
+    setPageError(null);
+    try {
+      await kbDeleteCollection(name);
+      if (selectedCollection === name) { setSelectedCollection(null); setMessages([]); }
+      await loadCollections();
+    } catch (err: any) {
+      setPageError(String(err?.message || t('deleteCollectionError', ru)));
+    }
   }
 
   // ── File upload ───────────────────────────────────────────────────
   async function handleFileUpload(files: FileList | null) {
     if (!files || !selectedCollection) return;
+    setPageError(null);
     for (const file of Array.from(files)) {
       const key = `${file.name}-${Date.now()}`;
       setUploadStatus(s => ({ ...s, [key]: 'uploading' }));
@@ -178,6 +233,7 @@ export function AgentPage() {
         await loadCollections();
       } catch (err: any) {
         setUploadStatus(s => ({ ...s, [key]: `error:${err.message}` }));
+        setPageError(String(err?.message || t('errorUpload', ru)));
       }
     }
   }
@@ -187,6 +243,7 @@ export function AgentPage() {
     e.preventDefault();
     if (!urlValue.trim() || !selectedCollection) return;
     setAddingUrl(true);
+    setPageError(null);
     try {
       await kbAddUrl(selectedCollection, urlValue.trim());
       setUrlValue('');
@@ -194,7 +251,7 @@ export function AgentPage() {
       setDocuments(docs);
       await loadCollections();
     } catch (err: any) {
-      alert(err.message);
+      setPageError(String(err?.message || t('addUrlError', ru)));
     } finally {
       setAddingUrl(false);
     }
@@ -203,9 +260,14 @@ export function AgentPage() {
   // ── Delete document ───────────────────────────────────────────────
   async function handleDeleteDoc(doc: KBDocument) {
     if (!selectedCollection) return;
-    await kbDeleteDocument(selectedCollection, doc.doc_id);
-    setDocuments(d => d.filter(x => x.doc_id !== doc.doc_id));
-    await loadCollections();
+    setPageError(null);
+    try {
+      await kbDeleteDocument(selectedCollection, doc.doc_id);
+      setDocuments(d => d.filter(x => x.doc_id !== doc.doc_id));
+      await loadCollections();
+    } catch (err: any) {
+      setPageError(String(err?.message || t('deleteDocumentError', ru)));
+    }
   }
 
   // ── Ask question ──────────────────────────────────────────────────
@@ -254,6 +316,25 @@ export function AgentPage() {
         </div>
       </div>
 
+      {pageError && (
+        <div className="px-6 pt-4 shrink-0">
+          <Alert variant="destructive" className="border-red-200 bg-red-50 text-red-700">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription className="flex items-start justify-between gap-3 text-red-700">
+              <span>{pageError}</span>
+              <button
+                type="button"
+                onClick={() => setPageError(null)}
+                className="inline-flex h-5 w-5 items-center justify-center rounded-md text-red-500 transition-colors hover:bg-red-100 hover:text-red-700"
+                aria-label={t('dismissError', ru)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Three-panel layout */}
       <div className="flex flex-1 overflow-hidden">
 
@@ -265,6 +346,7 @@ export function AgentPage() {
             </span>
             <button
               onClick={() => setShowNewForm(v => !v)}
+              disabled={creating}
               className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-indigo-600 transition-colors"
               title={t('newCollection', ru)}
             >
@@ -325,7 +407,11 @@ export function AgentPage() {
               collections.map(col => (
                 <div
                   key={col.name}
-                  onClick={() => { setSelectedCollection(col.name); setMessages([]); }}
+                  onClick={() => {
+                    if (selectedCollection === col.name) return;
+                    setSelectedCollection(col.name);
+                    setMessages([]);
+                  }}
                   className={`group flex items-center gap-2 mx-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${
                     selectedCollection === col.name
                       ? 'bg-indigo-50 text-indigo-700'
@@ -339,6 +425,7 @@ export function AgentPage() {
                   </div>
                   <button
                     onClick={e => { e.stopPropagation(); handleDeleteCollection(col.name); }}
+                    disabled={creating}
                     className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center text-gray-400 hover:text-red-500 transition-all"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -424,12 +511,12 @@ export function AgentPage() {
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     placeholder={t('placeholder', ru)}
-                    disabled={asking}
+                    disabled={asking || docsLoading}
                     className="flex-1 text-sm px-4 py-2.5 bg-white border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60"
                   />
                   <button
                     type="submit"
-                    disabled={asking || !input.trim()}
+                    disabled={asking || docsLoading || !input.trim()}
                     className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors"
                   >
                     {asking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -452,11 +539,25 @@ export function AgentPage() {
 
             {/* Upload zone */}
             <div
-              className="mx-3 mt-3 p-4 border-2 border-dashed border-gray-200 rounded-xl text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition-colors"
-              onClick={() => fileInputRef.current?.click()}
+              className={`mx-3 mt-3 p-4 border-2 border-dashed rounded-xl text-center transition-colors ${
+                docsLoading
+                  ? 'cursor-not-allowed border-gray-200 bg-gray-50 opacity-70'
+                  : 'cursor-pointer border-gray-200 hover:border-indigo-400 hover:bg-indigo-50'
+              }`}
+              onClick={() => {
+                if (!docsLoading) {
+                  fileInputRef.current?.click();
+                }
+              }}
               onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-indigo-400', 'bg-indigo-50'); }}
               onDragLeave={e => e.currentTarget.classList.remove('border-indigo-400', 'bg-indigo-50')}
-              onDrop={e => { e.preventDefault(); e.currentTarget.classList.remove('border-indigo-400', 'bg-indigo-50'); handleFileUpload(e.dataTransfer.files); }}
+              onDrop={e => {
+                e.preventDefault();
+                e.currentTarget.classList.remove('border-indigo-400', 'bg-indigo-50');
+                if (!docsLoading) {
+                  handleFileUpload(e.dataTransfer.files);
+                }
+              }}
             >
               <Upload className="w-6 h-6 text-gray-300 mx-auto mb-1.5" />
               <p className="text-xs text-gray-500 font-medium">{t('uploadHint', ru)}</p>
@@ -467,6 +568,7 @@ export function AgentPage() {
                 multiple
                 accept=".pdf,.docx,.txt,.md"
                 className="hidden"
+                disabled={docsLoading}
                 onChange={e => handleFileUpload(e.target.files)}
               />
             </div>
@@ -477,11 +579,12 @@ export function AgentPage() {
                 value={urlValue}
                 onChange={e => setUrlValue(e.target.value)}
                 placeholder={t('urlPlaceholder', ru)}
+                disabled={addingUrl || docsLoading}
                 className="flex-1 text-xs px-2.5 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
               <button
                 type="submit"
-                disabled={addingUrl || !urlValue.trim()}
+                disabled={addingUrl || docsLoading || !urlValue.trim()}
                 className="px-2.5 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
               >
                 {addingUrl ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
@@ -525,6 +628,7 @@ export function AgentPage() {
                     </div>
                     <button
                       onClick={() => handleDeleteDoc(doc)}
+                      disabled={docsLoading}
                       className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center text-gray-400 hover:text-red-500 transition-all"
                     >
                       <X className="w-3 h-3" />
