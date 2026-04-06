@@ -55,7 +55,8 @@ def get_problems(ctx: DashboardDateContext) -> list[dict]:
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at >= datetime($start)
@@ -135,7 +136,8 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
 
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
             WHERE i.last_seen >= datetime($start)
               AND i.last_seen < datetime($end)
@@ -144,14 +146,16 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
                    0 AS demandPrevWeek
         }
 
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
             WHERE i.last_seen >= datetime($previous_start)
               AND i.last_seen < datetime($previous_end)
             RETURN count(DISTINCT u) AS demandPrevWindow
         }
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at >= datetime($start)
@@ -165,7 +169,8 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
             RETURN s.label AS label, count(*) AS cnt
         }
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             WHERE p.posted_at >= datetime($start)
@@ -242,7 +247,8 @@ def get_problem_brief_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at > datetime() - duration({days: $days})
@@ -384,7 +390,8 @@ def get_service_gap_brief_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at > datetime() - duration({days: $days})
@@ -555,11 +562,13 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($end)
-            CALL (p) {
+            CALL {
+                WITH p
                 MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
                      coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
@@ -584,7 +593,8 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
             MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($end)
-            CALL (c) {
+            CALL {
+                WITH c
                 MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
                      coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
@@ -685,7 +695,8 @@ def get_mood_data(ctx: DashboardDateContext) -> list[dict]:
             MATCH (p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
-            CALL (p) {
+            CALL {
+                WITH p
                 MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
                      coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
@@ -761,7 +772,8 @@ def get_mood_data(ctx: DashboardDateContext) -> list[dict]:
             MATCH (c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
-            CALL (c) {
+            CALL {
+                WITH c
                 MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
                 WITH s.label AS sentiment,
                      coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
@@ -877,7 +889,8 @@ def get_urgency_brief_candidates(days: int = 14, limit_topics: int = 15, evidenc
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment {label: 'Urgent'})
             WHERE p.posted_at > datetime() - duration('P' + toString($days) + 'D')
