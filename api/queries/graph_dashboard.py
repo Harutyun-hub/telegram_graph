@@ -334,8 +334,9 @@ def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list
           AND NOT toLower(trim(coalesce(cat.name, 'General'))) IN $excluded_categories
           AND ($topic_count = 0 OR t.name IN $topics)
 
-        CALL (t) {{
-            CALL (t) {{
+        CALL {{
+            WITH t
+            CALL {{
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
@@ -453,7 +454,7 @@ def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list
                  size([row IN rows WHERE row.fearLike = 1 | 1]) AS fearSignalCount,
                  head([row IN rows WHERE row.hasText = 1 | row.id]) AS sampleEvidenceId,
                  head([row IN rows | row.timestamp]) AS latestAt
-            CALL (rows) {{
+            CALL {{
                 WITH rows
                 UNWIND rows AS row
                 WITH row.channel AS channel, row.channelUuid AS channelUuid, count(*) AS mentions
@@ -486,8 +487,9 @@ def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list
                    topChannels
         }}
 
-        CALL (t) {{
-            CALL (t) {{
+        CALL {{
+            WITH t
+            CALL {{
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($previous_start)
@@ -1072,7 +1074,7 @@ def search_graph(query: str, limit: int = 20) -> list[dict]:
     def build_search() -> list[dict[str, Any]]:
         return run_query(
             """
-            CALL (t) {
+            CALL {
                 MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
                 WHERE coalesce(t.proposed, false) = false
                   AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
@@ -1133,7 +1135,7 @@ def get_trending_topics(limit: int = 10, timeframe: str | None = None) -> list[d
             WHERE coalesce(t.proposed, false) = false
               AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
               AND NOT toLower(trim(coalesce(cat.name, 'General'))) IN $excluded_categories
-            CALL (t) {
+            CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)

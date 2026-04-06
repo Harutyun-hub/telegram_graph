@@ -40,7 +40,8 @@ def get_topic_bubbles(ctx: DashboardDateContext) -> list[dict]:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -57,7 +58,8 @@ def get_topic_bubbles(ctx: DashboardDateContext) -> list[dict]:
                     THEN p
                 END) AS postsPrevious
         }
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -104,7 +106,8 @@ def get_trend_lines(ctx: DashboardDateContext) -> list[dict]:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -144,7 +147,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -187,7 +191,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
              sum(asks_per_form) AS times_asked
         WHERE times_asked > 0
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -214,7 +219,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
              head(collect(sample_id)) AS latest_sample_id,
              head(collect(txt)) AS latest_sample
 
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (u:User)-[:EXHIBITS]->(:Intent {name: 'Information Seeking'})
             WHERE EXISTS { MATCH (u)-[:INTERESTED_IN]->(t) }
             OPTIONAL MATCH (:User)-[r:REPLIED_TO_USER]->(u)
@@ -282,7 +288,8 @@ def get_question_brief_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at > datetime() - duration({days: $days})
               AND p.text IS NOT NULL
@@ -297,7 +304,8 @@ def get_question_brief_candidates(
                 collect(DISTINCT coalesce(ch.title, ch.username, '')) AS postChannels
         }
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at > datetime() - duration({days: $days})
               AND c.text IS NOT NULL
@@ -332,7 +340,8 @@ def get_question_brief_candidates(
         ORDER BY signalCount DESC
         LIMIT $limit_topics
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at > datetime() - duration({days: $days})
               AND p.text IS NOT NULL
@@ -408,7 +417,8 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
