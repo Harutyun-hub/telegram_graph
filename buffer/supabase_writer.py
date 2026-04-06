@@ -596,6 +596,8 @@ class SupabaseWriter:
             if status == "dead_letter":
                 dead_letter_jobs += 1
                 continue
+            if status == "done":
+                continue
             if status == "leased":
                 if lease_expires_at and lease_expires_at > now:
                     leased_jobs += 1
@@ -612,7 +614,7 @@ class SupabaseWriter:
                 if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
                     oldest_due_age_seconds = age_seconds
                 continue
-            if next_attempt_at <= now:
+            if status not in {"pending", "leased"} and next_attempt_at <= now:
                 stale_nonclaimable_jobs += 1
 
         slots = self.list_source_resolution_slots(active_only=True)

@@ -400,7 +400,7 @@ class FreshnessResolutionMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["due_jobs"], 2)
         self.assertEqual(snapshot["leased_jobs"], 1)
         self.assertEqual(snapshot["dead_letter_jobs"], 1)
-        self.assertEqual(snapshot["stale_nonclaimable_jobs"], 1)
+        self.assertEqual(snapshot["stale_nonclaimable_jobs"], 0)
         self.assertEqual(snapshot["active_pending_sources"], 1)
         self.assertEqual(snapshot["active_missing_peer_refs"], 1)
 
