@@ -34,33 +34,12 @@ IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
 IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
 IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
 
-
-def _normalize_app_role_for_validation(value=None) -> str:
-    role = str(os.getenv("APP_ROLE") if value is None else value or "").strip().lower()
-    if role not in {"web", "worker", "all"}:
-        role = "all"
-    if IS_STAGING and role == "all":
-        return "web"
-    return role
-
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_API_ID       = int(os.getenv("TELEGRAM_API_ID", 0))
 TELEGRAM_API_HASH     = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE        = os.getenv("TELEGRAM_PHONE", "")
 TELEGRAM_SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "telegram_scraper")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")  # For Railway/cloud deployment
-
-
-def has_telegram_runtime_credentials() -> bool:
-    return bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
-
-
-def has_telegram_login_credentials() -> bool:
-    return bool(TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_PHONE)
-
-
-def needs_telegram_runtime_credentials() -> bool:
-    return _normalize_app_role_for_validation() in {"worker", "all"}
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
@@ -289,11 +268,9 @@ SOCIAL_RETRY_MAX_SECONDS = max(
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
     missing = []
-    if needs_telegram_runtime_credentials():
-        if not TELEGRAM_API_ID:
-            missing.append("TELEGRAM_API_ID")
-        if not TELEGRAM_API_HASH:
-            missing.append("TELEGRAM_API_HASH")
+    if not TELEGRAM_API_ID:        missing.append("TELEGRAM_API_ID")
+    if not TELEGRAM_API_HASH:      missing.append("TELEGRAM_API_HASH")
+    if not TELEGRAM_PHONE:         missing.append("TELEGRAM_PHONE")
     if not SUPABASE_URL:           missing.append("SUPABASE_URL")
     if not SUPABASE_SERVICE_ROLE_KEY: missing.append("SUPABASE_SERVICE_ROLE_KEY")
     if not NEO4J_URI:              missing.append("NEO4J_URI")

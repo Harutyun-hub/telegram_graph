@@ -1393,10 +1393,6 @@ async def _try_enrich_channel_metadata(
     if not username:
         return None
 
-    if not config.has_telegram_runtime_credentials():
-        logger.info(f"Source resolution deferred for {username}: Telegram runtime credentials are unavailable")
-        return None
-
     writer = get_supabase_writer()
 
     # Check for session string from environment (Railway deployment)
