@@ -36,6 +36,8 @@ import config
 config.validate()
 
 from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,6 +95,7 @@ from api.admin_runtime import (
     save_admin_config_raw,
 )
 from api import db
+from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_executors import (
     background_executor_workers,
     is_draining as runtime_is_draining,
@@ -940,6 +943,39 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(AIHelperError)
+async def ai_helper_error_handler(_request: Request, exc: AIHelperError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok": False,
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "retryable": exc.retryable,
+            },
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/api/ai-helper/"):
+        first = exc.errors()[0] if exc.errors() else {}
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "invalid_request",
+                    "message": str(first.get("msg") or "Invalid AI helper request."),
+                    "retryable": False,
+                },
+            },
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 def _format_server_timing(request: Request, total_ms: float) -> str:
     metrics = [f"app;dur={total_ms:.2f}"]
     query_ms = getattr(request.state, "query_ms", None)
@@ -1013,6 +1049,10 @@ async def request_metrics_middleware(request: Request, call_next):
 
 class AIQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
+
+
+class AIHelperChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
 
 
 class ChannelSourceCreateRequest(BaseModel):
@@ -1372,11 +1412,14 @@ def _enforce_analytics_rate_limit(request: Request) -> None:
         _analytics_rate_limit_buckets[bucket_key] = timestamps
 
 
-def require_analytics_access(
+def _validate_analytics_access(
     request: Request,
-    authorization: Optional[str] = Header(default=None),
+    authorization: Optional[str],
+    *,
+    enforce_rate_limit: bool,
 ) -> None:
-    _enforce_analytics_rate_limit(request)
+    if enforce_rate_limit:
+        _enforce_analytics_rate_limit(request)
 
     if not config.ANALYTICS_API_REQUIRE_AUTH:
         return
@@ -1419,6 +1462,197 @@ def require_analytics_access(
         )
     )
     raise HTTPException(status_code=401, detail="Invalid analytics API token.")
+
+
+def require_analytics_access(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> None:
+    _validate_analytics_access(
+        request,
+        authorization,
+        enforce_rate_limit=True,
+    )
+
+
+def _extract_bearer_token(raw_value: str | None) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    scheme, _, token = text.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return ""
+
+
+def get_ai_helper_provider():
+    return get_default_ai_helper_provider()
+
+
+async def require_admin_user(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    token = _extract_bearer_token(x_supabase_authorization) or _extract_bearer_token(authorization)
+    if not token:
+        raise AIHelperError(
+            status_code=401,
+            code="auth_required",
+            message="Sign in as the configured admin to use the AI helper.",
+            retryable=False,
+        )
+
+    admin_user_id = str(getattr(config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "") or "").strip()
+    admin_email = str(getattr(config, "AI_HELPER_ADMIN_EMAIL", "") or "").strip().lower()
+    if not admin_user_id and not admin_email:
+        raise AIHelperError(
+            status_code=503,
+            code="auth_unconfigured",
+            message="The AI helper admin identity is not configured.",
+            retryable=False,
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        user_response = await loop.run_in_executor(None, lambda: get_supabase_writer().client.auth.get_user(token))
+    except Exception as exc:
+        logger.warning(f"AI helper auth validation failed: {exc}")
+        raise AIHelperError(
+            status_code=401,
+            code="auth_invalid",
+            message="Your session could not be validated. Please sign in again.",
+            retryable=False,
+        ) from exc
+
+    user = getattr(user_response, "user", None)
+    if user is None:
+        raise AIHelperError(
+            status_code=401,
+            code="auth_invalid",
+            message="Your session could not be validated. Please sign in again.",
+            retryable=False,
+        )
+
+    user_id = str(getattr(user, "id", "") or "").strip()
+    email = str(getattr(user, "email", "") or "").strip().lower()
+
+    is_allowed = bool(admin_user_id and user_id == admin_user_id)
+    if not is_allowed and not config.IS_PRODUCTION and admin_email:
+        is_allowed = email == admin_email
+
+    if not is_allowed:
+        raise AIHelperError(
+            status_code=403,
+            code="admin_only",
+            message="The AI helper is available to the configured admin only.",
+            retryable=False,
+        )
+
+    return {"id": user_id, "email": email}
+
+
+def _allow_local_operator_bypass(
+    *,
+    x_supabase_authorization: Optional[str],
+    x_admin_authorization: Optional[str],
+    authorization: Optional[str],
+) -> bool:
+    if config.IS_LOCKED_ENV:
+        return False
+    if str(getattr(config, "ADMIN_API_KEY", "") or "").strip():
+        return False
+    if str(getattr(config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "") or "").strip():
+        return False
+    if str(getattr(config, "AI_HELPER_ADMIN_EMAIL", "") or "").strip():
+        return False
+    supplied_tokens = (
+        _extract_bearer_token(x_supabase_authorization),
+        _extract_bearer_token(x_admin_authorization),
+        _extract_bearer_token(authorization),
+    )
+    return not any(supplied_tokens)
+
+
+async def require_operator_access(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    admin_api_key = str(getattr(config, "ADMIN_API_KEY", "") or "").strip()
+    admin_token = _extract_bearer_token(x_admin_authorization) or _extract_bearer_token(authorization)
+    if admin_api_key and admin_token and hmac.compare_digest(admin_token, admin_api_key):
+        return {"id": "admin-api-key", "email": "", "auth": "api_key"}
+
+    if _allow_local_operator_bypass(
+        x_supabase_authorization=x_supabase_authorization,
+        x_admin_authorization=x_admin_authorization,
+        authorization=authorization,
+    ):
+        logger.warning("Operator route accessed via local-development bypass")
+        return {"id": "local-dev", "email": "", "auth": "local_dev"}
+
+    try:
+        operator = await require_admin_user(
+            x_supabase_authorization=x_supabase_authorization,
+            authorization=None if x_supabase_authorization else authorization,
+        )
+    except AIHelperError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    operator["auth"] = "supabase"
+    return operator
+
+
+async def require_kb_access(
+    request: Request,
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    """
+    KB routes are shared by the browser admin UI and the OpenClaw bridge.
+    Accept either operator/admin auth or analytics bearer tokens without
+    changing the existing contracts for other endpoints.
+    """
+    _enforce_analytics_rate_limit(request)
+
+    if x_supabase_authorization or x_admin_authorization:
+        return await require_operator_access(
+            x_supabase_authorization=x_supabase_authorization,
+            x_admin_authorization=x_admin_authorization,
+            authorization=authorization,
+        )
+
+    try:
+        _validate_analytics_access(
+            request,
+            authorization,
+            enforce_rate_limit=False,
+        )
+        return {"id": "analytics-api", "email": "", "auth": "analytics"}
+    except HTTPException as analytics_exc:
+        try:
+            return await require_operator_access(
+                x_supabase_authorization=x_supabase_authorization,
+                x_admin_authorization=x_admin_authorization,
+                authorization=authorization,
+            )
+        except HTTPException:
+            raise analytics_exc
+
+
+async def require_debug_endpoint_access(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    if not bool(getattr(config, "ENABLE_DEBUG_ENDPOINTS", not config.IS_LOCKED_ENV)):
+        raise HTTPException(status_code=404, detail="Not found")
+    return await require_operator_access(
+        x_supabase_authorization=x_supabase_authorization,
+        x_admin_authorization=x_admin_authorization,
+        authorization=authorization,
+    )
 
 
 def _sanitize_admin_config(raw_config: Any) -> dict[str, Any]:
@@ -2366,6 +2600,45 @@ async def ai_query(request: AIQueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/ai-helper/chat")
+async def ai_helper_chat(
+    payload: AIHelperChatRequest,
+    _admin_user: Dict[str, str] = Depends(require_admin_user),
+):
+    provider = get_ai_helper_provider()
+    message = await provider.chat(payload.message.strip())
+    return {
+        "ok": True,
+        "message": message.to_dict(),
+    }
+
+
+@app.get("/api/ai-helper/history")
+async def ai_helper_history(
+    limit: int = Query(default=50, ge=1, le=100),
+    _admin_user: Dict[str, str] = Depends(require_admin_user),
+):
+    provider = get_ai_helper_provider()
+    messages = await provider.history(limit=limit)
+    return {
+        "ok": True,
+        "messages": [message.to_dict() for message in messages],
+    }
+
+
+@app.post("/api/ai-helper/reset")
+async def ai_helper_reset(
+    _admin_user: Dict[str, str] = Depends(require_admin_user),
+):
+    provider = get_ai_helper_provider()
+    reset_at = await provider.reset()
+    return {
+        "ok": True,
+        "reset": True,
+        "timestamp": reset_at,
+    }
+
+
 @app.get("/api/topics", dependencies=[Depends(require_analytics_access)])
 async def topics(
     request: Request,
@@ -3302,7 +3575,7 @@ async def debug_refresh_behavioral_briefs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/opportunity-briefs/debug/refresh")
+@app.post("/api/opportunity-briefs/debug/refresh", dependencies=[Depends(require_debug_endpoint_access)])
 async def debug_refresh_opportunity_briefs():
     """Force-refresh opportunity cards and return stage diagnostics."""
     try:
@@ -3320,7 +3593,344 @@ async def debug_refresh_opportunity_briefs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/topic-overviews/debug/refresh")
+# ─────────────────────────────────────────────────────────────────────────────
+# KNOWLEDGE BASE (RAG) ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import UploadFile, File, Form
+from api.knowledge_base import (
+    KBVectorStore, GeminiEmbedder, make_kb_components,
+    ingest, hybrid_search, generate_answer,
+    _build_context, _confidence_level,
+    ParseError, UnsupportedFormatError,
+)
+
+
+def _kb_components() -> tuple[KBVectorStore, GeminiEmbedder]:
+    """Lazy singleton — created on first KB call."""
+    if not config.GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="GEMINI_API_KEY is not configured. Add it to your .env and restart.",
+        )
+    try:
+        return make_kb_components(
+            gemini_api_key=config.GEMINI_API_KEY,
+            storage_path=config.KB_STORAGE_PATH,
+            embed_dim=config.KB_EMBED_DIM,
+        )
+    except ImportError as exc:
+        logger.warning(f"KB runtime unavailable: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Knowledge base runtime dependencies are unavailable. {exc}",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"KB runtime bootstrap failed: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge base runtime is unavailable. Check KB dependencies and configuration, then restart the backend.",
+        ) from exc
+
+
+def _kb_openai_model() -> str:
+    return config.KB_GENERATION_MODEL or config.OPENAI_MODEL
+
+
+_kb_openclaw_provider: OpenClawAiHelperProvider | None = None
+_kb_openclaw_lock = threading.Lock()
+
+
+def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
+    """Return a dedicated OpenClaw provider for KB generation, or None if not configured."""
+    global _kb_openclaw_provider
+    if not config.OPENCLAW_GATEWAY_BASE_URL or not config.OPENCLAW_GATEWAY_TOKEN:
+        return None
+    if not config.OPENCLAW_KB_SESSION_KEY:
+        return None
+    with _kb_openclaw_lock:
+        if _kb_openclaw_provider is None:
+            _kb_openclaw_provider = OpenClawAiHelperProvider(
+                base_url=config.OPENCLAW_GATEWAY_BASE_URL,
+                gateway_token=config.OPENCLAW_GATEWAY_TOKEN,
+                agent_id=config.OPENCLAW_ANALYTICS_AGENT_ID,
+                session_key=config.OPENCLAW_KB_SESSION_KEY,
+                timeout_seconds=config.OPENCLAW_HELPER_TIMEOUT_SECONDS,
+                connect_timeout_seconds=config.OPENCLAW_HELPER_CONNECT_TIMEOUT_SECONDS,
+                read_timeout_seconds=config.OPENCLAW_HELPER_READ_TIMEOUT_SECONDS,
+                retry_attempts=config.OPENCLAW_HELPER_RETRY_ATTEMPTS,
+                transport=config.OPENCLAW_GATEWAY_TRANSPORT,
+                model=config.OPENCLAW_GATEWAY_MODEL,
+                manage_transcript=False,
+            )
+        return _kb_openclaw_provider
+
+
+class KBCollectionCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    description: str = Field("", max_length=300)
+
+
+@app.post("/api/kb/collections", dependencies=[Depends(require_kb_access)])
+async def kb_create_collection(body: KBCollectionCreate):
+    """Create a named knowledge base collection."""
+    store, _ = _kb_components()
+    try:
+        store.get_or_create_collection(body.name, body.description)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"name": body.name, "description": body.description, "created": True}
+
+
+@app.get("/api/kb/collections", dependencies=[Depends(require_kb_access)])
+async def kb_list_collections():
+    """List all knowledge base collections with stats."""
+    store, _ = _kb_components()
+    return {"collections": store.list_collections()}
+
+
+@app.delete("/api/kb/collections/{collection_name}", dependencies=[Depends(require_kb_access)])
+async def kb_delete_collection(collection_name: str):
+    """Delete a collection and all its documents."""
+    store, _ = _kb_components()
+    store.delete_collection(collection_name)
+    return {"deleted": collection_name}
+
+
+@app.post("/api/kb/collections/{collection_name}/upload", dependencies=[Depends(require_kb_access)])
+async def kb_upload_document(
+    collection_name: str,
+    file: UploadFile = File(...),
+    doc_title: str = Form(""),
+):
+    """Upload a document (PDF, DOCX, TXT, MD) and index it."""
+    max_bytes = config.KB_UPLOAD_MAX_MB * 1024 * 1024
+    data = await file.read()
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File exceeds {config.KB_UPLOAD_MAX_MB}MB limit.")
+
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: ingest(
+                file_path_or_url=file.filename or "upload",
+                collection_name=collection_name,
+                store=store,
+                embedder=embedder,
+                chunk_size=config.KB_CHUNK_SIZE,
+                chunk_overlap=config.KB_CHUNK_OVERLAP,
+                doc_title=doc_title,
+                data=data,
+                filename=file.filename or "",
+            ),
+        )
+    except UnsupportedFormatError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"KB ingest error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return result
+
+
+class KBAddUrlBody(BaseModel):
+    url: str = Field(..., min_length=10, max_length=2048)
+    doc_title: str = Field("", max_length=200)
+
+
+@app.post("/api/kb/collections/{collection_name}/add-url", dependencies=[Depends(require_kb_access)])
+async def kb_add_url(collection_name: str, body: KBAddUrlBody):
+    """Fetch a URL and index its content."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: ingest(
+                file_path_or_url=body.url,
+                collection_name=collection_name,
+                store=store,
+                embedder=embedder,
+                chunk_size=config.KB_CHUNK_SIZE,
+                chunk_overlap=config.KB_CHUNK_OVERLAP,
+                doc_title=body.doc_title,
+            ),
+        )
+    except ParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"KB add-url error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return result
+
+
+@app.get("/api/kb/collections/{collection_name}/documents", dependencies=[Depends(require_kb_access)])
+async def kb_list_documents(collection_name: str):
+    """List all documents in a collection."""
+    store, _ = _kb_components()
+    try:
+        coll = store._client.get_collection(collection_name)
+        if coll.count() == 0:
+            return {"documents": []}
+        all_data = coll.get(include=["metadatas"])
+        metas = all_data.get("metadatas", []) or []
+        seen: dict[str, dict] = {}
+        for m in metas:
+            if not m:
+                continue
+            doc_id = m.get("doc_id", "")
+            if doc_id and doc_id not in seen:
+                seen[doc_id] = {
+                    "doc_id": doc_id,
+                    "doc_title": m.get("doc_title", "Unknown"),
+                    "source": m.get("source", ""),
+                    "source_type": m.get("source_type", ""),
+                    "ingested_at": m.get("ingested_at", ""),
+                }
+        docs = list(seen.values())
+        chunk_counts: dict[str, int] = {}
+        for m in metas:
+            if m:
+                did = m.get("doc_id", "")
+                chunk_counts[did] = chunk_counts.get(did, 0) + 1
+        for doc in docs:
+            doc["chunk_count"] = chunk_counts.get(doc["doc_id"], 0)
+        return {"documents": docs}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name}")
+
+
+@app.delete("/api/kb/documents/{doc_id}", dependencies=[Depends(require_kb_access)])
+async def kb_delete_document(doc_id: str, collection: str = Query(...)):
+    """Delete a document from a collection by doc_id."""
+    store, _ = _kb_components()
+    deleted = store.delete_document(collection, doc_id)
+    return {"doc_id": doc_id, "chunks_deleted": deleted}
+
+
+class KBAskBody(BaseModel):
+    question: str = Field(..., min_length=3, max_length=500)
+    collection: str = Field("default", min_length=1, max_length=80)
+
+
+@app.post("/api/kb/ask", dependencies=[Depends(require_kb_access)])
+async def kb_ask(body: KBAskBody):
+    """Answer a question grounded in the knowledge base with citations."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+
+    try:
+        chunks = await loop.run_in_executor(
+            None,
+            lambda: hybrid_search(store, embedder, body.collection, body.question, config.KB_TOP_K),
+        )
+    except Exception as exc:
+        logger.error(f"KB search error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not chunks:
+        return {
+            "answer": "No relevant content found in this knowledge base for your question.",
+            "citations": [],
+            "confidence": "low_confidence",
+            "caveat": "The collection may be empty. Try uploading documents first.",
+        }
+
+    provider = _get_kb_openclaw_provider()
+    if provider is not None:
+        try:
+            context = _build_context(chunks)
+            prompt = (
+                "Answer the following question using ONLY the context below. "
+                "Cite sources inline as [Source: <title>, p.<page>]. "
+                "If the answer cannot be found in the context, say so clearly. "
+                "Be concise and direct.\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question: {body.question}"
+            )
+            msg = await provider.chat(prompt)
+            answer = msg.text
+
+            top_score = chunks[0]["score"] if chunks else 0.0
+            confidence = _confidence_level(top_score)
+            caveat = (
+                "Note: Retrieved context may not fully address this question."
+                if confidence == "low_confidence" else ""
+            )
+
+            seen: set[tuple] = set()
+            citations = []
+            for chunk in chunks:
+                meta = chunk.get("metadata", {})
+                key = (meta.get("doc_title", ""), meta.get("page", ""))
+                if key not in seen:
+                    seen.add(key)
+                    citations.append({
+                        "doc_title": meta.get("doc_title", "Unknown"),
+                        "page": meta.get("page", "?"),
+                        "doc_id": meta.get("doc_id", ""),
+                        "source": meta.get("source", ""),
+                    })
+
+            return {"answer": answer, "citations": citations, "confidence": confidence, "caveat": caveat}
+        except Exception as exc:
+            logger.warning(f"KB OpenClaw generation failed, falling back to OpenAI: {exc}")
+
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: generate_answer(
+                question=body.question,
+                chunks=chunks,
+                openai_api_key=config.OPENAI_API_KEY,
+                model=_kb_openai_model(),
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"KB generate error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return result
+
+
+@app.get("/api/kb/search", dependencies=[Depends(require_kb_access)])
+async def kb_search(
+    collection: str = Query(...),
+    q: str = Query(..., min_length=2, max_length=300),
+    top_k: int = Query(5, ge=1, le=20),
+):
+    """Semantic + keyword search returning ranked snippets."""
+    store, embedder = _kb_components()
+    loop = asyncio.get_running_loop()
+    try:
+        chunks = await loop.run_in_executor(
+            None,
+            lambda: hybrid_search(store, embedder, collection, q, top_k),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {
+        "query": q,
+        "collection": collection,
+        "results": [
+            {
+                "text": c["text"][:500],
+                "score": c["score"],
+                "doc_title": c.get("metadata", {}).get("doc_title", ""),
+                "page": c.get("metadata", {}).get("page", ""),
+                "source_type": c.get("metadata", {}).get("source_type", ""),
+            }
+            for c in chunks
+        ],
+    }
+
+
+@app.post("/api/topic-overviews/debug/refresh", dependencies=[Depends(require_debug_endpoint_access)])
 async def debug_refresh_topic_overviews():
     """Force-refresh topic overviews and return stage diagnostics."""
     try:

@@ -67,6 +67,46 @@ ANALYTICS_RATE_LIMIT_ENABLED = _env_bool("ANALYTICS_RATE_LIMIT_ENABLED", True)
 ANALYTICS_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ANALYTICS_RATE_LIMIT_WINDOW_SECONDS", "60"))
 ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQUESTS", "120"))
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+OPENCLAW_GATEWAY_BASE_URL = os.getenv("OPENCLAW_GATEWAY_BASE_URL", "").strip().rstrip("/")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "").strip()
+OPENCLAW_GATEWAY_TRANSPORT = os.getenv(
+    "OPENCLAW_GATEWAY_TRANSPORT",
+    "openai_compatible" if IS_STAGING else "auto",
+).strip().lower()
+OPENCLAW_GATEWAY_MODEL = os.getenv("OPENCLAW_GATEWAY_MODEL", "").strip()
+OPENCLAW_ANALYTICS_AGENT_ID = os.getenv("OPENCLAW_ANALYTICS_AGENT_ID", "").strip()
+OPENCLAW_WEB_SESSION_KEY = os.getenv(
+    "OPENCLAW_WEB_SESSION_KEY",
+    "" if IS_PRODUCTION else "tg-analyst-ru-web-admin",
+).strip()
+OPENCLAW_KB_SESSION_KEY = os.getenv(
+    "OPENCLAW_KB_SESSION_KEY",
+    "" if IS_PRODUCTION else "tg-analyst-ru-web-kb",
+).strip()
+OPENCLAW_HELPER_TIMEOUT_SECONDS = float(os.getenv("OPENCLAW_HELPER_TIMEOUT_SECONDS", "30"))
+OPENCLAW_HELPER_CONNECT_TIMEOUT_SECONDS = float(
+    os.getenv("OPENCLAW_HELPER_CONNECT_TIMEOUT_SECONDS", str(OPENCLAW_HELPER_TIMEOUT_SECONDS))
+)
+OPENCLAW_HELPER_READ_TIMEOUT_SECONDS = float(
+    os.getenv("OPENCLAW_HELPER_READ_TIMEOUT_SECONDS", str(OPENCLAW_HELPER_TIMEOUT_SECONDS))
+)
+OPENCLAW_HELPER_RETRY_ATTEMPTS = max(0, int(os.getenv("OPENCLAW_HELPER_RETRY_ATTEMPTS", "1")))
+OPENCLAW_HELPER_HISTORY_MAX_MESSAGES = max(
+    4,
+    int(os.getenv("OPENCLAW_HELPER_HISTORY_MAX_MESSAGES", "40")),
+)
+OPENCLAW_HELPER_HISTORY_MAX_CHARS = max(
+    1,
+    int(os.getenv("OPENCLAW_HELPER_HISTORY_MAX_CHARS", "12000")),
+)
+OPENCLAW_HELPER_TRANSCRIPT_TTL_SECONDS = max(
+    300,
+    int(os.getenv("OPENCLAW_HELPER_TRANSCRIPT_TTL_SECONDS", "604800")),
+)
+AI_HELPER_ADMIN_SUPABASE_USER_ID = os.getenv("AI_HELPER_ADMIN_SUPABASE_USER_ID", "").strip()
+AI_HELPER_ADMIN_EMAIL = os.getenv("AI_HELPER_ADMIN_EMAIL", "").strip().lower()
 ENABLE_SCRAPER_SCHEDULER = _env_bool("ENABLE_SCRAPER_SCHEDULER", True)
 REQUIRE_TELEGRAM_CREDENTIALS = _env_bool("REQUIRE_TELEGRAM_CREDENTIALS", not IS_STAGING)
 ENABLE_CARD_MATERIALIZERS = _env_bool("ENABLE_CARD_MATERIALIZERS", True)
@@ -211,6 +251,16 @@ AI_CATCHUP_COMMENT_LIMIT = int(os.getenv("AI_CATCHUP_COMMENT_LIMIT", "220"))
 AI_CATCHUP_POST_LIMIT = int(os.getenv("AI_CATCHUP_POST_LIMIT", "120"))
 AI_CATCHUP_SYNC_LIMIT = int(os.getenv("AI_CATCHUP_SYNC_LIMIT", "320"))
 
+# ── Knowledge Base (RAG) ──────────────────────────────────────────────────────
+GEMINI_API_KEY         = os.getenv("GEMINI_API_KEY", "")
+KB_STORAGE_PATH        = os.getenv("KB_STORAGE_PATH", "/data/kb")
+KB_EMBED_DIM           = int(os.getenv("KB_EMBED_DIM", "768"))
+KB_TOP_K               = int(os.getenv("KB_TOP_K", "8"))
+KB_CHUNK_SIZE          = int(os.getenv("KB_CHUNK_SIZE", "1500"))
+KB_CHUNK_OVERLAP       = int(os.getenv("KB_CHUNK_OVERLAP", "200"))
+KB_GENERATION_MODEL    = os.getenv("KB_GENERATION_MODEL", "")
+KB_UPLOAD_MAX_MB       = int(os.getenv("KB_UPLOAD_MAX_MB", "50"))
+
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
     missing = []
@@ -225,3 +275,48 @@ def validate():
     if not OPENAI_API_KEY:         missing.append("OPENAI_API_KEY/OpenAI_API")
     if missing:
         raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+
+    if IS_LOCKED_ENV:
+        locked_env_errors: list[str] = []
+        if not ANALYTICS_API_REQUIRE_AUTH:
+            locked_env_errors.append("ANALYTICS_API_REQUIRE_AUTH must be true")
+        if not CORS_ALLOW_ORIGINS or "*" in CORS_ALLOW_ORIGINS:
+            locked_env_errors.append("CORS_ALLOW_ORIGINS must not contain '*'")
+        if not REDIS_URL:
+            locked_env_errors.append("REDIS_URL")
+        if not ANALYTICS_API_KEY_FRONTEND:
+            locked_env_errors.append("ANALYTICS_API_KEY_FRONTEND")
+        if not ANALYTICS_API_KEY_OPENCLAW:
+            locked_env_errors.append("ANALYTICS_API_KEY_OPENCLAW")
+        if locked_env_errors:
+            raise EnvironmentError(
+                "Missing or unsafe locked-environment configuration: "
+                + ", ".join(locked_env_errors)
+            )
+
+        ai_helper_missing: list[str] = []
+        if not OPENCLAW_GATEWAY_BASE_URL:
+            ai_helper_missing.append("OPENCLAW_GATEWAY_BASE_URL")
+        if not OPENCLAW_GATEWAY_TOKEN:
+            ai_helper_missing.append("OPENCLAW_GATEWAY_TOKEN")
+        if not OPENCLAW_WEB_SESSION_KEY:
+            ai_helper_missing.append("OPENCLAW_WEB_SESSION_KEY")
+        transport = (
+            OPENCLAW_GATEWAY_TRANSPORT
+            if OPENCLAW_GATEWAY_TRANSPORT in {"openai_compatible", "legacy", "auto"}
+            else "auto"
+        )
+        effective_transport = "openai_compatible" if transport == "auto" and OPENCLAW_GATEWAY_MODEL else transport
+        if effective_transport == "openai_compatible":
+            if not OPENCLAW_GATEWAY_MODEL:
+                ai_helper_missing.append("OPENCLAW_GATEWAY_MODEL")
+        else:
+            if not OPENCLAW_ANALYTICS_AGENT_ID:
+                ai_helper_missing.append("OPENCLAW_ANALYTICS_AGENT_ID")
+        if not AI_HELPER_ADMIN_SUPABASE_USER_ID:
+            ai_helper_missing.append("AI_HELPER_ADMIN_SUPABASE_USER_ID")
+        if ai_helper_missing:
+            raise EnvironmentError(
+                "Missing required locked-environment AI helper environment variables: "
+                + ", ".join(ai_helper_missing)
+            )

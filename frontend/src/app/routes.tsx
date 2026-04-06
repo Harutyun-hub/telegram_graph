@@ -150,6 +150,13 @@ export const router = createBrowserRouter([
               return { Component: SettingsPage };
             },
           },
+          {
+            path: "agent",
+            lazy: async () => {
+              const { AgentPage } = await import("./pages/AgentPage");
+              return { Component: AgentPage };
+            },
+          },
         ],
       },
     ],

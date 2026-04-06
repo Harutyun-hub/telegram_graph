@@ -239,6 +239,7 @@ export function AdminLayout() {
     { label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
     { label: ru ? 'Граф связей' : 'Graph', path: '/graph', icon: Share2 },
     { label: ru ? 'Источники' : 'Sources', path: '/sources', icon: PlusCircle },
+    { label: ru ? 'ИИ Агент' : 'AI Agent', path: '/agent', icon: Sparkles },
     { label: ru ? 'Админ' : 'Admin', path: '/admin', icon: Shield },
     { label: ru ? 'Настройки' : 'Settings', path: '/settings', icon: Settings },
   ];
