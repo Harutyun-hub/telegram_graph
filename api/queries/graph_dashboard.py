@@ -1358,7 +1358,7 @@ def search_graph(query: str, limit: int = 20) -> list[dict]:
     def build_search() -> list[dict[str, Any]]:
         return run_query(
             """
-            CALL (t) {
+            CALL {
                 MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
                 WHERE coalesce(t.proposed, false) = false
                   AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
