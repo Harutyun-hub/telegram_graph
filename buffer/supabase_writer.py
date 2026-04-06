@@ -586,6 +586,7 @@ class SupabaseWriter:
         due_jobs = 0
         leased_jobs = 0
         dead_letter_jobs = 0
+        stale_nonclaimable_jobs = 0
         oldest_due_age_seconds: int | None = None
 
         for job in jobs:
@@ -595,14 +596,24 @@ class SupabaseWriter:
             if status == "dead_letter":
                 dead_letter_jobs += 1
                 continue
-            if status == "leased" and lease_expires_at and lease_expires_at > now:
-                leased_jobs += 1
+            if status == "leased":
+                if lease_expires_at and lease_expires_at > now:
+                    leased_jobs += 1
+                    continue
+                if next_attempt_at <= now:
+                    due_jobs += 1
+                    age_seconds = max(0, int((now - next_attempt_at).total_seconds()))
+                    if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
+                        oldest_due_age_seconds = age_seconds
                 continue
-            if next_attempt_at <= now:
+            if status == "pending" and next_attempt_at <= now:
                 due_jobs += 1
                 age_seconds = max(0, int((now - next_attempt_at).total_seconds()))
                 if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
                     oldest_due_age_seconds = age_seconds
+                continue
+            if next_attempt_at <= now:
+                stale_nonclaimable_jobs += 1
 
         slots = self.list_source_resolution_slots(active_only=True)
         cooldown_slots = 0
@@ -645,6 +656,7 @@ class SupabaseWriter:
             "due_jobs": due_jobs,
             "leased_jobs": leased_jobs,
             "dead_letter_jobs": dead_letter_jobs,
+            "stale_nonclaimable_jobs": stale_nonclaimable_jobs,
             "cooldown_slots": cooldown_slots,
             "cooldown_until": max_cooldown_until,
             "oldest_due_age_seconds": oldest_due_age_seconds,

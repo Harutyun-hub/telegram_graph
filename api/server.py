@@ -1115,6 +1115,7 @@ def get_current_scraper_scheduler_status() -> dict[str, Any]:
                     "due_jobs": 0,
                     "leased_jobs": 0,
                     "dead_letter_jobs": 0,
+                    "stale_nonclaimable_jobs": 0,
                     "cooldown_slots": 0,
                     "cooldown_until": None,
                     "oldest_due_age_seconds": None,

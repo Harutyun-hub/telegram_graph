@@ -126,6 +126,10 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append(
             f"{backlog.get('resolution_due_jobs')} source-resolution jobs are waiting to run."
         )
+    if _to_int(backlog.get("resolution_stale_nonclaimable_jobs"), 0) > 0:
+        notes.append(
+            f"{backlog.get('resolution_stale_nonclaimable_jobs')} source-resolution jobs need operator triage."
+        )
     if _to_int(backlog.get("resolution_cooldown_slots"), 0) > 0:
         notes.append("Telegram source resolution is cooling down due to flood-wait limits.")
     if drift.get("latest_post_delta_minutes") is not None and _to_int(drift.get("latest_post_delta_minutes"), 0) > 120:
@@ -298,6 +302,7 @@ def get_freshness_snapshot(
             "due_jobs": 0,
             "leased_jobs": 0,
             "dead_letter_jobs": 0,
+            "stale_nonclaimable_jobs": 0,
             "cooldown_slots": 0,
             "cooldown_until": None,
             "oldest_due_age_seconds": None,
@@ -413,6 +418,7 @@ def get_freshness_snapshot(
             "resolution_due_jobs": _to_int(resolution.get("due_jobs"), 0),
             "resolution_leased_jobs": _to_int(resolution.get("leased_jobs"), 0),
             "resolution_dead_letter_jobs": _to_int(resolution.get("dead_letter_jobs"), 0),
+            "resolution_stale_nonclaimable_jobs": _to_int(resolution.get("stale_nonclaimable_jobs"), 0),
             "resolution_cooldown_slots": _to_int(resolution.get("cooldown_slots"), 0),
             "resolution_oldest_due_age_seconds": _to_int(resolution.get("oldest_due_age_seconds"), 0),
             "active_pending_sources": _to_int(resolution.get("active_pending_sources"), 0),
