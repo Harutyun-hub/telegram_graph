@@ -238,6 +238,45 @@ def _keyword_bigrams(value: Any) -> list[str]:
     return _dedupe_texts([" ".join(tokens[idx: idx + 2]) for idx in range(max(0, len(tokens) - 1))][:3])
 
 
+def _alias_hint_candidates(value: Any, *, limit: int = 2) -> list[dict[str, Any]]:
+    normalized_value = _normalize_text(value)
+    hint_terms = [
+        term for term in _dedupe_texts(_alias_terms_for_text(value) + _extract_titlecase_phrases(_clean_text(value)))
+        if _normalize_text(term) and _normalize_text(term) != normalized_value
+    ]
+    multiword_terms = [term for term in hint_terms if len(_tokenize(term)) >= 2]
+    if multiword_terms:
+        hint_terms = multiword_terms
+    hint_terms = hint_terms[:limit]
+    candidates: list[dict[str, Any]] = []
+    for term in hint_terms:
+        if len(_tokenize(term)) < 1:
+            continue
+        candidates.append(
+            {
+                "source": "alias_hint",
+                "topic": term,
+                "summary": "Closest local topic interpretation from the question wording.",
+                "detail": "No exact backend entity matched yet for this wording in the selected window.",
+                "evidence_count": 0,
+            }
+        )
+    return candidates
+
+
+def _alias_hint_search_items(value: Any, *, limit: int = 2) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "topic_hint",
+            "id": None,
+            "name": candidate.get("topic"),
+            "text": _trim_text(candidate.get("detail"), 120),
+        }
+        for candidate in _alias_hint_candidates(value, limit=limit)
+        if candidate.get("topic")
+    ]
+
+
 def _is_graph_wide_question(value: str) -> bool:
     tokens = set(_tokenize(value))
     return bool(tokens.intersection(GRAPH_HINT_TOKENS))
@@ -433,6 +472,9 @@ def get_top_topics(client, request: GetTopTopicsRequest) -> dict[str, Any]:
 
 def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:
     rows = list(client.search_entities(request.query, request.limit) or [])[: request.limit]
+    alias_hint_items: list[dict[str, Any]] = []
+    if not rows:
+        alias_hint_items = _alias_hint_search_items(request.query, limit=min(request.limit, 2))
     items = [
         {
             "type": row.get("type"),
@@ -441,22 +483,33 @@ def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:
             "text": _trim_text(row.get("text"), 120),
         }
         for row in rows
-    ]
+    ] or alias_hint_items
     bullets = _limit_bullets([
         f"{item['type']}: {item['name']}" for item in items if item.get("name")
     ])
     confidence = "low_confidence"
     if items:
-        confidence = "high" if _normalize_text(items[0].get("type")) == "topic" else "medium"
+        item_type = _normalize_text(items[0].get("type"))
+        if item_type == "topic":
+            confidence = "high"
+        elif item_type == "topic_hint":
+            confidence = "low_confidence"
+        else:
+            confidence = "medium"
+    summary = f'Found {len(rows)} matching entities for "{request.query}".'
+    caveat = None
+    if not rows and alias_hint_items:
+        summary = f'No exact backend entities matched "{request.query}". Closest interpreted topics are shown below.'
+        caveat = "These are local alias hints, not confirmed backend entity matches."
     return build_success(
         action="search_entities",
         window=None,
-        summary=f'Found {len(items)} matching entities for "{request.query}".',
+        summary=summary,
         confidence=confidence,
         bullets=bullets or ["No matching entities were found."],
         items=items,
         source_endpoints=["/api/search"],
-        caveat=None if items else "Try a narrower topic or keyword.",
+        caveat=caveat or (None if items else "Try a narrower topic or keyword."),
     )
 
 
@@ -803,6 +856,33 @@ def _search_match(items: list[dict[str, Any]], *preferred_types: str) -> dict[st
             if _normalize_text(item.get("type")) == preferred_type and _clean_text(item.get("name")):
                 return item
     return None
+
+
+def _confirmed_search_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item for item in items
+        if _normalize_text(item.get("type")) not in {"topic_hint", "channel_hint", "category_hint"}
+    ]
+
+
+def _search_hint_candidates(items: list[dict[str, Any]], *, limit: int = 2) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        if _normalize_text(item.get("type")) != "topic_hint":
+            continue
+        topic = _clean_text(item.get("name"))
+        if not topic:
+            continue
+        candidates.append(
+            {
+                "source": "alias_hint",
+                "topic": topic,
+                "summary": "Closest local topic interpretation from the question wording.",
+                "detail": _clean_text(item.get("text")) or "No exact backend entity matched yet for this wording in the selected window.",
+                "evidence_count": 0,
+            }
+        )
+    return candidates
 
 
 def get_graph_snapshot(client, request: GetGraphSnapshotRequest) -> dict[str, Any]:
@@ -1290,8 +1370,9 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
         )
     )
     candidates = list(search_payload.get("items") or [])
+    confirmed_candidates = _confirmed_search_items(candidates)
     topic_candidate = next(
-        (item for item in candidates if _normalize_text(item.get("type")) == "topic" and _clean_text(item.get("name"))),
+        (item for item in confirmed_candidates if _normalize_text(item.get("type")) == "topic" and _clean_text(item.get("name"))),
         None,
     )
     if topic_candidate:
@@ -1324,7 +1405,7 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
             if exc.error_type != "not_found":
                 raise
 
-    channel_candidate = _search_match(candidates, "channel")
+    channel_candidate = _search_match(confirmed_candidates, "channel")
     if channel_candidate:
         try:
             return _relabel_action(
@@ -1338,7 +1419,7 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
             if exc.error_type != "not_found":
                 raise
 
-    category_candidate = _search_match(candidates, "category")
+    category_candidate = _search_match(confirmed_candidates, "category")
     if category_candidate:
         try:
             return _relabel_action(
@@ -1365,10 +1446,14 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
         except AnalyticsAPIError:
             pass
 
-    fallback_items = candidates[:3] or _candidate_items(base)
+    fallback_items = confirmed_candidates[:3] or _candidate_items(base)
+    if not fallback_items:
+        fallback_items = [_candidate_item(candidate) for candidate in _alias_hint_candidates(request.question, limit=2)]
+    if not fallback_items:
+        fallback_items = [_candidate_item(candidate) for candidate in _search_hint_candidates(candidates, limit=2)]
     fallback_bullets = (
-        _limit_bullets([f"{item.get('type')}: {item.get('name')}" for item in candidates[:3] if item.get("name")])
-        if candidates
+        _limit_bullets([f"{item.get('type')}: {item.get('name')}" for item in confirmed_candidates[:3] if item.get("name")])
+        if confirmed_candidates
         else _candidate_bullets(fallback_items)
     )
     fallback_summary = base.get("summary")
@@ -1379,6 +1464,13 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
             )
         else:
             fallback_summary = "The question did not resolve to a single exact topic right now."
+    if not confirmed_candidates and fallback_items:
+        hinted_topic = _clean_text(fallback_items[0].get("topic"))
+        if hinted_topic:
+            fallback_summary = (
+                f"{hinted_topic} is the closest local interpretation of this question, "
+                "but current backend evidence is too thin to answer confidently."
+            )
     return build_success(
         action="investigate_question",
         window=request.window,

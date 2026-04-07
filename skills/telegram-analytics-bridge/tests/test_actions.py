@@ -534,6 +534,17 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["type"], "topic")
         self.assertIn("Found 2 matching entities", payload["summary"])
 
+    def test_search_entities_returns_alias_hint_when_backend_search_is_empty(self) -> None:
+        payload = search_entities(
+            FakeClient(search_results=[]),
+            SearchEntitiesRequest(query="permits", limit=2),
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["confidence"], "low_confidence")
+        self.assertEqual(payload["items"][0]["type"], "topic_hint")
+        self.assertEqual(payload["items"][0]["name"], "Residency permits")
+        self.assertIn("No exact backend entities matched", payload["summary"])
+
     def test_get_topic_detail_normalizes_detail_payload(self) -> None:
         payload = get_topic_detail(
             self.client,
@@ -699,6 +710,22 @@ class ActionTests(unittest.TestCase):
         )
         self.assertEqual(payload["confidence"], "low_confidence")
         self.assertLessEqual(len(payload["items"]), 3)
+
+    def test_investigate_question_returns_alias_backed_low_confidence_when_exact_topic_is_missing(self) -> None:
+        payload = investigate_question(
+            FakeClient(
+                dashboard={"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}},
+                insight_cards={"cards": []},
+                search_results=[],
+                search_results_by_query={"Residency permits": []},
+                topic_details_by_topic={"Residency permits": None},
+            ),
+            InvestigateQuestionRequest(window="7d", question="What is driving concern about residency permits?"),
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["confidence"], "low_confidence")
+        self.assertEqual(payload["items"][0]["topic"], "Residency permits")
+        self.assertIn("closest local interpretation", payload["summary"])
 
     def test_investigate_question_recovers_from_topic_not_found_using_short_search_term(self) -> None:
         dashboard = {"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}}
