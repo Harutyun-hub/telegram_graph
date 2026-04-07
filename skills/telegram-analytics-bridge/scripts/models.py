@@ -8,6 +8,9 @@ SCHEMA_VERSION = "1.0"
 WindowLiteral = Literal["24h", "7d", "30d", "90d"]
 SignalFocusLiteral = Literal["all", "asks", "needs", "fear"]
 EntityTypeLiteral = Literal["auto", "topic", "category", "channel"]
+DEFAULT_TIMEOUT = 40.0
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_BASE = 0.75
 
 
 class ValidationError(ValueError):
@@ -258,9 +261,9 @@ class CompareChannelsRequest(WindowedRequest):
 class ClientConfig(BaseRequestModel):
     base_url: str
     api_key: str
-    timeout: float = 35.0
-    max_retries: int = 2
-    backoff_base: float = 0.5
+    timeout: float = DEFAULT_TIMEOUT
+    max_retries: int = DEFAULT_MAX_RETRIES
+    backoff_base: float = DEFAULT_BACKOFF_BASE
 
     def __post_init__(self) -> None:
         self.base_url = _require_text(self.base_url, "base_url", min_length=1, max_length=500)

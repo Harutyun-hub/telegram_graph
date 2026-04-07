@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from windows import dashboard_date_range, window_to_timeframe
 
 
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 
 class AnalyticsAPIError(RuntimeError):
@@ -225,6 +227,14 @@ class AnalyticsClient:
             except urllib_error.HTTPError as exc:
                 last_error = self._map_http_error(exc)
                 if exc.code in RETRYABLE_STATUS_CODES and attempt < attempts:
+                    logger.info(
+                        "Retrying analytics request after HTTP %s for %s %s (attempt %s/%s)",
+                        exc.code,
+                        method.upper(),
+                        path,
+                        attempt,
+                        attempts,
+                    )
                     time.sleep(self.backoff_base * (2 ** (attempt - 1)))
                     continue
                 raise last_error
@@ -240,8 +250,22 @@ class AnalyticsClient:
                     error_type="timeout" if is_timeout else "network_error",
                 )
                 if attempt < attempts:
+                    logger.info(
+                        "Retrying analytics request after %s for %s %s (attempt %s/%s)",
+                        "timeout" if is_timeout else "network_error",
+                        method.upper(),
+                        path,
+                        attempt,
+                        attempts,
+                    )
                     time.sleep(self.backoff_base * (2 ** (attempt - 1)))
                     continue
+                logger.info(
+                    "Analytics request exhausted retries due to %s for %s %s",
+                    "timeout" if is_timeout else "network_error",
+                    method.upper(),
+                    path,
+                )
                 raise last_error
             except json.JSONDecodeError as exc:
                 raise AnalyticsAPIError(

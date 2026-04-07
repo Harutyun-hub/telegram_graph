@@ -11,6 +11,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from models import (
     AskInsightsRequest,
+    ClientConfig,
     CompareChannelsRequest,
     CompareTopicsRequest,
     GetGraphSnapshotRequest,
@@ -88,6 +89,12 @@ class ModelValidationTests(unittest.TestCase):
     def test_compare_channels_requires_distinct_channels(self) -> None:
         with self.assertRaises(ValidationError):
             CompareChannelsRequest(window="7d", channel_a="Docs Chat", channel_b="Docs Chat")
+
+    def test_client_config_defaults_use_warmer_runtime_tuning(self) -> None:
+        request = ClientConfig(base_url="https://analytics.example.com", api_key="sk_test")
+        self.assertEqual(request.timeout, 40.0)
+        self.assertEqual(request.max_retries, 3)
+        self.assertEqual(request.backoff_base, 0.75)
 
 
 if __name__ == "__main__":
