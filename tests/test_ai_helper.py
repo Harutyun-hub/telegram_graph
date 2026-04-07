@@ -88,6 +88,49 @@ class AIHelperEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["error"]["code"], "auth_invalid")
 
+    def test_chat_accepts_frontend_proxy_token_in_staging(self) -> None:
+        provider = _FakeProvider()
+        with patch.object(server.config, "IS_STAGING", True), \
+             patch.object(server.config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "admin-user"), \
+             patch.object(server.config, "AI_HELPER_ADMIN_EMAIL", ""), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server, "get_ai_helper_provider", return_value=provider):
+            response = self.client.post(
+                "/api/ai-helper/chat",
+                json={"message": "hello"},
+                headers={"Authorization": "Bearer frontend-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"]["text"], "Echo: hello")
+        self.assertEqual(provider.chat_calls, ["hello"])
+
+    def test_chat_prefers_supabase_validation_when_supabase_token_present(self) -> None:
+        class _FailingWriter:
+            def __init__(self) -> None:
+                self.client = SimpleNamespace(
+                    auth=SimpleNamespace(
+                        get_user=lambda _token: (_ for _ in ()).throw(RuntimeError("invalid session token"))
+                    )
+                )
+
+        with patch.object(server.config, "IS_STAGING", True), \
+             patch.object(server.config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "admin-user"), \
+             patch.object(server.config, "AI_HELPER_ADMIN_EMAIL", ""), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server, "get_supabase_writer", return_value=_FailingWriter()):
+            response = self.client.post(
+                "/api/ai-helper/chat",
+                json={"message": "hello"},
+                headers={
+                    "Authorization": "Bearer frontend-secret",
+                    "X-Supabase-Authorization": "Bearer invalid-user-token",
+                },
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "auth_invalid")
+
     def test_chat_rejects_non_admin_user(self) -> None:
         with patch.object(server.config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "admin-user"), \
              patch.object(server.config, "AI_HELPER_ADMIN_EMAIL", ""), \

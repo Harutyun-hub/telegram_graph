@@ -1492,8 +1492,12 @@ def get_ai_helper_provider():
 async def require_admin_user(
     x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
     authorization: Optional[str] = Header(default=None),
+    *,
+    allow_frontend_proxy_token: bool = False,
 ) -> Dict[str, str]:
-    token = _extract_bearer_token(x_supabase_authorization) or _extract_bearer_token(authorization)
+    supabase_token = _extract_bearer_token(x_supabase_authorization)
+    auth_token = _extract_bearer_token(authorization)
+    token = supabase_token or auth_token
     if not token:
         raise AIHelperError(
             status_code=401,
@@ -1511,6 +1515,17 @@ async def require_admin_user(
             message="The AI helper admin identity is not configured.",
             retryable=False,
         )
+
+    if (
+        allow_frontend_proxy_token
+        and config.IS_STAGING
+        and not supabase_token
+        and auth_token
+        and config.ANALYTICS_API_KEY_FRONTEND
+        and hmac.compare_digest(auth_token, config.ANALYTICS_API_KEY_FRONTEND)
+    ):
+        logger.info("AI helper auth satisfied via staging frontend proxy token")
+        return {"id": "staging-frontend-proxy", "email": "", "auth": "frontend_proxy"}
 
     try:
         loop = asyncio.get_running_loop()
@@ -1549,6 +1564,17 @@ async def require_admin_user(
         )
 
     return {"id": user_id, "email": email}
+
+
+async def require_ai_helper_access(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    return await require_admin_user(
+        x_supabase_authorization=x_supabase_authorization,
+        authorization=authorization,
+        allow_frontend_proxy_token=True,
+    )
 
 
 def _allow_local_operator_bypass(
@@ -2603,7 +2629,7 @@ async def ai_query(request: AIQueryRequest):
 @app.post("/api/ai-helper/chat")
 async def ai_helper_chat(
     payload: AIHelperChatRequest,
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
 ):
     provider = get_ai_helper_provider()
     message = await provider.chat(payload.message.strip())
@@ -2616,7 +2642,7 @@ async def ai_helper_chat(
 @app.get("/api/ai-helper/history")
 async def ai_helper_history(
     limit: int = Query(default=50, ge=1, le=100),
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
 ):
     provider = get_ai_helper_provider()
     messages = await provider.history(limit=limit)
@@ -2628,7 +2654,7 @@ async def ai_helper_history(
 
 @app.post("/api/ai-helper/reset")
 async def ai_helper_reset(
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
 ):
     provider = get_ai_helper_provider()
     reset_at = await provider.reset()
