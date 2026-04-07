@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -7,15 +8,20 @@ from client import AnalyticsAPIError
 from formatters import build_success
 from models import (
     AskInsightsRequest,
+    CompareChannelsRequest,
+    CompareTopicsRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
+    GetGraphSnapshotRequest,
+    GetNodeContextRequest,
     GetProblemSpikesRequest,
     GetQuestionClustersRequest,
     GetSentimentOverviewRequest,
     GetTopicDetailRequest,
     GetTopicEvidenceRequest,
     GetTopTopicsRequest,
+    InvestigateChannelRequest,
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
@@ -26,9 +32,48 @@ STOPWORDS = {
     "a", "an", "and", "are", "about", "at", "be", "by", "for", "from", "how", "in",
     "is", "it", "main", "of", "on", "or", "the", "to", "what", "which", "who", "why",
     "with", "driving", "drive", "issue", "issues", "problem", "problems", "trend", "trends",
+    "now", "right", "week", "month", "today", "current", "currently",
 }
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+QUOTED_PHRASE_RE = re.compile(r"['\"]([^'\"]{2,80})['\"]")
+TITLECASE_PHRASE_RE = re.compile(r"\b(?:[A-Z][A-Za-z0-9_-]+(?:\s+[A-Z][A-Za-z0-9_-]+)+)\b")
 SEVERITY_RANK = {"critical": 4, "high": 3, "urgent": 3, "medium": 2, "low": 1}
+SOURCE_PRIORITY = {
+    "question_brief": 4,
+    "problem_brief": 3,
+    "urgency_signal": 3,
+    "trending_topic": 2,
+    "insight_card": 1,
+}
+QUESTION_ALIASES = {
+    "politics": ["Political protests", "Politics"],
+    "political": ["Political protests", "Politics"],
+    "permit": ["Residency permits", "permit"],
+    "permits": ["Residency permits", "permits"],
+    "residence permit": ["Residency permits", "residence permit"],
+    "residence permits": ["Residency permits", "residence permits"],
+    "residency": ["Residency permits", "residency"],
+    "visa": ["Residency permits", "Visa appointments", "visa"],
+    "visas": ["Residency permits", "Visa appointments", "visas"],
+    "appointment": ["Residency permits", "Visa appointments", "appointment"],
+    "appointments": ["Residency permits", "Visa appointments", "appointments"],
+    "paperwork": ["Residency permits", "paperwork"],
+    "document": ["Residency permits", "Documents", "document"],
+    "documents": ["Residency permits", "Documents", "documents"],
+    "housing": ["Rental costs", "Housing"],
+    "rent": ["Rental costs", "rent"],
+    "rental": ["Rental costs", "rental"],
+    "school": ["School admissions", "schools"],
+    "schools": ["School admissions", "schools"],
+    "admission": ["School admissions", "admissions"],
+}
+GRAPH_HINT_TOKENS = {
+    "channels", "community", "discussion", "ecosystem", "graph", "hidden", "landscape",
+    "map", "network", "networks", "pattern", "patterns", "shaping", "conversation",
+}
+CHANNEL_HINT_TOKENS = {"channel", "channels", "chat", "group", "groups", "inside", "in"}
+RESOLUTION_PROBE_LIMIT = 3
+logger = logging.getLogger(__name__)
 
 
 def _clean_text(value: Any) -> str:
@@ -175,6 +220,87 @@ def _dedupe_texts(values: list[str]) -> list[str]:
     return deduped
 
 
+def _extract_quoted_phrases(value: str) -> list[str]:
+    return _dedupe_texts([match.group(1) for match in QUOTED_PHRASE_RE.finditer(value or "")])
+
+
+def _extract_titlecase_phrases(value: str) -> list[str]:
+    phrases: list[str] = []
+    for match in TITLECASE_PHRASE_RE.finditer(value or ""):
+        phrase = _clean_text(match.group(0))
+        if len(_tokenize(phrase)) < 1:
+            continue
+        phrases.append(phrase)
+    return _dedupe_texts(phrases)
+
+
+def _alias_terms_for_text(value: Any) -> list[str]:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return []
+    matches: list[str] = []
+    for alias, expansions in QUESTION_ALIASES.items():
+        if re.search(rf"\b{re.escape(alias)}\b", normalized):
+            matches.extend(expansions)
+    return _dedupe_texts(matches)
+
+
+def _keyword_bigrams(value: Any) -> list[str]:
+    tokens = [token for token in _tokenize(value) if len(token) >= 4]
+    return _dedupe_texts([" ".join(tokens[idx: idx + 2]) for idx in range(max(0, len(tokens) - 1))][:3])
+
+
+def _alias_hint_candidates(value: Any, *, limit: int = 2) -> list[dict[str, Any]]:
+    normalized_value = _normalize_text(value)
+    hint_terms = [
+        term for term in _dedupe_texts(_alias_terms_for_text(value) + _extract_titlecase_phrases(_clean_text(value)))
+        if _normalize_text(term) and _normalize_text(term) != normalized_value
+    ]
+    multiword_terms = [term for term in hint_terms if len(_tokenize(term)) >= 2]
+    if multiword_terms:
+        hint_terms = multiword_terms
+    hint_terms = hint_terms[:limit]
+    candidates: list[dict[str, Any]] = []
+    for term in hint_terms:
+        if len(_tokenize(term)) < 1:
+            continue
+        candidates.append(
+            {
+                "source": "alias_hint",
+                "topic": term,
+                "summary": "Closest local topic interpretation from the question wording.",
+                "detail": "No exact backend entity matched yet for this wording in the selected window.",
+                "evidence_count": 0,
+            }
+        )
+    return candidates
+
+
+def _alias_hint_search_items(value: Any, *, limit: int = 2) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "topic_hint",
+            "id": None,
+            "name": candidate.get("topic"),
+            "text": _trim_text(candidate.get("detail"), 120),
+        }
+        for candidate in _alias_hint_candidates(value, limit=limit)
+        if candidate.get("topic")
+    ]
+
+
+def _is_graph_wide_question(value: str) -> bool:
+    tokens = set(_tokenize(value))
+    return bool(tokens.intersection(GRAPH_HINT_TOKENS))
+
+
+def _is_channel_question(value: str) -> bool:
+    tokens = set(_tokenize(value))
+    if tokens.intersection(CHANNEL_HINT_TOKENS):
+        return True
+    return bool(_extract_titlecase_phrases(value))
+
+
 def _resolution_terms(base_payload: dict[str, Any], question: str, *, attempted_topic: str | None = None) -> list[str]:
     terms: list[str] = []
     items = base_payload.get("items")
@@ -185,10 +311,101 @@ def _resolution_terms(base_payload: dict[str, Any], question: str, *, attempted_
             topic = _clean_text(item.get("topic"))
             if topic:
                 terms.append(topic)
+            name = _clean_text(item.get("name"))
+            if name:
+                terms.append(name)
 
+    if attempted_topic:
+        terms.append(attempted_topic)
+    terms.extend(_extract_quoted_phrases(question))
+    terms.extend(_extract_titlecase_phrases(question))
+    terms.extend(_alias_terms_for_text(question))
+    terms.extend(_alias_terms_for_text(attempted_topic))
+    terms.extend(_keyword_bigrams(question))
     keyword_terms = [token for token in _tokenize(question) if len(token) >= 4]
     terms.extend(keyword_terms)
     return _dedupe_texts(terms)
+
+
+def _prioritized_resolution_terms(
+    base_payload: dict[str, Any],
+    question: str,
+    *,
+    attempted_topic: str | None = None,
+    limit: int = RESOLUTION_PROBE_LIMIT,
+) -> list[str]:
+    base_items = base_payload.get("items") if isinstance(base_payload.get("items"), list) else []
+    base_topics: list[str] = []
+    base_names: list[str] = []
+    for item in base_items:
+        if not isinstance(item, dict):
+            continue
+        topic = _clean_text(item.get("topic"))
+        if topic:
+            base_topics.append(topic)
+        name = _clean_text(item.get("name"))
+        if name:
+            base_names.append(name)
+
+    alias_terms = _alias_terms_for_text(question)
+    alias_multiword = [term for term in alias_terms if len(_tokenize(term)) >= 2]
+    phrase_terms = _extract_quoted_phrases(question) + _extract_titlecase_phrases(question)
+    bigram_terms = _keyword_bigrams(question)
+    keyword_terms = [token for token in _tokenize(question) if len(token) >= 4]
+
+    ordered = _dedupe_texts(
+        ([attempted_topic] if attempted_topic else [])
+        + alias_multiword
+        + phrase_terms
+        + base_topics
+        + base_names
+        + alias_terms
+        + bigram_terms
+        + keyword_terms
+    )
+    return ordered[:limit]
+
+
+def _merge_search_items(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(existing)
+    seen = {
+        (
+            _normalize_text(item.get("type")),
+            _normalize_text(item.get("id")),
+            _normalize_text(item.get("name")),
+        )
+        for item in existing
+        if isinstance(item, dict)
+    }
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            _normalize_text(item.get("type")),
+            _normalize_text(item.get("id")),
+            _normalize_text(item.get("name")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _log_resolution_outcome(
+    question: str,
+    *,
+    tried_terms: list[str],
+    outcome: str,
+    resolved_name: str | None = None,
+) -> None:
+    logger.info(
+        "question_resolution outcome=%s resolved=%s tried_terms=%s question=%s",
+        outcome,
+        resolved_name or "",
+        tried_terms,
+        _trim_text(question, 160),
+    )
 
 
 def _candidate_items(payload: dict[str, Any], *, limit: int = 3) -> list[dict[str, Any]]:
@@ -204,6 +421,110 @@ def _candidate_bullets(items: list[dict[str, Any]]) -> list[str]:
         for item in items
         if item.get("topic") or item.get("name")
     ])
+
+
+def _relabel_action(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    adjusted = dict(payload)
+    adjusted["action"] = action
+    return adjusted
+
+
+def _channel_detail_item(detail: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "channel": detail.get("title") or detail.get("username"),
+        "username": detail.get("username"),
+        "member_count": int(detail.get("memberCount") or 0),
+        "post_count": int(detail.get("postCount") or 0),
+        "avg_views": int(detail.get("avgViews") or 0),
+        "daily_messages": int(detail.get("dailyMessages") or 0),
+        "growth_7d_pct": float(detail.get("growth7dPct") or 0.0),
+        "top_topics": list(detail.get("topTopics") or [])[:3],
+        "sentiment_positive": int(detail.get("sentimentPositive") or 0),
+        "sentiment_neutral": int(detail.get("sentimentNeutral") or 0),
+        "sentiment_negative": int(detail.get("sentimentNegative") or 0),
+    }
+
+
+def _node_context_item(detail: dict[str, Any]) -> dict[str, Any]:
+    node_type = _normalize_text(detail.get("type"))
+    if node_type == "topic":
+        return {
+            "type": "topic",
+            "name": detail.get("name"),
+            "category": detail.get("category"),
+            "mention_count": int(detail.get("mentionCount") or 0),
+            "evidence_count": int(detail.get("evidenceCount") or 0),
+            "distinct_channels": int(detail.get("distinctChannels") or 0),
+            "trend_pct": float(detail.get("trendPct") or 0.0),
+            "dominant_sentiment": detail.get("dominantSentiment"),
+            "top_channels": list(detail.get("topChannels") or [])[:3],
+            "related_topics": list(detail.get("relatedTopics") or [])[:3],
+        }
+    if node_type == "category":
+        return {
+            "type": "category",
+            "name": detail.get("name"),
+            "topic_count": int(detail.get("topicCount") or 0),
+            "mention_count": int(detail.get("mentionCount") or 0),
+            "trend_pct": float(detail.get("trendPct") or 0.0),
+            "dominant_sentiment": detail.get("dominantSentiment"),
+            "top_topics": list(detail.get("topTopics") or [])[:3],
+            "top_channels": list(detail.get("topChannels") or [])[:3],
+        }
+    return {
+        "type": "channel",
+        "name": detail.get("name"),
+        "username": detail.get("username"),
+        "post_count": int(detail.get("postCount") or 0),
+        "topics": list(detail.get("topics") or [])[:4],
+        "categories": list(detail.get("categories") or [])[:4],
+    }
+
+
+def _graph_snapshot_item(
+    graph: dict[str, Any],
+    insights: dict[str, Any],
+    top_channels: list[dict[str, Any]],
+    trending_topics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    meta = graph.get("meta") if isinstance(graph.get("meta"), dict) else {}
+    nodes = list(graph.get("nodes") or [])
+    categories = sorted(
+        [node for node in nodes if _normalize_text(node.get("type")) == "category"],
+        key=lambda row: (int(row.get("mentionCount") or 0), int(row.get("topicCount") or 0)),
+        reverse=True,
+    )[:3]
+    topics = sorted(
+        [node for node in nodes if _normalize_text(node.get("type")) == "topic"],
+        key=lambda row: int(row.get("mentionCount") or 0),
+        reverse=True,
+    )[:3]
+    return {
+        "topic_count": int(meta.get("visibleTopicCount") or 0),
+        "category_count": int(meta.get("visibleCategoryCount") or 0),
+        "channel_count": int(meta.get("visibleChannelCount") or 0),
+        "total_mentions": int(meta.get("totalMentions") or 0),
+        "top_categories": [
+            {
+                "name": row.get("name"),
+                "mention_count": int(row.get("mentionCount") or 0),
+                "topic_count": int(row.get("topicCount") or 0),
+            }
+            for row in categories
+        ],
+        "leading_topics": [
+            {"name": row.get("name"), "mention_count": int(row.get("mentionCount") or 0)}
+            for row in topics
+        ] or [
+            {"name": row.get("name"), "mention_count": int(row.get("adCount") or 0)}
+            for row in trending_topics[:3]
+        ],
+        "leading_channels": [
+            {"name": row.get("name"), "mention_count": int(row.get("adCount") or 0)}
+            for row in top_channels[:3]
+        ],
+        "insight": _trim_text(insights.get("insight"), 180),
+    }
 
 
 def get_top_topics(client, request: GetTopTopicsRequest) -> dict[str, Any]:
@@ -244,6 +565,9 @@ def get_top_topics(client, request: GetTopTopicsRequest) -> dict[str, Any]:
 
 def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:
     rows = list(client.search_entities(request.query, request.limit) or [])[: request.limit]
+    alias_hint_items: list[dict[str, Any]] = []
+    if not rows:
+        alias_hint_items = _alias_hint_search_items(request.query, limit=min(request.limit, 2))
     items = [
         {
             "type": row.get("type"),
@@ -252,22 +576,33 @@ def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:
             "text": _trim_text(row.get("text"), 120),
         }
         for row in rows
-    ]
+    ] or alias_hint_items
     bullets = _limit_bullets([
         f"{item['type']}: {item['name']}" for item in items if item.get("name")
     ])
     confidence = "low_confidence"
     if items:
-        confidence = "high" if _normalize_text(items[0].get("type")) == "topic" else "medium"
+        item_type = _normalize_text(items[0].get("type"))
+        if item_type == "topic":
+            confidence = "high"
+        elif item_type == "topic_hint":
+            confidence = "low_confidence"
+        else:
+            confidence = "medium"
+    summary = f'Found {len(rows)} matching entities for "{request.query}".'
+    caveat = None
+    if not rows and alias_hint_items:
+        summary = f'No exact backend entities matched "{request.query}". Closest interpreted topics are shown below.'
+        caveat = "These are local alias hints, not confirmed backend entity matches."
     return build_success(
         action="search_entities",
         window=None,
-        summary=f'Found {len(items)} matching entities for "{request.query}".',
+        summary=summary,
         confidence=confidence,
         bullets=bullets or ["No matching entities were found."],
         items=items,
         source_endpoints=["/api/search"],
-        caveat=None if items else "Try a narrower topic or keyword.",
+        caveat=caveat or (None if items else "Try a narrower topic or keyword."),
     )
 
 
@@ -515,15 +850,41 @@ def get_question_clusters(client, request: GetQuestionClustersRequest) -> dict[s
 
 
 def get_sentiment_overview(client, request: GetSentimentOverviewRequest) -> dict[str, Any]:
-    sentiments = list(client.get_sentiment_distribution(request.window) or [])
     dashboard = _dashboard_data(client.get_dashboard(request.window))
+    health = dashboard.get("communityHealth") or {}
+    health_score = int(health.get("score") or 0)
+    health_trend = health.get("trend") or "flat"
+    try:
+        sentiments = list(client.get_sentiment_distribution(request.window) or [])
+    except AnalyticsAPIError as exc:
+        bullets = _limit_bullets([
+            f"Sentiment distribution is temporarily unavailable for the last {request.window}.",
+            f"Community health score is {health_score} with a {health_trend} trend.",
+            f"{len(list(dashboard.get('urgencySignals') or []))} urgency signals remain visible in dashboard data.",
+        ])
+        return build_success(
+            action="get_sentiment_overview",
+            window=request.window,
+            summary=f"Sentiment distribution is temporarily unavailable for the last {request.window}.",
+            confidence="low_confidence",
+            bullets=bullets,
+            items=[
+                {
+                    "label": "Unavailable",
+                    "count": 0,
+                    "share_pct": 0.0,
+                    "community_health_score": health_score,
+                    "community_health_trend": health_trend,
+                }
+            ],
+            source_endpoints=["/api/sentiment-distribution", "/api/dashboard"],
+            caveat=f"Sentiment endpoint /api/sentiment-distribution is unavailable right now: {exc.message}",
+        )
+
     total = sum(int(row.get("count") or 0) for row in sentiments)
     counts = {str(row.get("label") or "Unknown"): int(row.get("count") or 0) for row in sentiments}
     dominant_label = max(counts, key=counts.get) if counts else "Unknown"
     dominant_count = counts.get(dominant_label, 0)
-    health = dashboard.get("communityHealth") or {}
-    health_score = int(health.get("score") or 0)
-    health_trend = health.get("trend") or "flat"
 
     items = [
         {
@@ -579,6 +940,335 @@ def get_active_alerts(client, request: GetActiveAlertsRequest) -> dict[str, Any]
         bullets=bullets or ["No urgent community alerts are active right now."],
         items=items,
         source_endpoints=["/api/dashboard"],
+    )
+
+
+def _search_match(items: list[dict[str, Any]], *preferred_types: str) -> dict[str, Any] | None:
+    for preferred_type in preferred_types:
+        for item in items:
+            if _normalize_text(item.get("type")) == preferred_type and _clean_text(item.get("name")):
+                return item
+    return None
+
+
+def _confirmed_search_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item for item in items
+        if _normalize_text(item.get("type")) not in {"topic_hint", "channel_hint", "category_hint"}
+    ]
+
+
+def _search_hint_candidates(items: list[dict[str, Any]], *, limit: int = 2) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        if _normalize_text(item.get("type")) != "topic_hint":
+            continue
+        topic = _clean_text(item.get("name"))
+        if not topic:
+            continue
+        candidates.append(
+            {
+                "source": "alias_hint",
+                "topic": topic,
+                "summary": "Closest local topic interpretation from the question wording.",
+                "detail": _clean_text(item.get("text")) or "No exact backend entity matched yet for this wording in the selected window.",
+                "evidence_count": 0,
+            }
+        )
+    return candidates
+
+
+def get_graph_snapshot(client, request: GetGraphSnapshotRequest) -> dict[str, Any]:
+    graph = client.get_graph_data(
+        request.window,
+        category=request.category,
+        signal_focus=request.signal_focus,
+        max_nodes=request.max_nodes,
+    )
+    insights = client.get_graph_insights(request.window)
+    top_channels = list(client.get_top_channels(limit=5, window=request.window) or [])
+    trending_topics = list(client.get_trending_topics(limit=5, window=request.window) or [])
+    freshness = client.get_freshness_status(False)
+    item = _graph_snapshot_item(graph, insights, top_channels, trending_topics)
+    bullets = _limit_bullets([
+        (
+            "Top categories: " + ", ".join(
+                f"{row.get('name')} ({int(row.get('mention_count') or 0)})" for row in item.get("top_categories") or []
+            ) + "."
+            if item.get("top_categories")
+            else "No graph categories were returned for this window."
+        ),
+        (
+            "Leading topics: " + ", ".join(
+                f"{row.get('name')} ({int(row.get('mention_count') or 0)})" for row in item.get("leading_topics") or []
+            ) + "."
+            if item.get("leading_topics")
+            else "No leading topics were returned for this window."
+        ),
+        (
+            "Leading channels: " + ", ".join(
+                f"{row.get('name')} ({int(row.get('mention_count') or 0)})" for row in item.get("leading_channels") or []
+            ) + "."
+            if item.get("leading_channels")
+            else "No leading channels were returned for this window."
+        ),
+    ])
+    summary = item.get("insight") or (
+        f"The graph currently shows {item['topic_count']} topics across {item['category_count']} categories "
+        f"and {item['channel_count']} visible channels."
+    )
+    return build_success(
+        action="get_graph_snapshot",
+        window=request.window,
+        summary=summary,
+        confidence="high" if item["topic_count"] > 0 else "medium",
+        bullets=bullets,
+        items=[item],
+        source_endpoints=[
+            "/api/graph",
+            "/api/graph-insights",
+            "/api/top-channels",
+            "/api/trending-topics",
+            "/api/freshness",
+        ],
+        caveat=_freshness_caveat(freshness),
+    )
+
+
+def get_node_context(client, request: GetNodeContextRequest) -> dict[str, Any]:
+    source_endpoints: list[str] = []
+    candidate_name = request.entity
+    candidate_id: str | None = None
+    candidate_type = request.type
+
+    if request.type == "auto" or request.type == "channel":
+        search_payload = search_entities(client, SearchEntitiesRequest(query=request.entity, limit=5))
+        source_endpoints.append("/api/search")
+        candidates = list(search_payload.get("items") or [])
+        chosen = _search_match(candidates, request.type if request.type != "auto" else "topic", "category", "channel")
+        if request.type == "auto":
+            chosen = _search_match(candidates, "topic", "category", "channel")
+        if request.type == "channel":
+            chosen = _search_match(candidates, "channel")
+        if chosen:
+            candidate_name = _clean_text(chosen.get("name")) or request.entity
+            candidate_id = _clean_text(chosen.get("id"))
+            candidate_type = _normalize_text(chosen.get("type")) or request.type
+        elif request.type in {"auto", "channel"}:
+            return build_success(
+                action="get_node_context",
+                window=request.window,
+                summary=f'No graph node matched "{request.entity}" clearly enough.',
+                confidence="low_confidence",
+                bullets=["No matching graph node was found."],
+                items=candidates[:3],
+                source_endpoints=source_endpoints,
+                caveat="Try the exact topic, category, or channel title.",
+            )
+
+    if request.type in {"topic", "category"}:
+        candidate_type = request.type
+        candidate_id = f"{request.type}:{request.entity}"
+
+    if not candidate_id:
+        candidate_id = f"{candidate_type}:{candidate_name}" if candidate_type in {"topic", "category", "channel"} else request.entity
+
+    detail = client.get_node_details(candidate_id, candidate_type, request.window)
+    item = _node_context_item(detail)
+    evidence_rows = list(detail.get("evidence") or detail.get("questionEvidence") or [])[:2]
+    evidence_items = [_compact_evidence_item(row) for row in evidence_rows]
+
+    if _normalize_text(detail.get("type")) == "category":
+        bullets = _limit_bullets([
+            f"{detail.get('name')} includes {int(detail.get('topicCount') or 0)} scoped topics and {int(detail.get('mentionCount') or 0)} mentions.",
+            (
+                "Top topics: " + ", ".join(
+                    f"{row.get('name')} ({int(row.get('mentions') or 0)})" for row in list(detail.get("topTopics") or [])[:3]
+                ) + "."
+                if detail.get("topTopics")
+                else "Top topics are limited in this window."
+            ),
+            (
+                "Top channels: " + ", ".join(
+                    f"{row.get('name')} ({int(row.get('mentions') or 0)})" for row in list(detail.get("topChannels") or [])[:3]
+                ) + "."
+                if detail.get("topChannels")
+                else "Top channels are limited in this window."
+            ),
+        ])
+        summary = f"{detail.get('name')} is a category-level graph context with {int(detail.get('topicCount') or 0)} active topics."
+    elif _normalize_text(detail.get("type")) == "channel":
+        bullets = _limit_bullets([
+            f"{detail.get('name')} has {int(detail.get('postCount') or 0)} broadcast posts in this scoped graph window.",
+            (
+                "Key topics: " + ", ".join(
+                    row.get("name") for row in list(detail.get("topics") or [])[:4] if row.get("name")
+                ) + "."
+                if detail.get("topics")
+                else "No topic list was returned for this channel node."
+            ),
+            (
+                "Top categories: " + ", ".join(
+                    row.get("name") for row in list(detail.get("categories") or [])[:4] if row.get("name")
+                ) + "."
+                if detail.get("categories")
+                else "No category breakdown was returned for this channel node."
+            ),
+        ])
+        summary = f"{detail.get('name')} is active in the graph with {int(detail.get('postCount') or 0)} scoped posts."
+    else:
+        overview = detail.get("overview") if isinstance(detail.get("overview"), dict) else {}
+        bullets = _limit_bullets([
+            f"{detail.get('name')} has {int(detail.get('mentionCount') or 0)} mentions and trend {float(detail.get('trendPct') or 0.0):+.1f}%.",
+            (
+                "Top channels: " + ", ".join(
+                    row.get("name") for row in list(detail.get("topChannels") or [])[:3] if row.get("name")
+                ) + "."
+                if detail.get("topChannels")
+                else "Top channels are limited in this window."
+            ),
+            (
+                _trim_text(overview.get("summaryEn"), 140)
+                if overview.get("summaryEn")
+                else (
+                    f"Evidence sample: {evidence_items[0]['channel'] or 'Unknown source'} - {evidence_items[0]['text']}"
+                    if evidence_items
+                    else "No direct evidence was returned for this node."
+                )
+            ),
+        ])
+        summary = f"{detail.get('name')} is the closest graph node for this request."
+
+    return build_success(
+        action="get_node_context",
+        window=request.window,
+        summary=summary,
+        confidence="high" if item else "medium",
+        bullets=bullets,
+        items=[item] + evidence_items,
+        source_endpoints=source_endpoints + ["/api/node-details"],
+        caveat=(
+            "Channel graph context is structural; use investigate_channel for recent post evidence."
+            if _normalize_text(detail.get("type")) == "channel"
+            else None
+        ),
+    )
+
+
+def investigate_channel(client, request: InvestigateChannelRequest) -> dict[str, Any]:
+    detail = client.get_channel_detail(request.channel, request.window)
+    posts_payload = client.get_channel_posts(request.channel, limit=3, page=0, window=request.window)
+    freshness = client.get_freshness_status(False)
+    channel_item = _channel_detail_item(detail)
+    recent_posts = [
+        _compact_evidence_item({**row, "type": "post"})
+        for row in list(posts_payload.get("items") or [])[:3]
+    ]
+    top_topics = [row.get("name") for row in channel_item.get("top_topics") or [] if row.get("name")]
+    bullets = _limit_bullets([
+        (
+            f"Top topics: {', '.join(top_topics)}."
+            if top_topics
+            else "Top topics are limited in this window."
+        ),
+        (
+            f"Recent post: {recent_posts[0]['channel'] or channel_item['channel']} - {recent_posts[0]['text']}"
+            if recent_posts
+            else "Recent post evidence is thin for this channel."
+        ),
+        (
+            f"Sentiment: +{channel_item['sentiment_positive']} / "
+            f"~{channel_item['sentiment_neutral']} / -{channel_item['sentiment_negative']}."
+        ),
+    ])
+    caveat = _freshness_caveat(freshness)
+    if not recent_posts:
+        caveat = (
+            f"{caveat} Recent posts are thin for this channel."
+            if caveat
+            else "Recent posts are thin for this channel."
+        )
+    return build_success(
+        action="investigate_channel",
+        window=request.window,
+        summary=(
+            f"{channel_item['channel']} has {channel_item['post_count']} posts in the last {request.window}, "
+            f"averaging {channel_item['daily_messages']} messages per day with growth {channel_item['growth_7d_pct']:+.1f}%."
+        ),
+        confidence="high" if channel_item["post_count"] > 0 and recent_posts else "medium",
+        bullets=bullets,
+        items=[channel_item] + recent_posts,
+        source_endpoints=["/api/channels/detail", "/api/channels/posts", "/api/freshness"],
+        caveat=caveat,
+    )
+
+
+def compare_topics(client, request: CompareTopicsRequest) -> dict[str, Any]:
+    detail_a = _topic_detail_item(client.get_topic_detail(request.topic_a, None, request.window))
+    detail_b = _topic_detail_item(client.get_topic_detail(request.topic_b, None, request.window))
+    larger = detail_a if detail_a["mention_count"] >= detail_b["mention_count"] else detail_b
+    faster = detail_a if detail_a["growth_7d_pct"] >= detail_b["growth_7d_pct"] else detail_b
+    more_negative = detail_a if detail_a["sentiment_negative"] >= detail_b["sentiment_negative"] else detail_b
+    comparison = {
+        "topic_a": detail_a["topic"],
+        "topic_b": detail_b["topic"],
+        "larger_by_mentions": larger["topic"],
+        "faster_growth": faster["topic"],
+        "more_negative_sentiment": more_negative["topic"],
+        "mention_gap": abs(detail_a["mention_count"] - detail_b["mention_count"]),
+        "growth_gap_pct": round(abs(detail_a["growth_7d_pct"] - detail_b["growth_7d_pct"]), 1),
+    }
+    bullets = _limit_bullets([
+        f"{detail_a['topic']}: {detail_a['mention_count']} mentions, growth {detail_a['growth_7d_pct']:+.1f}%, top channels {', '.join(detail_a['top_channels']) or 'n/a'}.",
+        f"{detail_b['topic']}: {detail_b['mention_count']} mentions, growth {detail_b['growth_7d_pct']:+.1f}%, top channels {', '.join(detail_b['top_channels']) or 'n/a'}.",
+        f"{more_negative['topic']} carries the heavier negative-pressure mix right now.",
+    ])
+    return build_success(
+        action="compare_topics",
+        window=request.window,
+        summary=(
+            f"{larger['topic']} is larger by volume right now, while {faster['topic']} is moving faster "
+            f"over the last {request.window}."
+        ),
+        confidence="high",
+        bullets=bullets,
+        items=[comparison, detail_a, detail_b],
+        source_endpoints=["/api/topics/detail"],
+    )
+
+
+def compare_channels(client, request: CompareChannelsRequest) -> dict[str, Any]:
+    detail_a = _channel_detail_item(client.get_channel_detail(request.channel_a, request.window))
+    detail_b = _channel_detail_item(client.get_channel_detail(request.channel_b, request.window))
+    larger = detail_a if detail_a["post_count"] >= detail_b["post_count"] else detail_b
+    stronger = detail_a if detail_a["avg_views"] >= detail_b["avg_views"] else detail_b
+    faster = detail_a if detail_a["growth_7d_pct"] >= detail_b["growth_7d_pct"] else detail_b
+    comparison = {
+        "channel_a": detail_a["channel"],
+        "channel_b": detail_b["channel"],
+        "higher_volume": larger["channel"],
+        "higher_engagement_proxy": stronger["channel"],
+        "faster_growth": faster["channel"],
+        "post_gap": abs(detail_a["post_count"] - detail_b["post_count"]),
+        "view_gap": abs(detail_a["avg_views"] - detail_b["avg_views"]),
+    }
+    topics_a = [row.get("name") for row in detail_a["top_topics"] if row.get("name")]
+    topics_b = [row.get("name") for row in detail_b["top_topics"] if row.get("name")]
+    bullets = _limit_bullets([
+        f"{detail_a['channel']}: {detail_a['post_count']} posts, avg views {detail_a['avg_views']}, top topics {', '.join(topics_a) or 'n/a'}.",
+        f"{detail_b['channel']}: {detail_b['post_count']} posts, avg views {detail_b['avg_views']}, top topics {', '.join(topics_b) or 'n/a'}.",
+        f"{stronger['channel']} has the stronger engagement proxy, while {faster['channel']} is growing faster.",
+    ])
+    return build_success(
+        action="compare_channels",
+        window=request.window,
+        summary=(
+            f"{larger['channel']} is larger by recent post volume, while {stronger['channel']} has the stronger view proxy."
+        ),
+        confidence="high",
+        bullets=bullets,
+        items=[comparison, detail_a, detail_b],
+        source_endpoints=["/api/channels/detail"],
     )
 
 
@@ -691,6 +1381,45 @@ def investigate_topic(client, request: InvestigateTopicRequest) -> dict[str, Any
 
 
 def investigate_question(client, request: InvestigateQuestionRequest) -> dict[str, Any]:
+    if _is_graph_wide_question(request.question):
+        try:
+            payload = _relabel_action(
+                get_graph_snapshot(client, GetGraphSnapshotRequest(window=request.window)),
+                "investigate_question",
+            )
+            _log_resolution_outcome(request.question, tried_terms=[], outcome="graph_snapshot")
+            return payload
+        except AnalyticsAPIError:
+            pass
+
+    if _is_channel_question(request.question):
+        tried_channel_terms: list[str] = []
+        for channel_search_term in _prioritized_resolution_terms({"items": []}, request.question):
+            tried_channel_terms.append(channel_search_term)
+            search_payload = search_entities(client, SearchEntitiesRequest(query=channel_search_term, limit=5))
+            channel_candidates = _confirmed_search_items(list(search_payload.get("items") or []))
+            channel_candidate = _search_match(channel_candidates, "channel")
+            if not channel_candidate:
+                continue
+            try:
+                payload = _relabel_action(
+                    investigate_channel(
+                        client,
+                        InvestigateChannelRequest(window=request.window, channel=str(channel_candidate.get("name"))),
+                    ),
+                    "investigate_question",
+                )
+                _log_resolution_outcome(
+                    request.question,
+                    tried_terms=tried_channel_terms,
+                    outcome="channel_search_match",
+                    resolved_name=_clean_text(channel_candidate.get("name")),
+                )
+                return payload
+            except AnalyticsAPIError as exc:
+                if exc.error_type != "not_found":
+                    raise
+
     base = ask_insights(client, AskInsightsRequest(window=request.window, question=request.question))
     base_confidence = _normalize_text(base.get("confidence"))
     topic = _extract_primary_topic(base)
@@ -714,7 +1443,7 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
                 ),
             ])
             caveat = _freshness_caveat(freshness)
-            return build_success(
+            payload = build_success(
                 action="investigate_question",
                 window=request.window,
                 summary=base.get("summary") or f"{topic} appears most relevant to this question.",
@@ -724,76 +1453,159 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
                 source_endpoints=["/api/dashboard", "/api/insights/cards", "/api/topics/detail", "/api/freshness"],
                 caveat=caveat,
             )
-        except AnalyticsAPIError as exc:
-            if exc.error_type != "not_found":
-                raise
-
-    search_term = next(iter(_resolution_terms(base, request.question, attempted_topic=topic)), None)
-    search_used = bool(search_term)
-    search_payload = (
-        search_entities(client, SearchEntitiesRequest(query=search_term, limit=5))
-        if search_term
-        else build_success(
-            action="search_entities",
-            window=None,
-            summary="No search candidates were derived from this question.",
-            confidence="low_confidence",
-            bullets=["No matching entities were found."],
-            items=[],
-            source_endpoints=["/api/search"],
-            caveat="Try a narrower topic or keyword.",
-        )
-    )
-    candidates = list(search_payload.get("items") or [])
-    topic_candidate = next(
-        (item for item in candidates if _normalize_text(item.get("type")) == "topic" and _clean_text(item.get("name"))),
-        None,
-    )
-    if topic_candidate:
-        try:
-            detail = client.get_topic_detail(str(topic_candidate.get("name")), None, request.window)
-            detail_item = _topic_detail_item(detail)
-            sample = detail_item.get("sample_evidence") if isinstance(detail_item.get("sample_evidence"), dict) else {}
-            bullets = _limit_bullets([
-                f"Topic match: {detail_item['topic']}.",
-                (
-                    f"Top channels: {', '.join(detail_item['top_channels'])}."
-                    if detail_item["top_channels"]
-                    else "Top channels are limited in this window."
-                ),
-                (
-                    f"Evidence sample: {sample.get('channel') or 'Unknown source'} - "
-                    f"{sample.get('text') or 'No direct sample available.'}"
-                ),
-            ])
-            return build_success(
-                action="investigate_question",
-                window=request.window,
-                summary=f"{detail_item['topic']} looks like the closest evidence-backed match to this question.",
-                confidence="medium" if detail_item["mention_count"] > 0 else "low_confidence",
-                bullets=bullets,
-                items=[detail_item],
-                source_endpoints=["/api/dashboard", "/api/insights/cards", "/api/search", "/api/topics/detail"],
+            _log_resolution_outcome(
+                request.question,
+                tried_terms=[topic],
+                outcome="direct_insight_match",
+                resolved_name=detail_item["topic"],
             )
+            return payload
         except AnalyticsAPIError as exc:
             if exc.error_type != "not_found":
                 raise
 
-    fallback_items = candidates[:3] or _candidate_items(base)
+    search_used = False
+    tried_search_terms: list[str] = []
+    candidates: list[dict[str, Any]] = []
+
+    for search_term in _prioritized_resolution_terms(base, request.question, attempted_topic=topic):
+        search_used = True
+        tried_search_terms.append(search_term)
+        search_payload = search_entities(client, SearchEntitiesRequest(query=search_term, limit=5))
+        search_candidates = list(search_payload.get("items") or [])
+        candidates = _merge_search_items(candidates, search_candidates)
+        confirmed_candidates = _confirmed_search_items(search_candidates)
+
+        topic_candidate = _search_match(confirmed_candidates, "topic")
+        if topic_candidate:
+            try:
+                detail = client.get_topic_detail(str(topic_candidate.get("name")), None, request.window)
+                detail_item = _topic_detail_item(detail)
+                sample = detail_item.get("sample_evidence") if isinstance(detail_item.get("sample_evidence"), dict) else {}
+                bullets = _limit_bullets([
+                    f"Topic match: {detail_item['topic']}.",
+                    (
+                        f"Top channels: {', '.join(detail_item['top_channels'])}."
+                        if detail_item["top_channels"]
+                        else "Top channels are limited in this window."
+                    ),
+                    (
+                        f"Evidence sample: {sample.get('channel') or 'Unknown source'} - "
+                        f"{sample.get('text') or 'No direct sample available.'}"
+                    ),
+                ])
+                payload = build_success(
+                    action="investigate_question",
+                    window=request.window,
+                    summary=f"{detail_item['topic']} looks like the closest evidence-backed match to this question.",
+                    confidence="medium" if detail_item["mention_count"] > 0 else "low_confidence",
+                    bullets=bullets,
+                    items=[detail_item],
+                    source_endpoints=["/api/dashboard", "/api/insights/cards", "/api/search", "/api/topics/detail"],
+                )
+                _log_resolution_outcome(
+                    request.question,
+                    tried_terms=tried_search_terms,
+                    outcome="search_topic_match",
+                    resolved_name=detail_item["topic"],
+                )
+                return payload
+            except AnalyticsAPIError as exc:
+                if exc.error_type != "not_found":
+                    raise
+
+        channel_candidate = _search_match(confirmed_candidates, "channel")
+        if channel_candidate:
+            try:
+                payload = _relabel_action(
+                    investigate_channel(
+                        client,
+                        InvestigateChannelRequest(window=request.window, channel=str(channel_candidate.get("name"))),
+                    ),
+                    "investigate_question",
+                )
+                _log_resolution_outcome(
+                    request.question,
+                    tried_terms=tried_search_terms,
+                    outcome="search_channel_match",
+                    resolved_name=_clean_text(channel_candidate.get("name")),
+                )
+                return payload
+            except AnalyticsAPIError as exc:
+                if exc.error_type != "not_found":
+                    raise
+
+        category_candidate = _search_match(confirmed_candidates, "category")
+        if category_candidate:
+            try:
+                payload = _relabel_action(
+                    get_node_context(
+                        client,
+                        GetNodeContextRequest(
+                            window=request.window,
+                            entity=str(category_candidate.get("name")),
+                            type="category",
+                        ),
+                    ),
+                    "investigate_question",
+                )
+                _log_resolution_outcome(
+                    request.question,
+                    tried_terms=tried_search_terms,
+                    outcome="search_category_match",
+                    resolved_name=_clean_text(category_candidate.get("name")),
+                )
+                return payload
+            except AnalyticsAPIError as exc:
+                if exc.error_type != "not_found":
+                    raise
+
+    confirmed_candidates = _confirmed_search_items(candidates)
+
+    if _is_graph_wide_question(request.question):
+        try:
+            payload = _relabel_action(
+                get_graph_snapshot(client, GetGraphSnapshotRequest(window=request.window)),
+                "investigate_question",
+            )
+            _log_resolution_outcome(
+                request.question,
+                tried_terms=tried_search_terms,
+                outcome="graph_snapshot_fallback",
+            )
+            return payload
+        except AnalyticsAPIError:
+            pass
+
+    fallback_items = confirmed_candidates[:3] or _candidate_items(base)
+    if not fallback_items:
+        fallback_items = [_candidate_item(candidate) for candidate in _alias_hint_candidates(request.question, limit=2)]
+    if not fallback_items:
+        fallback_items = [_candidate_item(candidate) for candidate in _search_hint_candidates(candidates, limit=2)]
     fallback_bullets = (
-        _limit_bullets([f"{item.get('type')}: {item.get('name')}" for item in candidates[:3] if item.get("name")])
-        if candidates
+        _limit_bullets([f"{item.get('type')}: {item.get('name')}" for item in confirmed_candidates[:3] if item.get("name")])
+        if confirmed_candidates
         else _candidate_bullets(fallback_items)
     )
     fallback_summary = base.get("summary")
+    outcome = "candidate_fallback"
     if not fallback_summary:
-        if search_term:
+        if tried_search_terms:
+            searched_using = ", ".join(tried_search_terms[:2])
             fallback_summary = (
-                f'The question did not resolve to a single exact topic. Closest matches were searched using "{search_term}".'
+                f'The question did not resolve to a single exact topic. Closest matches were searched using "{searched_using}".'
             )
         else:
             fallback_summary = "The question did not resolve to a single exact topic right now."
-    return build_success(
+    if not confirmed_candidates and fallback_items:
+        hinted_topic = _clean_text(fallback_items[0].get("topic"))
+        if hinted_topic:
+            fallback_summary = (
+                f"{hinted_topic} is the closest local interpretation of this question, "
+                "but current backend evidence is too thin to answer confidently."
+            )
+            outcome = "alias_fallback"
+    payload = build_success(
         action="investigate_question",
         window=request.window,
         summary=fallback_summary,
@@ -804,6 +1616,13 @@ def investigate_question(client, request: InvestigateQuestionRequest) -> dict[st
         caveat="The question did not resolve cleanly to a single exact topic, so the skill returned the closest candidate signals instead of forcing a deeper lookup.",
         suggested_follow_up="Try naming a topic directly, such as residency permits, rental costs, or school admissions.",
     )
+    _log_resolution_outcome(
+        request.question,
+        tried_terms=tried_search_terms,
+        outcome=outcome,
+        resolved_name=_clean_text(fallback_items[0].get("topic") or fallback_items[0].get("name")) if fallback_items else None,
+    )
+    return payload
 
 
 def _low_confidence_response(
@@ -896,8 +1715,10 @@ def _build_insight_candidates(dashboard: dict[str, Any], insight_cards: dict[str
 
 def _rank_candidates(question_tokens: list[str], question: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized_question = _normalize_text(question)
+    alias_terms = {_normalize_text(term) for term in _alias_terms_for_text(question)}
     ranked: list[dict[str, Any]] = []
     for candidate in candidates:
+        topic_norm = _normalize_text(candidate.get("topic"))
         corpus = " ".join(
             part for part in [
                 candidate.get("topic"),
@@ -910,14 +1731,26 @@ def _rank_candidates(question_tokens: list[str], question: str, candidates: list
         overlap = len(corpus_tokens.intersection(question_tokens))
         score = overlap
         if normalized_question and normalized_question in corpus_norm:
-            score += 3
+            score += 4
         topic_tokens = set(_tokenize(candidate.get("topic")))
-        if topic_tokens and topic_tokens.intersection(question_tokens):
+        topic_overlap = len(topic_tokens.intersection(question_tokens))
+        if topic_overlap:
+            score += 2 + min(topic_overlap, 2)
+        exact_topic_match = bool(topic_norm and topic_norm in normalized_question)
+        if exact_topic_match:
+            score += 4
+        alias_match = bool(topic_norm and any(alias and (alias == topic_norm or alias in topic_norm or topic_norm in alias) for alias in alias_terms))
+        if alias_match:
             score += 2
+        if not (normalized_question and normalized_question in corpus_norm) and not exact_topic_match and not topic_overlap and not alias_match and overlap < 2:
+            continue
         if int(candidate.get("evidence_count") or 0) >= 2:
+            score += 1
+        if int(candidate.get("messages") or 0) >= 10:
             score += 1
         if score <= 0:
             continue
+        score += SOURCE_PRIORITY.get(str(candidate.get("source") or ""), 0)
         ranked.append({"candidate": candidate, "score": score})
     ranked.sort(
         key=lambda item: (
@@ -937,7 +1770,7 @@ def _has_sufficient_support(question_tokens: list[str], ranked: list[dict[str, A
     top_score = ranked[0]["score"]
     total_score = sum(item["score"] for item in ranked[:3])
     evidence = sum(int(item["candidate"].get("evidence_count") or 0) for item in ranked[:2])
-    return top_score >= 3 and total_score >= 5 and evidence >= 2
+    return top_score >= 5 and total_score >= 8 and evidence >= 2
 
 
 def _has_conflicting_support(ranked: list[dict[str, Any]]) -> bool:

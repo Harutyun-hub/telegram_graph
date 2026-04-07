@@ -3,20 +3,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 
 from actions import (
     ask_insights,
+    compare_channels,
+    compare_topics,
     get_freshness_status,
     get_active_alerts,
     get_declining_topics,
+    get_graph_snapshot,
+    get_node_context,
     get_problem_spikes,
     get_question_clusters,
     get_sentiment_overview,
     get_topic_detail,
     get_topic_evidence,
     get_top_topics,
+    investigate_channel,
     investigate_question,
     investigate_topic,
     search_entities,
@@ -26,20 +32,36 @@ from formatters import build_error
 from models import (
     AskInsightsRequest,
     ClientConfig,
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    CompareChannelsRequest,
+    CompareTopicsRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
+    GetGraphSnapshotRequest,
+    GetNodeContextRequest,
     GetProblemSpikesRequest,
     GetQuestionClustersRequest,
     GetSentimentOverviewRequest,
     GetTopicDetailRequest,
     GetTopicEvidenceRequest,
     GetTopTopicsRequest,
+    InvestigateChannelRequest,
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
-from pydantic import ValidationError
+
+
+def _configure_logging() -> None:
+    if os.getenv("TELEGRAM_ANALYTICS_BRIDGE_DEBUG") == "1":
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(levelname)s %(name)s: %(message)s",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,9 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--base-url", default=os.getenv("ANALYTICS_API_BASE_URL", ""))
     common.add_argument("--api-key", default=os.getenv("ANALYTICS_API_KEY", ""))
-    common.add_argument("--timeout", type=float, default=35.0)
-    common.add_argument("--max-retries", type=int, default=2)
-    common.add_argument("--backoff-base", type=float, default=0.5)
+    common.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    common.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
+    common.add_argument("--backoff-base", type=float, default=DEFAULT_BACKOFF_BASE)
     common.add_argument("--json", action="store_true", help="emit compact JSON")
 
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -94,10 +116,35 @@ def build_parser() -> argparse.ArgumentParser:
     freshness = subparsers.add_parser("get_freshness_status", parents=[common])
     freshness.add_argument("--force", action="store_true")
 
+    graph_snapshot = subparsers.add_parser("get_graph_snapshot", parents=[common])
+    graph_snapshot.add_argument("--window", default="7d")
+    graph_snapshot.add_argument("--category", default=None)
+    graph_snapshot.add_argument("--signal-focus", default="all")
+    graph_snapshot.add_argument("--max-nodes", type=int, default=12)
+
+    node_context = subparsers.add_parser("get_node_context", parents=[common])
+    node_context.add_argument("--entity", required=True)
+    node_context.add_argument("--type", default="auto")
+    node_context.add_argument("--window", default="7d")
+
     investigate_topic_parser = subparsers.add_parser("investigate_topic", parents=[common])
     investigate_topic_parser.add_argument("--topic", required=True)
     investigate_topic_parser.add_argument("--category", default=None)
     investigate_topic_parser.add_argument("--window", default="7d")
+
+    investigate_channel_parser = subparsers.add_parser("investigate_channel", parents=[common])
+    investigate_channel_parser.add_argument("--channel", required=True)
+    investigate_channel_parser.add_argument("--window", default="7d")
+
+    compare_topics_parser = subparsers.add_parser("compare_topics", parents=[common])
+    compare_topics_parser.add_argument("--topic-a", required=True)
+    compare_topics_parser.add_argument("--topic-b", required=True)
+    compare_topics_parser.add_argument("--window", default="7d")
+
+    compare_channels_parser = subparsers.add_parser("compare_channels", parents=[common])
+    compare_channels_parser.add_argument("--channel-a", required=True)
+    compare_channels_parser.add_argument("--channel-b", required=True)
+    compare_channels_parser.add_argument("--window", default="7d")
 
     insights = subparsers.add_parser("ask_insights", parents=[common])
     insights.add_argument("--window", default="7d")
@@ -111,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    _configure_logging()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -158,10 +206,40 @@ def main() -> int:
             )
         elif args.action == "get_freshness_status":
             payload = get_freshness_status(client, GetFreshnessStatusRequest(force=args.force))
+        elif args.action == "get_graph_snapshot":
+            payload = get_graph_snapshot(
+                client,
+                GetGraphSnapshotRequest(
+                    window=args.window,
+                    category=args.category,
+                    signal_focus=args.signal_focus,
+                    max_nodes=args.max_nodes,
+                ),
+            )
+        elif args.action == "get_node_context":
+            payload = get_node_context(
+                client,
+                GetNodeContextRequest(window=args.window, entity=args.entity, type=args.type),
+            )
         elif args.action == "investigate_topic":
             payload = investigate_topic(
                 client,
                 InvestigateTopicRequest(window=args.window, topic=args.topic, category=args.category),
+            )
+        elif args.action == "investigate_channel":
+            payload = investigate_channel(
+                client,
+                InvestigateChannelRequest(window=args.window, channel=args.channel),
+            )
+        elif args.action == "compare_topics":
+            payload = compare_topics(
+                client,
+                CompareTopicsRequest(window=args.window, topic_a=args.topic_a, topic_b=args.topic_b),
+            )
+        elif args.action == "compare_channels":
+            payload = compare_channels(
+                client,
+                CompareChannelsRequest(window=args.window, channel_a=args.channel_a, channel_b=args.channel_b),
             )
         elif args.action == "ask_insights":
             payload = ask_insights(client, AskInsightsRequest(window=args.window, question=args.question))

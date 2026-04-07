@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from windows import dashboard_date_range, window_to_timeframe
 
 
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 
 class AnalyticsAPIError(RuntimeError):
@@ -110,6 +112,86 @@ class AnalyticsClient:
             query={"force": "true" if force else "false"},
         )
 
+    def get_graph_data(
+        self,
+        window: str = "7d",
+        *,
+        category: str | None = None,
+        signal_focus: str | None = None,
+        max_nodes: int = 12,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "timeframe": window_to_timeframe(window),  # type: ignore[arg-type]
+            "sourceDetail": "minimal",
+            "max_nodes": max_nodes,
+        }
+        if category:
+            payload["category"] = category
+        if signal_focus and signal_focus != "all":
+            payload["signalFocus"] = signal_focus
+        return self._request_json("POST", "/api/graph", payload=payload)
+
+    def get_graph_insights(self, window: str = "7d") -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/graph-insights",
+            query={"timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_top_channels(self, limit: int = 5, window: str = "7d") -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/top-channels",
+            query={"limit": limit, "timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_trending_topics(self, limit: int = 5, window: str = "7d") -> list[dict[str, Any]]:
+        return self._request_json(
+            "GET",
+            "/api/trending-topics",
+            query={"limit": limit, "timeframe": window_to_timeframe(window)},  # type: ignore[arg-type]
+        )
+
+    def get_node_details(self, node_id: str, node_type: str, window: str = "7d") -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            "/api/node-details",
+            query={
+                "nodeId": node_id,
+                "nodeType": node_type,
+                "timeframe": window_to_timeframe(window),  # type: ignore[arg-type]
+            },
+        )
+
+    def get_channel_detail(self, channel: str, window: str = "7d") -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/channels/detail",
+            query={"channel": channel, "from": from_date, "to": to_date},
+        )
+
+    def get_channel_posts(
+        self,
+        channel: str,
+        *,
+        limit: int = 5,
+        page: int = 0,
+        window: str = "7d",
+    ) -> dict[str, Any]:
+        from_date, to_date = dashboard_date_range(window)  # type: ignore[arg-type]
+        return self._request_json(
+            "GET",
+            "/api/channels/posts",
+            query={
+                "channel": channel,
+                "page": page,
+                "size": limit,
+                "from": from_date,
+                "to": to_date,
+            },
+        )
+
     def _request_json(
         self,
         method: str,
@@ -145,6 +227,14 @@ class AnalyticsClient:
             except urllib_error.HTTPError as exc:
                 last_error = self._map_http_error(exc)
                 if exc.code in RETRYABLE_STATUS_CODES and attempt < attempts:
+                    logger.info(
+                        "Retrying analytics request after HTTP %s for %s %s (attempt %s/%s)",
+                        exc.code,
+                        method.upper(),
+                        path,
+                        attempt,
+                        attempts,
+                    )
                     time.sleep(self.backoff_base * (2 ** (attempt - 1)))
                     continue
                 raise last_error
@@ -160,8 +250,22 @@ class AnalyticsClient:
                     error_type="timeout" if is_timeout else "network_error",
                 )
                 if attempt < attempts:
+                    logger.info(
+                        "Retrying analytics request after %s for %s %s (attempt %s/%s)",
+                        "timeout" if is_timeout else "network_error",
+                        method.upper(),
+                        path,
+                        attempt,
+                        attempts,
+                    )
                     time.sleep(self.backoff_base * (2 ** (attempt - 1)))
                     continue
+                logger.info(
+                    "Analytics request exhausted retries due to %s for %s %s",
+                    "timeout" if is_timeout else "network_error",
+                    method.upper(),
+                    path,
+                )
                 raise last_error
             except json.JSONDecodeError as exc:
                 raise AnalyticsAPIError(

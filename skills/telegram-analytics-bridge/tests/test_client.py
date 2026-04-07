@@ -59,9 +59,9 @@ class ClientTests(unittest.TestCase):
             api_key="sk_test",
         )
 
-        self.assertEqual(config.timeout, 35.0)
-        self.assertEqual(config.max_retries, 2)
-        self.assertEqual(config.backoff_base, 0.5)
+        self.assertEqual(config.timeout, 40.0)
+        self.assertEqual(config.max_retries, 3)
+        self.assertEqual(config.backoff_base, 0.75)
 
     @mock.patch("client.time.sleep", autospec=True)
     @mock.patch("client.urllib_request.urlopen", autospec=True)
@@ -206,6 +206,70 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(payload["health"]["status"], "healthy")
         request = mock_urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://analytics.example.com/api/freshness?force=true")
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_graph_snapshot_posts_graph_payload(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"nodes": [], "meta": {}})
+
+        self.client.get_graph_data("7d", category="Documents", signal_focus="needs", max_nodes=12)
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/graph")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"timeframe": "Last 7 Days"', request.data)
+        self.assertIn(b'"category": "Documents"', request.data)
+        self.assertIn(b'"signalFocus": "needs"', request.data)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_node_details_uses_timeframe_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"id": "topic:Residency permits"})
+
+        self.client.get_node_details("topic:Residency permits", "topic", "7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/node-details?", request.full_url)
+        self.assertIn("nodeId=topic%3AResidency+permits", request.full_url)
+        self.assertIn("nodeType=topic", request.full_url)
+        self.assertIn("timeframe=Last+7+Days", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_channel_detail_builds_date_range_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"title": "Docs Chat"})
+
+        self.client.get_channel_detail("Docs Chat", "7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/channels/detail?", request.full_url)
+        self.assertIn("channel=Docs+Chat", request.full_url)
+        self.assertIn("from=", request.full_url)
+        self.assertIn("to=", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_channel_posts_builds_limit_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"items": []})
+
+        self.client.get_channel_posts("Docs Chat", limit=3, page=0, window="7d")
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/api/channels/posts?", request.full_url)
+        self.assertIn("size=3", request.full_url)
+        self.assertIn("page=0", request.full_url)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_graph_summary_helpers_use_timeframe_query(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse([{"name": "Docs Chat"}])
+
+        self.client.get_top_channels(4, "7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/top-channels?limit=4&timeframe=Last+7+Days")
+
+        self.client.get_trending_topics(3, "7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/trending-topics?limit=3&timeframe=Last+7+Days")
+
+        self.client.get_graph_insights("7d")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/graph-insights?timeframe=Last+7+Days")
 
 
 if __name__ == "__main__":
