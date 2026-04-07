@@ -48,8 +48,8 @@ from models import (
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
-from pydantic import ValidationError
 
 
 def build_parser() -> argparse.ArgumentParser:

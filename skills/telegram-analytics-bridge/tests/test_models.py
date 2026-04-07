@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from pydantic import ValidationError
-
 import sys
 from pathlib import Path
 
@@ -24,6 +22,7 @@ from models import (
     InvestigateChannelRequest,
     InvestigateQuestionRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
 
 
