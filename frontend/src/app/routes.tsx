@@ -5,6 +5,14 @@ import { AdminConfigProvider } from "./contexts/AdminConfigContext";
 import { resolveAuthRedirectTarget } from "./auth";
 import { useAuth } from "./contexts/AuthContext";
 
+function AuthBootstrapScreen() {
+  return (
+    <div className="flex min-h-[100dvh] items-center justify-center bg-slate-950 text-sm text-slate-300">
+      Checking access...
+    </div>
+  );
+}
+
 function DashboardShell() {
   return (
     <DataProvider>
@@ -28,8 +36,12 @@ function PlainShell() {
 }
 
 function ProtectedRoutes() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
+
+  if (loading) {
+    return <AuthBootstrapScreen />;
+  }
 
   if (!isAuthenticated) {
     return (
@@ -51,14 +63,22 @@ function ProtectedRoutes() {
 }
 
 function LoginRoute() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
+
+  if (loading) {
+    return <AuthBootstrapScreen />;
+  }
 
   if (isAuthenticated) {
     return <Navigate replace to={resolveAuthRedirectTarget(location.state)} />;
   }
 
   return <Outlet />;
+}
+
+function SocialLegacyRedirect() {
+  return <Navigate replace to="/social" />;
 }
 
 export const router = createBrowserRouter([
@@ -142,6 +162,31 @@ export const router = createBrowserRouter([
               const { SourcesPage } = await import("./pages/SourcesPage");
               return { Component: SourcesPage };
             },
+          },
+          {
+            path: "social",
+            lazy: async () => {
+              const { SocialPage } = await import("./pages/SocialPage");
+              return { Component: SocialPage };
+            },
+          },
+          {
+            path: "social/topics",
+            lazy: async () => {
+              const { SocialTopicsPage } = await import("./pages/SocialTopicsPage");
+              return { Component: SocialTopicsPage };
+            },
+          },
+          {
+            path: "social/ops",
+            lazy: async () => {
+              const { SocialOpsPage } = await import("./pages/SocialOpsPage");
+              return { Component: SocialOpsPage };
+            },
+          },
+          {
+            path: "social-activities",
+            Component: SocialLegacyRedirect,
           },
           {
             path: "settings",

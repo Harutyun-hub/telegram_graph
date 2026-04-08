@@ -18,7 +18,7 @@ npm ci
 npm run dev
 ```
 
-Default local URL: `http://127.0.0.1:5173`
+Default local URL: `http://127.0.0.1:5174`
 
 ## Build
 
@@ -39,6 +39,10 @@ Key variable:
 - `VITE_API_BASE_URL`
   - default: `/api`
   - local explicit example: `http://127.0.0.1:8001/api`
+- `VITE_SUPABASE_URL`
+  - required for admin-authenticated AI helper requests
+- `VITE_SUPABASE_ANON_KEY`
+  - required for the browser Supabase session client used by the AI helper
 
 ## Deployment Notes
 
@@ -46,6 +50,8 @@ Key variable:
 - `/api/*` requests are still expected to be reverse-proxied to the backend via `BACKEND_URL`.
 - Railway runtime must also provide `BACKEND_ANALYTICS_API_KEY_FRONTEND` so Caddy can inject the backend Bearer token server-side.
 - The browser must never receive analytics secrets through `VITE_*` variables.
+- The browser may send its own Supabase access token to `/api/ai-helper/*` via `X-Supabase-Authorization`; OpenClaw secrets remain backend-only.
+- The browser also reaches `/api/kb/*` only through the app backend. It must not call OpenClaw Gateway or OpenClaw Control UI directly.
 
 ## Current Dashboard Behavior
 
@@ -54,13 +60,19 @@ Key variable:
 - Strategic topic widgets now reflect direct-message mention semantics within the clean 15-day graph window.
 - Service Gap Detector uses `serviceGapBriefs` only. It no longer renders fallback-derived service-gap bars.
 - If no AI-backed service-gap cards are available, the widget shows a soft `No service gap detected.` state.
+- `/social` is a separate operator-only dashboard twin. It uses social-specific hooks and `/api/social/*` endpoints rather than `DataContext`.
+- `/social/topics` mirrors the Telegram Topics layout with social-only data, social filters, and an evidence-only detail pane.
+- Social routes share the global date selector for now, but Telegram-specific freshness copy is suppressed on `/social*` and social freshness is shown inside the social pages.
 
 ## Important Paths
 
 - `src/app/contexts/DataContext.tsx` — dashboard bootstrap and refresh flow
 - `src/app/services/dashboardAdapter.ts` — backend-to-UI transformation layer
 - `src/app/services/detailData.ts` — topic/channel/audience detail loaders
+- `src/app/services/socialTwinData.ts` — social dashboard and social topics hook layer
 - `src/app/components/widgets/` — dashboard widget implementations
+- `src/app/pages/SocialPage.tsx` — social dashboard twin route
+- `src/app/pages/SocialTopicsPage.tsx` — social topics route
 - `src/app/graph/` — graph feature modules
 
 ## QA
