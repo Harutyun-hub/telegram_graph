@@ -27,7 +27,7 @@ _local_transcript_lock = threading.Lock()
 _local_transcripts: dict[str, tuple[float, list["AIHelperMessage"]]] = {}
 
 
-Transport = Literal["openai_compatible", "legacy"]
+Transport = Literal["openai_compatible", "legacy", "cli_bridge"]
 
 
 def _utc_now_iso() -> str:
@@ -103,13 +103,30 @@ class AIHelperMessage:
 
 
 class AIHelperProvider(Protocol):
-    async def chat(self, message: str) -> AIHelperMessage:
+    async def chat(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> AIHelperMessage:
         ...
 
-    async def history(self, limit: int = 50) -> list[AIHelperMessage]:
+    async def history(
+        self,
+        limit: int = 50,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> list[AIHelperMessage]:
         ...
 
-    async def reset(self) -> str:
+    async def reset(
+        self,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> str:
         ...
 
 
@@ -135,6 +152,8 @@ def _normalize_transport(value: str | None, *, has_model: bool) -> Transport:
         return "legacy"
     if raw == "openai_compatible":
         return "openai_compatible"
+    if raw == "cli_bridge":
+        return "cli_bridge"
     transport: Transport = "openai_compatible" if has_model else "legacy"
     logger.info(
         "AI helper transport auto-selected {} (configured={}, model_present={})",
@@ -192,19 +211,20 @@ def _extract_text_from_response(payload: Any) -> str:
     return _extract_text(payload)
 
 
+def _drop_oldest_turn(messages: list[AIHelperMessage]) -> list[AIHelperMessage]:
+    if not messages:
+        return messages
+    remaining = messages[1:]
+    if remaining and remaining[0].role == "assistant":
+        remaining = remaining[1:]
+    return remaining
+
+
 def _trim_transcript(messages: list[AIHelperMessage], *, session_key: str | None = None) -> list[AIHelperMessage]:
     max_messages = max(2, int(config.OPENCLAW_HELPER_HISTORY_MAX_MESSAGES))
     max_chars = max(1000, int(config.OPENCLAW_HELPER_HISTORY_MAX_CHARS))
     trimmed = list(messages)
     trimmed_any = False
-
-    def _drop_oldest_turn(items: list[AIHelperMessage]) -> list[AIHelperMessage]:
-        if not items:
-            return items
-        remaining = items[1:]
-        if remaining and remaining[0].role == "assistant":
-            remaining = remaining[1:]
-        return remaining
 
     while len(trimmed) > max_messages:
         next_trimmed = _drop_oldest_turn(trimmed)
@@ -232,6 +252,36 @@ def _trim_transcript(messages: list[AIHelperMessage], *, session_key: str | None
             sum(len(item.text) for item in trimmed),
         )
     return trimmed
+
+
+def _bounded_replay_messages(messages: list[AIHelperMessage], *, session_key: str | None = None) -> list[AIHelperMessage]:
+    max_messages = max(2, int(config.OPENCLAW_HELPER_REPLAY_MAX_MESSAGES))
+    max_chars = max(1000, int(config.OPENCLAW_HELPER_REPLAY_MAX_CHARS))
+    bounded = list(messages)
+
+    while len(bounded) > max_messages:
+        next_bounded = _drop_oldest_turn(bounded)
+        if len(next_bounded) == len(bounded):
+            break
+        bounded = next_bounded
+
+    while bounded and sum(len(item.text) for item in bounded) > max_chars:
+        next_bounded = _drop_oldest_turn(bounded)
+        if len(next_bounded) == len(bounded):
+            break
+        bounded = next_bounded
+
+    while bounded and bounded[0].role != "user":
+        bounded = bounded[1:]
+
+    if len(bounded) != len(messages):
+        logger.info(
+            "AI helper replay bounded | session={} messages={} chars={}",
+            session_key or "unknown",
+            len(bounded),
+            sum(len(item.text) for item in bounded),
+        )
+    return bounded
 
 
 class _TranscriptStore:
@@ -346,24 +396,37 @@ class OpenClawAiHelperProvider:
         if not connect_timeout_seconds and not read_timeout_seconds:
             self.connect_timeout_seconds = max(self.connect_timeout_seconds, min(default_timeout, self.connect_timeout_seconds))
             self.read_timeout_seconds = max(self.read_timeout_seconds, min(default_timeout, self.read_timeout_seconds))
-        self._transcript_store = _TranscriptStore(self.session_key) if self.manage_transcript else None
+        self._transcript_store_mode = (
+            _TranscriptStore(self.session_key).mode if self.manage_transcript else "disabled"
+        )
         logger.info(
             "AI helper provider configured | transport={} base_url={} model={} transcript_store={} legacy_agent={}",
             self.transport,
             self.base_url,
             self.model or "-",
-            self._transcript_store.mode if self._transcript_store is not None else "disabled",
+            self._transcript_store_mode,
             bool(self.agent_id),
         )
 
-    def _build_headers(self) -> dict[str, str]:
+    def _effective_session_key(self, session_id: str | None = None) -> str:
+        session_suffix = str(session_id or "").strip()
+        if not session_suffix:
+            return self.session_key
+        return f"{self.session_key}:{session_suffix}"
+
+    def _transcript_store(self, session_id: str | None = None) -> _TranscriptStore | None:
+        if not self.manage_transcript:
+            return None
+        return _TranscriptStore(self._effective_session_key(session_id))
+
+    def _build_headers(self, *, session_key: str | None = None) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self.gateway_token}",
             "Accept": "application/json",
         }
         if self.transport == "legacy":
             headers["x-openclaw-agent-id"] = self.agent_id
-            headers["x-openclaw-session-key"] = self.session_key
+            headers["x-openclaw-session-key"] = str(session_key or self.session_key)
         return headers
 
     def _validate_config(self) -> None:
@@ -398,11 +461,19 @@ class OpenClawAiHelperProvider:
                 retryable=False,
             )
 
-    async def chat(self, message: str) -> AIHelperMessage:
+    async def chat(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> AIHelperMessage:
         self._validate_config()
-        async with _session_lock(self.session_key):
+        effective_session_key = self._effective_session_key(session_id)
+        transcript_store = self._transcript_store(session_id)
+        async with _session_lock(effective_session_key):
             if self.transport == "openai_compatible":
-                transcript = self._transcript_store.load() if self._transcript_store is not None else []
+                transcript = transcript_store.load() if transcript_store is not None else []
                 payload = await _run_blocking(
                     self._request_json,
                     "POST",
@@ -416,10 +487,45 @@ class OpenClawAiHelperProvider:
                         ],
                         "stream": False,
                     },
+                    effective_session_key,
+                    request_id,
                 )
                 reply = self._normalize_chat_message(payload)
-                if self._transcript_store is not None:
-                    self._transcript_store.save(
+                if transcript_store is not None:
+                    transcript_store.save(
+                        [
+                            *transcript,
+                            AIHelperMessage(role="user", text=message, timestamp=_utc_now_iso()),
+                            reply,
+                        ]
+                    )
+                return reply
+
+            if self.transport == "cli_bridge":
+                transcript = transcript_store.load() if transcript_store is not None else []
+                outgoing_messages = _bounded_replay_messages(
+                    [
+                        *transcript,
+                        AIHelperMessage(role="user", text=message, timestamp=_utc_now_iso()),
+                    ],
+                    session_key=effective_session_key,
+                )
+                payload = await _run_blocking(
+                    self._request_json,
+                    "POST",
+                    "/openclaw-agent/chat",
+                    None,
+                    {
+                        "requestId": request_id or "",
+                        "sessionId": str(session_id or effective_session_key),
+                        "messages": [{"role": item.role, "text": item.text} for item in outgoing_messages],
+                    },
+                    effective_session_key,
+                    request_id,
+                )
+                reply = self._normalize_chat_message(payload)
+                if transcript_store is not None:
+                    transcript_store.save(
                         [
                             *transcript,
                             AIHelperMessage(role="user", text=message, timestamp=_utc_now_iso()),
@@ -438,16 +544,26 @@ class OpenClawAiHelperProvider:
                     "stream": False,
                     "input": message,
                 },
+                effective_session_key,
+                request_id,
             )
             return self._normalize_chat_message(payload)
 
-    async def history(self, limit: int = 50) -> list[AIHelperMessage]:
+    async def history(
+        self,
+        limit: int = 50,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> list[AIHelperMessage]:
         safe_limit = min(max(int(limit), 1), _MAX_HISTORY_LIMIT)
         self._validate_config()
-        if self.transport == "openai_compatible":
-            if self._transcript_store is None:
+        effective_session_key = self._effective_session_key(session_id)
+        transcript_store = self._transcript_store(session_id)
+        if self.transport in {"openai_compatible", "cli_bridge"}:
+            if transcript_store is None:
                 return []
-            messages = self._transcript_store.load()
+            messages = transcript_store.load()
             if len(messages) > safe_limit:
                 messages = messages[-safe_limit:]
             return messages
@@ -456,12 +572,14 @@ class OpenClawAiHelperProvider:
             payload = await _run_blocking(
                 self._request_json,
                 "GET",
-                f"/sessions/{urllib_parse.quote(self.session_key, safe='')}/history",
+                f"/sessions/{urllib_parse.quote(effective_session_key, safe='')}/history",
                 {
                     "limit": safe_limit,
                     "includeTools": "false",
                 },
                 None,
+                effective_session_key,
+                request_id,
             )
         except AIHelperError as exc:
             if exc.status_code == 404:
@@ -469,12 +587,19 @@ class OpenClawAiHelperProvider:
             raise
         return self._normalize_history(payload, limit=safe_limit)
 
-    async def reset(self) -> str:
+    async def reset(
+        self,
+        *,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> str:
         self._validate_config()
-        async with _session_lock(self.session_key):
-            if self.transport == "openai_compatible":
-                if self._transcript_store is not None:
-                    self._transcript_store.clear()
+        effective_session_key = self._effective_session_key(session_id)
+        transcript_store = self._transcript_store(session_id)
+        async with _session_lock(effective_session_key):
+            if self.transport in {"openai_compatible", "cli_bridge"}:
+                if transcript_store is not None:
+                    transcript_store.clear()
                 return _utc_now_iso()
 
             await _run_blocking(
@@ -487,6 +612,8 @@ class OpenClawAiHelperProvider:
                     "stream": False,
                     "input": "/reset",
                 },
+                effective_session_key,
+                request_id,
             )
         return _utc_now_iso()
 
@@ -496,12 +623,21 @@ class OpenClawAiHelperProvider:
         path: str,
         query: dict[str, Any] | None,
         payload: dict[str, Any] | None,
+        session_key: str | None = None,
+        request_id: str | None = None,
     ) -> Any:
-        url = _compose_endpoint(self.base_url, path)
-        request_headers = self._build_headers()
+        url = (
+            f"{self.base_url.rstrip('/')}/{str(path or '').lstrip('/')}"
+            if self.transport == "cli_bridge"
+            else _compose_endpoint(self.base_url, path)
+        )
+        request_headers = self._build_headers(session_key=session_key)
+        if request_id:
+            request_headers["X-Request-ID"] = str(request_id)
 
         attempt = 0
         while True:
+            started_at = time.perf_counter()
             try:
                 with httpx.Client(
                     timeout=httpx.Timeout(
@@ -526,33 +662,82 @@ class OpenClawAiHelperProvider:
                             message="The AI helper service returned an empty response.",
                             retryable=True,
                         )
-                    return response.json()
+                    result = response.json()
+                    logger.info(
+                        "AI helper upstream request succeeded | request_id={} session_id={} transport={} agent_id={} duration_ms={} outcome=success",
+                        request_id or "-",
+                        session_key or self.session_key,
+                        self.transport,
+                        self.agent_id or "-",
+                        round((time.perf_counter() - started_at) * 1000, 2),
+                    )
+                    return result
             except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "AI helper upstream HTTP error | request_id={} session_id={} transport={} agent_id={} status={} duration_ms={}",
+                    request_id or "-",
+                    session_key or self.session_key,
+                    self.transport,
+                    self.agent_id or "-",
+                    exc.response.status_code,
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                )
                 raise self._map_http_error(exc.response) from exc
             except (httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
                 if attempt < self.retry_attempts:
                     attempt += 1
                     logger.warning(
-                        "AI helper request timeout, retrying | transport={} attempt={} url={}",
+                        "AI helper request timeout, retrying | request_id={} session_id={} transport={} agent_id={} attempt={} url={}",
+                        request_id or "-",
+                        session_key or self.session_key,
                         self.transport,
+                        self.agent_id or "-",
                         attempt,
                         url,
                     )
                     continue
+                logger.warning(
+                    "AI helper upstream timeout | request_id={} session_id={} transport={} agent_id={} duration_ms={}",
+                    request_id or "-",
+                    session_key or self.session_key,
+                    self.transport,
+                    self.agent_id or "-",
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                )
                 raise self._map_network_error(exc) from exc
             except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
                 if attempt < self.retry_attempts:
                     attempt += 1
                     logger.warning(
-                        "AI helper transient network error, retrying | transport={} attempt={} url={} error={}",
+                        "AI helper transient network error, retrying | request_id={} session_id={} transport={} agent_id={} attempt={} url={} error={}",
+                        request_id or "-",
+                        session_key or self.session_key,
                         self.transport,
+                        self.agent_id or "-",
                         attempt,
                         url,
                         exc,
                     )
                     continue
+                logger.warning(
+                    "AI helper upstream network error | request_id={} session_id={} transport={} agent_id={} duration_ms={} error={}",
+                    request_id or "-",
+                    session_key or self.session_key,
+                    self.transport,
+                    self.agent_id or "-",
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                    exc,
+                )
                 raise self._map_network_error(exc) from exc
             except ValueError as exc:
+                logger.warning(
+                    "AI helper upstream parse error | request_id={} session_id={} transport={} agent_id={} duration_ms={}",
+                    request_id or "-",
+                    session_key or self.session_key,
+                    self.transport,
+                    self.agent_id or "-",
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                )
                 raise AIHelperError(
                     status_code=502,
                     code="upstream_invalid_response",
@@ -575,15 +760,28 @@ class OpenClawAiHelperProvider:
 
     def _map_http_error(self, response: httpx.Response) -> AIHelperError:
         detail = ""
+        bridge_code = ""
         try:
             parsed = response.json()
             if isinstance(parsed, dict):
                 detail = _extract_text(parsed) or str(parsed.get("detail") or "").strip()
+                error_payload = parsed.get("error")
+                if isinstance(error_payload, dict):
+                    bridge_code = str(error_payload.get("code") or "").strip()
             else:
                 detail = str(parsed).strip()
         except Exception:
             detail = response.text.strip()
 
+        if self.transport == "cli_bridge" and bridge_code:
+            retryable = bridge_code in {"bridge_timeout"}
+            status_code = 504 if bridge_code == "bridge_timeout" else 502
+            return AIHelperError(
+                status_code=status_code,
+                code=bridge_code,
+                message=detail or "The OpenClaw bridge request failed.",
+                retryable=retryable,
+            )
         if response.status_code in {401, 403}:
             return AIHelperError(
                 status_code=502,
@@ -620,7 +818,13 @@ class OpenClawAiHelperProvider:
         )
 
     def _normalize_chat_message(self, payload: Any) -> AIHelperMessage:
-        text = _extract_text_from_response(payload)
+        message_payload = payload.get("message") if isinstance(payload, dict) else None
+        timestamp_source = payload.get("created_at") if isinstance(payload, dict) else None
+        if isinstance(message_payload, dict):
+            text = _extract_text_from_response(message_payload)
+            timestamp_source = message_payload.get("timestamp") or timestamp_source
+        else:
+            text = _extract_text_from_response(payload)
         if not text:
             raise AIHelperError(
                 status_code=502,
@@ -631,11 +835,7 @@ class OpenClawAiHelperProvider:
         return AIHelperMessage(
             role="assistant",
             text=text,
-            timestamp=_coerce_timestamp(
-                payload.get("created_at")
-                if isinstance(payload, dict)
-                else None
-            ),
+            timestamp=_coerce_timestamp(timestamp_source),
         )
 
     def _normalize_history(self, payload: Any, *, limit: int) -> list[AIHelperMessage]:
@@ -687,16 +887,18 @@ def get_default_ai_helper_provider() -> OpenClawAiHelperProvider:
     global _provider
     with _provider_lock:
         if _provider is None:
+            transport = config.OPENCLAW_GATEWAY_TRANSPORT
+            is_cli_bridge = str(transport or "").strip().lower() == "cli_bridge"
             _provider = OpenClawAiHelperProvider(
-                base_url=config.OPENCLAW_GATEWAY_BASE_URL,
-                gateway_token=config.OPENCLAW_GATEWAY_TOKEN,
-                agent_id=config.OPENCLAW_ANALYTICS_AGENT_ID,
+                base_url=config.OPENCLAW_BRIDGE_BASE_URL if is_cli_bridge else config.OPENCLAW_GATEWAY_BASE_URL,
+                gateway_token=config.OPENCLAW_BRIDGE_TOKEN if is_cli_bridge else config.OPENCLAW_GATEWAY_TOKEN,
+                agent_id=config.OPENCLAW_BRIDGE_AGENT_ID if is_cli_bridge else config.OPENCLAW_ANALYTICS_AGENT_ID,
                 session_key=config.OPENCLAW_WEB_SESSION_KEY,
                 timeout_seconds=config.OPENCLAW_HELPER_TIMEOUT_SECONDS,
                 connect_timeout_seconds=config.OPENCLAW_HELPER_CONNECT_TIMEOUT_SECONDS,
                 read_timeout_seconds=config.OPENCLAW_HELPER_READ_TIMEOUT_SECONDS,
                 retry_attempts=config.OPENCLAW_HELPER_RETRY_ATTEMPTS,
-                transport=config.OPENCLAW_GATEWAY_TRANSPORT,
+                transport=transport,
                 model=config.OPENCLAW_GATEWAY_MODEL,
                 manage_transcript=True,
             )

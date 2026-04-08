@@ -91,7 +91,6 @@ from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
-from social.postgres_store import SocialPostgresStore
 from social.store import SocialStore
 from social.runtime import SocialRuntimeService
 from utils.taxonomy import TAXONOMY_DOMAINS
@@ -319,7 +318,7 @@ async def ai_helper_error_handler(_request: Request, exc: AIHelperError):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    if request.url.path.startswith("/api/ai-helper/"):
+    if request.url.path.startswith("/api/ai-helper/") or request.url.path.startswith("/api/ai/chat"):
         first = exc.errors()[0] if exc.errors() else {}
         return JSONResponse(
             status_code=400,
@@ -350,6 +349,11 @@ def _record_query_timing(request: Request, started_at: float, *, cache_status: O
         request.state.cache_status = cache_status
 
 
+def _is_ai_chat_path(path: str) -> bool:
+    value = str(path or "")
+    return value.startswith("/api/ai-helper/") or value.startswith("/api/ai/chat")
+
+
 @app.middleware("http")
 async def request_metrics_middleware(request: Request, call_next):
     request_id = uuid.uuid4().hex[:12]
@@ -358,6 +362,27 @@ async def request_metrics_middleware(request: Request, call_next):
     response = None
     status_code = 500
     try:
+        if _is_ai_chat_path(request.url.path):
+            raw_length = str(request.headers.get("content-length") or "").strip()
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError:
+                    content_length = 0
+                if content_length > int(config.OPENCLAW_HELPER_HTTP_MAX_BODY_BYTES):
+                    response = JSONResponse(
+                        status_code=413,
+                        content={
+                            "ok": False,
+                            "error": {
+                                "code": "request_too_large",
+                                "message": "The AI helper request body is too large.",
+                                "retryable": False,
+                            },
+                        },
+                    )
+                    status_code = response.status_code
+                    return response
         response = await call_next(request)
         status_code = response.status_code
         return response
@@ -403,6 +428,11 @@ class AIQueryRequest(BaseModel):
 
 class AIHelperChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
+    sessionId: Optional[str] = Field(default=None, max_length=64)
+
+
+class AIHelperSessionRequest(BaseModel):
+    sessionId: Optional[str] = Field(default=None, max_length=64)
 
 
 class ChannelSourceCreateRequest(BaseModel):
@@ -612,7 +642,6 @@ def get_social_runtime() -> SocialRuntimeService:
 
 def get_current_social_runtime_status() -> dict[str, Any]:
     if social_runtime_service is None:
-        postgres_worker_enabled = SocialPostgresStore().enabled
         return {
             "status": "stopped",
             "is_active": False,
@@ -627,7 +656,7 @@ def get_current_social_runtime_status() -> dict[str, Any]:
             "run_history": [],
             "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
             "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
-            "postgres_worker_enabled": bool(postgres_worker_enabled),
+            "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
             "worker_id": None,
         }
     return social_runtime_service.status()
@@ -932,11 +961,32 @@ def get_ai_helper_provider():
     return get_default_ai_helper_provider()
 
 
+_AI_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _normalize_ai_session_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not _AI_SESSION_ID_RE.fullmatch(text):
+        raise AIHelperError(
+            status_code=400,
+            code="invalid_request",
+            message="sessionId must be 8-64 characters using letters, numbers, '-' or '_'.",
+            retryable=False,
+        )
+    return text
+
+
 async def require_admin_user(
     x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
     authorization: Optional[str] = Header(default=None),
+    *,
+    allow_frontend_proxy_token: bool = False,
 ) -> Dict[str, str]:
-    token = _extract_bearer_token(x_supabase_authorization) or _extract_bearer_token(authorization)
+    supabase_token = _extract_bearer_token(x_supabase_authorization)
+    auth_token = _extract_bearer_token(authorization)
+    token = supabase_token or auth_token
     if not token:
         raise AIHelperError(
             status_code=401,
@@ -954,6 +1004,17 @@ async def require_admin_user(
             message="The AI helper admin identity is not configured.",
             retryable=False,
         )
+
+    if (
+        allow_frontend_proxy_token
+        and config.IS_STAGING
+        and not supabase_token
+        and auth_token
+        and config.ANALYTICS_API_KEY_FRONTEND
+        and hmac.compare_digest(auth_token, config.ANALYTICS_API_KEY_FRONTEND)
+    ):
+        logger.info("AI helper auth satisfied via staging frontend proxy token")
+        return {"id": "staging-frontend-proxy", "email": "", "auth": "frontend_proxy"}
 
     try:
         loop = asyncio.get_running_loop()
@@ -992,6 +1053,17 @@ async def require_admin_user(
         )
 
     return {"id": user_id, "email": email}
+
+
+async def require_ai_helper_access(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    return await require_admin_user(
+        x_supabase_authorization=x_supabase_authorization,
+        authorization=authorization,
+        allow_frontend_proxy_token=True,
+    )
 
 
 def _allow_local_operator_bypass(
@@ -1828,43 +1900,106 @@ async def ai_query(request: AIQueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ai-helper/chat")
-async def ai_helper_chat(
+async def _run_ai_helper_chat(
+    request: Request,
     payload: AIHelperChatRequest,
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
 ):
+    session_id = _normalize_ai_session_id(payload.sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    message = await provider.chat(payload.message.strip())
+    message = await provider.chat(
+        payload.message.strip(),
+        session_id=session_id,
+        request_id=request_id,
+    )
     return {
         "ok": True,
+        "sessionId": session_id,
         "message": message.to_dict(),
     }
 
 
-@app.get("/api/ai-helper/history")
-async def ai_helper_history(
+async def _run_ai_helper_history(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=100),
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+    sessionId: Optional[str] = Query(default=None),
 ):
+    session_id = _normalize_ai_session_id(sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    messages = await provider.history(limit=limit)
+    messages = await provider.history(limit=limit, session_id=session_id, request_id=request_id)
     return {
         "ok": True,
+        "sessionId": session_id,
         "messages": [message.to_dict() for message in messages],
     }
 
 
-@app.post("/api/ai-helper/reset")
-async def ai_helper_reset(
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+async def _run_ai_helper_reset(
+    request: Request,
+    payload: AIHelperSessionRequest,
 ):
+    session_id = _normalize_ai_session_id(payload.sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    reset_at = await provider.reset()
+    reset_at = await provider.reset(session_id=session_id, request_id=request_id)
     return {
         "ok": True,
         "reset": True,
+        "sessionId": session_id,
         "timestamp": reset_at,
     }
+
+
+async def _run_ai_helper_smoke(
+    request: Request,
+    payload: AIHelperSessionRequest,
+):
+    smoke_payload = AIHelperChatRequest(
+        message="Reply with exactly WEB_HELPER_OK",
+        sessionId=payload.sessionId,
+    )
+    return await _run_ai_helper_chat(request, smoke_payload)
+
+
+@app.post("/api/ai/chat")
+@app.post("/api/ai-helper/chat")
+async def ai_helper_chat(
+    request: Request,
+    payload: AIHelperChatRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_chat(request, payload)
+
+
+@app.get("/api/ai/chat/history")
+@app.get("/api/ai-helper/history")
+async def ai_helper_history(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    sessionId: Optional[str] = Query(default=None),
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_history(request, limit=limit, sessionId=sessionId)
+
+
+@app.post("/api/ai/chat/reset")
+@app.post("/api/ai-helper/reset")
+async def ai_helper_reset(
+    request: Request,
+    payload: AIHelperSessionRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_reset(request, payload)
+
+
+@app.post("/api/ai/chat/smoke")
+async def ai_helper_smoke(
+    request: Request,
+    payload: AIHelperSessionRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_smoke(request, payload)
 
 
 @app.get("/api/topics", dependencies=[Depends(require_analytics_access)])
@@ -3209,6 +3344,8 @@ _kb_openclaw_lock = threading.Lock()
 def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
     """Return a dedicated OpenClaw provider for KB generation, or None if not configured."""
     global _kb_openclaw_provider
+    if str(config.OPENCLAW_GATEWAY_TRANSPORT or "").strip().lower() == "cli_bridge":
+        return None
     if not config.OPENCLAW_GATEWAY_BASE_URL or not config.OPENCLAW_GATEWAY_TOKEN:
         return None
     if not config.OPENCLAW_KB_SESSION_KEY:

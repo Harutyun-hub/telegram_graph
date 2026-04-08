@@ -26,6 +26,33 @@ const SUGGESTED_PROMPTS_RU = [
   'Сводка настроений по жилью',
 ];
 const MAX_MESSAGE_CHARS = 2000;
+const AI_CHAT_SESSION_STORAGE_KEY = 'radar.ai-chat.session.v1';
+
+function generateAiChatSessionId() {
+  const randomPart = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `web_${randomPart.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
+function getOrCreateAiChatSessionId() {
+  if (typeof window === 'undefined') {
+    return generateAiChatSessionId();
+  }
+  const existing = window.localStorage.getItem(AI_CHAT_SESSION_STORAGE_KEY);
+  if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) {
+    return existing;
+  }
+  const next = generateAiChatSessionId();
+  window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, next);
+  return next;
+}
+
+function persistAiChatSessionId(value: string) {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, value);
+  }
+}
 
 function parseTimestamp(value: string | Date | undefined) {
   if (value instanceof Date) {
@@ -55,6 +82,7 @@ function renderMarkdown(text: string) {
   });
 }
 
+// ─── Chat content (shared between mobile sheet and desktop panel) ──
 function ChatContent({
   messages, typing, suggested, input, setInput, onSend, onReset, onClose, ru, inputRef, bottomRef,
   remainingChars, busy,
@@ -68,6 +96,7 @@ function ChatContent({
   const inputTooLong = remainingChars < 0;
   return (
     <>
+      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 flex-shrink-0"
         style={{ background: 'linear-gradient(135deg, #7c3aed, #6d28d9)' }}>
         <div className="flex items-center gap-3">
@@ -97,6 +126,7 @@ function ChatContent({
         </div>
       </div>
 
+      {/* Messages */}
       <div className="flex-1 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3">
         {messages.map(msg => (
           <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -119,6 +149,7 @@ function ChatContent({
           </div>
         ))}
 
+        {/* Typing */}
         {typing && (
           <div className="flex justify-start">
             <div className="w-6 h-6 rounded-lg flex-shrink-0 mr-2 mt-0.5 flex items-center justify-center"
@@ -133,6 +164,7 @@ function ChatContent({
           </div>
         )}
 
+        {/* Suggested prompts */}
         {messages.filter(m => m.role === 'user').length === 0 && !typing && (
           <div className="space-y-2 pt-2">
             <p className="text-xs text-gray-400 text-center" style={{ fontWeight: 500 }}>
@@ -150,6 +182,7 @@ function ChatContent({
         <div ref={bottomRef} />
       </div>
 
+      {/* Input */}
       <div className="flex-shrink-0 bg-white border-t border-gray-100 px-3 py-3">
         <div className="flex items-center gap-2 bg-gray-50 rounded-xl border border-gray-200 px-3 py-2 focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-100 transition-all">
           <input ref={inputRef} type="text" value={input} maxLength={MAX_MESSAGE_CHARS}
@@ -181,7 +214,9 @@ function ChatContent({
   );
 }
 
+// ─── Main Export ─────────────────────────────────────────────────
 interface AIAssistantProps {
+  /** controlled from outside (mobile bottom-nav tab) */
   mobileOpen?: boolean;
   onMobileClose?: () => void;
 }
@@ -196,6 +231,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
   const [typing, setTyping] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [sessionId, setSessionId] = useState(() => getOrCreateAiChatSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRequestedRef = useRef(false);
@@ -226,7 +262,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
       historyRequestedRef.current = true;
       void (async () => {
         try {
-          const history = await getAiHelperHistory();
+          const history = await getAiHelperHistory(sessionId);
           if (cancelled) {
             return;
           }
@@ -269,7 +305,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     }
     const timer = window.setTimeout(() => inputRef.current?.focus(), 150);
     return () => window.clearTimeout(timer);
-  }, [desktopOpen, mobileOpen, historyLoaded, messages.length, ru]);
+  }, [desktopOpen, mobileOpen, historyLoaded, messages.length, ru, sessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -282,7 +318,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     setInput('');
     setTyping(true);
     try {
-      const response = await aiHelperChat(trimmed);
+      const response = await aiHelperChat(trimmed, sessionId);
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -310,9 +346,13 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     }
     setResetting(true);
     try {
-      await resetAiHelper();
+      await resetAiHelper(sessionId);
+      const nextSessionId = generateAiChatSessionId();
+      persistAiChatSessionId(nextSessionId);
+      historyRequestedRef.current = false;
+      setSessionId(nextSessionId);
       setMessages(initMessages('welcome-reset'));
-      setHistoryLoaded(true);
+      setHistoryLoaded(false);
     } catch (error: any) {
       setMessages(prev => [
         ...prev,
@@ -344,6 +384,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
 
   return (
     <>
+      {/* ── DESKTOP FLOATING BUTTON (hidden on mobile) ── */}
       <button
         onClick={() => setDesktopOpen(o => !o)}
         className="hidden md:flex fixed bottom-6 right-6 z-50 w-14 h-14 rounded-2xl shadow-xl items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95"
@@ -365,6 +406,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
         )}
       </button>
 
+      {/* ── DESKTOP CHAT PANEL ── */}
       <AnimatePresence>
         {desktopOpen && (
           <motion.div
@@ -384,6 +426,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
         )}
       </AnimatePresence>
 
+      {/* ── MOBILE CHAT BOTTOM SHEET ── */}
       <AnimatePresence>
         {mobileOpen && (
           <>
@@ -396,13 +439,14 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
             <motion.div
               className="md:hidden fixed inset-x-0 bottom-0 z-50 rounded-t-2xl overflow-hidden flex flex-col"
               style={{
-                top: '64px',
+                top: '64px', // below mobile top bar
                 background: 'white',
                 boxShadow: '0 -8px 40px rgba(139,92,246,0.18)',
               }}
               initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
               transition={springConfig}
             >
+              {/* Drag handle */}
               <div className="pt-2.5 pb-1 flex justify-center flex-shrink-0">
                 <div className="w-10 h-1 bg-gray-300 rounded-full" />
               </div>

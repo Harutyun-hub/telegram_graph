@@ -105,13 +105,16 @@ OPENCLAW_GATEWAY_BASE_URL = os.getenv("OPENCLAW_GATEWAY_BASE_URL", "").strip().r
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "").strip()
 OPENCLAW_GATEWAY_TRANSPORT = os.getenv(
     "OPENCLAW_GATEWAY_TRANSPORT",
-    "openai_compatible" if IS_STAGING else "auto",
+    "cli_bridge" if IS_STAGING else "auto",
 ).strip().lower()
 OPENCLAW_GATEWAY_MODEL = os.getenv("OPENCLAW_GATEWAY_MODEL", "").strip()
 OPENCLAW_ANALYTICS_AGENT_ID = os.getenv("OPENCLAW_ANALYTICS_AGENT_ID", "").strip()
+OPENCLAW_BRIDGE_BASE_URL = os.getenv("OPENCLAW_BRIDGE_BASE_URL", "").strip().rstrip("/")
+OPENCLAW_BRIDGE_TOKEN = os.getenv("OPENCLAW_BRIDGE_TOKEN", "").strip()
+OPENCLAW_BRIDGE_AGENT_ID = os.getenv("OPENCLAW_BRIDGE_AGENT_ID", "web-api-assistant").strip()
 OPENCLAW_WEB_SESSION_KEY = os.getenv(
     "OPENCLAW_WEB_SESSION_KEY",
-    "" if IS_PRODUCTION else "tg-analyst-ru-web-admin",
+    "" if IS_PRODUCTION else "web-api-assistant-web",
 ).strip()
 OPENCLAW_KB_SESSION_KEY = os.getenv(
     "OPENCLAW_KB_SESSION_KEY",
@@ -133,9 +136,21 @@ OPENCLAW_HELPER_HISTORY_MAX_CHARS = max(
     1000,
     int(os.getenv("OPENCLAW_HELPER_HISTORY_MAX_CHARS", "12000")),
 )
+OPENCLAW_HELPER_REPLAY_MAX_MESSAGES = max(
+    2,
+    int(os.getenv("OPENCLAW_HELPER_REPLAY_MAX_MESSAGES", "20")),
+)
+OPENCLAW_HELPER_REPLAY_MAX_CHARS = max(
+    1000,
+    int(os.getenv("OPENCLAW_HELPER_REPLAY_MAX_CHARS", "8000")),
+)
 OPENCLAW_HELPER_TRANSCRIPT_TTL_SECONDS = max(
     300,
     int(os.getenv("OPENCLAW_HELPER_TRANSCRIPT_TTL_SECONDS", "604800")),
+)
+OPENCLAW_HELPER_HTTP_MAX_BODY_BYTES = max(
+    1024,
+    int(os.getenv("OPENCLAW_HELPER_HTTP_MAX_BODY_BYTES", "8192")),
 )
 AI_HELPER_ADMIN_SUPABASE_USER_ID = os.getenv("AI_HELPER_ADMIN_SUPABASE_USER_ID", "").strip()
 AI_HELPER_ADMIN_EMAIL = os.getenv("AI_HELPER_ADMIN_EMAIL", "").strip().lower()
@@ -167,6 +182,12 @@ AI_MAX_INFLIGHT_REQUESTS = int(os.getenv("AI_MAX_INFLIGHT_REQUESTS", "4"))
 AI_FAILURE_MAX_RETRIES = int(os.getenv("AI_FAILURE_MAX_RETRIES", "5"))
 AI_FAILURE_BACKOFF_SECONDS = int(os.getenv("AI_FAILURE_BACKOFF_SECONDS", "60"))
 AI_FAILURE_BACKOFF_MAX_SECONDS = int(os.getenv("AI_FAILURE_BACKOFF_MAX_SECONDS", "3600"))
+AI_TRANSIENT_RECOVERY_ENABLED = _env_bool("AI_TRANSIENT_RECOVERY_ENABLED", True)
+AI_TRANSIENT_RECOVERY_CANARY_LIMIT = int(os.getenv("AI_TRANSIENT_RECOVERY_CANARY_LIMIT", "10"))
+AI_TRANSIENT_RECOVERY_BATCH_LIMIT = int(os.getenv("AI_TRANSIENT_RECOVERY_BATCH_LIMIT", "50"))
+AI_TRANSIENT_RECOVERY_COOLDOWN_MINUTES = int(os.getenv("AI_TRANSIENT_RECOVERY_COOLDOWN_MINUTES", "60"))
+AI_TRANSIENT_RECOVERY_SUCCESS_WINDOW_MINUTES = int(os.getenv("AI_TRANSIENT_RECOVERY_SUCCESS_WINDOW_MINUTES", "120"))
+AI_TRANSIENT_RECOVERY_MAX_ATTEMPTS = int(os.getenv("AI_TRANSIENT_RECOVERY_MAX_ATTEMPTS", "3"))
 AI_POST_BATCH_SIZE = int(os.getenv("AI_POST_BATCH_SIZE", "5"))
 AI_POST_BATCH_MAX_TOKENS = int(os.getenv("AI_POST_BATCH_MAX_TOKENS", "2600"))
 AI_MESSAGE_CHAR_LIMIT = int(os.getenv("AI_MESSAGE_CHAR_LIMIT", "700"))
@@ -348,20 +369,32 @@ def validate():
 
     if IS_LOCKED_ENV:
         ai_helper_missing = []
-        if not OPENCLAW_GATEWAY_BASE_URL:
-            ai_helper_missing.append("OPENCLAW_GATEWAY_BASE_URL")
-        if not OPENCLAW_GATEWAY_TOKEN:
-            ai_helper_missing.append("OPENCLAW_GATEWAY_TOKEN")
         if not OPENCLAW_WEB_SESSION_KEY:
             ai_helper_missing.append("OPENCLAW_WEB_SESSION_KEY")
-        transport = OPENCLAW_GATEWAY_TRANSPORT if OPENCLAW_GATEWAY_TRANSPORT in {"openai_compatible", "legacy", "auto"} else "auto"
+        transport = (
+            OPENCLAW_GATEWAY_TRANSPORT
+            if OPENCLAW_GATEWAY_TRANSPORT in {"openai_compatible", "legacy", "auto", "cli_bridge"}
+            else "auto"
+        )
         effective_transport = "openai_compatible" if transport == "auto" and OPENCLAW_GATEWAY_MODEL else transport
-        if effective_transport == "openai_compatible":
-            if not OPENCLAW_GATEWAY_MODEL:
-                ai_helper_missing.append("OPENCLAW_GATEWAY_MODEL")
+        if effective_transport == "cli_bridge":
+            if not OPENCLAW_BRIDGE_BASE_URL:
+                ai_helper_missing.append("OPENCLAW_BRIDGE_BASE_URL")
+            if not OPENCLAW_BRIDGE_TOKEN:
+                ai_helper_missing.append("OPENCLAW_BRIDGE_TOKEN")
+            if not OPENCLAW_BRIDGE_AGENT_ID:
+                ai_helper_missing.append("OPENCLAW_BRIDGE_AGENT_ID")
         else:
-            if not OPENCLAW_ANALYTICS_AGENT_ID:
-                ai_helper_missing.append("OPENCLAW_ANALYTICS_AGENT_ID")
+            if not OPENCLAW_GATEWAY_BASE_URL:
+                ai_helper_missing.append("OPENCLAW_GATEWAY_BASE_URL")
+            if not OPENCLAW_GATEWAY_TOKEN:
+                ai_helper_missing.append("OPENCLAW_GATEWAY_TOKEN")
+            if effective_transport == "openai_compatible":
+                if not OPENCLAW_GATEWAY_MODEL:
+                    ai_helper_missing.append("OPENCLAW_GATEWAY_MODEL")
+            else:
+                if not OPENCLAW_ANALYTICS_AGENT_ID:
+                    ai_helper_missing.append("OPENCLAW_ANALYTICS_AGENT_ID")
         if not AI_HELPER_ADMIN_SUPABASE_USER_ID:
             ai_helper_missing.append("AI_HELPER_ADMIN_SUPABASE_USER_ID")
         if ai_helper_missing:
