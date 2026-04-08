@@ -31,14 +31,14 @@ def wait_for_ready(base_url: str, timeout_seconds: int) -> None:
                 print(f"[smoke] ready: {ready_url}")
                 return
             last_error = f"unexpected status {status}"
-        except Exception as exc:  # pragma: no cover - transport-specific
+        except Exception as exc:  # pragma: no cover - runtime/transport specific
             last_error = str(exc)
         time.sleep(10)
 
     raise SystemExit(f"Timed out waiting for readiness at {ready_url}: {last_error}")
 
 
-def run_smoke_checks(base_url: str, analytics_token: str, admin_token: str = "") -> None:
+def run_smoke_checks(base_url: str, analytics_token: str, admin_token: str) -> None:
     checks = [
         ("readyz", f"{base_url}/readyz", {}),
         (
@@ -56,23 +56,34 @@ def run_smoke_checks(base_url: str, analytics_token: str, admin_token: str = "")
             f"{base_url}/api/freshness?force=true",
             {"Authorization": f"Bearer {analytics_token}"},
         ),
+        (
+            "operator_scheduler",
+            f"{base_url}/api/scraper/scheduler",
+            {"Authorization": f"Bearer {admin_token}"},
+        ),
+        (
+            "social_overview",
+            f"{base_url}/api/social/overview",
+            {"Authorization": f"Bearer {admin_token}"},
+        ),
+        (
+            "social_activities",
+            f"{base_url}/api/social/activities?limit=5",
+            {"Authorization": f"Bearer {admin_token}"},
+        ),
+        (
+            "social_runtime_status",
+            f"{base_url}/api/social/runtime/status",
+            {"Authorization": f"Bearer {admin_token}"},
+        ),
     ]
-
-    if admin_token:
-        checks.append(
-            (
-                "operator_scheduler",
-                f"{base_url}/api/scraper/scheduler",
-                {"Authorization": f"Bearer {admin_token}"},
-            )
-        )
 
     for label, url, headers in checks:
         try:
             status = _request(url, headers=headers, timeout=20)
         except urllib.error.HTTPError as exc:
             raise SystemExit(f"Smoke check failed for {label}: HTTP {exc.code} at {url}") from exc
-        except Exception as exc:  # pragma: no cover - transport-specific
+        except Exception as exc:  # pragma: no cover - runtime/transport specific
             raise SystemExit(f"Smoke check failed for {label}: {exc}") from exc
         print(f"[smoke] {label}: {status} {url}")
 
@@ -92,15 +103,13 @@ def main() -> int:
         raise SystemExit("Missing base URL. Set DEPLOY_BASE_URL or pass --base-url.")
     if not args.analytics_token:
         raise SystemExit("Missing analytics token. Set ANALYTICS_API_KEY_FRONTEND or pass --analytics-token.")
+    if not args.admin_token:
+        raise SystemExit("Missing admin token. Set ADMIN_API_KEY or pass --admin-token.")
 
     print(f"[smoke] starting {args.label} checks against {base_url}")
     if args.wait_ready:
         wait_for_ready(base_url, timeout_seconds=args.ready_timeout_seconds)
-    run_smoke_checks(
-        base_url,
-        analytics_token=args.analytics_token,
-        admin_token=str(args.admin_token or "").strip(),
-    )
+    run_smoke_checks(base_url, analytics_token=args.analytics_token, admin_token=args.admin_token)
     print(f"[smoke] all {args.label} checks passed")
     return 0
 

@@ -194,7 +194,7 @@ def _extract_text_from_response(payload: Any) -> str:
 
 def _trim_transcript(messages: list[AIHelperMessage], *, session_key: str | None = None) -> list[AIHelperMessage]:
     max_messages = max(2, int(config.OPENCLAW_HELPER_HISTORY_MAX_MESSAGES))
-    max_chars = max(1, int(config.OPENCLAW_HELPER_HISTORY_MAX_CHARS))
+    max_chars = max(1000, int(config.OPENCLAW_HELPER_HISTORY_MAX_CHARS))
     trimmed = list(messages)
     trimmed_any = False
 
@@ -269,7 +269,7 @@ class _TranscriptStore:
             if expires_at <= now:
                 _local_transcripts.pop(key, None)
                 return []
-            return _trim_transcript(list(messages), session_key=self._session_key)
+            return list(messages)
 
     def save(self, messages: list[AIHelperMessage]) -> None:
         payload = _trim_transcript(messages, session_key=self._session_key)

@@ -11,11 +11,10 @@ Endpoints:
 
 Run:
   cd /Users/harutnahapetyan/Documents/Gemini/Telegram
-  python -m uvicorn api.server:app --reload --port 8000
+  venv/bin/python -m uvicorn api.server:app --reload --port 8001
 """
 from __future__ import annotations
 import sys, os
-import gzip
 import json
 import hashlib
 import asyncio
@@ -24,10 +23,9 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,27 +60,14 @@ else:  # pragma: no cover - exercised when orjson isn't installed locally
     ORJSONResponse = None
 
 from api.aggregator import (
-    CACHE_TTL_SECONDS as DASHBOARD_CACHE_TTL_SECONDS,
-    MAX_STALE_SECONDS as DASHBOARD_MAX_STALE_SECONDS,
-    CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
-    DetailRefreshUnavailableError,
-    build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
-    invalidate_cache, peek_dashboard_snapshot, prime_dashboard_snapshot
+    invalidate_cache
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
-from api.freshness import (
-    clear_cached_freshness_snapshot,
-    freshness_cache_ttl_seconds,
-    get_cached_freshness_snapshot,
-    get_latest_cached_freshness_snapshot,
-    get_freshness_snapshot,
-    freshness_max_stale_seconds,
-    prime_freshness_snapshot,
-)
+from api.freshness import get_freshness_snapshot
 from api import insights
 from api import behavioral_briefs
 from api import opportunity_briefs
@@ -96,22 +81,18 @@ from api.admin_runtime import (
 )
 from api import db
 from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
-from api.runtime_executors import (
-    background_executor_workers,
-    is_draining as runtime_is_draining,
-    log_executor_configuration,
-    mark_draining as mark_runtime_draining,
-    request_executor_workers,
-    run_background,
-    run_request,
-    submit_background,
-    shutdown_background_executor,
-    shutdown_request_executor,
+from api.runtime_coordinator import get_runtime_coordinator
+from api.source_resolution import (
+    build_pending_source_payload,
+    enqueue_missing_peer_ref_backfill,
+    ensure_resolution_job,
 )
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
-from scraper.channel_metadata import get_full_channel_metadata
+from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
+from social.store import SocialStore
+from social.runtime import SocialRuntimeService
 from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -128,41 +109,30 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
 
 
+def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
+    if config.IS_STAGING:
+        if role != "web":
+            logger.warning("Staging/testing environment forced to APP_ROLE=web (was {})", role)
+        if warmers_enabled:
+            logger.warning("Staging/testing environment forced to RUN_STARTUP_WARMERS=false")
+        return "web", False
+    return role, warmers_enabled
+
+
 APP_ROLE = _normalize_app_role(os.getenv("APP_ROLE"))
 RUN_STARTUP_WARMERS = str(os.getenv("RUN_STARTUP_WARMERS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+APP_ROLE, RUN_STARTUP_WARMERS = _apply_testing_release_invariants(APP_ROLE, RUN_STARTUP_WARMERS)
 SENTRY_DSN = str(os.getenv("SENTRY_DSN", "")).strip()
 SENTRY_TRACES_SAMPLE_RATE = max(0.0, min(float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.05")), 1.0))
 _DASHBOARD_RESPONSE_DROP_KEYS = {"trendData", "voiceData", "integrationLevels", "housingHotTopics"}
-_DEFAULT_ALIAS_FALLBACK_LOOKBACK_DAYS = max(1, int(os.getenv("DASH_DEFAULT_ALIAS_FALLBACK_DAYS", "3")))
-_DEFAULT_TOPICS_PREWARM_SIZE = max(50, min(int(os.getenv("TOPICS_PREWARM_PAGE_SIZE", "100")), 500))
 _SERVER_TIMING_PATHS = {
     "/api/dashboard",
     "/api/topics",
     "/api/topics/detail",
     "/api/topics/evidence",
 }
-_DASHBOARD_PERSISTED_SCHEMA_VERSION = 1
-_DASHBOARD_PERSISTED_PREFIX = "dashboard-cache/v1"
-_DASHBOARD_DEFAULT_ALIAS_PATH = f"{_DASHBOARD_PERSISTED_PREFIX}/default-latest.json.gz"
-_FRESHNESS_PERSISTED_SCHEMA_VERSION = 1
-_FRESHNESS_PERSISTED_PATH = "freshness-cache/v1/latest.json.gz"
-_SUPABASE_CACHE_READ_TIMEOUT_SECONDS = max(1.0, float(os.getenv("SUPABASE_CACHE_READ_TIMEOUT_SECONDS", "5")))
-_SUPABASE_CACHE_WRITE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("SUPABASE_CACHE_WRITE_TIMEOUT_SECONDS", "5")))
-_DEFAULT_DASHBOARD_LOOKBACK_DAYS = 14
-_HISTORICAL_FASTPATH_ENABLED = str(
-    os.getenv("DASH_HISTORICAL_FASTPATH_ENABLED", "true")
-).strip().lower() in {"1", "true", "yes", "on"}
-_HISTORICAL_FASTPATH_SKIP_TIERS = {
-    item.strip().lower()
-    for item in os.getenv("DASH_HISTORICAL_FASTPATH_SKIP_TIERS", "network,comparative,predictive").split(",")
-    if item.strip()
-}
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
-_dashboard_refresh_control_lock = threading.Lock()
-_dashboard_refresh_inflight: set[str] = set()
-_freshness_refresh_control_lock = threading.Lock()
-_freshness_refresh_inflight = False
 
 
 def _init_sentry() -> None:
@@ -180,30 +150,6 @@ def _init_sentry() -> None:
         integrations=[FastApiIntegration(transaction_style="endpoint")],
     )
     logger.info(f"Sentry enabled | traces_sample_rate={SENTRY_TRACES_SAMPLE_RATE}")
-
-
-def _should_run_scraper_scheduler() -> bool:
-    return _should_run_background_jobs() and bool(config.ENABLE_SCRAPER_SCHEDULER)
-
-
-def _should_run_any_card_materializers() -> bool:
-    return _should_run_background_jobs() and bool(config.ENABLE_CARD_MATERIALIZERS)
-
-
-def _should_run_question_card_materializer() -> bool:
-    return _should_run_any_card_materializers() and bool(config.ENABLE_QUESTION_CARD_MATERIALIZER)
-
-
-def _should_run_behavioral_card_materializer() -> bool:
-    return _should_run_any_card_materializers() and bool(config.ENABLE_BEHAVIORAL_CARD_MATERIALIZER)
-
-
-def _should_run_opportunity_card_materializer() -> bool:
-    return _should_run_any_card_materializers() and bool(config.ENABLE_OPPORTUNITY_CARD_MATERIALIZER)
-
-
-def _should_run_topic_overviews_materializer() -> bool:
-    return _should_run_background_jobs() and bool(config.FEATURE_TOPIC_OVERVIEWS_AI)
 
 
 def _trim_dashboard_payload(snapshot: dict) -> dict:
@@ -225,593 +171,6 @@ def _dashboard_response(payload: dict) -> JSONResponse:
     return JSONResponse(content=payload)
 
 
-def _json_dumps_bytes(payload: dict) -> bytes:
-    if orjson is not None:
-        return orjson.dumps(payload)
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-
-
-def _json_loads_bytes(raw: bytes) -> dict:
-    if orjson is not None:
-        return orjson.loads(raw)
-    return json.loads(raw.decode("utf-8"))
-
-
-def _dashboard_snapshot_storage_path(cache_key: str) -> str:
-    return f"{_DASHBOARD_PERSISTED_PREFIX}/{quote(str(cache_key or '').strip(), safe='')}.json.gz"
-
-
-def _dashboard_context_from_trusted_end(trusted_end: date) -> Any:
-    from_date = (trusted_end - timedelta(days=_DEFAULT_DASHBOARD_LOOKBACK_DAYS)).isoformat()
-    return build_dashboard_date_context(from_date, trusted_end.isoformat())
-
-
-def _serialize_runtime_envelope(envelope: dict) -> bytes:
-    return gzip.compress(_json_dumps_bytes(envelope))
-
-
-def _deserialize_runtime_envelope(raw: bytes) -> dict:
-    return _json_loads_bytes(gzip.decompress(raw))
-
-
-def _load_persisted_envelope(path: str, *, schema_version: int) -> dict[str, Any]:
-    blob = get_supabase_writer().read_runtime_blob(path, timeout_seconds=_SUPABASE_CACHE_READ_TIMEOUT_SECONDS)
-    status = str(blob.get("status") or "error")
-    read_ms = float(blob.get("elapsed_ms") or 0.0)
-    if status != "ok":
-        mapped = {
-            "missing": "miss",
-            "timeout": "timeout",
-        }.get(status, "error")
-        return {"status": mapped, "readMs": read_ms, "envelope": None, "error": blob.get("error") or ""}
-
-    try:
-        envelope = _deserialize_runtime_envelope(blob.get("body") or b"")
-    except Exception as exc:
-        logger.warning("Persisted runtime payload decode failed | path={} error={}", path, exc)
-        return {"status": "error", "readMs": read_ms, "envelope": None, "error": str(exc)}
-
-    if not isinstance(envelope, dict):
-        return {"status": "error", "readMs": read_ms, "envelope": None, "error": "Persisted payload must be an object"}
-
-    try:
-        stored_schema = int(envelope.get("schemaVersion") or 0)
-    except Exception:
-        stored_schema = 0
-    if stored_schema != schema_version:
-        return {"status": "schema_mismatch", "readMs": read_ms, "envelope": None, "error": ""}
-
-    return {"status": "hit", "readMs": read_ms, "envelope": envelope, "error": ""}
-
-
-def _load_persisted_freshness_snapshot() -> dict[str, Any]:
-    loaded = _load_persisted_envelope(
-        _FRESHNESS_PERSISTED_PATH,
-        schema_version=_FRESHNESS_PERSISTED_SCHEMA_VERSION,
-    )
-    if loaded["status"] != "hit":
-        return loaded
-
-    envelope = loaded["envelope"] or {}
-    snapshot = envelope.get("data")
-    snapshot_built_at = _parse_snapshot_date(envelope.get("snapshotBuiltAt"))
-    if not isinstance(snapshot, dict) or snapshot_built_at is None:
-        return {
-            "status": "error",
-            "readMs": loaded["readMs"],
-            "envelope": None,
-            "error": "Persisted freshness payload is malformed",
-        }
-    loaded.update(
-        {
-            "snapshot": snapshot,
-            "snapshotBuiltAt": snapshot_built_at,
-        }
-    )
-    return loaded
-
-
-def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
-    loaded = _load_persisted_envelope(
-        path,
-        schema_version=_DASHBOARD_PERSISTED_SCHEMA_VERSION,
-    )
-    if loaded["status"] != "hit":
-        return loaded
-
-    envelope = loaded["envelope"] or {}
-    snapshot = envelope.get("data")
-    meta = envelope.get("meta")
-    snapshot_built_at = _parse_snapshot_date(envelope.get("snapshotBuiltAt"))
-    trusted_end_date = str(envelope.get("trustedEndDate") or "").strip()
-    from_date = str(envelope.get("fromDate") or "").strip()
-    to_date = str(envelope.get("toDate") or "").strip()
-
-    if not isinstance(snapshot, dict) or not isinstance(meta, dict) or snapshot_built_at is None:
-        return {
-            "status": "error",
-            "readMs": loaded["readMs"],
-            "envelope": None,
-            "error": "Persisted dashboard payload is malformed",
-        }
-
-    try:
-        ctx = build_dashboard_date_context(from_date, to_date)
-    except Exception as exc:
-        return {
-            "status": "error",
-            "readMs": loaded["readMs"],
-            "envelope": None,
-            "error": f"Invalid persisted dashboard context: {exc}",
-        }
-
-    loaded.update(
-        {
-            "snapshot": snapshot,
-            "meta": meta,
-            "ctx": ctx,
-            "snapshotBuiltAt": snapshot_built_at,
-            "trustedEndDate": trusted_end_date or ctx.to_date.isoformat(),
-        }
-    )
-    return loaded
-
-
-def _snapshot_age_seconds(snapshot_built_at: datetime | None) -> float | None:
-    if snapshot_built_at is None:
-        return None
-    return max(0.0, (datetime.now(timezone.utc) - snapshot_built_at).total_seconds())
-
-
-def _is_persisted_snapshot_fresh(snapshot_built_at: datetime | None) -> bool:
-    age_seconds = _snapshot_age_seconds(snapshot_built_at)
-    return age_seconds is not None and age_seconds < DASHBOARD_CACHE_TTL_SECONDS
-
-
-def _is_persisted_snapshot_usable(snapshot_built_at: datetime | None) -> bool:
-    age_seconds = _snapshot_age_seconds(snapshot_built_at)
-    return age_seconds is not None and age_seconds < DASHBOARD_MAX_STALE_SECONDS
-
-
-def _is_persisted_freshness_usable(snapshot_built_at: datetime | None) -> bool:
-    age_seconds = _snapshot_age_seconds(snapshot_built_at)
-    return age_seconds is not None and age_seconds < freshness_max_stale_seconds()
-
-
-def _cached_freshness_resolution(*, allow_live: bool) -> dict[str, Any]:
-    cached_snapshot, cached_at = get_cached_freshness_snapshot()
-    if cached_snapshot is not None:
-        return {
-            "snapshot": cached_snapshot,
-            "source": "memory",
-            "snapshotBuiltAt": cached_at or _parse_snapshot_date(cached_snapshot.get("generated_at")),
-            "persistedReadStatus": None,
-            "persistedReadMs": None,
-        }
-
-    latest_cached_snapshot, latest_cached_at = get_latest_cached_freshness_snapshot()
-    if latest_cached_snapshot is not None:
-        return {
-            "snapshot": latest_cached_snapshot,
-            "source": "memory_stale",
-            "snapshotBuiltAt": latest_cached_at or _parse_snapshot_date(latest_cached_snapshot.get("generated_at")),
-            "persistedReadStatus": None,
-            "persistedReadMs": None,
-        }
-
-    persisted = _load_persisted_freshness_snapshot()
-    if persisted["status"] == "hit":
-        snapshot_built_at = persisted.get("snapshotBuiltAt")
-        if _snapshot_age_seconds(snapshot_built_at) is not None and _snapshot_age_seconds(snapshot_built_at) < freshness_cache_ttl_seconds():
-            snapshot = persisted.get("snapshot") or {}
-            prime_freshness_snapshot(snapshot, cached_at=snapshot_built_at)
-            return {
-                "snapshot": snapshot,
-                "source": "persisted",
-                "snapshotBuiltAt": snapshot_built_at,
-                "persistedReadStatus": persisted["status"],
-                "persistedReadMs": persisted["readMs"],
-            }
-        if _is_persisted_freshness_usable(snapshot_built_at):
-            snapshot = persisted.get("snapshot") or {}
-            prime_freshness_snapshot(snapshot, cached_at=snapshot_built_at)
-            return {
-                "snapshot": snapshot,
-                "source": "persisted_stale",
-                "snapshotBuiltAt": snapshot_built_at,
-                "persistedReadStatus": persisted["status"],
-                "persistedReadMs": persisted["readMs"],
-            }
-
-    if not allow_live:
-        return {
-            "snapshot": None,
-            "source": None,
-            "snapshotBuiltAt": None,
-            "persistedReadStatus": persisted.get("status"),
-            "persistedReadMs": persisted.get("readMs"),
-        }
-
-    snapshot = _dashboard_freshness_snapshot(force_refresh=False)
-    snapshot_built_at = _parse_snapshot_date(snapshot.get("generated_at")) or datetime.now(timezone.utc)
-    prime_freshness_snapshot(snapshot, cached_at=snapshot_built_at)
-    _persist_freshness_snapshot_async(snapshot)
-    return {
-        "snapshot": snapshot,
-        "source": "live",
-        "snapshotBuiltAt": snapshot_built_at,
-        "persistedReadStatus": persisted.get("status"),
-        "persistedReadMs": persisted.get("readMs"),
-    }
-
-
-def _persist_freshness_snapshot_sync(snapshot: dict) -> dict[str, Any]:
-    envelope = {
-        "schemaVersion": _FRESHNESS_PERSISTED_SCHEMA_VERSION,
-        "snapshotBuiltAt": snapshot.get("generated_at") or datetime.now(timezone.utc).isoformat(),
-        "data": snapshot,
-    }
-    payload = _serialize_runtime_envelope(envelope)
-    started_at = time.perf_counter()
-    ok = get_supabase_writer().save_runtime_blob(
-        _FRESHNESS_PERSISTED_PATH,
-        payload,
-        content_type="application/gzip",
-    )
-    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-    level = "INFO" if ok else "WARNING"
-    logger.log(
-        level,
-        json.dumps(
-            {
-                "level": level.lower(),
-                "message": "freshness_snapshot_persisted",
-                "ok": ok,
-                "persistedWriteMs": elapsed_ms,
-                "path": _FRESHNESS_PERSISTED_PATH,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ),
-    )
-    return {"ok": ok, "persistedWriteMs": elapsed_ms}
-
-
-def _persist_freshness_snapshot_async(snapshot: dict) -> None:
-    thread = threading.Thread(
-        target=_persist_freshness_snapshot_sync,
-        args=(dict(snapshot),),
-        daemon=True,
-        name="freshness-persist",
-    )
-    thread.start()
-
-
-def _ensure_background_freshness_refresh() -> bool:
-    global _freshness_refresh_inflight
-    with _freshness_refresh_control_lock:
-        if _freshness_refresh_inflight:
-            return False
-        _freshness_refresh_inflight = True
-
-    def _worker() -> None:
-        global _freshness_refresh_inflight
-        try:
-            snapshot = _dashboard_freshness_snapshot(force_refresh=True)
-            _persist_freshness_snapshot_sync(snapshot)
-        except Exception as exc:
-            logger.error(f"Background freshness refresh failed: {exc}")
-        finally:
-            with _freshness_refresh_control_lock:
-                _freshness_refresh_inflight = False
-
-    thread = threading.Thread(target=_worker, daemon=True, name="freshness-refresh")
-    thread.start()
-    return True
-
-
-def _load_recent_default_dashboard_snapshot(
-    trusted_end: date,
-    *,
-    lookback_days: int = _DEFAULT_ALIAS_FALLBACK_LOOKBACK_DAYS,
-) -> dict[str, Any]:
-    total_read_ms = 0.0
-    for offset in range(1, max(1, lookback_days) + 1):
-        candidate_ctx = _dashboard_context_from_trusted_end(trusted_end - timedelta(days=offset))
-        loaded = _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(candidate_ctx.cache_key))
-        total_read_ms += float(loaded.get("readMs") or 0.0)
-        if loaded.get("status") != "hit":
-            continue
-        if not _is_persisted_snapshot_usable(loaded.get("snapshotBuiltAt")):
-            continue
-        loaded["fallbackOffsetDays"] = offset
-        loaded["readMs"] = round(total_read_ms, 2)
-        return loaded
-    return {"status": "miss", "readMs": round(total_read_ms, 2)}
-
-
-def _schedule_default_topics_prewarm(ctx) -> bool:
-    def _worker() -> None:
-        try:
-            get_topics_page(0, _DEFAULT_TOPICS_PREWARM_SIZE, ctx)
-            logger.info(
-                "Default topics cache warmed | key={} page=0 size={}",
-                ctx.cache_key,
-                _DEFAULT_TOPICS_PREWARM_SIZE,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Default topics cache warm failed | key={} page=0 size={} error={}",
-                ctx.cache_key,
-                _DEFAULT_TOPICS_PREWARM_SIZE,
-                exc,
-            )
-
-    try:
-        submit_background(_worker)
-        return True
-    except Exception as exc:
-        logger.warning(
-            "Default topics cache warm could not be scheduled | key={} page=0 size={} error={}",
-            ctx.cache_key,
-            _DEFAULT_TOPICS_PREWARM_SIZE,
-            exc,
-        )
-        return False
-
-
-def _should_persist_dashboard_snapshot(meta: dict[str, Any]) -> bool:
-    if bool(meta.get("isStale")):
-        return False
-    degraded = {
-        str(name).strip()
-        for name in (meta.get("degradedTiers") or [])
-        if str(name).strip()
-    }
-    if degraded.intersection(DASHBOARD_CRITICAL_TIERS):
-        return False
-    if str(meta.get("cacheStatus") or "") in {
-        "stale_on_error",
-        "preserved_previous_on_fallback",
-        "refresh_success_uncached_degraded",
-    }:
-        return False
-    return True
-
-
-def _build_dashboard_persisted_envelope(
-    ctx,
-    snapshot: dict,
-    meta: dict[str, Any],
-    *,
-    trusted_end_date: str,
-) -> tuple[dict[str, Any], datetime]:
-    snapshot_built_at = _parse_snapshot_date(meta.get("snapshotBuiltAt")) or datetime.now(timezone.utc)
-    envelope = {
-        "schemaVersion": _DASHBOARD_PERSISTED_SCHEMA_VERSION,
-        "snapshotBuiltAt": snapshot_built_at.isoformat(),
-        "trustedEndDate": trusted_end_date,
-        "fromDate": ctx.from_date.isoformat(),
-        "toDate": ctx.to_date.isoformat(),
-        "cacheKey": ctx.cache_key,
-        "data": snapshot,
-        "meta": dict(meta),
-    }
-    return envelope, snapshot_built_at
-
-
-def _persist_dashboard_snapshot_sync(
-    ctx,
-    snapshot: dict,
-    meta: dict[str, Any],
-    *,
-    trusted_end_date: str,
-    write_default_alias: bool,
-) -> dict[str, Any]:
-    if not _should_persist_dashboard_snapshot(meta):
-        return {"ok": False, "persistedWriteMs": 0.0, "skipped": True}
-
-    envelope, snapshot_built_at = _build_dashboard_persisted_envelope(
-        ctx,
-        snapshot,
-        meta,
-        trusted_end_date=trusted_end_date,
-    )
-    payload = _serialize_runtime_envelope(envelope)
-    started_at = time.perf_counter()
-    primary_path = _dashboard_snapshot_storage_path(ctx.cache_key)
-    writer = get_supabase_writer()
-    primary_ok = writer.save_runtime_blob(primary_path, payload, content_type="application/gzip")
-    alias_ok = True
-    if write_default_alias and primary_ok:
-        alias_ok = writer.save_runtime_blob(
-            _DASHBOARD_DEFAULT_ALIAS_PATH,
-            payload,
-            content_type="application/gzip",
-        )
-    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
-    updated_meta = dict(meta)
-    updated_meta["persistedWriteMs"] = elapsed_ms
-    if primary_ok:
-        prime_dashboard_snapshot(
-            ctx,
-            snapshot,
-            updated_meta,
-            cached_at_ts=snapshot_built_at.timestamp(),
-        )
-        if write_default_alias:
-            _schedule_default_topics_prewarm(ctx)
-    logger.info(
-        json.dumps(
-            {
-                "level": "info" if primary_ok else "warning",
-                "message": "dashboard_snapshot_persisted",
-                "cache_key": ctx.cache_key,
-                "ok": bool(primary_ok and alias_ok),
-                "primaryPath": primary_path,
-                "defaultAliasWritten": bool(write_default_alias and alias_ok),
-                "persistedWriteMs": elapsed_ms,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )
-    )
-    return {"ok": bool(primary_ok and alias_ok), "persistedWriteMs": elapsed_ms}
-
-
-def _persist_dashboard_snapshot_async(
-    ctx,
-    snapshot: dict,
-    meta: dict[str, Any],
-    *,
-    trusted_end_date: str,
-    write_default_alias: bool,
-) -> None:
-    thread = threading.Thread(
-        target=_persist_dashboard_snapshot_sync,
-        args=(ctx, dict(snapshot), dict(meta)),
-        kwargs={
-            "trusted_end_date": trusted_end_date,
-            "write_default_alias": write_default_alias,
-        },
-        daemon=True,
-        name=f"dashboard-persist-{ctx.cache_key}",
-    )
-    thread.start()
-
-
-def _ensure_background_dashboard_refresh(
-    ctx,
-    *,
-    trusted_end_date: str,
-    write_default_alias: bool,
-) -> bool:
-    with _dashboard_refresh_control_lock:
-        if ctx.cache_key in _dashboard_refresh_inflight:
-            return False
-        _dashboard_refresh_inflight.add(ctx.cache_key)
-
-    def _worker() -> None:
-        try:
-            snapshot, runtime_meta = get_dashboard_snapshot(ctx, force_refresh=True)
-            _persist_dashboard_snapshot_sync(
-                ctx,
-                snapshot,
-                runtime_meta,
-                trusted_end_date=trusted_end_date,
-                write_default_alias=write_default_alias,
-            )
-        except Exception as exc:
-            logger.error(f"Background dashboard refresh failed | key={ctx.cache_key} error={exc}")
-        finally:
-            with _dashboard_refresh_control_lock:
-                _dashboard_refresh_inflight.discard(ctx.cache_key)
-
-    thread = threading.Thread(
-        target=_worker,
-        daemon=True,
-        name=f"dashboard-refresh-{ctx.cache_key}",
-    )
-    thread.start()
-    return True
-
-
-def _build_dashboard_api_payload(
-    *,
-    ctx,
-    trusted_end_date: str,
-    dashboard_data: dict,
-    dashboard_runtime_meta: dict[str, Any],
-    requested_from: str,
-    requested_to: str,
-    cache_source: str,
-    freshness_snapshot: dict | None,
-    freshness_source: str | None,
-    persisted_read_status: str | None = None,
-    persisted_read_ms: float | None = None,
-    cache_status_override: str | None = None,
-    default_resolution_path: str | None = None,
-) -> dict[str, Any]:
-    trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
-    origin_cache_status = dashboard_runtime_meta.get("cacheStatus")
-    response_meta = {
-        "from": ctx.from_date.isoformat(),
-        "to": ctx.to_date.isoformat(),
-        "requestedFrom": requested_from,
-        "requestedTo": requested_to,
-        "days": ctx.days,
-        "mode": "operational" if ctx.is_operational else "intelligence",
-        "rangeLabel": ctx.range_label,
-        "trustedEndDate": trusted_end_date,
-        "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
-        "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
-        "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
-        "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
-        "cacheStatus": cache_status_override or origin_cache_status,
-        "isStale": dashboard_runtime_meta.get("isStale", False),
-        "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
-        "buildMode": dashboard_runtime_meta.get("buildMode"),
-        "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
-        "cacheSource": cache_source,
-        "freshnessSource": freshness_source,
-        "persistedReadStatus": persisted_read_status,
-        "persistedReadMs": persisted_read_ms,
-        "persistedWriteMs": dashboard_runtime_meta.get("persistedWriteMs"),
-        "freshness": {
-            "status": freshness_snapshot.get("health", {}).get("status") if isinstance(freshness_snapshot, dict) else None,
-            "generatedAt": freshness_snapshot.get("generated_at") if isinstance(freshness_snapshot, dict) else None,
-        },
-    }
-    if default_resolution_path:
-        response_meta["defaultResolutionPath"] = default_resolution_path
-    if origin_cache_status and cache_status_override and cache_status_override != origin_cache_status:
-        response_meta["originCacheStatus"] = origin_cache_status
-    response_meta["responseBytes"] = -1
-    response_meta["responseSerializeMs"] = 0
-    return {
-        "data": trimmed_dashboard_data,
-        "meta": response_meta,
-    }
-
-
-def _should_use_historical_fastpath(*, default_request: bool) -> bool:
-    return bool(_HISTORICAL_FASTPATH_ENABLED and not default_request and _HISTORICAL_FASTPATH_SKIP_TIERS)
-
-
-def _newer_snapshot_choice(
-    first: tuple[str, dict, dict[str, Any]] | None,
-    second: tuple[str, dict, dict[str, Any]] | None,
-) -> tuple[str, dict, dict[str, Any]] | None:
-    if first is None:
-        return second
-    if second is None:
-        return first
-    first_built = _parse_snapshot_date(first[2].get("snapshotBuiltAt"))
-    second_built = _parse_snapshot_date(second[2].get("snapshotBuiltAt"))
-    if first_built is None:
-        return second
-    if second_built is None:
-        return first
-    return first if first_built >= second_built else second
-
-
-def _clear_persisted_dashboard_cache() -> int:
-    writer = get_supabase_writer()
-    paths = {_DASHBOARD_DEFAULT_ALIAS_PATH, _FRESHNESS_PERSISTED_PATH}
-    for row in writer.list_runtime_files(_DASHBOARD_PERSISTED_PREFIX):
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").strip()
-        if not name:
-            continue
-        if "/" in name:
-            paths.add(name)
-        else:
-            paths.add(f"{_DASHBOARD_PERSISTED_PREFIX}/{name}")
-    deleted = writer.delete_runtime_files(sorted(paths))
-    return deleted
-
-
 _init_sentry()
 
 
@@ -820,49 +179,52 @@ async def app_lifespan(_app: FastAPI):
     startup_started_at = time.perf_counter()
     startup_phases: dict[str, float] = {}
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
-    mark_runtime_draining(False)
-    log_executor_configuration()
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
-    if _should_run_scraper_scheduler():
+    runtime_coordinator = get_runtime_coordinator()
+    if config.IS_LOCKED_ENV:
+        if not runtime_coordinator.ping():
+            raise RuntimeError("Locked environments require a healthy Redis runtime coordinator.")
+    elif config.REDIS_URL and not runtime_coordinator.ping():
+        logger.warning("Redis runtime coordinator is configured but unavailable; falling back to local coordination")
+
+    if _should_run_background_jobs():
         scheduler_started_at = time.perf_counter()
         scheduler = get_scraper_scheduler()
         startup_phases["schedulerInitMs"] = round((time.perf_counter() - scheduler_started_at) * 1000, 2)
         scheduler_boot_at = time.perf_counter()
         await scheduler.startup()
         startup_phases["schedulerStartupMs"] = round((time.perf_counter() - scheduler_boot_at) * 1000, 2)
-    else:
-        logger.info("Scraper scheduler disabled for this runtime")
 
-    cards_scheduler_started_at = time.perf_counter()
-    started_cards_scheduler = False
-    if _should_run_any_card_materializers():
+        if config.SOCIAL_RUNTIME_ENABLED:
+            social_runtime_started_at = time.perf_counter()
+            try:
+                social_scheduler = get_social_runtime()
+                await social_scheduler.startup()
+                startup_phases["socialRuntimeStartupMs"] = round((time.perf_counter() - social_runtime_started_at) * 1000, 2)
+            except Exception as exc:
+                logger.warning(f"Social runtime startup skipped due to error: {exc}")
+
+        cards_scheduler_started_at = time.perf_counter()
         _start_question_cards_scheduler()
         _start_behavioral_cards_scheduler()
         _start_opportunity_cards_scheduler()
-        started_cards_scheduler = True
-    else:
-        logger.info("Recurring card materializers disabled for this runtime")
-    if _should_run_topic_overviews_materializer():
         _start_topic_overviews_scheduler()
-        started_cards_scheduler = True
-    else:
-        logger.info("Topic overview materializer disabled for this runtime")
-    if started_cards_scheduler:
         startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
-
-    if RUN_STARTUP_WARMERS:
-        warmers_started_at = time.perf_counter()
-        asyncio.create_task(_warm_dashboard_cache())
-        if _should_run_question_card_materializer() and config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
-            asyncio.create_task(_materialize_question_cards_once(force=False))
-        if _should_run_behavioral_card_materializer() and config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
-            asyncio.create_task(_materialize_behavioral_cards_once(force=False))
-        if _should_run_opportunity_card_materializer() and config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
-            asyncio.create_task(_materialize_opportunity_cards_once(force=False))
-        if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
-            asyncio.create_task(_materialize_topic_overviews_once(force=False))
-        startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
+        if RUN_STARTUP_WARMERS:
+            warmers_started_at = time.perf_counter()
+            asyncio.create_task(_warm_dashboard_cache())
+            if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_question_cards_once(force=False))
+            if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_behavioral_cards_once(force=False))
+            if config.OPPORTUNITY_BRIEFS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_opportunity_cards_once(force=False))
+            if config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
+                asyncio.create_task(_materialize_topic_overviews_once(force=False))
+            startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
+    else:
+        logger.info("Web-only runtime ready | background jobs disabled")
 
     startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
     logger.info(
@@ -872,12 +234,7 @@ async def app_lifespan(_app: FastAPI):
                 "message": "startup_completed",
                 "role": APP_ROLE,
                 "background_jobs_enabled": _should_run_background_jobs(),
-                "scraper_scheduler_enabled": _should_run_scraper_scheduler(),
-                "card_materializers_enabled": _should_run_any_card_materializers(),
-                "topic_overviews_materializer_enabled": _should_run_topic_overviews_materializer(),
                 "run_startup_warmers": RUN_STARTUP_WARMERS,
-                "requestExecutorWorkers": request_executor_workers(),
-                "backgroundExecutorWorkers": background_executor_workers(),
                 "phases": startup_phases,
             },
             ensure_ascii=True,
@@ -889,8 +246,7 @@ async def app_lifespan(_app: FastAPI):
         yield
     finally:
         global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler, topic_overviews_scheduler
-        global scraper_scheduler, supabase_writer
-        mark_runtime_draining(True)
+        global scraper_scheduler, supabase_writer, social_runtime_service, social_store_writer
         if question_cards_scheduler is not None:
             try:
                 question_cards_scheduler.shutdown(wait=False)
@@ -916,11 +272,13 @@ async def app_lifespan(_app: FastAPI):
                 pass
             topic_overviews_scheduler = None
         if scraper_scheduler is not None:
-            await scraper_scheduler.shutdown(wait_for_cycle_seconds=30.0)
+            await scraper_scheduler.shutdown()
             scraper_scheduler = None
-        shutdown_background_executor(wait=True)
-        shutdown_request_executor(wait=True)
+        if social_runtime_service is not None:
+            await social_runtime_service.shutdown()
+            social_runtime_service = None
         supabase_writer = None
+        social_store_writer = None
         db.close()
         logger.info("API server shut down — Neo4j driver closed")
 
@@ -987,7 +345,6 @@ def _format_server_timing(request: Request, total_ms: float) -> str:
 def _record_query_timing(request: Request, started_at: float, *, cache_status: Optional[str] = None) -> None:
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     request.state.query_ms = round(elapsed_ms, 2)
-    request.state.executor_class = "request"
     if cache_status:
         request.state.cache_status = cache_status
 
@@ -1024,22 +381,14 @@ async def request_metrics_middleware(request: Request, call_next):
         query_ms = getattr(request.state, "query_ms", None)
         if isinstance(query_ms, (int, float)):
             payload["query_ms"] = round(float(query_ms), 2)
-        executor_class = getattr(request.state, "executor_class", None)
-        if executor_class:
-            payload["executorClass"] = executor_class
         dashboard_meta = getattr(request.state, "dashboard_meta", None)
         if isinstance(dashboard_meta, dict):
             for src_key, dst_key in (
                 ("cacheStatus", "dashboard_cache_status"),
-                ("cacheSource", "dashboard_cache_source"),
-                ("freshnessSource", "dashboard_freshness_source"),
                 ("buildElapsedSeconds", "dashboard_build_elapsed_seconds"),
                 ("buildMode", "dashboard_build_mode"),
                 ("tierTimes", "dashboard_tier_times"),
                 ("refreshFailureCount", "dashboard_refresh_failure_count"),
-                ("persistedReadMs", "dashboard_persisted_read_ms"),
-                ("persistedWriteMs", "dashboard_persisted_write_ms"),
-                ("persistedReadStatus", "dashboard_persisted_read_status"),
             ):
                 value = dashboard_meta.get(src_key)
                 if value not in (None, "", []):
@@ -1072,6 +421,37 @@ class ScraperSchedulerUpdateRequest(BaseModel):
     interval_minutes: int = Field(..., ge=1, le=1440)
 
 
+class SocialAccountUpsertRequest(BaseModel):
+    platform: str = Field(..., min_length=1, max_length=32)
+    account_handle: Optional[str] = Field(default=None, max_length=256)
+    account_external_id: Optional[str] = Field(default=None, max_length=256)
+    domain: Optional[str] = Field(default=None, max_length=256)
+    is_active: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SocialEntityCreateRequest(BaseModel):
+    legacy_company_id: str = Field(..., min_length=1, max_length=64)
+    is_active: Optional[bool] = None
+    accounts: List[SocialAccountUpsertRequest] = Field(default_factory=list)
+
+
+class SocialEntityUpdateRequest(BaseModel):
+    is_active: Optional[bool] = None
+    metadata: Optional[Dict[str, Any]] = None
+    accounts: List[SocialAccountUpsertRequest] = Field(default_factory=list)
+
+
+class SocialRuntimeRetryRequest(BaseModel):
+    stage: str = Field(..., min_length=1, max_length=32)
+    scope_key: str = Field(..., min_length=1, max_length=512)
+
+
+class SocialRuntimeReplayRequest(BaseModel):
+    stage: str = Field(default="analysis", min_length=1, max_length=32)
+    activity_uids: List[str] = Field(..., min_length=1)
+
+
 class AdminConfigPatchRequest(BaseModel):
     widgets: Optional[Dict[str, Dict[str, Any]]] = None
     prompts: Optional[Dict[str, Any]] = None
@@ -1084,11 +464,18 @@ class AdminConfigPatchRequest(BaseModel):
 class GraphRequest(BaseModel):
     mode: Optional[str] = Field(default=None, max_length=64)
     timeframe: Optional[str] = Field(default="Last 7 Days", max_length=64)
+    from_date: Optional[str] = Field(default=None, max_length=10)
+    to_date: Optional[str] = Field(default=None, max_length=10)
     channels: Optional[List[str]] = None
     brandSource: Optional[List[str]] = None
     sentiment: Optional[List[str]] = None
     sentiments: Optional[List[str]] = None
     topics: Optional[List[str]] = None
+    category: Optional[str] = Field(default=None, max_length=120)
+    signalFocus: Optional[str] = Field(default=None, max_length=32)
+    sourceDetail: Optional[str] = Field(default=None, max_length=32)
+    rankingMode: Optional[str] = Field(default=None, max_length=32)
+    minMentions: Optional[int] = Field(default=None, ge=1, le=100)
     layers: Optional[List[str]] = None
     insightMode: Optional[str] = Field(default=None, max_length=64)
     sourceProfile: Optional[str] = Field(default=None, max_length=64)
@@ -1120,6 +507,8 @@ class TopicProposalReviewRequest(BaseModel):
 
 supabase_writer: SupabaseWriter | None = None
 scraper_scheduler: ScraperSchedulerService | None = None
+social_store_writer: SocialStore | None = None
+social_runtime_service: SocialRuntimeService | None = None
 question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
@@ -1206,6 +595,42 @@ def get_scraper_scheduler() -> ScraperSchedulerService:
     return scraper_scheduler
 
 
+def get_social_store() -> SocialStore:
+    global social_store_writer
+    if social_store_writer is None:
+        social_store_writer = SocialStore()
+    return social_store_writer
+
+
+def get_social_runtime() -> SocialRuntimeService:
+    global social_runtime_service
+    if social_runtime_service is None:
+        social_runtime_service = SocialRuntimeService(get_social_store())
+    return social_runtime_service
+
+
+def get_current_social_runtime_status() -> dict[str, Any]:
+    if social_runtime_service is None:
+        return {
+            "status": "stopped",
+            "is_active": False,
+            "interval_minutes": 360,
+            "running_now": False,
+            "last_run_started_at": None,
+            "last_run_finished_at": None,
+            "last_success_at": None,
+            "next_run_at": None,
+            "last_error": None,
+            "last_result": None,
+            "run_history": [],
+            "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
+            "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
+            "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
+            "worker_id": None,
+        }
+    return social_runtime_service.status()
+
+
 def get_current_scraper_scheduler_status() -> dict[str, Any]:
     if scraper_scheduler is None:
         return {
@@ -1231,6 +656,29 @@ def get_current_scraper_scheduler_status() -> dict[str, Any]:
                 "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
             },
             "run_history": [],
+            "resolution": {
+                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
+                "running_now": False,
+                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
+                "last_run_started_at": None,
+                "last_run_finished_at": None,
+                "last_success_at": None,
+                "next_run_at": None,
+                "last_error": None,
+                "last_result": None,
+                "run_history": [],
+                "snapshot": {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                },
+            },
             "persisted": None,
         }
     return scraper_scheduler.status()
@@ -1389,27 +837,20 @@ def _enforce_analytics_rate_limit(request: Request) -> None:
     if not config.ANALYTICS_RATE_LIMIT_ENABLED:
         return
 
-    now = time.monotonic()
     window_seconds = max(1, int(config.ANALYTICS_RATE_LIMIT_WINDOW_SECONDS))
     max_requests = max(1, int(config.ANALYTICS_RATE_LIMIT_MAX_REQUESTS))
-    bucket_key = (_analytics_client_ip(request), request.url.path)
-
-    with _analytics_rate_limit_lock:
-        timestamps = _analytics_rate_limit_buckets.get(bucket_key, [])
-        cutoff = now - window_seconds
-        timestamps = [ts for ts in timestamps if ts >= cutoff]
-        if len(timestamps) >= max_requests:
-            _analytics_rate_limit_buckets[bucket_key] = timestamps
-            logger.warning(
-                "Analytics rate limit exceeded | endpoint={} client_ip={} count={}".format(
-                    request.url.path,
-                    bucket_key[0],
-                    len(timestamps),
-                )
+    client_ip = _analytics_client_ip(request)
+    counter_name = f"analytics:{client_ip}:{request.url.path}"
+    count = get_runtime_coordinator().increment_window_counter(counter_name, window_seconds)
+    if count > max_requests:
+        logger.warning(
+            "Analytics rate limit exceeded | endpoint={} client_ip={} count={}".format(
+                request.url.path,
+                client_ip,
+                count,
             )
-            raise HTTPException(status_code=429, detail="Rate limit exceeded for analytics API.")
-        timestamps.append(now)
-        _analytics_rate_limit_buckets[bucket_key] = timestamps
+        )
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for analytics API.")
 
 
 def _validate_analytics_access(
@@ -1646,7 +1087,7 @@ async def require_debug_endpoint_access(
     x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, str]:
-    if not bool(getattr(config, "ENABLE_DEBUG_ENDPOINTS", not config.IS_LOCKED_ENV)):
+    if not config.ENABLE_DEBUG_ENDPOINTS:
         raise HTTPException(status_code=404, detail="Not found")
     return await require_operator_access(
         x_supabase_authorization=x_supabase_authorization,
@@ -1744,298 +1185,13 @@ def _default_dashboard_context(snapshot: Optional[dict] = None):
     return build_dashboard_date_context(from_date, trusted_end.isoformat())
 
 
-def _build_dashboard_response_payload(
-    from_date: Optional[str],
-    to_date: Optional[str],
-) -> dict[str, Any]:
-    default_request = not from_date or not to_date
-    freshness_snapshot: dict | None = None
-    freshness_source: str | None = None
-    persisted_read_status: str | None = None
-    persisted_read_ms: float | None = None
-
-    if default_request:
-        freshness_resolution = _cached_freshness_resolution(allow_live=False)
-        freshness_snapshot = freshness_resolution.get("snapshot")
-        freshness_source = freshness_resolution.get("source")
-
-        if freshness_snapshot is not None:
-            trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
-            ctx = _dashboard_context_from_trusted_end(trusted_end)
-            trusted_end_iso = trusted_end.isoformat()
-        else:
-            default_snapshot = _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)
-            persisted_read_status = default_snapshot.get("status")
-            persisted_read_ms = default_snapshot.get("readMs")
-            if default_snapshot.get("status") == "hit" and _is_persisted_snapshot_usable(default_snapshot.get("snapshotBuiltAt")):
-                ctx = default_snapshot["ctx"]
-                trusted_end_iso = str(default_snapshot.get("trustedEndDate") or ctx.to_date.isoformat())
-                dashboard_meta = dict(default_snapshot.get("meta") or {})
-                dashboard_meta["isStale"] = not _is_persisted_snapshot_fresh(default_snapshot.get("snapshotBuiltAt"))
-                prime_dashboard_snapshot(
-                    ctx,
-                    default_snapshot["snapshot"],
-                    dashboard_meta,
-                    cached_at_ts=default_snapshot["snapshotBuiltAt"].timestamp(),
-                )
-                refresh_started = False
-                if dashboard_meta.get("isStale"):
-                    refresh_started = _ensure_background_dashboard_refresh(
-                        ctx,
-                        trusted_end_date=trusted_end_iso,
-                        write_default_alias=True,
-                    )
-                _ensure_background_freshness_refresh()
-                return _build_dashboard_api_payload(
-                    ctx=ctx,
-                    trusted_end_date=trusted_end_iso,
-                    dashboard_data=default_snapshot["snapshot"],
-                    dashboard_runtime_meta=dashboard_meta,
-                    requested_from=ctx.from_date.isoformat(),
-                    requested_to=ctx.to_date.isoformat(),
-                    cache_source="persisted",
-                    freshness_snapshot=None,
-                    freshness_source=None,
-                    persisted_read_status=persisted_read_status,
-                    persisted_read_ms=persisted_read_ms,
-                    default_resolution_path="persisted_alias",
-                    cache_status_override=(
-                        "persisted_stale_while_revalidate" if dashboard_meta.get("isStale") and refresh_started
-                        else "persisted_stale_refresh_inflight" if dashboard_meta.get("isStale")
-                        else "persisted_fresh"
-                    ),
-                )
-
-            freshness_resolution = _cached_freshness_resolution(allow_live=True)
-            freshness_snapshot = freshness_resolution.get("snapshot")
-            freshness_source = freshness_resolution.get("source")
-            trusted_end = _trusted_end_date_from_freshness(freshness_snapshot or {})
-            ctx = _dashboard_context_from_trusted_end(trusted_end)
-            trusted_end_iso = trusted_end.isoformat()
-    else:
-        ctx = build_dashboard_date_context(from_date or "", to_date or "")
-        trusted_end_iso = ctx.to_date.isoformat()
-        freshness_resolution = _cached_freshness_resolution(allow_live=False)
-        freshness_snapshot = freshness_resolution.get("snapshot")
-        freshness_source = freshness_resolution.get("source")
-
-    requested_from = from_date or ctx.from_date.isoformat()
-    requested_to = to_date or ctx.to_date.isoformat()
-
-    memory_snapshot, memory_meta, memory_state = peek_dashboard_snapshot(ctx)
-    if memory_state == "fresh" and memory_snapshot is not None and memory_meta is not None:
-        return _build_dashboard_api_payload(
-            ctx=ctx,
-            trusted_end_date=trusted_end_iso,
-            dashboard_data=memory_snapshot,
-            dashboard_runtime_meta=memory_meta,
-            requested_from=requested_from,
-            requested_to=requested_to,
-            cache_source="memory",
-            freshness_snapshot=freshness_snapshot,
-            freshness_source=freshness_source,
-            default_resolution_path="memory" if default_request else None,
-            cache_status_override="memory_fresh",
-        )
-
-    persisted_snapshot = _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))
-    persisted_read_status = persisted_snapshot.get("status")
-    persisted_read_ms = persisted_snapshot.get("readMs")
-
-    memory_stale_choice: tuple[str, dict, dict[str, Any]] | None = None
-    if memory_state == "stale" and memory_snapshot is not None and memory_meta is not None:
-        memory_stale_choice = ("memory", memory_snapshot, dict(memory_meta))
-
-    persisted_stale_choice: tuple[str, dict, dict[str, Any]] | None = None
-    if persisted_snapshot.get("status") == "hit":
-        persisted_meta = dict(persisted_snapshot.get("meta") or {})
-        persisted_meta["isStale"] = not _is_persisted_snapshot_fresh(persisted_snapshot.get("snapshotBuiltAt"))
-        if not persisted_meta["isStale"]:
-            prime_dashboard_snapshot(
-                ctx,
-                persisted_snapshot["snapshot"],
-                persisted_meta,
-                cached_at_ts=persisted_snapshot["snapshotBuiltAt"].timestamp(),
-            )
-            return _build_dashboard_api_payload(
-                ctx=ctx,
-                trusted_end_date=trusted_end_iso,
-                dashboard_data=persisted_snapshot["snapshot"],
-                dashboard_runtime_meta=persisted_meta,
-                requested_from=requested_from,
-                requested_to=requested_to,
-                cache_source="persisted",
-                freshness_snapshot=freshness_snapshot,
-                freshness_source=freshness_source,
-                persisted_read_status=persisted_read_status,
-                persisted_read_ms=persisted_read_ms,
-                default_resolution_path="persisted_exact" if default_request else None,
-                cache_status_override="persisted_fresh",
-            )
-
-        if _is_persisted_snapshot_usable(persisted_snapshot.get("snapshotBuiltAt")):
-            persisted_stale_choice = ("persisted", persisted_snapshot["snapshot"], persisted_meta)
-
-    stale_choice = _newer_snapshot_choice(memory_stale_choice, persisted_stale_choice)
-    if stale_choice is not None:
-        cache_source, stale_snapshot, stale_meta = stale_choice
-        if cache_source == "persisted" and persisted_snapshot.get("status") == "hit":
-            prime_dashboard_snapshot(
-                ctx,
-                stale_snapshot,
-                stale_meta,
-                cached_at_ts=persisted_snapshot["snapshotBuiltAt"].timestamp(),
-            )
-        refresh_started = _ensure_background_dashboard_refresh(
-            ctx,
-            trusted_end_date=trusted_end_iso,
-            write_default_alias=default_request,
-        )
-        if default_request and freshness_snapshot is None:
-            _ensure_background_freshness_refresh()
-        stale_meta["isStale"] = True
-        return _build_dashboard_api_payload(
-            ctx=ctx,
-            trusted_end_date=trusted_end_iso,
-            dashboard_data=stale_snapshot,
-            dashboard_runtime_meta=stale_meta,
-            requested_from=requested_from,
-            requested_to=requested_to,
-            cache_source=cache_source,
-            freshness_snapshot=freshness_snapshot,
-            freshness_source=freshness_source,
-            persisted_read_status=persisted_read_status,
-            persisted_read_ms=persisted_read_ms,
-            default_resolution_path=(
-                "persisted_exact" if default_request and cache_source == "persisted"
-                else "memory" if default_request and cache_source == "memory"
-                else None
-            ),
-            cache_status_override=(
-                f"{cache_source}_stale_while_revalidate"
-                if refresh_started
-                else f"{cache_source}_stale_refresh_inflight"
-            ),
-        )
-
-    if default_request:
-        recent_default_snapshot = _load_recent_default_dashboard_snapshot(trusted_end)
-        if recent_default_snapshot.get("status") == "hit":
-            fallback_ctx = recent_default_snapshot["ctx"]
-            fallback_meta = dict(recent_default_snapshot.get("meta") or {})
-            fallback_meta["isStale"] = True
-            prime_dashboard_snapshot(
-                fallback_ctx,
-                recent_default_snapshot["snapshot"],
-                fallback_meta,
-                cached_at_ts=recent_default_snapshot["snapshotBuiltAt"].timestamp(),
-            )
-            refresh_started = _ensure_background_dashboard_refresh(
-                ctx,
-                trusted_end_date=trusted_end_iso,
-                write_default_alias=True,
-            )
-            if freshness_snapshot is None:
-                _ensure_background_freshness_refresh()
-            return _build_dashboard_api_payload(
-                ctx=fallback_ctx,
-                trusted_end_date=str(recent_default_snapshot.get("trustedEndDate") or fallback_ctx.to_date.isoformat()),
-                dashboard_data=recent_default_snapshot["snapshot"],
-                dashboard_runtime_meta=fallback_meta,
-                requested_from=requested_from,
-                requested_to=requested_to,
-                cache_source="persisted",
-                freshness_snapshot=freshness_snapshot,
-                freshness_source=freshness_source,
-                persisted_read_status="recent_fallback_hit",
-                persisted_read_ms=round(float(persisted_read_ms or 0.0) + float(recent_default_snapshot.get("readMs") or 0.0), 2),
-                default_resolution_path="persisted_recent_fallback",
-                cache_status_override=(
-                    "persisted_recent_fallback_while_revalidate"
-                    if refresh_started
-                    else "persisted_recent_fallback_refresh_inflight"
-                ),
-            )
-
-    if _should_use_historical_fastpath(default_request=default_request):
-        try:
-            dashboard_data, dashboard_runtime_meta = build_dashboard_snapshot_once(
-                ctx,
-                skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
-                cache_status="historical_fastpath_uncached",
-            )
-            critical_degraded = {
-                str(name).strip()
-                for name in (dashboard_runtime_meta.get("degradedTiers") or [])
-                if str(name).strip()
-            }.intersection(DASHBOARD_CRITICAL_TIERS)
-            if not critical_degraded:
-                refresh_started = _ensure_background_dashboard_refresh(
-                    ctx,
-                    trusted_end_date=trusted_end_iso,
-                    write_default_alias=default_request,
-                )
-                logger.info(
-                    "Historical dashboard fastpath served | key={} skipped_tiers={} refresh_started={}",
-                    ctx.cache_key,
-                    sorted(_HISTORICAL_FASTPATH_SKIP_TIERS),
-                    refresh_started,
-                )
-                return _build_dashboard_api_payload(
-                    ctx=ctx,
-                    trusted_end_date=trusted_end_iso,
-                    dashboard_data=dashboard_data,
-                    dashboard_runtime_meta=dashboard_runtime_meta,
-                    requested_from=requested_from,
-                    requested_to=requested_to,
-                    cache_source="fastpath",
-                    freshness_snapshot=freshness_snapshot,
-                    freshness_source=freshness_source,
-                    persisted_read_status=persisted_read_status,
-                    persisted_read_ms=persisted_read_ms,
-                    cache_status_override=(
-                        "historical_fastpath_while_revalidate"
-                        if refresh_started
-                        else "historical_fastpath_refresh_inflight"
-                    ),
-                )
-            logger.warning(
-                "Historical dashboard fastpath fell back to full rebuild because critical tiers degraded | key={} degraded={}",
-                ctx.cache_key,
-                sorted(critical_degraded),
-            )
-        except Exception as exc:
-            logger.warning(f"Historical dashboard fastpath failed | key={ctx.cache_key} error={exc}")
-
-    dashboard_data, dashboard_runtime_meta = get_dashboard_snapshot(ctx, force_refresh=True)
-    if _should_persist_dashboard_snapshot(dashboard_runtime_meta):
-        _persist_dashboard_snapshot_async(
-            ctx,
-            dashboard_data,
-            dashboard_runtime_meta,
-            trusted_end_date=trusted_end_iso,
-            write_default_alias=default_request,
-        )
-    return _build_dashboard_api_payload(
-        ctx=ctx,
-        trusted_end_date=trusted_end_iso,
-        dashboard_data=dashboard_data,
-        dashboard_runtime_meta=dashboard_runtime_meta,
-        requested_from=requested_from,
-        requested_to=requested_to,
-        cache_source="rebuild",
-        freshness_snapshot=freshness_snapshot,
-        freshness_source=freshness_source,
-        persisted_read_status=persisted_read_status,
-        persisted_read_ms=persisted_read_ms,
-        default_resolution_path="rebuild" if default_request else None,
-    )
-
-
 async def _warm_dashboard_cache() -> None:
     """Warm dashboard cache in background after startup."""
     try:
-        await run_background(lambda: _build_dashboard_response_payload(None, None))
+        loop = asyncio.get_running_loop()
+        freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+        ctx = _default_dashboard_context(freshness_snapshot)
+        await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")
@@ -2043,11 +1199,12 @@ async def _warm_dashboard_cache() -> None:
 
 async def _materialize_question_cards_once(force: bool = False) -> None:
     """Run question-card materialization off the request path."""
-    if not _should_run_question_card_materializer():
-        logger.info("Question cards materialization skipped | disabled=true")
-        return
     try:
-        cards = await run_background(lambda: question_briefs.refresh_question_briefs(force=force))
+        loop = asyncio.get_running_loop()
+        cards = await loop.run_in_executor(
+            None,
+            lambda: question_briefs.refresh_question_briefs(force=force),
+        )
         logger.info(f"Question cards materialization completed | cards={len(cards)}")
     except Exception as e:
         logger.warning(f"Question cards materialization failed: {e}")
@@ -2055,11 +1212,12 @@ async def _materialize_question_cards_once(force: bool = False) -> None:
 
 async def _materialize_behavioral_cards_once(force: bool = False) -> None:
     """Run behavioral-card materialization off the request path."""
-    if not _should_run_behavioral_card_materializer():
-        logger.info("Behavioral cards materialization skipped | disabled=true")
-        return
     try:
-        payload = await run_background(lambda: behavioral_briefs.refresh_behavioral_briefs(force=force))
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(
+            None,
+            lambda: behavioral_briefs.refresh_behavioral_briefs(force=force),
+        )
         problems = len(payload.get("problemBriefs") or []) if isinstance(payload, dict) else 0
         services = len(payload.get("serviceGapBriefs") or []) if isinstance(payload, dict) else 0
         logger.info(f"Behavioral cards materialization completed | problem_cards={problems} service_cards={services}")
@@ -2069,11 +1227,12 @@ async def _materialize_behavioral_cards_once(force: bool = False) -> None:
 
 async def _materialize_opportunity_cards_once(force: bool = False) -> None:
     """Run opportunity-card materialization off the request path."""
-    if not _should_run_opportunity_card_materializer():
-        logger.info("Opportunity cards materialization skipped | disabled=true")
-        return
     try:
-        cards = await run_background(lambda: opportunity_briefs.refresh_opportunity_briefs(force=force))
+        loop = asyncio.get_running_loop()
+        cards = await loop.run_in_executor(
+            None,
+            lambda: opportunity_briefs.refresh_opportunity_briefs(force=force),
+        )
         logger.info(f"Opportunity cards materialization completed | cards={len(cards)}")
     except Exception as e:
         logger.warning(f"Opportunity cards materialization failed: {e}")
@@ -2081,13 +1240,12 @@ async def _materialize_opportunity_cards_once(force: bool = False) -> None:
 
 async def _materialize_topic_overviews_once(force: bool = False) -> None:
     """Run topic-overview materialization off the request path."""
-    if not _should_run_topic_overviews_materializer():
-        logger.info("Topic overviews materialization skipped | disabled=true")
-        return
     try:
+        loop = asyncio.get_running_loop()
         freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
         ctx = _default_dashboard_context(freshness_snapshot)
-        payload = await run_background(
+        payload = await loop.run_in_executor(
+            None,
             lambda: topic_overviews.refresh_topic_overviews(ctx=ctx, force=force),
         )
         items = len(payload.get("items") or []) if isinstance(payload, dict) else 0
@@ -2099,8 +1257,6 @@ async def _materialize_topic_overviews_once(force: bool = False) -> None:
 def _start_question_cards_scheduler() -> None:
     """Start recurring question-card materialization scheduler."""
     global question_cards_scheduler
-    if not _should_run_question_card_materializer():
-        return
 
     interval = max(15, int(config.QUESTION_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -2121,8 +1277,6 @@ def _start_question_cards_scheduler() -> None:
 def _start_behavioral_cards_scheduler() -> None:
     """Start recurring W8/W9 card materialization scheduler."""
     global behavioral_cards_scheduler
-    if not _should_run_behavioral_card_materializer():
-        return
 
     interval = max(15, int(config.BEHAVIORAL_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -2143,8 +1297,6 @@ def _start_behavioral_cards_scheduler() -> None:
 def _start_opportunity_cards_scheduler() -> None:
     """Start recurring business-opportunity card materialization scheduler."""
     global opportunity_cards_scheduler
-    if not _should_run_opportunity_card_materializer():
-        return
 
     interval = max(15, int(config.OPPORTUNITY_BRIEFS_REFRESH_MINUTES))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -2165,8 +1317,6 @@ def _start_opportunity_cards_scheduler() -> None:
 def _start_topic_overviews_scheduler() -> None:
     """Start recurring topic-overview materialization scheduler."""
     global topic_overviews_scheduler
-    if not _should_run_topic_overviews_materializer():
-        return
 
     interval = max(15, int(topic_overviews.get_topic_overviews_refresh_minutes()))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -2190,19 +1340,29 @@ def _normalize_channel_username(raw: str) -> str:
         return ""
 
     value = re.sub(r"^https?://", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^www\.", "", value, flags=re.IGNORECASE)
     lowered = value.lower()
     if lowered.startswith("t.me/"):
         value = value[5:]
     elif lowered.startswith("telegram.me/"):
         value = value[12:]
 
-    value = value.split("?", 1)[0].split("#", 1)[0]
+    value = value.split("?", 1)[0].split("#", 1)[0].strip()
     if value.startswith("@"):
         value = value[1:]
-    if "/" in value:
-        value = value.split("/", 1)[0]
 
-    return value.strip().lower().lstrip("@")
+    segments = [segment.strip() for segment in value.split("/") if segment.strip()]
+    if not segments:
+        return ""
+
+    candidate = segments[0]
+    if candidate.lower() == "c":
+        candidate = segments[1] if len(segments) > 1 else ""
+
+    candidate = candidate.strip().lower().lstrip("@")
+    if not USERNAME_RE.match(candidate):
+        return ""
+    return candidate
 
 
 def _canonical_channel_username(handle: str) -> str:
@@ -2214,24 +1374,30 @@ async def _try_enrich_channel_metadata(
     channel_uuid: str,
     canonical_username: str,
     fallback_title: Optional[str] = None,
-) -> None:
+) -> dict | None:
     """
-    Best-effort Telegram metadata enrichment for a channel source.
+    Best-effort Telegram source resolution for a source row.
 
-    This fills telegram_channel_id (and title where available) right after source
-    creation/activation so users don't have to wait for the scraper cycle.
+    This keeps source creation fast while allowing immediate type resolution when
+    the current process has an authorized Telegram session.
     """
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         import os
     except Exception as e:
-        logger.warning(f"Telethon unavailable for metadata enrichment: {e}")
-        return
+        logger.warning(f"Telethon unavailable for source resolution: {e}")
+        return None
 
     username = _canonical_channel_username(canonical_username)
     if not username:
-        return
+        return None
+
+    if not config.has_telegram_runtime_credentials():
+        logger.info(f"Source resolution deferred for {username}: Telegram runtime credentials are unavailable")
+        return None
+
+    writer = get_supabase_writer()
 
     # Check for session string from environment (Railway deployment)
     session_string = os.getenv("TELEGRAM_SESSION_STRING")
@@ -2253,18 +1419,47 @@ async def _try_enrich_channel_metadata(
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            logger.warning(f"Metadata enrichment skipped for {username}: Telegram session is not authorized")
-            return
+            logger.info(f"Source resolution deferred for {username}: Telegram session is not authorized")
+            return None
 
-        metadata = await get_full_channel_metadata(client, username=username)
+        entity = await client.get_entity(username)
+        metadata, _entity = await resolve_source_metadata(client, username=username, entity=entity)
         if not metadata.get("channel_title") and fallback_title:
             metadata["channel_title"] = fallback_title
 
-        get_supabase_writer().update_channel_metadata(channel_uuid, metadata)
+        writer.update_channel(channel_uuid, metadata)
+        return writer.get_channel_by_id(channel_uuid)
     except Exception as e:
-        logger.warning(f"Metadata enrichment failed for {username}: {e}")
+        logger.warning(f"Source resolution failed for {username}: {e}")
+        try:
+            entity = await client.get_entity(username)
+            metadata = minimal_source_metadata_from_entity(
+                entity,
+                username=username,
+                fallback_title=fallback_title,
+            )
+            writer.update_channel(channel_uuid, metadata)
+        except Exception:
+            writer.update_channel(
+                channel_uuid,
+                {
+                    "source_type": "pending",
+                    "resolution_status": "error",
+                    "last_resolution_error": str(e)[:500],
+                },
+            )
+        return writer.get_channel_by_id(channel_uuid)
     finally:
-        client.disconnect()
+        await client.disconnect()
+
+
+def _pending_source_payload(*, channel_title: str) -> dict:
+    return {
+        "source_type": "pending",
+        "resolution_status": "pending",
+        "last_resolution_error": None,
+        "channel_title": channel_title,
+    }
 
 
 def _validate_channel_username(username: str) -> None:
@@ -2272,8 +1467,9 @@ def _validate_channel_username(username: str) -> None:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Invalid Telegram channel username. Use @name, t.me/name, or name; "
-                "5-32 chars, letters/digits/underscore, starts with a letter."
+                "Invalid Telegram source. Use @name, t.me/name, t.me/name/123, "
+                "or t.me/c/public_name/123; private numeric t.me/c links are not supported. "
+                "Username must be 5-32 chars, letters/digits/underscore, and start with a letter."
             ),
         )
 
@@ -2537,8 +1733,6 @@ def _build_ai_answer(query: str, dashboard: dict) -> str:
 @app.get("/readyz")
 async def readyz():
     """Cheap readiness probe that avoids database work."""
-    if runtime_is_draining():
-        raise HTTPException(status_code=503, detail="draining")
     return {"status": "ready", "role": APP_ROLE}
 
 
@@ -2549,6 +1743,8 @@ async def health():
         db.run_single("RETURN 1 AS ok")
         return {"status": "ok", "neo4j": "connected"}
     except Exception as e:
+        if config.IS_LOCKED_ENV:
+            return {"status": "degraded", "neo4j": "unavailable"}
         return {"status": "degraded", "neo4j": str(e)}
 
 
@@ -2563,21 +1759,51 @@ async def dashboard(
     Cached for 15 minutes by default. Call POST /api/cache/clear to refresh.
     """
     try:
+        freshness = _dashboard_freshness_snapshot(force_refresh=False)
+        trusted_end = _trusted_end_date_from_freshness(freshness)
+        if not from_date or not to_date:
+            ctx = _default_dashboard_context(freshness)
+        else:
+            ctx = build_dashboard_date_context(from_date, to_date)
+        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        response = await run_request(lambda: _build_dashboard_response_payload(from_date, to_date))
+        dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
         _record_query_timing(
             request,
             query_started_at,
-            cache_status=str(response.get("meta", {}).get("cacheStatus") or ""),
+            cache_status=str(dashboard_runtime_meta.get("cacheStatus") or ""),
         )
+        trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
+        response = {
+            "data": trimmed_dashboard_data,
+            "meta": {
+                "from": ctx.from_date.isoformat(),
+                "to": ctx.to_date.isoformat(),
+                "requestedFrom": from_date or ctx.from_date.isoformat(),
+                "requestedTo": to_date or ctx.to_date.isoformat(),
+                "days": ctx.days,
+                "mode": "operational" if ctx.is_operational else "intelligence",
+                "rangeLabel": ctx.range_label,
+                "trustedEndDate": trusted_end.isoformat(),
+                "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
+                "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
+                "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
+                "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
+                "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
+                "isStale": dashboard_runtime_meta.get("isStale", False),
+                "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
+                "buildMode": dashboard_runtime_meta.get("buildMode"),
+                "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
+                "freshness": {
+                    "status": freshness.get("health", {}).get("status"),
+                    "generatedAt": freshness.get("generated_at"),
+                },
+            },
+        }
+        response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
+        response["meta"]["responseSerializeMs"] = 0
         request.state.dashboard_meta = response["meta"]
         return _dashboard_response(response)
-    except TimeoutError as e:
-        logger.warning(f"Dashboard endpoint warming timeout: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Dashboard is still warming this date range. Please retry in a few seconds.",
-        )
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2585,7 +1811,7 @@ async def dashboard(
 
 @app.post("/api/ai/query", dependencies=[Depends(require_analytics_access)])
 async def ai_query(request: AIQueryRequest):
-    """Lightweight AI endpoint backed by the live dashboard snapshot."""
+    """Deprecated legacy AI endpoint backed by the live dashboard snapshot."""
     try:
         freshness = _dashboard_freshness_snapshot(force_refresh=False)
         dashboard_data = get_dashboard_data(_default_dashboard_context(freshness))
@@ -2650,13 +1876,11 @@ async def topics(
     """Topics detail page — paginated."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_topics_page(page, size, ctx))
+        payload = await loop.run_in_executor(None, lambda: get_topics_page(page, size, ctx))
         _record_query_timing(request, query_started_at)
         return payload
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Topics endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2673,8 +1897,9 @@ async def topic_detail(
     """Single topic detail payload with evidence and trend series."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_topic_detail(topic, category, ctx))
+        payload = await loop.run_in_executor(None, lambda: get_topic_detail(topic, category, ctx))
         _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
@@ -2686,9 +1911,6 @@ async def topic_detail(
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Topic detail endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topic detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2712,8 +1934,10 @@ async def topic_evidence(
         if normalized_view not in {"all", "questions"}:
             raise HTTPException(status_code=422, detail="view must be 'all' or 'questions'.")
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        payload = await run_request(
+        payload = await loop.run_in_executor(
+            None,
             lambda: get_topic_evidence_page(topic, category, normalized_view, page, size, focus_id, ctx),
         )
         _record_query_timing(request, query_started_at)
@@ -2722,9 +1946,6 @@ async def topic_evidence(
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Topic evidence endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Topic evidence endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2732,20 +1953,14 @@ async def topic_evidence(
 
 @app.get("/api/channels", dependencies=[Depends(require_analytics_access)])
 async def channels(
-    request: Request,
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
 ):
     """Channels detail page."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_channels_page(ctx))
-        _record_query_timing(request, query_started_at)
-        return payload
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Channels endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: get_channels_page(ctx))
     except Exception as e:
         logger.error(f"Channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2753,7 +1968,6 @@ async def channels(
 
 @app.get("/api/channels/detail", dependencies=[Depends(require_analytics_access)])
 async def channel_detail(
-    request: Request,
     channel: str = Query(..., min_length=1),
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
@@ -2761,17 +1975,13 @@ async def channel_detail(
     """Single channel detail payload with recent posts and distributions."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_channel_detail(channel, ctx))
-        _record_query_timing(request, query_started_at)
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_channel_detail(channel, ctx))
         if payload is None:
             raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Channel detail endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Channel detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2779,7 +1989,6 @@ async def channel_detail(
 
 @app.get("/api/channels/posts", dependencies=[Depends(require_analytics_access)])
 async def channel_posts(
-    request: Request,
     channel: str = Query(..., min_length=1),
     page: int = Query(0, ge=0),
     size: int = Query(20, ge=1, le=50),
@@ -2789,17 +1998,13 @@ async def channel_posts(
     """Paginated recent posts feed for a selected channel."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_channel_posts_page(channel, page, size, ctx))
-        _record_query_timing(request, query_started_at)
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_channel_posts_page(channel, page, size, ctx))
         if payload is None:
             raise HTTPException(status_code=404, detail="Channel not found for the selected window.")
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Channel posts endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Channel posts endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2810,32 +2015,29 @@ async def graph_data(payload: GraphRequest):
     """Graph dataset for /graph page (server-side Neo4j)."""
     try:
         filters = payload.model_dump(exclude_none=True)
-        def _build_graph() -> dict[str, Any]:
-            graph = graph_dashboard.get_graph_data(filters)
-            freshness = get_freshness_snapshot(
-                get_supabase_writer(),
-                scheduler_status=get_current_scraper_scheduler_status(),
-            )
-            if not isinstance(graph, dict):
-                return graph
-            meta_existing = graph.get("meta")
-            meta_dict = dict(meta_existing) if isinstance(meta_existing, dict) else {}
-            meta_dict["freshness"] = {
-                "status": freshness.get("health", {}).get("status"),
-                "score": freshness.get("health", {}).get("score"),
-                "generatedAt": freshness.get("generated_at"),
-                "lastScrapeAt": freshness.get("pipeline", {}).get("scrape", {}).get("last_scrape_at"),
-                "lastProcessAt": freshness.get("pipeline", {}).get("process", {}).get("last_process_at"),
-                "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
-                "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
-                "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
-                "analyticsWindowDays": freshness.get("drift", {}).get("analytics_window_days"),
-                "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
-            }
-            graph["meta"] = meta_dict
+        graph = graph_dashboard.get_graph_data(filters)
+        freshness = get_freshness_snapshot(
+            get_supabase_writer(),
+            scheduler_status=get_current_scraper_scheduler_status(),
+        )
+        if not isinstance(graph, dict):
             return graph
-
-        return await run_request(_build_graph)
+        meta_existing = graph.get("meta")
+        meta_dict = dict(meta_existing) if isinstance(meta_existing, dict) else {}
+        meta_dict["freshness"] = {
+            "status": freshness.get("health", {}).get("status"),
+            "score": freshness.get("health", {}).get("score"),
+            "generatedAt": freshness.get("generated_at"),
+            "lastScrapeAt": freshness.get("pipeline", {}).get("scrape", {}).get("last_scrape_at"),
+            "lastProcessAt": freshness.get("pipeline", {}).get("process", {}).get("last_process_at"),
+            "lastGraphSyncAt": freshness.get("pipeline", {}).get("sync", {}).get("last_graph_sync_at"),
+            "syncEstimated": freshness.get("pipeline", {}).get("sync", {}).get("estimated"),
+            "unsyncedPosts": freshness.get("backlog", {}).get("unsynced_posts"),
+            "analyticsWindowDays": freshness.get("drift", {}).get("analytics_window_days"),
+            "latestPostDeltaMinutes": freshness.get("drift", {}).get("latest_post_delta_minutes"),
+        }
+        graph["meta"] = meta_dict
+        return graph
     except Exception as e:
         logger.error(f"Graph data endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2856,19 +2058,17 @@ async def node_details(
     """Detailed panel data for a graph node."""
     try:
         channel_filters = [c.strip() for c in (channels or "").split(",") if c.strip()]
-        sentiment_filters = [item.strip() for item in (sentiments or "").split(",") if item.strip()]
-        details = await run_request(
-            lambda: graph_dashboard.get_node_details(
-                nodeId,
-                nodeType,
-                timeframe=timeframe,
-                channels=channel_filters,
-                from_date=from_date,
-                to_date=to_date,
-                sentiments=sentiment_filters,
-                category=category,
-                signal_focus=signalFocus,
-            )
+        sentiment_filters = [label.strip() for label in (sentiments or "").split(",") if label.strip()]
+        details = graph_dashboard.get_node_details(
+            nodeId,
+            nodeType,
+            timeframe=timeframe,
+            channels=channel_filters,
+            from_date=from_date,
+            to_date=to_date,
+            sentiments=sentiment_filters,
+            category=category,
+            signal_focus=signalFocus,
         )
         if not details:
             raise HTTPException(status_code=404, detail="Node not found")
@@ -2886,7 +2086,7 @@ async def search_graph(query: str = Query("", min_length=0, max_length=200), lim
     try:
         if not (query or "").strip():
             return []
-        return await run_request(lambda: graph_dashboard.search_graph(query, limit))
+        return graph_dashboard.search_graph(query, limit)
     except Exception as e:
         logger.error(f"Graph search endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2896,7 +2096,7 @@ async def search_graph(query: str = Query("", min_length=0, max_length=200), lim
 async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top trending topics for graph filters."""
     try:
-        return await run_request(lambda: graph_dashboard.get_trending_topics(limit, timeframe))
+        return graph_dashboard.get_trending_topics(limit, timeframe)
     except Exception as e:
         logger.error(f"Trending topics endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2906,7 +2106,7 @@ async def trending_topics(limit: int = Query(10, ge=1, le=100), timeframe: str =
 async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Top channels by post activity (graph context)."""
     try:
-        return await run_request(lambda: graph_dashboard.get_top_channels(limit, timeframe))
+        return graph_dashboard.get_top_channels(limit, timeframe)
     except Exception as e:
         logger.error(f"Top channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2916,7 +2116,7 @@ async def top_channels(limit: int = Query(10, ge=1, le=100), timeframe: str = Qu
 async def all_channels_graph():
     """All channels list for graph filters."""
     try:
-        return await run_request(graph_dashboard.get_all_channels)
+        return graph_dashboard.get_all_channels()
     except Exception as e:
         logger.error(f"All channels endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2926,7 +2126,7 @@ async def all_channels_graph():
 async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str = Query("Last 7 Days")):
     """Compatibility endpoint: returns top channels in legacy shape."""
     try:
-        return await run_request(lambda: graph_dashboard.get_top_channels(limit, timeframe))
+        return graph_dashboard.get_top_channels(limit, timeframe)
     except Exception as e:
         logger.error(f"Top brands compatibility endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2936,7 +2136,7 @@ async def top_brands_compat(limit: int = Query(10, ge=1, le=100), timeframe: str
 async def all_brands_compat():
     """Compatibility endpoint: returns all channels in legacy shape."""
     try:
-        return await run_request(graph_dashboard.get_all_channels)
+        return graph_dashboard.get_all_channels()
     except Exception as e:
         logger.error(f"All brands compatibility endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2946,7 +2146,7 @@ async def all_brands_compat():
 async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
     """Sentiment distribution for graph side panels/filters."""
     try:
-        return await run_request(lambda: graph_dashboard.get_sentiment_distribution(timeframe))
+        return graph_dashboard.get_sentiment_distribution(timeframe)
     except Exception as e:
         logger.error(f"Sentiment distribution endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2956,7 +2156,7 @@ async def sentiment_distribution(timeframe: str = Query("Last 7 Days")):
 async def graph_insights(timeframe: str = Query("Last 7 Days")):
     """Narrative summary for graph context."""
     try:
-        return await run_request(lambda: graph_dashboard.get_graph_insights(timeframe))
+        return graph_dashboard.get_graph_insights(timeframe)
     except Exception as e:
         logger.error(f"Graph insights endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2969,13 +2169,17 @@ async def insight_cards(payload: InsightCardsRequest):
         audience = (payload.audience or "analyst").strip().lower()
         if audience not in {"analyst", "executive"}:
             audience = "analyst"
-        return await run_request(lambda: insights.get_insight_cards(payload.filters or {}, audience))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: insights.get_insight_cards(payload.filters or {}, audience),
+        )
     except Exception as e:
         logger.error(f"Insight cards endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/admin/config")
+@app.get("/api/admin/config", dependencies=[Depends(require_operator_access)])
 async def get_admin_config():
     """Return merged Admin config with defaults and runtime overrides."""
     try:
@@ -2985,7 +2189,7 @@ async def get_admin_config():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.patch("/api/admin/config")
+@app.patch("/api/admin/config", dependencies=[Depends(require_operator_access)])
 async def update_admin_config(payload: AdminConfigPatchRequest):
     """Persist lightweight Admin page config in runtime storage."""
     try:
@@ -3016,7 +2220,7 @@ async def update_admin_config(payload: AdminConfigPatchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/sources/channels")
+@app.get("/api/sources/channels", dependencies=[Depends(require_operator_access)])
 async def list_channel_sources():
     """List configured Telegram channel sources from Supabase."""
     try:
@@ -3027,7 +2231,319 @@ async def list_channel_sources():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/sources/channels")
+@app.get("/api/social/overview", dependencies=[Depends(require_operator_access)])
+async def get_social_overview():
+    try:
+        overview = get_social_store().get_overview()
+        overview["runtime"] = get_current_social_runtime_status()
+        return overview
+    except Exception as e:
+        logger.error(f"Social overview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/activities", dependencies=[Depends(require_operator_access)])
+async def list_social_activities(
+    limit: int = Query(100, ge=1, le=500),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+):
+    try:
+        items = get_social_store().list_activities(limit=limit, entity_id=entity_id, platform=platform)
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social activities error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/entities", dependencies=[Depends(require_operator_access)])
+async def list_social_entities():
+    try:
+        items = get_social_store().list_entities()
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social entities error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/entities", dependencies=[Depends(require_operator_access)])
+async def create_social_entity(payload: SocialEntityCreateRequest):
+    try:
+        store = get_social_store()
+        entity = store.ensure_entity_from_company(payload.legacy_company_id)
+        if payload.is_active is not None or payload.accounts:
+            entity = store.update_entity(
+                entity["id"],
+                is_active=payload.is_active,
+                accounts=[account.model_dump() for account in payload.accounts],
+            )
+        return {"item": entity}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Create social entity error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/social/entities/{entity_id}", dependencies=[Depends(require_operator_access)])
+async def update_social_entity(entity_id: str, payload: SocialEntityUpdateRequest):
+    try:
+        store = get_social_store()
+        existing = store.get_entity(entity_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Social entity not found")
+        if payload.is_active is None and payload.metadata is None and not payload.accounts:
+            raise HTTPException(status_code=400, detail="No update fields provided")
+        item = store.update_entity(
+            entity_id,
+            is_active=payload.is_active,
+            metadata=payload.metadata,
+            accounts=[account.model_dump() for account in payload.accounts],
+        )
+        return {"item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update social entity error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/runtime/status", dependencies=[Depends(require_operator_access)])
+async def get_social_runtime_status():
+    return get_current_social_runtime_status()
+
+
+@app.post("/api/social/runtime/run-once", dependencies=[Depends(require_operator_access)])
+async def run_social_runtime_once():
+    try:
+        return await get_social_runtime().run_once()
+    except Exception as e:
+        logger.error(f"Social runtime run-once error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/runtime/failures", dependencies=[Depends(require_operator_access)])
+async def list_social_runtime_failures(
+    dead_letter_only: bool = Query(False),
+    stage: Optional[str] = Query(default=None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    try:
+        items = get_social_store().list_failures(
+            dead_letter_only=dead_letter_only,
+            stage=stage,
+            limit=limit,
+        )
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"Social runtime failures error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/runtime/retry", dependencies=[Depends(require_operator_access)])
+async def retry_social_runtime_failure(payload: SocialRuntimeRetryRequest):
+    try:
+        return await get_social_runtime().retry_failure(stage=payload.stage, scope_key=payload.scope_key)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc).lower() or "no active failure" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Social runtime retry error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/runtime/replay", dependencies=[Depends(require_operator_access)])
+async def replay_social_runtime_items(payload: SocialRuntimeReplayRequest):
+    try:
+        return await get_social_runtime().replay_activities(
+            stage=payload.stage,
+            activity_uids=payload.activity_uids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Social runtime replay error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _social_unavailable(detail: str, error: Exception) -> HTTPException:
+    logger.error(f"{detail}: {error}")
+    return HTTPException(status_code=503, detail=str(error))
+
+
+@app.get("/api/social/intelligence/summary", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_summary(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+):
+    try:
+        return get_social_store().get_intelligence_summary(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence summary error", e) from e
+
+
+@app.get("/api/social/intelligence/topic-timeline", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_topic_timeline(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    topic: Optional[str] = Query(default=None),
+    bucket: str = Query(default="day"),
+):
+    try:
+        return get_social_store().get_topic_timeline(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            topic=topic,
+            bucket=bucket,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence topic timeline error", e) from e
+
+
+@app.get("/api/social/intelligence/topics", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_topics(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return get_social_store().get_topic_intelligence(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            limit=limit,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence topics error", e) from e
+
+
+@app.get("/api/social/intelligence/ads", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_ads(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    cta_type: Optional[str] = Query(default=None),
+    content_format: Optional[str] = Query(default=None),
+    sort: str = Query(default="recent"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return get_social_store().get_ad_intelligence(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            cta_type=cta_type,
+            content_format=content_format,
+            sort=sort,
+            page=page,
+            size=size,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence ads error", e) from e
+
+
+@app.get("/api/social/intelligence/audience-response", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_audience_response(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    try:
+        return get_social_store().get_audience_response(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            limit=limit,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence audience response error", e) from e
+
+
+@app.get("/api/social/intelligence/competitors", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_competitors(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    platform: Optional[str] = Query(default=None),
+    sort_by: str = Query(default="posts"),
+    sort_dir: str = Query(default="desc"),
+):
+    try:
+        return get_social_store().get_competitor_scorecard(
+            from_date=from_date,
+            to_date=to_date,
+            platform=platform,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence competitors error", e) from e
+
+
+@app.get("/api/social/intelligence/evidence", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_evidence(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    activity_uid: Optional[str] = Query(default=None),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    topic: Optional[str] = Query(default=None),
+    marketing_intent: Optional[str] = Query(default=None),
+    pain_point: Optional[str] = Query(default=None),
+    customer_intent: Optional[str] = Query(default=None),
+    source_kind: Optional[str] = Query(default=None),
+    cta_type: Optional[str] = Query(default=None),
+    content_format: Optional[str] = Query(default=None),
+    sentiment: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=25, ge=1, le=100),
+):
+    try:
+        return get_social_store().get_intelligence_evidence(
+            from_date=from_date,
+            to_date=to_date,
+            activity_uid=activity_uid,
+            entity_id=entity_id,
+            platform=platform,
+            topic=topic,
+            marketing_intent=marketing_intent,
+            pain_point=pain_point,
+            customer_intent=customer_intent,
+            source_kind=source_kind,
+            cta_type=cta_type,
+            content_format=content_format,
+            sentiment=sentiment,
+            page=page,
+            size=size,
+        )
+    except Exception as e:
+        raise _social_unavailable("Social intelligence evidence error", e) from e
+
+
+@app.post("/api/sources/channels", dependencies=[Depends(require_operator_access)])
 async def create_channel_source(payload: ChannelSourceCreateRequest):
     """Create or reactivate a Telegram channel source for scheduler pickup."""
     try:
@@ -3051,36 +2567,54 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
                 update_payload["channel_title"] = provided_title
             elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
                 update_payload["channel_title"] = normalized_handle
+            if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
+                pending_title = (update_payload.get("channel_title") or channel_title or canonical_username).strip() or canonical_username
+                if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                    update_payload.update(build_pending_source_payload(channel_title=pending_title))
+                else:
+                    update_payload.update(_pending_source_payload(channel_title=pending_title))
             action = "exists"
             if not existing.get("is_active", False):
                 update_payload["is_active"] = True
                 action = "reactivated"
 
             updated = writer.update_channel(existing["id"], update_payload)
-            if updated:
-                await _try_enrich_channel_metadata(
+            if updated and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            elif updated:
+                inline_resolved = await _try_enrich_channel_metadata(
                     updated["id"],
                     updated.get("channel_username") or canonical_username,
                     updated.get("channel_title"),
                 )
-                updated = writer.get_channel_by_id(updated["id"]) or updated
+                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
             return {"action": action, "item": updated}
 
+        create_payload = {
+            "channel_username": canonical_username,
+            "is_active": True,
+            "scrape_depth_days": payload.scrape_depth_days,
+            "scrape_comments": payload.scrape_comments,
+        }
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            create_payload.update(build_pending_source_payload(channel_title=channel_title))
+        else:
+            create_payload.update(_pending_source_payload(channel_title=channel_title))
         created = writer.create_channel(
-            {
-                "channel_username": canonical_username,
-                "channel_title": channel_title,
-                "is_active": True,
-                "scrape_depth_days": payload.scrape_depth_days,
-                "scrape_comments": payload.scrape_comments,
-            }
+            create_payload
         )
-        await _try_enrich_channel_metadata(
-            created["id"],
-            created.get("channel_username") or canonical_username,
-            created.get("channel_title"),
-        )
-        created = writer.get_channel_by_id(created["id"]) or created
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            ensure_resolution_job(writer, created)
+            created = writer.get_channel_by_id(created["id"]) or created
+        else:
+            inline_resolved = await _try_enrich_channel_metadata(
+                created["id"],
+                created.get("channel_username") or canonical_username,
+                created.get("channel_title"),
+            )
+            created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
         return {"action": "created", "item": created}
     except HTTPException:
         raise
@@ -3089,7 +2623,7 @@ async def create_channel_source(payload: ChannelSourceCreateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.patch("/api/sources/channels/{channel_id}")
+@app.patch("/api/sources/channels/{channel_id}", dependencies=[Depends(require_operator_access)])
 async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateRequest):
     """Update source settings (active flag and scrape settings)."""
     try:
@@ -3111,12 +2645,34 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 
         updated = writer.update_channel(channel_id, update_payload)
         if updated and updated.get("is_active"):
-            await _try_enrich_channel_metadata(
-                updated["id"],
-                updated.get("channel_username") or "",
-                updated.get("channel_title"),
-            )
-            updated = writer.get_channel_by_id(updated["id"]) or updated
+            if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        build_pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                    ensure_resolution_job(writer, updated)
+                updated = writer.get_channel_by_id(updated["id"]) or updated
+            else:
+                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                    writer.update_channel(
+                        channel_id,
+                        _pending_source_payload(
+                            channel_title=(updated.get("channel_title") or updated.get("channel_username") or "").strip()
+                            or ""
+                        ),
+                    )
+                    updated = writer.get_channel_by_id(channel_id) or updated
+                inline_resolved = await _try_enrich_channel_metadata(
+                    updated["id"],
+                    updated.get("channel_username") or "",
+                    updated.get("channel_title"),
+                )
+                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
         return {"item": updated}
     except HTTPException:
         raise
@@ -3125,7 +2681,45 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/scraper/scheduler")
+@app.get("/api/sources/resolution", dependencies=[Depends(require_operator_access)])
+async def get_source_resolution_status():
+    """Current source resolution worker status and queue snapshot."""
+    return get_scraper_scheduler().status().get("resolution") or {}
+
+
+@app.post("/api/sources/resolution/run-once", dependencies=[Depends(require_operator_access)])
+async def run_source_resolution_once():
+    """Trigger one immediate source resolution cycle."""
+    try:
+        return await get_scraper_scheduler().run_source_resolution_once()
+    except Exception as e:
+        logger.error(f"Run-once source resolution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sources/resolution/backfill-peer-refs", dependencies=[Depends(require_operator_access)])
+async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
+    """Queue resolution jobs for sources that still lack cached peer refs."""
+    try:
+        capped_limit = max(1, min(int(limit), 1000))
+        queued = enqueue_missing_peer_ref_backfill(
+            get_supabase_writer(),
+            session_slot="primary",
+            active_only=bool(active_only),
+            limit=capped_limit,
+        )
+        return {
+            "queued": queued,
+            "active_only": bool(active_only),
+            "limit": capped_limit,
+            "resolution": get_scraper_scheduler().status().get("resolution") or {},
+        }
+    except Exception as e:
+        logger.error(f"Backfill source peer refs error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/scraper/scheduler", dependencies=[Depends(require_operator_access)])
 async def get_scraper_scheduler_status():
     """Current scraper scheduler runtime status."""
     return get_scraper_scheduler().status()
@@ -3135,32 +2729,11 @@ async def get_scraper_scheduler_status():
 async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
-        if force:
-            return await run_request(
-                lambda: get_freshness_snapshot(
-                    get_supabase_writer(),
-                    scheduler_status=get_current_scraper_scheduler_status(),
-                    force_refresh=True,
-                )
-            )
-
-        resolution = _cached_freshness_resolution(allow_live=False)
-        snapshot = resolution.get("snapshot")
-        source = str(resolution.get("source") or "")
-        if isinstance(snapshot, dict) and snapshot:
-            if source in {"memory_stale", "persisted_stale"}:
-                _ensure_background_freshness_refresh()
-            return snapshot
-
-        snapshot = await run_request(
-            lambda: get_freshness_snapshot(
-                get_supabase_writer(),
-                scheduler_status=get_current_scraper_scheduler_status(),
-                force_refresh=False,
-            )
+        return get_freshness_snapshot(
+            get_supabase_writer(),
+            scheduler_status=get_current_scraper_scheduler_status(),
+            force_refresh=force,
         )
-        _persist_freshness_snapshot_async(snapshot)
-        return snapshot
     except Exception as e:
         logger.error(f"Freshness endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3170,7 +2743,8 @@ async def freshness_snapshot(force: bool = Query(False)):
 async def taxonomy_quality_snapshot():
     """Enterprise taxonomy quality snapshot with sign-off gates."""
     try:
-        snapshot = await run_request(_taxonomy_quality_snapshot)
+        loop = asyncio.get_running_loop()
+        snapshot = await loop.run_in_executor(None, _taxonomy_quality_snapshot)
         snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
         return snapshot
     except Exception as e:
@@ -3186,6 +2760,8 @@ async def trending_widget_quality_snapshot(
     """QA snapshot for the Trending widget read model and evidence integrity."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
+        loop = asyncio.get_running_loop()
+
         def _build_snapshot() -> dict[str, Any]:
             writer = get_supabase_writer()
             proposal_rows = writer.list_topic_proposals(status="pending", limit=500)
@@ -3229,13 +2805,13 @@ async def trending_widget_quality_snapshot(
                 "proposalQueue": proposal_summary,
             }
 
-        return await run_request(_build_snapshot)
+        return await loop.run_in_executor(None, _build_snapshot)
     except Exception as e:
         logger.error(f"Trending widget quality endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/scraper/scheduler/start")
+@app.post("/api/scraper/scheduler/start", dependencies=[Depends(require_operator_access)])
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
@@ -3245,7 +2821,7 @@ async def start_scraper_scheduler():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/scraper/scheduler/stop")
+@app.post("/api/scraper/scheduler/stop", dependencies=[Depends(require_operator_access)])
 async def stop_scraper_scheduler():
     """Stop recurring scraper schedule."""
     try:
@@ -3255,7 +2831,7 @@ async def stop_scraper_scheduler():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.patch("/api/scraper/scheduler")
+@app.patch("/api/scraper/scheduler", dependencies=[Depends(require_operator_access)])
 async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
     """Update scraper scheduler interval in minutes."""
     try:
@@ -3265,7 +2841,7 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/scraper/scheduler/run-once")
+@app.post("/api/scraper/scheduler/run-once", dependencies=[Depends(require_operator_access)])
 async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
@@ -3275,7 +2851,7 @@ async def run_scraper_once():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/scraper/scheduler/catchup-once")
+@app.post("/api/scraper/scheduler/catchup-once", dependencies=[Depends(require_operator_access)])
 async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
@@ -3285,7 +2861,7 @@ async def run_scraper_catchup_once():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/ai/failures")
+@app.get("/api/ai/failures", dependencies=[Depends(require_operator_access)])
 async def list_ai_failures(
     dead_letter_only: bool = Query(True),
     scope_type: Optional[str] = Query(None),
@@ -3307,7 +2883,7 @@ async def list_ai_failures(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ai/failures/retry")
+@app.post("/api/ai/failures/retry", dependencies=[Depends(require_operator_access)])
 async def retry_ai_failures(payload: FailureRetryRequest):
     """Unlock selected AI failure scopes for immediate retry."""
     scope_type = (payload.scope_type or "").strip().lower()
@@ -3328,7 +2904,7 @@ async def retry_ai_failures(payload: FailureRetryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/taxonomy/proposals")
+@app.get("/api/taxonomy/proposals", dependencies=[Depends(require_operator_access)])
 async def list_taxonomy_proposals(
     status: str = Query("pending"),
     visibility_state: Optional[str] = Query(None),
@@ -3366,7 +2942,7 @@ async def list_taxonomy_proposals(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/taxonomy/trending-new")
+@app.get("/api/taxonomy/trending-new", dependencies=[Depends(require_operator_access)])
 async def list_taxonomy_trending_new(
     status: str = Query("pending"),
     limit: int = Query(30, ge=1, le=200),
@@ -3384,7 +2960,7 @@ async def list_taxonomy_trending_new(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/taxonomy/proposals/review")
+@app.post("/api/taxonomy/proposals/review", dependencies=[Depends(require_operator_access)])
 async def review_taxonomy_proposal(payload: TopicProposalReviewRequest):
     """Approve or reject a proposed topic, with optional alias promotions."""
     decision = (payload.decision or "").strip().lower()
@@ -3415,7 +2991,7 @@ async def review_taxonomy_proposal(payload: TopicProposalReviewRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/taxonomy/promotions")
+@app.get("/api/taxonomy/promotions", dependencies=[Depends(require_operator_access)])
 async def list_taxonomy_promotions(
     active_only: bool = Query(True),
     limit: int = Query(200, ge=1, le=500),
@@ -3433,7 +3009,7 @@ async def list_taxonomy_promotions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/taxonomy/promotions/reload")
+@app.post("/api/taxonomy/promotions/reload", dependencies=[Depends(require_operator_access)])
 async def reload_taxonomy_promotions():
     """Reload runtime alias map from approved promotions table."""
     try:
@@ -3448,7 +3024,6 @@ async def reload_taxonomy_promotions():
 
 @app.get("/api/audience", dependencies=[Depends(require_analytics_access)])
 async def audience(
-    request: Request,
     page: int = Query(0, ge=0),
     size: int = Query(500, ge=1, le=1000),
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -3457,13 +3032,8 @@ async def audience(
     """Audience detail page — paginated."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_audience_page(page, size, ctx))
-        _record_query_timing(request, query_started_at)
-        return payload
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Audience endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: get_audience_page(page, size, ctx))
     except Exception as e:
         logger.error(f"Audience endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3471,7 +3041,6 @@ async def audience(
 
 @app.get("/api/audience/detail", dependencies=[Depends(require_analytics_access)])
 async def audience_detail(
-    request: Request,
     user_id: str = Query(..., alias="userId", min_length=1),
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
@@ -3479,17 +3048,13 @@ async def audience_detail(
     """Single audience-member detail payload."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_audience_detail(user_id, ctx))
-        _record_query_timing(request, query_started_at)
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_audience_detail(user_id, ctx))
         if payload is None:
             raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Audience detail endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Audience detail endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3497,7 +3062,6 @@ async def audience_detail(
 
 @app.get("/api/audience/messages", dependencies=[Depends(require_analytics_access)])
 async def audience_messages(
-    request: Request,
     user_id: str = Query(..., alias="userId", min_length=1),
     page: int = Query(0, ge=0),
     size: int = Query(20, ge=1, le=50),
@@ -3507,44 +3071,39 @@ async def audience_messages(
     """Paginated recent messages feed for a selected audience member."""
     try:
         ctx = build_dashboard_date_context(from_date, to_date) if from_date and to_date else _default_dashboard_context()
-        query_started_at = time.perf_counter()
-        payload = await run_request(lambda: get_audience_messages_page(user_id, page, size, ctx))
-        _record_query_timing(request, query_started_at)
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, lambda: get_audience_messages_page(user_id, page, size, ctx))
         if payload is None:
             raise HTTPException(status_code=404, detail="Audience member not found for the selected window.")
         return payload
     except HTTPException:
         raise
-    except DetailRefreshUnavailableError as e:
-        logger.warning(f"Audience messages endpoint degraded: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Audience messages endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/cache/clear")
+@app.post("/api/cache/clear", dependencies=[Depends(require_operator_access)])
 async def clear_cache():
-    """Invalidate dashboard/freshness caches in memory and persisted storage."""
+    """Invalidate the in-memory dashboard cache."""
     invalidate_cache()
-    clear_cached_freshness_snapshot()
-    deleted_runtime_files = _clear_persisted_dashboard_cache()
+    graph_dashboard.invalidate_graph_cache()
     question_briefs.invalidate_question_briefs_cache()
     behavioral_briefs.invalidate_behavioral_briefs_cache()
     opportunity_briefs.invalidate_opportunity_briefs_cache()
     topic_overviews.invalidate_topic_overviews_cache()
-    return {
-        "success": True,
-        "message": "Cache cleared",
-        "persistedRuntimeFilesDeleted": deleted_runtime_files,
-    }
+    return {"success": True, "message": "Cache cleared"}
 
 
-@app.post("/api/question-briefs/debug/refresh")
+@app.post("/api/question-briefs/debug/refresh", dependencies=[Depends(require_debug_endpoint_access)])
 async def debug_refresh_question_briefs():
     """Force-refresh question cards and return stage diagnostics."""
     try:
-        diagnostics = await run_background(lambda: question_briefs.refresh_question_briefs_with_diagnostics(force=True))
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
+            lambda: question_briefs.refresh_question_briefs_with_diagnostics(force=True),
+        )
         return {
             "success": True,
             "cardsProduced": diagnostics.get("cardsProduced", 0),
@@ -3556,11 +3115,13 @@ async def debug_refresh_question_briefs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/behavioral-briefs/debug/refresh")
+@app.post("/api/behavioral-briefs/debug/refresh", dependencies=[Depends(require_debug_endpoint_access)])
 async def debug_refresh_behavioral_briefs():
     """Force-refresh behavioral cards and return stage diagnostics."""
     try:
-        diagnostics = await run_background(
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
             lambda: behavioral_briefs.refresh_behavioral_briefs_with_diagnostics(force=True),
         )
         return {
@@ -3579,7 +3140,9 @@ async def debug_refresh_behavioral_briefs():
 async def debug_refresh_opportunity_briefs():
     """Force-refresh opportunity cards and return stage diagnostics."""
     try:
-        diagnostics = await run_background(
+        loop = asyncio.get_running_loop()
+        diagnostics = await loop.run_in_executor(
+            None,
             lambda: opportunity_briefs.refresh_opportunity_briefs_with_diagnostics(force=True),
         )
         return {
@@ -3592,7 +3155,6 @@ async def debug_refresh_opportunity_briefs():
         logger.error(f"Opportunity briefs debug refresh endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # KNOWLEDGE BASE (RAG) ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3604,7 +3166,6 @@ from api.knowledge_base import (
     _build_context, _confidence_level,
     ParseError, UnsupportedFormatError,
 )
-
 
 def _kb_components() -> tuple[KBVectorStore, GeminiEmbedder]:
     """Lazy singleton — created on first KB call."""
@@ -3668,6 +3229,8 @@ def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
         return _kb_openclaw_provider
 
 
+# ── Collections ───────────────────────────────────────────────────────────────
+
 class KBCollectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     description: str = Field("", max_length=300)
@@ -3698,6 +3261,8 @@ async def kb_delete_collection(collection_name: str):
     store.delete_collection(collection_name)
     return {"deleted": collection_name}
 
+
+# ── Documents ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/kb/collections/{collection_name}/upload", dependencies=[Depends(require_kb_access)])
 async def kb_upload_document(
@@ -3793,6 +3358,7 @@ async def kb_list_documents(collection_name: str):
                     "ingested_at": m.get("ingested_at", ""),
                 }
         docs = list(seen.values())
+        # Count chunks per doc
         chunk_counts: dict[str, int] = {}
         for m in metas:
             if m:
@@ -3813,6 +3379,8 @@ async def kb_delete_document(doc_id: str, collection: str = Query(...)):
     return {"doc_id": doc_id, "chunks_deleted": deleted}
 
 
+# ── Query ─────────────────────────────────────────────────────────────────────
+
 class KBAskBody(BaseModel):
     question: str = Field(..., min_length=3, max_length=500)
     collection: str = Field("default", min_length=1, max_length=80)
@@ -3824,6 +3392,7 @@ async def kb_ask(body: KBAskBody):
     store, embedder = _kb_components()
     loop = asyncio.get_running_loop()
 
+    # Step 1: Retrieve chunks via hybrid search (unchanged)
     try:
         chunks = await loop.run_in_executor(
             None,
@@ -3841,6 +3410,7 @@ async def kb_ask(body: KBAskBody):
             "caveat": "The collection may be empty. Try uploading documents first.",
         }
 
+    # Step 2: Try OpenClaw for generation, fall back to direct OpenAI
     provider = _get_kb_openclaw_provider()
     if provider is not None:
         try:
@@ -3856,6 +3426,7 @@ async def kb_ask(body: KBAskBody):
             msg = await provider.chat(prompt)
             answer = msg.text
 
+            # Build citations and confidence from retrieved chunks
             top_score = chunks[0]["score"] if chunks else 0.0
             confidence = _confidence_level(top_score)
             caveat = (
@@ -3881,6 +3452,7 @@ async def kb_ask(body: KBAskBody):
         except Exception as exc:
             logger.warning(f"KB OpenClaw generation failed, falling back to OpenAI: {exc}")
 
+    # Fallback: direct OpenAI (same as original behavior)
     try:
         result = await loop.run_in_executor(
             None,
@@ -3934,14 +3506,16 @@ async def kb_search(
 async def debug_refresh_topic_overviews():
     """Force-refresh topic overviews and return stage diagnostics."""
     try:
+        loop = asyncio.get_running_loop()
         freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
         ctx = _default_dashboard_context(freshness_snapshot)
-        diagnostics = await run_background(
+        diagnostics = await loop.run_in_executor(
+            None,
             lambda: topic_overviews.refresh_topic_overviews_with_diagnostics(ctx=ctx, force=True),
         )
         return {
             "success": True,
-            "itemsProduced": diagnostics.get("stages", {}).get("finalTopics", 0),
+            "itemsProduced": diagnostics.get("itemsProduced", 0),
             "diagnostics": diagnostics,
         }
     except Exception as e:
