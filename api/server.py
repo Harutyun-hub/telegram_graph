@@ -91,6 +91,7 @@ from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
+from social.postgres_store import SocialPostgresStore
 from social.store import SocialStore
 from social.runtime import SocialRuntimeService
 from utils.taxonomy import TAXONOMY_DOMAINS
@@ -611,6 +612,7 @@ def get_social_runtime() -> SocialRuntimeService:
 
 def get_current_social_runtime_status() -> dict[str, Any]:
     if social_runtime_service is None:
+        postgres_worker_enabled = SocialPostgresStore().enabled
         return {
             "status": "stopped",
             "is_active": False,
@@ -625,7 +627,7 @@ def get_current_social_runtime_status() -> dict[str, Any]:
             "run_history": [],
             "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
             "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
-            "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
+            "postgres_worker_enabled": bool(postgres_worker_enabled),
             "worker_id": None,
         }
     return social_runtime_service.status()
