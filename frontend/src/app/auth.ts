@@ -103,6 +103,32 @@ export function persistSimpleAuthSession(session: SimpleAuthSession): void {
   }
 }
 
+function encodeBasicAuth(value: string): string {
+  if (typeof globalThis.btoa === 'function') {
+    return globalThis.btoa(value);
+  }
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(value, 'utf-8').toString('base64');
+  }
+  throw new Error('No base64 encoder available for simple auth header');
+}
+
+export function buildSimpleAuthApiAuthorization(): string | null {
+  const session = loadStoredSimpleAuthSession();
+  const credentials = getSimpleAuthCredentials();
+  if (!session || !credentials || !isSimpleAuthEnabled()) {
+    return null;
+  }
+
+  const sessionUsername = normalizeSimpleUsername(session.username);
+  const configuredUsername = normalizeSimpleUsername(credentials.username);
+  if (sessionUsername !== configuredUsername) {
+    return null;
+  }
+
+  return `Basic ${encodeBasicAuth(`${credentials.username}:${credentials.password}`)}`;
+}
+
 export function clearStoredSimpleAuthSession(): void {
   if (typeof window === 'undefined') {
     return;

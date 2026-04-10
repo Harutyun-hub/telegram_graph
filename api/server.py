@@ -11,9 +11,10 @@ Endpoints:
 
 Run:
   cd /Users/harutnahapetyan/Documents/Gemini/Telegram
-  python -m uvicorn api.server:app --reload --port 8000
+  venv/bin/python -m uvicorn api.server:app --reload --port 8001
 """
 from __future__ import annotations
+import base64
 import sys, os
 import json
 import hashlib
@@ -60,10 +61,12 @@ else:  # pragma: no cover - exercised when orjson isn't installed locally
     ORJSONResponse = None
 
 from api.aggregator import (
+    CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
+    build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
-    invalidate_cache
+    invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
@@ -130,6 +133,17 @@ _SERVER_TIMING_PATHS = {
     "/api/topics",
     "/api/topics/detail",
     "/api/topics/evidence",
+}
+_HISTORICAL_FASTPATH_ENABLED = str(
+    os.getenv("DASH_HISTORICAL_FASTPATH_ENABLED", "true")
+).strip().lower() in {"1", "true", "yes", "on"}
+_HISTORICAL_FASTPATH_SKIP_TIERS = {
+    item.strip().lower()
+    for item in os.getenv(
+        "DASH_HISTORICAL_FASTPATH_SKIP_TIERS",
+        "network,comparative,predictive",
+    ).split(",")
+    if item.strip()
 }
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
@@ -318,7 +332,7 @@ async def ai_helper_error_handler(_request: Request, exc: AIHelperError):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    if request.url.path.startswith("/api/ai-helper/"):
+    if request.url.path.startswith("/api/ai-helper/") or request.url.path.startswith("/api/ai/chat"):
         first = exc.errors()[0] if exc.errors() else {}
         return JSONResponse(
             status_code=400,
@@ -349,6 +363,11 @@ def _record_query_timing(request: Request, started_at: float, *, cache_status: O
         request.state.cache_status = cache_status
 
 
+def _is_ai_chat_path(path: str) -> bool:
+    value = str(path or "")
+    return value.startswith("/api/ai-helper/") or value.startswith("/api/ai/chat")
+
+
 @app.middleware("http")
 async def request_metrics_middleware(request: Request, call_next):
     request_id = uuid.uuid4().hex[:12]
@@ -357,6 +376,27 @@ async def request_metrics_middleware(request: Request, call_next):
     response = None
     status_code = 500
     try:
+        if _is_ai_chat_path(request.url.path):
+            raw_length = str(request.headers.get("content-length") or "").strip()
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError:
+                    content_length = 0
+                if content_length > int(config.OPENCLAW_HELPER_HTTP_MAX_BODY_BYTES):
+                    response = JSONResponse(
+                        status_code=413,
+                        content={
+                            "ok": False,
+                            "error": {
+                                "code": "request_too_large",
+                                "message": "The AI helper request body is too large.",
+                                "retryable": False,
+                            },
+                        },
+                    )
+                    status_code = response.status_code
+                    return response
         response = await call_next(request)
         status_code = response.status_code
         return response
@@ -385,6 +425,7 @@ async def request_metrics_middleware(request: Request, call_next):
         if isinstance(dashboard_meta, dict):
             for src_key, dst_key in (
                 ("cacheStatus", "dashboard_cache_status"),
+                ("cacheSource", "dashboard_cache_source"),
                 ("buildElapsedSeconds", "dashboard_build_elapsed_seconds"),
                 ("buildMode", "dashboard_build_mode"),
                 ("tierTimes", "dashboard_tier_times"),
@@ -402,6 +443,11 @@ class AIQueryRequest(BaseModel):
 
 class AIHelperChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
+    sessionId: Optional[str] = Field(default=None, max_length=64)
+
+
+class AIHelperSessionRequest(BaseModel):
+    sessionId: Optional[str] = Field(default=None, max_length=64)
 
 
 class ChannelSourceCreateRequest(BaseModel):
@@ -926,15 +972,65 @@ def _extract_bearer_token(raw_value: str | None) -> str:
     return ""
 
 
+def _extract_basic_credentials(raw_value: str | None) -> tuple[str, str] | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    scheme, _, token = text.partition(" ")
+    if scheme.lower() != "basic" or not token.strip():
+        return None
+    try:
+        decoded = base64.b64decode(token.strip()).decode("utf-8")
+    except Exception:
+        return None
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return None
+    return username, password
+
+
+def _simple_auth_credentials_are_valid(username: str, password: str) -> bool:
+    configured_username = str(getattr(config, "SIMPLE_AUTH_USERNAME", "") or "").strip()
+    configured_password = str(getattr(config, "SIMPLE_AUTH_PASSWORD", "") or "")
+    if not configured_username or not configured_password:
+        return False
+    normalized_username = str(username or "").strip().lower()
+    return hmac.compare_digest(normalized_username, configured_username.lower()) and hmac.compare_digest(
+        password,
+        configured_password,
+    )
+
+
 def get_ai_helper_provider():
     return get_default_ai_helper_provider()
+
+
+_AI_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _normalize_ai_session_id(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not _AI_SESSION_ID_RE.fullmatch(text):
+        raise AIHelperError(
+            status_code=400,
+            code="invalid_request",
+            message="sessionId must be 8-64 characters using letters, numbers, '-' or '_'.",
+            retryable=False,
+        )
+    return text
 
 
 async def require_admin_user(
     x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
     authorization: Optional[str] = Header(default=None),
+    *,
+    allow_frontend_proxy_token: bool = False,
 ) -> Dict[str, str]:
-    token = _extract_bearer_token(x_supabase_authorization) or _extract_bearer_token(authorization)
+    supabase_token = _extract_bearer_token(x_supabase_authorization)
+    auth_token = _extract_bearer_token(authorization)
+    token = supabase_token or auth_token
     if not token:
         raise AIHelperError(
             status_code=401,
@@ -952,6 +1048,17 @@ async def require_admin_user(
             message="The AI helper admin identity is not configured.",
             retryable=False,
         )
+
+    if (
+        allow_frontend_proxy_token
+        and config.IS_STAGING
+        and not supabase_token
+        and auth_token
+        and config.ANALYTICS_API_KEY_FRONTEND
+        and hmac.compare_digest(auth_token, config.ANALYTICS_API_KEY_FRONTEND)
+    ):
+        logger.info("AI helper auth satisfied via staging frontend proxy token")
+        return {"id": "staging-frontend-proxy", "email": "", "auth": "frontend_proxy"}
 
     try:
         loop = asyncio.get_running_loop()
@@ -992,6 +1099,17 @@ async def require_admin_user(
     return {"id": user_id, "email": email}
 
 
+async def require_ai_helper_access(
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    return await require_admin_user(
+        x_supabase_authorization=x_supabase_authorization,
+        authorization=authorization,
+        allow_frontend_proxy_token=True,
+    )
+
+
 def _allow_local_operator_bypass(
     *,
     x_supabase_authorization: Optional[str],
@@ -1023,6 +1141,14 @@ async def require_operator_access(
     admin_token = _extract_bearer_token(x_admin_authorization) or _extract_bearer_token(authorization)
     if admin_api_key and admin_token and hmac.compare_digest(admin_token, admin_api_key):
         return {"id": "admin-api-key", "email": "", "auth": "api_key"}
+
+    simple_credentials = _extract_basic_credentials(x_admin_authorization) or _extract_basic_credentials(authorization)
+    if simple_credentials and _simple_auth_credentials_are_valid(*simple_credentials):
+        return {
+            "id": f"simple-auth:{simple_credentials[0].strip().lower()}",
+            "email": "",
+            "auth": "simple_password",
+        }
 
     if _allow_local_operator_bypass(
         x_supabase_authorization=x_supabase_authorization,
@@ -1183,6 +1309,64 @@ def _default_dashboard_context(snapshot: Optional[dict] = None):
     trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
     from_date = (trusted_end - timedelta(days=14)).isoformat()
     return build_dashboard_date_context(from_date, trusted_end.isoformat())
+
+
+def _should_use_historical_fastpath(
+    *,
+    default_request: bool,
+    ctx,
+    trusted_end_date,
+) -> bool:
+    return bool(
+        _HISTORICAL_FASTPATH_ENABLED
+        and not default_request
+        and _HISTORICAL_FASTPATH_SKIP_TIERS
+        and ctx.to_date < trusted_end_date
+    )
+
+
+def _build_dashboard_api_payload(
+    *,
+    ctx,
+    requested_from: str,
+    requested_to: str,
+    trusted_end_date: str,
+    dashboard_data: dict,
+    dashboard_runtime_meta: dict[str, Any],
+    freshness_snapshot: dict,
+) -> dict[str, Any]:
+    trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
+    response = {
+        "data": trimmed_dashboard_data,
+        "meta": {
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
+            "requestedFrom": requested_from,
+            "requestedTo": requested_to,
+            "days": ctx.days,
+            "mode": "operational" if ctx.is_operational else "intelligence",
+            "rangeLabel": ctx.range_label,
+            "trustedEndDate": trusted_end_date,
+            "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
+            "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
+            "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
+            "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
+            "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
+            "cacheSource": dashboard_runtime_meta.get("cacheSource"),
+            "isStale": dashboard_runtime_meta.get("isStale", False),
+            "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
+            "buildMode": dashboard_runtime_meta.get("buildMode"),
+            "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
+            "skippedTiers": dashboard_runtime_meta.get("skippedTiers", []),
+            "freshness": {
+                "status": freshness_snapshot.get("health", {}).get("status"),
+                "generatedAt": freshness_snapshot.get("generated_at"),
+            },
+        },
+    }
+    response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
+    response["meta"]["responseSerializeMs"] = 0
+    return response
 
 
 async def _warm_dashboard_cache() -> None:
@@ -1391,6 +1575,10 @@ async def _try_enrich_channel_metadata(
 
     username = _canonical_channel_username(canonical_username)
     if not username:
+        return None
+
+    if not config.has_telegram_runtime_credentials():
+        logger.info(f"Source resolution deferred for {username}: Telegram runtime credentials are unavailable")
         return None
 
     writer = get_supabase_writer()
@@ -1757,47 +1945,79 @@ async def dashboard(
     try:
         freshness = _dashboard_freshness_snapshot(force_refresh=False)
         trusted_end = _trusted_end_date_from_freshness(freshness)
-        if not from_date or not to_date:
+        default_request = not (from_date and to_date)
+        if default_request:
             ctx = _default_dashboard_context(freshness)
         else:
             ctx = build_dashboard_date_context(from_date, to_date)
+        requested_from = from_date or ctx.from_date.isoformat()
+        requested_to = to_date or ctx.to_date.isoformat()
         loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
+        dashboard_data: dict | None = None
+        dashboard_runtime_meta: dict[str, Any] | None = None
+
+        if _should_use_historical_fastpath(
+            default_request=default_request,
+            ctx=ctx,
+            trusted_end_date=trusted_end,
+        ):
+            cached_snapshot, _cached_meta, cached_state = peek_dashboard_snapshot(ctx)
+            if cached_state in {"missing", "expired"}:
+                try:
+                    fast_data, fast_meta = await loop.run_in_executor(
+                        None,
+                        lambda: build_dashboard_snapshot_once(
+                            ctx,
+                            skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
+                            cache_status="historical_fastpath_uncached",
+                        ),
+                    )
+                    critical_degraded = {
+                        str(name).strip()
+                        for name in (fast_meta.get("degradedTiers") or [])
+                        if str(name).strip()
+                    }.intersection(DASHBOARD_CRITICAL_TIERS)
+                    if not critical_degraded:
+                        refresh_started = refresh_dashboard_snapshot_async(ctx)
+                        fast_meta["cacheSource"] = "fastpath"
+                        fast_meta["cacheStatus"] = (
+                            "historical_fastpath_while_revalidate"
+                            if refresh_started
+                            else "historical_fastpath_refresh_inflight"
+                        )
+                        fast_meta["isStale"] = True
+                        dashboard_data = fast_data
+                        dashboard_runtime_meta = fast_meta
+                    else:
+                        logger.warning(
+                            "Historical dashboard fastpath fell back to full rebuild because critical tiers degraded "
+                            "| key={} degraded={}",
+                            ctx.cache_key,
+                            sorted(critical_degraded),
+                        )
+                except Exception as exc:
+                    logger.warning(f"Historical dashboard fastpath failed | key={ctx.cache_key} error={exc}")
+
+        if dashboard_data is None or dashboard_runtime_meta is None:
+            dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(
+                None,
+                lambda: get_dashboard_snapshot(ctx),
+            )
         _record_query_timing(
             request,
             query_started_at,
             cache_status=str(dashboard_runtime_meta.get("cacheStatus") or ""),
         )
-        trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
-        response = {
-            "data": trimmed_dashboard_data,
-            "meta": {
-                "from": ctx.from_date.isoformat(),
-                "to": ctx.to_date.isoformat(),
-                "requestedFrom": from_date or ctx.from_date.isoformat(),
-                "requestedTo": to_date or ctx.to_date.isoformat(),
-                "days": ctx.days,
-                "mode": "operational" if ctx.is_operational else "intelligence",
-                "rangeLabel": ctx.range_label,
-                "trustedEndDate": trusted_end.isoformat(),
-                "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
-                "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
-                "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
-                "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
-                "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
-                "isStale": dashboard_runtime_meta.get("isStale", False),
-                "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
-                "buildMode": dashboard_runtime_meta.get("buildMode"),
-                "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
-                "freshness": {
-                    "status": freshness.get("health", {}).get("status"),
-                    "generatedAt": freshness.get("generated_at"),
-                },
-            },
-        }
-        response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
-        response["meta"]["responseSerializeMs"] = 0
+        response = _build_dashboard_api_payload(
+            ctx=ctx,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            trusted_end_date=trusted_end.isoformat(),
+            dashboard_data=dashboard_data,
+            dashboard_runtime_meta=dashboard_runtime_meta,
+            freshness_snapshot=freshness,
+        )
         request.state.dashboard_meta = response["meta"]
         return _dashboard_response(response)
     except Exception as e:
@@ -1822,43 +2042,106 @@ async def ai_query(request: AIQueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ai-helper/chat")
-async def ai_helper_chat(
+async def _run_ai_helper_chat(
+    request: Request,
     payload: AIHelperChatRequest,
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
 ):
+    session_id = _normalize_ai_session_id(payload.sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    message = await provider.chat(payload.message.strip())
+    message = await provider.chat(
+        payload.message.strip(),
+        session_id=session_id,
+        request_id=request_id,
+    )
     return {
         "ok": True,
+        "sessionId": session_id,
         "message": message.to_dict(),
     }
 
 
-@app.get("/api/ai-helper/history")
-async def ai_helper_history(
+async def _run_ai_helper_history(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=100),
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+    sessionId: Optional[str] = Query(default=None),
 ):
+    session_id = _normalize_ai_session_id(sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    messages = await provider.history(limit=limit)
+    messages = await provider.history(limit=limit, session_id=session_id, request_id=request_id)
     return {
         "ok": True,
+        "sessionId": session_id,
         "messages": [message.to_dict() for message in messages],
     }
 
 
-@app.post("/api/ai-helper/reset")
-async def ai_helper_reset(
-    _admin_user: Dict[str, str] = Depends(require_admin_user),
+async def _run_ai_helper_reset(
+    request: Request,
+    payload: AIHelperSessionRequest,
 ):
+    session_id = _normalize_ai_session_id(payload.sessionId)
+    request_id = str(getattr(request.state, "request_id", "") or "")
     provider = get_ai_helper_provider()
-    reset_at = await provider.reset()
+    reset_at = await provider.reset(session_id=session_id, request_id=request_id)
     return {
         "ok": True,
         "reset": True,
+        "sessionId": session_id,
         "timestamp": reset_at,
     }
+
+
+async def _run_ai_helper_smoke(
+    request: Request,
+    payload: AIHelperSessionRequest,
+):
+    smoke_payload = AIHelperChatRequest(
+        message="Reply with exactly WEB_HELPER_OK",
+        sessionId=payload.sessionId,
+    )
+    return await _run_ai_helper_chat(request, smoke_payload)
+
+
+@app.post("/api/ai/chat")
+@app.post("/api/ai-helper/chat")
+async def ai_helper_chat(
+    request: Request,
+    payload: AIHelperChatRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_chat(request, payload)
+
+
+@app.get("/api/ai/chat/history")
+@app.get("/api/ai-helper/history")
+async def ai_helper_history(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    sessionId: Optional[str] = Query(default=None),
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_history(request, limit=limit, sessionId=sessionId)
+
+
+@app.post("/api/ai/chat/reset")
+@app.post("/api/ai-helper/reset")
+async def ai_helper_reset(
+    request: Request,
+    payload: AIHelperSessionRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_reset(request, payload)
+
+
+@app.post("/api/ai/chat/smoke")
+async def ai_helper_smoke(
+    request: Request,
+    payload: AIHelperSessionRequest,
+    _admin_user: Dict[str, str] = Depends(require_ai_helper_access),
+):
+    return await _run_ai_helper_smoke(request, payload)
 
 
 @app.get("/api/topics", dependencies=[Depends(require_analytics_access)])
@@ -3203,9 +3486,11 @@ _kb_openclaw_lock = threading.Lock()
 def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
     """Return a dedicated OpenClaw provider for KB generation, or None if not configured."""
     global _kb_openclaw_provider
+    if str(config.OPENCLAW_GATEWAY_TRANSPORT or "").strip().lower() == "cli_bridge":
+        return None
     if not config.OPENCLAW_GATEWAY_BASE_URL or not config.OPENCLAW_GATEWAY_TOKEN:
         return None
-    if not config.OPENCLAW_ANALYTICS_AGENT_ID or not config.OPENCLAW_KB_SESSION_KEY:
+    if not config.OPENCLAW_KB_SESSION_KEY:
         return None
     with _kb_openclaw_lock:
         if _kb_openclaw_provider is None:
@@ -3215,6 +3500,12 @@ def _get_kb_openclaw_provider() -> OpenClawAiHelperProvider | None:
                 agent_id=config.OPENCLAW_ANALYTICS_AGENT_ID,
                 session_key=config.OPENCLAW_KB_SESSION_KEY,
                 timeout_seconds=config.OPENCLAW_HELPER_TIMEOUT_SECONDS,
+                connect_timeout_seconds=config.OPENCLAW_HELPER_CONNECT_TIMEOUT_SECONDS,
+                read_timeout_seconds=config.OPENCLAW_HELPER_READ_TIMEOUT_SECONDS,
+                retry_attempts=config.OPENCLAW_HELPER_RETRY_ATTEMPTS,
+                transport=config.OPENCLAW_GATEWAY_TRANSPORT,
+                model=config.OPENCLAW_GATEWAY_MODEL,
+                manage_transcript=False,
             )
         return _kb_openclaw_provider
 

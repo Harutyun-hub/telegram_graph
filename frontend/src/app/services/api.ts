@@ -8,6 +8,7 @@
 // ================================================================
 
 import { getSupabaseBrowserClient } from './supabaseClient';
+import { buildSimpleAuthApiAuthorization } from '../auth';
 
 // ── Configuration ──────────────────────────────────────────────
 // Prefer VITE_API_BASE_URL for local/prod environments.
@@ -66,6 +67,11 @@ export async function apiFetch<T>(
     const token = await getAuthToken();
     if (token) {
       headers.set('X-Supabase-Authorization', `Bearer ${token}`);
+    } else {
+      const simpleAuthHeader = buildSimpleAuthApiAuthorization();
+      if (simpleAuthHeader) {
+        headers.set('X-Admin-Authorization', simpleAuthHeader);
+      }
     }
   }
 
@@ -132,28 +138,34 @@ export interface AIHelperMessage {
   timestamp: string;
 }
 
-export async function aiHelperChat(message: string): Promise<AIHelperMessage> {
-  const payload = await apiFetch<{ ok: boolean; message: AIHelperMessage }>('/ai-helper/chat', {
+export async function aiHelperChat(message: string, sessionId: string): Promise<AIHelperMessage> {
+  const payload = await apiFetch<{ ok: boolean; sessionId?: string; message: AIHelperMessage }>('/ai/chat', {
     method: 'POST',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, sessionId }),
     includeUserAuth: true,
-    timeoutMs: 35_000,
+    timeoutMs: 95_000,
   });
   return payload.message;
 }
 
-export async function getAiHelperHistory(limit: number = 50): Promise<AIHelperMessage[]> {
-  const payload = await apiFetch<{ ok: boolean; messages: AIHelperMessage[] }>(`/ai-helper/history?limit=${limit}`, {
+export async function getAiHelperHistory(sessionId: string, limit: number = 50): Promise<AIHelperMessage[]> {
+  const payload = await apiFetch<{ ok: boolean; sessionId?: string; messages: AIHelperMessage[] }>(
+    `/ai/chat/history?limit=${limit}&sessionId=${encodeURIComponent(sessionId)}`,
+    {
     method: 'GET',
     includeUserAuth: true,
     timeoutMs: 20_000,
-  });
+    }
+  );
   return Array.isArray(payload?.messages) ? payload.messages : [];
 }
 
-export async function resetAiHelper(): Promise<{ ok: boolean; reset: boolean; timestamp: string }> {
-  return apiFetch('/ai-helper/reset', {
+export async function resetAiHelper(
+  sessionId: string,
+): Promise<{ ok: boolean; reset: boolean; sessionId?: string; timestamp: string }> {
+  return apiFetch('/ai/chat/reset', {
     method: 'POST',
+    body: JSON.stringify({ sessionId }),
     includeUserAuth: true,
     timeoutMs: 20_000,
   });
