@@ -170,6 +170,49 @@ class SchedulerDistributedLockTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_pipeline_queue_repair_cycle_exits_when_flag_disabled(self) -> None:
+        async def scenario() -> None:
+            db = SimpleNamespace(repair_pipeline_stage_queues=AsyncMock())
+            service = ScraperSchedulerService(db)
+
+            with patch.object(server.config, "PIPELINE_QUEUE_ENABLED", False), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", False):
+                await service._run_pipeline_queue_repair_cycle()
+
+            db.repair_pipeline_stage_queues.assert_not_called()
+            self.assertIsNone(service.pipeline_queue_repair_last_result)
+
+        asyncio.run(scenario())
+
+    def test_pipeline_queue_reclaim_cycle_runs_all_reclaimers(self) -> None:
+        coordinator = _CoordinatorStub()
+
+        async def scenario() -> None:
+            db = SimpleNamespace(
+                reclaim_expired_ai_post_jobs=lambda: 2,
+                reclaim_expired_ai_comment_group_jobs=lambda: 3,
+                reclaim_expired_neo4j_sync_jobs=lambda: 4,
+            )
+            service = ScraperSchedulerService(db)
+
+            with patch("api.scraper_scheduler.get_runtime_coordinator", return_value=coordinator), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", True), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES", 1):
+                await service._run_pipeline_queue_reclaim_cycle()
+
+            self.assertEqual(
+                service.pipeline_queue_reclaim_last_result,
+                {
+                    "ai_post_jobs_reclaimed": 2,
+                    "ai_comment_group_jobs_reclaimed": 3,
+                    "neo4j_sync_jobs_reclaimed": 4,
+                },
+            )
+            self.assertIsNone(service.pipeline_queue_reclaim_last_error)
+            self.assertEqual(coordinator._locks, {})
+
+        asyncio.run(scenario())
+
     def test_catchup_cycle_is_exclusive_across_scheduler_instances(self) -> None:
         coordinator = _CoordinatorStub()
         run_calls = 0

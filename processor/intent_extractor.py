@@ -15,19 +15,327 @@ Strategy:
 """
 from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import openai
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from loguru import logger
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 import json
 import time
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
+from api.runtime_coordinator import get_runtime_coordinator
 from utils.ai_usage import log_openai_usage
 from utils.taxonomy import TAXONOMY_VERSION, compact_taxonomy_prompt
 from utils.topic_normalizer import normalize_model_topics
 
 client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+_OPENAI_CIRCUIT_STATE_KEY = "openai:circuit:v1"
+_OPENAI_CIRCUIT_HALF_OPEN_LOCK = "openai-circuit-half-open"
+_OPENAI_CIRCUIT_REASON_QUOTA = "insufficient_quota"
+_OPENAI_CIRCUIT_REASON_RATE_LIMIT = "rate_limit"
+_OPENAI_CIRCUIT_REASON_PROVIDER_ERROR = "provider_error"
+
+
+class OpenAICircuitOpenError(RuntimeError):
+    def __init__(self, *, reason: str, open_until: str | None = None, phase: str = "open") -> None:
+        self.reason = str(reason or _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR)
+        self.open_until = str(open_until or "").strip() or None
+        self.phase = str(phase or "open")
+        detail = f"OpenAI circuit is {self.phase}"
+        if self.reason:
+            detail = f"{detail} ({self.reason})"
+        if self.open_until:
+            detail = f"{detail} until {self.open_until}"
+        super().__init__(detail)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _serialize_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _openai_circuit_enabled() -> bool:
+    return bool(getattr(config, "OPENAI_CIRCUIT_BREAKER_ENABLED", True))
+
+
+def _load_openai_circuit_state() -> dict[str, object] | None:
+    raw = get_runtime_coordinator().get_json(_OPENAI_CIRCUIT_STATE_KEY)
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("OpenAI circuit state is not valid JSON; clearing stale value")
+            get_runtime_coordinator().delete_json(_OPENAI_CIRCUIT_STATE_KEY)
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return raw if isinstance(raw, dict) else None
+
+
+def _base_openai_circuit_ttl_seconds(reason: str) -> int:
+    if reason == _OPENAI_CIRCUIT_REASON_QUOTA:
+        return max(60, int(config.OPENAI_CIRCUIT_QUOTA_OPEN_SECONDS))
+    if reason == _OPENAI_CIRCUIT_REASON_RATE_LIMIT:
+        return max(30, int(config.OPENAI_CIRCUIT_RATE_LIMIT_OPEN_SECONDS))
+    return max(30, int(config.OPENAI_CIRCUIT_PROVIDER_ERROR_OPEN_SECONDS))
+
+
+def _next_openai_circuit_ttl_seconds(reason: str, prior_state: dict[str, object] | None = None) -> int:
+    base_seconds = _base_openai_circuit_ttl_seconds(reason)
+    if not prior_state:
+        return base_seconds
+
+    phase = str(prior_state.get("state") or "").strip().lower()
+    if phase != "half_open":
+        return base_seconds
+
+    previous = int(prior_state.get("open_seconds") or base_seconds)
+    multiplied = int(max(base_seconds, round(previous * float(config.OPENAI_CIRCUIT_REOPEN_MULTIPLIER))))
+    return min(max(base_seconds, multiplied), int(config.OPENAI_CIRCUIT_MAX_OPEN_SECONDS))
+
+
+def _persist_openai_circuit_state(
+    *,
+    state: str,
+    reason: str,
+    open_seconds: int,
+    failure_count: int,
+    last_error_code: str | None = None,
+    last_error_message: str | None = None,
+) -> dict[str, object]:
+    now = _utc_now()
+    open_until = now + timedelta(seconds=max(1, int(open_seconds)))
+    payload: dict[str, object] = {
+        "state": state,
+        "reason": reason,
+        "opened_at": _serialize_timestamp(now),
+        "open_until": _serialize_timestamp(open_until),
+        "open_seconds": int(open_seconds),
+        "failure_count": max(1, int(failure_count)),
+        "last_error_code": str(last_error_code or "").strip() or None,
+        "last_error_message": str(last_error_message or "").strip() or None,
+    }
+    ttl_seconds = min(
+        int(config.OPENAI_CIRCUIT_MAX_OPEN_SECONDS) + int(config.OPENAI_CIRCUIT_HALF_OPEN_TTL_SECONDS) + 60,
+        max(int(open_seconds) + int(config.OPENAI_CIRCUIT_HALF_OPEN_TTL_SECONDS) + 60, 120),
+    )
+    get_runtime_coordinator().set_json(_OPENAI_CIRCUIT_STATE_KEY, json.dumps(payload), ttl_seconds)
+    return payload
+
+
+def _close_openai_circuit() -> None:
+    get_runtime_coordinator().delete_json(_OPENAI_CIRCUIT_STATE_KEY)
+
+
+def _extract_openai_error_code(error: Exception) -> str | None:
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            code = str(err.get("code") or err.get("type") or "").strip()
+            if code:
+                return code
+        code = str(body.get("code") or body.get("type") or "").strip()
+        if code:
+            return code
+    code = str(getattr(error, "code", "") or "").strip()
+    return code or None
+
+
+def _extract_openai_error_message(error: Exception) -> str:
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+        if body.get("message"):
+            return str(body["message"])
+    return str(error)
+
+
+def _classify_openai_provider_failure(error: Exception) -> str | None:
+    code = (_extract_openai_error_code(error) or "").lower()
+    message = _extract_openai_error_message(error).lower()
+    status_code = getattr(error, "status_code", None)
+    response = getattr(error, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+
+    if code == _OPENAI_CIRCUIT_REASON_QUOTA or "insufficient_quota" in message:
+        return _OPENAI_CIRCUIT_REASON_QUOTA
+
+    if isinstance(error, openai.RateLimitError) or status_code == 429:
+        return _OPENAI_CIRCUIT_REASON_RATE_LIMIT
+
+    if "rate limit" in message or "too many requests" in message:
+        return _OPENAI_CIRCUIT_REASON_RATE_LIMIT
+
+    if isinstance(error, (openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError)):
+        return _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR
+
+    if status_code in {500, 502, 503, 504}:
+        return _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR
+
+    if any(token in message for token in ("service unavailable", "server error", "bad gateway", "gateway timeout")):
+        return _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR
+
+    return None
+
+
+def _openai_circuit_counter_name(reason: str) -> tuple[str, int, int] | None:
+    if reason == _OPENAI_CIRCUIT_REASON_RATE_LIMIT:
+        return (
+            "openai:rate_limit",
+            int(config.OPENAI_CIRCUIT_RATE_LIMIT_THRESHOLD),
+            int(config.OPENAI_CIRCUIT_RATE_LIMIT_WINDOW_SECONDS),
+        )
+    if reason == _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR:
+        return (
+            "openai:provider_error",
+            int(config.OPENAI_CIRCUIT_PROVIDER_ERROR_THRESHOLD),
+            int(config.OPENAI_CIRCUIT_PROVIDER_ERROR_WINDOW_SECONDS),
+        )
+    return None
+
+
+def _trip_openai_circuit(reason: str, error: Exception, *, prior_state: dict[str, object] | None = None) -> dict[str, object] | None:
+    code = _extract_openai_error_code(error)
+    message = _extract_openai_error_message(error)
+
+    if reason == _OPENAI_CIRCUIT_REASON_QUOTA:
+        state = _persist_openai_circuit_state(
+            state="open",
+            reason=reason,
+            open_seconds=_next_openai_circuit_ttl_seconds(reason, prior_state),
+            failure_count=max(1, int((prior_state or {}).get("failure_count") or 0) + 1),
+            last_error_code=code,
+            last_error_message=message,
+        )
+        logger.warning(f"OpenAI circuit opened for quota exhaustion until {state.get('open_until')}")
+        return state
+
+    counter_spec = _openai_circuit_counter_name(reason)
+    if counter_spec is None:
+        return None
+
+    counter_name, threshold, window_seconds = counter_spec
+    failure_count = get_runtime_coordinator().increment_window_counter(counter_name, window_seconds)
+    if failure_count < threshold:
+        return None
+
+    state = _persist_openai_circuit_state(
+        state="open",
+        reason=reason,
+        open_seconds=_next_openai_circuit_ttl_seconds(reason, prior_state),
+        failure_count=failure_count,
+        last_error_code=code,
+        last_error_message=message,
+    )
+    logger.warning(
+        f"OpenAI circuit opened for {reason} after {failure_count} failures in {window_seconds}s "
+        f"until {state.get('open_until')}"
+    )
+    return state
+
+
+def _prepare_openai_circuit_probe(request_label: str) -> str | None:
+    if not _openai_circuit_enabled():
+        return None
+
+    coordinator = get_runtime_coordinator()
+    state = _load_openai_circuit_state()
+    if not state:
+        return None
+
+    reason = str(state.get("reason") or _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR)
+    now = _utc_now()
+    open_until = _parse_timestamp(state.get("open_until"))
+    phase = str(state.get("state") or "open").strip().lower() or "open"
+
+    if phase == "half_open":
+        probe_until = _parse_timestamp(state.get("probe_until"))
+        if probe_until is not None and probe_until > now:
+            raise OpenAICircuitOpenError(
+                reason=reason,
+                open_until=_serialize_timestamp(probe_until),
+                phase="half_open",
+            )
+        phase = "open"
+
+    if open_until is not None and open_until > now:
+        raise OpenAICircuitOpenError(
+            reason=reason,
+            open_until=_serialize_timestamp(open_until),
+            phase=phase,
+        )
+
+    probe_token = coordinator.acquire_lock(
+        _OPENAI_CIRCUIT_HALF_OPEN_LOCK,
+        int(config.OPENAI_CIRCUIT_HALF_OPEN_TTL_SECONDS),
+    )
+    if not probe_token:
+        raise OpenAICircuitOpenError(
+            reason=reason,
+            open_until=_serialize_timestamp(open_until or now),
+            phase="half_open",
+        )
+
+    probe_until = now + timedelta(seconds=int(config.OPENAI_CIRCUIT_HALF_OPEN_TTL_SECONDS))
+    probe_state = dict(state)
+    probe_state.update({
+        "state": "half_open",
+        "probe_started_at": _serialize_timestamp(now),
+        "probe_until": _serialize_timestamp(probe_until),
+    })
+    ttl_seconds = max(int(config.OPENAI_CIRCUIT_HALF_OPEN_TTL_SECONDS) + 60, 120)
+    coordinator.set_json(_OPENAI_CIRCUIT_STATE_KEY, json.dumps(probe_state), ttl_seconds)
+    logger.warning(f"{request_label}: OpenAI circuit entering half-open probe mode until {probe_state['probe_until']}")
+    return probe_token
+
+
+def _close_openai_circuit_probe(probe_token: str | None, request_label: str) -> None:
+    if not probe_token:
+        return
+    _close_openai_circuit()
+    get_runtime_coordinator().release_lock(_OPENAI_CIRCUIT_HALF_OPEN_LOCK, probe_token)
+    logger.info(f"{request_label}: OpenAI circuit closed after successful half-open probe")
+
+
+def _reopen_openai_circuit_from_probe(probe_token: str | None, error: Exception, request_label: str) -> dict[str, object] | None:
+    prior_state = _load_openai_circuit_state()
+    reason = _classify_openai_provider_failure(error) or _OPENAI_CIRCUIT_REASON_PROVIDER_ERROR
+    state = _persist_openai_circuit_state(
+        state="open",
+        reason=reason,
+        open_seconds=_next_openai_circuit_ttl_seconds(reason, prior_state),
+        failure_count=max(1, int((prior_state or {}).get("failure_count") or 0) + 1),
+        last_error_code=_extract_openai_error_code(error),
+        last_error_message=_extract_openai_error_message(error),
+    )
+    if probe_token:
+        get_runtime_coordinator().release_lock(_OPENAI_CIRCUIT_HALF_OPEN_LOCK, probe_token)
+    logger.warning(f"{request_label}: OpenAI half-open probe failed; circuit reopened until {state.get('open_until')}")
+    return state
 
 _SOCIAL_SENTIMENT_TAGS = {
     "Anxious",
@@ -540,7 +848,9 @@ def _request_json(*, system_prompt: str, user_context: str, max_tokens: int, req
     ]
 
     for attempt in range(retry_limit + 1):
+        probe_token: str | None = None
         try:
+            probe_token = _prepare_openai_circuit_probe(request_label)
             attempt_max_tokens = max_tokens + (attempt * 400)
             request_started_at = time.perf_counter()
             response = client.chat.completions.create(
@@ -564,8 +874,31 @@ def _request_json(*, system_prompt: str, user_context: str, max_tokens: int, req
                 f"{request_label}: AI response received id={getattr(response, 'id', 'unknown')} model={model_name}"
             )
             raw = response.choices[0].message.content
+            _close_openai_circuit_probe(probe_token, request_label)
             return _safe_json_object(raw)
+        except OpenAICircuitOpenError:
+            raise
         except Exception as exc:
+            provider_reason = _classify_openai_provider_failure(exc)
+            if probe_token:
+                if provider_reason:
+                    reopened_state = _reopen_openai_circuit_from_probe(probe_token, exc, request_label)
+                    raise OpenAICircuitOpenError(
+                        reason=str((reopened_state or {}).get("reason") or provider_reason),
+                        open_until=str((reopened_state or {}).get("open_until") or ""),
+                        phase="open",
+                    ) from exc
+                _close_openai_circuit_probe(probe_token, request_label)
+
+            if _openai_circuit_enabled() and provider_reason:
+                opened_state = _trip_openai_circuit(provider_reason, exc, prior_state=_load_openai_circuit_state())
+                if opened_state:
+                    raise OpenAICircuitOpenError(
+                        reason=str(opened_state.get("reason") or provider_reason),
+                        open_until=str(opened_state.get("open_until") or ""),
+                        phase="open",
+                    ) from exc
+
             if attempt >= retry_limit:
                 raise
             logger.warning(
@@ -890,6 +1223,13 @@ def extract_intents(
         channel_id = payload.get("channel_id")
         post_id = payload.get("post_id")
         scope_key = payload.get("scope_key") or ""
+
+        if isinstance(error, OpenAICircuitOpenError):
+            logger.warning(
+                f"Comment analysis deferred for user {telegram_user_id} post {post_id}: provider circuit {error}"
+            )
+            stats["blocked_groups"] = int(stats["blocked_groups"]) + 1
+            return
 
         logger.error(f"AI processing error for user {telegram_user_id} post {post_id}: {error}")
         _record_failure_scope(
@@ -1362,16 +1702,19 @@ def _analyze_post_batch_payload(posts: list[dict]) -> dict[str, dict]:
     return _validate_post_batch_payload(parsed, posts)
 
 
-def _process_single_post(post: dict, supabase_writer) -> bool:
+def _process_single_post(post: dict, supabase_writer) -> str:
     if _should_skip_post_analysis(post):
         supabase_writer.mark_post_processed(post["id"])
-        return False
+        return "skipped"
 
     try:
         parsed = _analyze_single_post_payload(post, supabase_writer)
         _persist_post_analysis(post, parsed, supabase_writer)
         _clear_failure_scope(supabase_writer, scope_type="post", scope_key=str(post["id"]))
-        return True
+        return "saved"
+    except OpenAICircuitOpenError as error:
+        logger.warning(f"Post intent extraction deferred for post {post['id']}: provider circuit {error}")
+        return "blocked"
     except Exception as e:
         logger.error(f"Post intent extraction failed for post {post['id']}: {e}")
         _record_failure_scope(
@@ -1384,7 +1727,7 @@ def _process_single_post(post: dict, supabase_writer) -> bool:
             error=e,
         )
         # Do NOT mark as processed — retry on the next cycle
-        return False
+        return "failed"
 
 
 def extract_post_intents(
@@ -1474,11 +1817,20 @@ def extract_post_intents(
                 stats["deferred_posts"] = int(stats["deferred_posts"]) + (len(chunk) - index)
                 logger.warning("Post extraction deadline reached during fallback; deferring remaining posts")
                 return
-            if _process_single_post(post, supabase_writer):
+            result = _process_single_post(post, supabase_writer)
+            if result == "saved":
                 stats["saved"] = int(stats["saved"]) + 1
                 stats["succeeded_posts"] = int(stats["succeeded_posts"]) + 1
-            else:
+            elif result == "blocked":
+                stats["blocked_posts"] = int(stats["blocked_posts"]) + 1
+            elif result == "failed":
                 stats["failed_posts"] = int(stats["failed_posts"]) + 1
+
+    def _mark_chunk_blocked(chunk: list[dict], error: OpenAICircuitOpenError) -> None:
+        stats["blocked_posts"] = int(stats["blocked_posts"]) + len(chunk)
+        logger.warning(
+            f"Post analysis deferred for {len(chunk)} posts: provider circuit {error}"
+        )
 
     if workers <= 1:
         for chunk_index, chunk in enumerate(chunks):
@@ -1489,10 +1841,13 @@ def extract_post_intents(
                 break
 
             if len(chunk) == 1:
-                if _process_single_post(chunk[0], supabase_writer):
+                result = _process_single_post(chunk[0], supabase_writer)
+                if result == "saved":
                     stats["saved"] = int(stats["saved"]) + 1
                     stats["succeeded_posts"] = int(stats["succeeded_posts"]) + 1
-                else:
+                elif result == "blocked":
+                    stats["blocked_posts"] = int(stats["blocked_posts"]) + 1
+                elif result == "failed":
                     stats["failed_posts"] = int(stats["failed_posts"]) + 1
                 continue
 
@@ -1503,6 +1858,8 @@ def extract_post_intents(
             try:
                 parsed_by_post_id = _analyze_post_batch_payload(chunk)
                 _handle_chunk_success(chunk, parsed_by_post_id)
+            except OpenAICircuitOpenError as circuit_error:
+                _mark_chunk_blocked(chunk, circuit_error)
             except Exception as batch_error:
                 stats["batch_failures"] = int(stats["batch_failures"]) + 1
                 logger.warning(
@@ -1552,6 +1909,8 @@ def extract_post_intents(
                     try:
                         parsed_by_post_id = future.result()
                         _handle_chunk_success(chunk, parsed_by_post_id)
+                    except OpenAICircuitOpenError as circuit_error:
+                        _mark_chunk_blocked(chunk, circuit_error)
                     except Exception as batch_error:
                         stats["batch_failures"] = int(stats["batch_failures"]) + 1
                         logger.warning(
@@ -1583,4 +1942,4 @@ def extract_post_intents(
 
 def extract_post_intent(post: dict, supabase_writer) -> bool:
     """Analyze a single channel post with full behavioral intelligence framework."""
-    return _process_single_post(post, supabase_writer)
+    return _process_single_post(post, supabase_writer) == "saved"
