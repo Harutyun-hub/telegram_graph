@@ -111,6 +111,13 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
 
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
     if config.IS_STAGING:
+        if config.STAGING_ENABLE_BACKGROUND_JOBS:
+            logger.warning(
+                "Staging background jobs explicitly enabled | role={} run_startup_warmers={}",
+                role,
+                warmers_enabled,
+            )
+            return role, warmers_enabled
         if role != "web":
             logger.warning("Staging/testing environment forced to APP_ROLE=web (was {})", role)
         if warmers_enabled:
