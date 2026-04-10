@@ -47,6 +47,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
 
         with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server.config, "validate"), \
              patch.object(server.config, "IS_LOCKED_ENV", False), \
              patch.object(server.config, "REDIS_URL", ""), \
              patch.object(server, "RUN_STARTUP_WARMERS", False), \
@@ -76,6 +77,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
 
         with patch.object(server, "APP_ROLE", "worker"), \
+             patch.object(server.config, "validate"), \
              patch.object(server.config, "IS_LOCKED_ENV", False), \
              patch.object(server.config, "REDIS_URL", ""), \
              patch.object(server, "RUN_STARTUP_WARMERS", False), \
@@ -101,6 +103,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
                 return None
 
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "validate"), \
              patch.object(server, "get_runtime_coordinator", return_value=_CoordinatorStub(ping_result=False)), \
              patch.object(server, "_should_run_background_jobs", return_value=False):
             with self.assertRaises(RuntimeError) as ctx:

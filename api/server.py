@@ -14,6 +14,7 @@ Run:
   venv/bin/python -m uvicorn api.server:app --reload --port 8001
 """
 from __future__ import annotations
+import gzip
 import sys, os
 import json
 import hashlib
@@ -23,9 +24,10 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,10 +61,15 @@ else:  # pragma: no cover - exercised when orjson isn't installed locally
     ORJSONResponse = None
 
 from api.aggregator import (
+    CACHE_TTL_SECONDS as DASHBOARD_CACHE_TTL_SECONDS,
+    CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
+    MAX_STALE_SECONDS as DASHBOARD_MAX_STALE_SECONDS,
+    DetailRefreshUnavailableError,
+    build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
-    invalidate_cache
+    invalidate_cache, peek_dashboard_snapshot, prime_dashboard_snapshot
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
@@ -88,6 +95,7 @@ from api.source_resolution import (
 )
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
+from api.runtime_executors import run_background, run_request
 from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
 from social.store import SocialStore
@@ -137,8 +145,27 @@ _SERVER_TIMING_PATHS = {
     "/api/topics/detail",
     "/api/topics/evidence",
 }
+_DASHBOARD_PERSISTED_SCHEMA_VERSION = 1
+_DASHBOARD_PERSISTED_PREFIX = "dashboard-cache/v1"
+_DASHBOARD_DEFAULT_ALIAS_PATH = f"{_DASHBOARD_PERSISTED_PREFIX}/default-latest.json.gz"
+_FRESHNESS_PERSISTED_SCHEMA_VERSION = 1
+_FRESHNESS_PERSISTED_PATH = "freshness-cache/v1/latest.json.gz"
+_SUPABASE_CACHE_READ_TIMEOUT_SECONDS = max(1.0, float(os.getenv("SUPABASE_CACHE_READ_TIMEOUT_SECONDS", "5")))
+_DEFAULT_DASHBOARD_LOOKBACK_DAYS = 14
+_HISTORICAL_FASTPATH_ENABLED = str(
+    os.getenv("DASH_HISTORICAL_FASTPATH_ENABLED", "true")
+).strip().lower() in {"1", "true", "yes", "on"}
+_HISTORICAL_FASTPATH_SKIP_TIERS = {
+    item.strip().lower()
+    for item in os.getenv("DASH_HISTORICAL_FASTPATH_SKIP_TIERS", "network,comparative,predictive").split(",")
+    if item.strip()
+}
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
+_dashboard_refresh_control_lock = threading.Lock()
+_dashboard_refresh_inflight: set[str] = set()
+_freshness_refresh_control_lock = threading.Lock()
+_freshness_refresh_inflight = False
 
 
 def _init_sentry() -> None:
@@ -158,6 +185,10 @@ def _init_sentry() -> None:
     logger.info(f"Sentry enabled | traces_sample_rate={SENTRY_TRACES_SAMPLE_RATE}")
 
 
+def _should_run_topic_overviews_materializer() -> bool:
+    return _should_run_background_jobs() and bool(config.FEATURE_TOPIC_OVERVIEWS_AI)
+
+
 def _trim_dashboard_payload(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key not in _DASHBOARD_RESPONSE_DROP_KEYS}
 
@@ -175,6 +206,739 @@ def _dashboard_response(payload: dict) -> JSONResponse:
             _orjson_dashboard_verified = True
         return ORJSONResponse(content=payload)
     return JSONResponse(content=payload)
+
+
+def _json_dumps_bytes(payload: dict) -> bytes:
+    if orjson is not None:
+        return orjson.dumps(payload)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _json_loads_bytes(raw: bytes) -> dict:
+    if orjson is not None:
+        return orjson.loads(raw)
+    return json.loads(raw.decode("utf-8"))
+
+
+def _dashboard_snapshot_storage_path(cache_key: str) -> str:
+    return f"{_DASHBOARD_PERSISTED_PREFIX}/{quote(str(cache_key or '').strip(), safe='')}.json.gz"
+
+
+def _dashboard_context_from_trusted_end(trusted_end: date):
+    from_date = (trusted_end - timedelta(days=_DEFAULT_DASHBOARD_LOOKBACK_DAYS)).isoformat()
+    return build_dashboard_date_context(from_date, trusted_end.isoformat())
+
+
+def _serialize_runtime_envelope(envelope: dict) -> bytes:
+    return gzip.compress(_json_dumps_bytes(envelope))
+
+
+def _deserialize_runtime_envelope(raw: bytes) -> dict:
+    return _json_loads_bytes(gzip.decompress(raw))
+
+
+def _load_persisted_envelope(path: str, *, schema_version: int) -> dict[str, Any]:
+    blob = get_supabase_writer().read_runtime_blob(path, timeout_seconds=_SUPABASE_CACHE_READ_TIMEOUT_SECONDS)
+    status = str(blob.get("status") or "error")
+    read_ms = float(blob.get("elapsed_ms") or 0.0)
+    if status != "ok":
+        mapped = {"missing": "miss", "timeout": "timeout"}.get(status, "error")
+        return {"status": mapped, "readMs": read_ms, "envelope": None, "error": blob.get("error") or ""}
+
+    try:
+        envelope = _deserialize_runtime_envelope(blob.get("body") or b"")
+    except Exception as exc:
+        logger.warning("Persisted runtime payload decode failed | path={} error={}", path, exc)
+        return {"status": "error", "readMs": read_ms, "envelope": None, "error": str(exc)}
+
+    if not isinstance(envelope, dict):
+        return {"status": "error", "readMs": read_ms, "envelope": None, "error": "Persisted payload must be an object"}
+
+    try:
+        stored_schema = int(envelope.get("schemaVersion") or 0)
+    except Exception:
+        stored_schema = 0
+    if stored_schema != schema_version:
+        return {"status": "schema_mismatch", "readMs": read_ms, "envelope": None, "error": ""}
+
+    return {"status": "hit", "readMs": read_ms, "envelope": envelope, "error": ""}
+
+
+def _load_persisted_freshness_snapshot() -> dict[str, Any]:
+    loaded = _load_persisted_envelope(
+        _FRESHNESS_PERSISTED_PATH,
+        schema_version=_FRESHNESS_PERSISTED_SCHEMA_VERSION,
+    )
+    if loaded["status"] != "hit":
+        return loaded
+
+    envelope = loaded["envelope"] or {}
+    snapshot = envelope.get("data")
+    snapshot_built_at = _parse_snapshot_date(envelope.get("snapshotBuiltAt"))
+    if not isinstance(snapshot, dict) or snapshot_built_at is None:
+        return {
+            "status": "error",
+            "readMs": loaded["readMs"],
+            "envelope": None,
+            "error": "Persisted freshness payload is malformed",
+        }
+    loaded.update({"snapshot": snapshot, "snapshotBuiltAt": snapshot_built_at})
+    return loaded
+
+
+def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
+    loaded = _load_persisted_envelope(
+        path,
+        schema_version=_DASHBOARD_PERSISTED_SCHEMA_VERSION,
+    )
+    if loaded["status"] != "hit":
+        return loaded
+
+    envelope = loaded["envelope"] or {}
+    snapshot = envelope.get("data")
+    meta = envelope.get("meta")
+    snapshot_built_at = _parse_snapshot_date(envelope.get("snapshotBuiltAt"))
+    trusted_end_date = str(envelope.get("trustedEndDate") or "").strip()
+    from_date = str(envelope.get("fromDate") or "").strip()
+    to_date = str(envelope.get("toDate") or "").strip()
+
+    if not isinstance(snapshot, dict) or not isinstance(meta, dict) or snapshot_built_at is None:
+        return {
+            "status": "error",
+            "readMs": loaded["readMs"],
+            "envelope": None,
+            "error": "Persisted dashboard payload is malformed",
+        }
+
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "readMs": loaded["readMs"],
+            "envelope": None,
+            "error": f"Invalid persisted dashboard context: {exc}",
+        }
+
+    loaded.update(
+        {
+            "snapshot": snapshot,
+            "meta": meta,
+            "ctx": ctx,
+            "snapshotBuiltAt": snapshot_built_at,
+            "trustedEndDate": trusted_end_date or ctx.to_date.isoformat(),
+        }
+    )
+    return loaded
+
+
+def _load_recent_default_dashboard_snapshot(_trusted_end: date) -> dict[str, Any]:
+    return {"status": "miss", "readMs": None}
+
+
+def _snapshot_age_seconds(snapshot_built_at: datetime | None) -> float | None:
+    if snapshot_built_at is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - snapshot_built_at).total_seconds())
+
+
+def _is_persisted_snapshot_fresh(snapshot_built_at: datetime | None) -> bool:
+    age_seconds = _snapshot_age_seconds(snapshot_built_at)
+    return age_seconds is not None and age_seconds < DASHBOARD_CACHE_TTL_SECONDS
+
+
+def _is_persisted_snapshot_usable(snapshot_built_at: datetime | None) -> bool:
+    age_seconds = _snapshot_age_seconds(snapshot_built_at)
+    return age_seconds is not None and age_seconds < DASHBOARD_MAX_STALE_SECONDS
+
+
+def _cached_freshness_resolution(*, allow_live: bool) -> dict[str, Any]:
+    persisted = _load_persisted_freshness_snapshot()
+    if persisted.get("status") == "hit":
+        return {
+            "snapshot": persisted.get("snapshot"),
+            "source": "persisted",
+            "snapshotBuiltAt": persisted.get("snapshotBuiltAt"),
+            "persistedReadStatus": persisted.get("status"),
+            "persistedReadMs": persisted.get("readMs"),
+        }
+
+    if not allow_live:
+        return {
+            "snapshot": None,
+            "source": None,
+            "snapshotBuiltAt": None,
+            "persistedReadStatus": persisted.get("status"),
+            "persistedReadMs": persisted.get("readMs"),
+        }
+
+    snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+    return {
+        "snapshot": snapshot,
+        "source": "live",
+        "snapshotBuiltAt": _parse_snapshot_date(snapshot.get("generated_at")) or datetime.now(timezone.utc),
+        "persistedReadStatus": persisted.get("status"),
+        "persistedReadMs": persisted.get("readMs"),
+    }
+
+
+def _persist_freshness_snapshot_sync(snapshot: dict) -> dict[str, Any]:
+    envelope = {
+        "schemaVersion": _FRESHNESS_PERSISTED_SCHEMA_VERSION,
+        "snapshotBuiltAt": snapshot.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+        "data": snapshot,
+    }
+    payload = _serialize_runtime_envelope(envelope)
+    started_at = time.perf_counter()
+    ok = get_supabase_writer().save_runtime_blob(
+        _FRESHNESS_PERSISTED_PATH,
+        payload,
+        content_type="application/gzip",
+    )
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    level = "INFO" if ok else "WARNING"
+    logger.log(
+        level,
+        json.dumps(
+            {
+                "level": level.lower(),
+                "message": "freshness_snapshot_persisted",
+                "ok": ok,
+                "persistedWriteMs": elapsed_ms,
+                "path": _FRESHNESS_PERSISTED_PATH,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ),
+    )
+    return {"ok": ok, "persistedWriteMs": elapsed_ms}
+
+
+def _persist_freshness_snapshot_async(snapshot: dict) -> None:
+    thread = threading.Thread(
+        target=_persist_freshness_snapshot_sync,
+        args=(dict(snapshot),),
+        daemon=True,
+        name="freshness-persist",
+    )
+    thread.start()
+
+
+def _ensure_background_freshness_refresh() -> bool:
+    global _freshness_refresh_inflight
+    with _freshness_refresh_control_lock:
+        if _freshness_refresh_inflight:
+            return False
+        _freshness_refresh_inflight = True
+
+    def _worker() -> None:
+        global _freshness_refresh_inflight
+        try:
+            snapshot = _dashboard_freshness_snapshot(force_refresh=True)
+            _persist_freshness_snapshot_sync(snapshot)
+        except Exception as exc:
+            logger.error(f"Background freshness refresh failed: {exc}")
+        finally:
+            with _freshness_refresh_control_lock:
+                _freshness_refresh_inflight = False
+
+    threading.Thread(target=_worker, daemon=True, name="freshness-refresh").start()
+    return True
+
+
+def _should_persist_dashboard_snapshot(meta: dict[str, Any]) -> bool:
+    if bool(meta.get("isStale")):
+        return False
+    degraded = {
+        str(name).strip()
+        for name in (meta.get("degradedTiers") or [])
+        if str(name).strip()
+    }
+    if degraded.intersection(DASHBOARD_CRITICAL_TIERS):
+        return False
+    return True
+
+
+def _build_dashboard_persisted_envelope(
+    ctx,
+    snapshot: dict,
+    meta: dict[str, Any],
+    *,
+    trusted_end_date: str,
+) -> tuple[dict[str, Any], datetime]:
+    snapshot_built_at = _parse_snapshot_date(meta.get("snapshotBuiltAt")) or datetime.now(timezone.utc)
+    envelope = {
+        "schemaVersion": _DASHBOARD_PERSISTED_SCHEMA_VERSION,
+        "snapshotBuiltAt": snapshot_built_at.isoformat(),
+        "trustedEndDate": trusted_end_date,
+        "fromDate": ctx.from_date.isoformat(),
+        "toDate": ctx.to_date.isoformat(),
+        "cacheKey": ctx.cache_key,
+        "data": snapshot,
+        "meta": dict(meta),
+    }
+    return envelope, snapshot_built_at
+
+
+def _schedule_default_topics_prewarm(_ctx) -> bool:
+    return False
+
+
+def _persist_dashboard_snapshot_sync(
+    ctx,
+    snapshot: dict,
+    meta: dict[str, Any],
+    *,
+    trusted_end_date: str,
+    write_default_alias: bool,
+) -> dict[str, Any]:
+    if not _should_persist_dashboard_snapshot(meta):
+        return {"ok": False, "persistedWriteMs": 0.0, "skipped": True}
+
+    envelope, snapshot_built_at = _build_dashboard_persisted_envelope(
+        ctx,
+        snapshot,
+        meta,
+        trusted_end_date=trusted_end_date,
+    )
+    payload = _serialize_runtime_envelope(envelope)
+    started_at = time.perf_counter()
+    primary_path = _dashboard_snapshot_storage_path(ctx.cache_key)
+    writer = get_supabase_writer()
+    primary_ok = writer.save_runtime_blob(primary_path, payload, content_type="application/gzip")
+    alias_ok = True
+    if write_default_alias and primary_ok:
+        alias_ok = writer.save_runtime_blob(
+            _DASHBOARD_DEFAULT_ALIAS_PATH,
+            payload,
+            content_type="application/gzip",
+        )
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    updated_meta = dict(meta)
+    updated_meta["persistedWriteMs"] = elapsed_ms
+    if primary_ok:
+        prime_dashboard_snapshot(
+            ctx,
+            snapshot,
+            updated_meta,
+            cached_at_ts=snapshot_built_at.timestamp(),
+        )
+        if write_default_alias:
+            _schedule_default_topics_prewarm(ctx)
+    return {"ok": bool(primary_ok and alias_ok), "persistedWriteMs": elapsed_ms}
+
+
+def _persist_dashboard_snapshot_async(
+    ctx,
+    snapshot: dict,
+    meta: dict[str, Any],
+    *,
+    trusted_end_date: str,
+    write_default_alias: bool,
+) -> None:
+    thread = threading.Thread(
+        target=_persist_dashboard_snapshot_sync,
+        args=(ctx, dict(snapshot), dict(meta)),
+        kwargs={
+            "trusted_end_date": trusted_end_date,
+            "write_default_alias": write_default_alias,
+        },
+        daemon=True,
+        name=f"dashboard-persist-{ctx.cache_key}",
+    )
+    thread.start()
+
+
+def _ensure_background_dashboard_refresh(
+    ctx,
+    *,
+    trusted_end_date: str,
+    write_default_alias: bool,
+) -> bool:
+    with _dashboard_refresh_control_lock:
+        if ctx.cache_key in _dashboard_refresh_inflight:
+            return False
+        _dashboard_refresh_inflight.add(ctx.cache_key)
+
+    def _worker() -> None:
+        try:
+            snapshot, runtime_meta = get_dashboard_snapshot(ctx, force_refresh=True)
+            _persist_dashboard_snapshot_sync(
+                ctx,
+                snapshot,
+                runtime_meta,
+                trusted_end_date=trusted_end_date,
+                write_default_alias=write_default_alias,
+            )
+        except Exception as exc:
+            logger.error(f"Background dashboard refresh failed | key={ctx.cache_key} error={exc}")
+        finally:
+            with _dashboard_refresh_control_lock:
+                _dashboard_refresh_inflight.discard(ctx.cache_key)
+
+    threading.Thread(target=_worker, daemon=True, name=f"dashboard-refresh-{ctx.cache_key}").start()
+    return True
+
+
+def _build_dashboard_api_payload(
+    *,
+    ctx,
+    trusted_end_date: str,
+    dashboard_data: dict,
+    dashboard_runtime_meta: dict[str, Any],
+    requested_from: str,
+    requested_to: str,
+    cache_source: str,
+    freshness_snapshot: dict | None,
+    freshness_source: str | None,
+    persisted_read_status: str | None = None,
+    persisted_read_ms: float | None = None,
+    cache_status_override: str | None = None,
+    default_resolution_path: str | None = None,
+) -> dict[str, Any]:
+    trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
+    response_meta = {
+        "from": ctx.from_date.isoformat(),
+        "to": ctx.to_date.isoformat(),
+        "requestedFrom": requested_from,
+        "requestedTo": requested_to,
+        "days": ctx.days,
+        "mode": "operational" if ctx.is_operational else "intelligence",
+        "rangeLabel": ctx.range_label,
+        "trustedEndDate": trusted_end_date,
+        "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
+        "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
+        "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
+        "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
+        "cacheStatus": cache_status_override or dashboard_runtime_meta.get("cacheStatus"),
+        "isStale": dashboard_runtime_meta.get("isStale", False),
+        "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
+        "buildMode": dashboard_runtime_meta.get("buildMode"),
+        "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
+        "cacheSource": cache_source,
+        "freshnessSource": freshness_source,
+        "persistedReadStatus": persisted_read_status,
+        "persistedReadMs": persisted_read_ms,
+        "persistedWriteMs": dashboard_runtime_meta.get("persistedWriteMs"),
+        "defaultResolutionPath": default_resolution_path,
+        "freshness": {
+            "status": freshness_snapshot.get("health", {}).get("status") if isinstance(freshness_snapshot, dict) else None,
+            "generatedAt": freshness_snapshot.get("generated_at") if isinstance(freshness_snapshot, dict) else None,
+        },
+    }
+    response_meta["responseBytes"] = -1
+    response_meta["responseSerializeMs"] = 0
+    return {"data": trimmed_dashboard_data, "meta": response_meta}
+
+
+def _should_use_historical_fastpath(*, default_request: bool) -> bool:
+    return bool(_HISTORICAL_FASTPATH_ENABLED and not default_request and _HISTORICAL_FASTPATH_SKIP_TIERS)
+
+
+def _newer_snapshot_choice(
+    first: tuple[str, dict, dict[str, Any]] | None,
+    second: tuple[str, dict, dict[str, Any]] | None,
+) -> tuple[str, dict, dict[str, Any]] | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+    first_built = _parse_snapshot_date(first[2].get("snapshotBuiltAt"))
+    second_built = _parse_snapshot_date(second[2].get("snapshotBuiltAt"))
+    if first_built is None:
+        return second
+    if second_built is None:
+        return first
+    return first if first_built >= second_built else second
+
+
+def _build_dashboard_response_payload(
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> dict[str, Any]:
+    default_request = not from_date or not to_date
+    recent_default_fallback: dict[str, Any] | None = None
+    recent_default_fallback_checked = False
+    freshness_snapshot: dict | None = None
+    freshness_source: str | None = None
+    persisted_read_status: str | None = None
+    persisted_read_ms: float | None = None
+
+    if default_request:
+        freshness_resolution = _cached_freshness_resolution(allow_live=False)
+        freshness_snapshot = freshness_resolution.get("snapshot")
+        freshness_source = freshness_resolution.get("source")
+
+        if freshness_snapshot is not None:
+            trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
+            ctx = _dashboard_context_from_trusted_end(trusted_end)
+            trusted_end_iso = trusted_end.isoformat()
+        else:
+            default_snapshot = _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)
+            persisted_read_status = default_snapshot.get("status")
+            persisted_read_ms = default_snapshot.get("readMs")
+            if default_snapshot.get("status") == "hit" and _is_persisted_snapshot_usable(default_snapshot.get("snapshotBuiltAt")):
+                ctx = default_snapshot["ctx"]
+                trusted_end_iso = str(default_snapshot.get("trustedEndDate") or ctx.to_date.isoformat())
+                dashboard_meta = dict(default_snapshot.get("meta") or {})
+                dashboard_meta["isStale"] = not _is_persisted_snapshot_fresh(default_snapshot.get("snapshotBuiltAt"))
+                prime_dashboard_snapshot(
+                    ctx,
+                    default_snapshot["snapshot"],
+                    dashboard_meta,
+                    cached_at_ts=default_snapshot["snapshotBuiltAt"].timestamp(),
+                )
+                refresh_started = False
+                if dashboard_meta.get("isStale"):
+                    refresh_started = _ensure_background_dashboard_refresh(
+                        ctx,
+                        trusted_end_date=trusted_end_iso,
+                        write_default_alias=True,
+                    )
+                _ensure_background_freshness_refresh()
+                return _build_dashboard_api_payload(
+                    ctx=ctx,
+                    trusted_end_date=trusted_end_iso,
+                    dashboard_data=default_snapshot["snapshot"],
+                    dashboard_runtime_meta=dashboard_meta,
+                    requested_from=ctx.from_date.isoformat(),
+                    requested_to=ctx.to_date.isoformat(),
+                    cache_source="persisted",
+                    freshness_snapshot=None,
+                    freshness_source=None,
+                    persisted_read_status=persisted_read_status,
+                    persisted_read_ms=persisted_read_ms,
+                    cache_status_override=(
+                        "persisted_stale_while_revalidate" if dashboard_meta.get("isStale") and refresh_started
+                        else "persisted_stale_refresh_inflight" if dashboard_meta.get("isStale")
+                        else "persisted_fresh"
+                    ),
+                    default_resolution_path="persisted_alias",
+                )
+
+            freshness_resolution = _cached_freshness_resolution(allow_live=True)
+            freshness_snapshot = freshness_resolution.get("snapshot")
+            freshness_source = freshness_resolution.get("source")
+            trusted_end = _trusted_end_date_from_freshness(freshness_snapshot or {})
+            ctx = _dashboard_context_from_trusted_end(trusted_end)
+            trusted_end_iso = trusted_end.isoformat()
+
+            recent_default_fallback = _load_recent_default_dashboard_snapshot(ctx.to_date)
+            recent_default_fallback_checked = True
+            if recent_default_fallback.get("status") == "hit":
+                fallback_meta = dict(recent_default_fallback.get("meta") or {})
+                fallback_meta["isStale"] = True
+                prime_dashboard_snapshot(
+                    recent_default_fallback["ctx"],
+                    recent_default_fallback["snapshot"],
+                    fallback_meta,
+                    cached_at_ts=recent_default_fallback["snapshotBuiltAt"].timestamp(),
+                )
+                _ensure_background_dashboard_refresh(
+                    recent_default_fallback["ctx"],
+                    trusted_end_date=str(
+                        recent_default_fallback.get("trustedEndDate")
+                        or recent_default_fallback["ctx"].to_date.isoformat()
+                    ),
+                    write_default_alias=True,
+                )
+                return _build_dashboard_api_payload(
+                    ctx=recent_default_fallback["ctx"],
+                    trusted_end_date=str(
+                        recent_default_fallback.get("trustedEndDate")
+                        or recent_default_fallback["ctx"].to_date.isoformat()
+                    ),
+                    dashboard_data=recent_default_fallback["snapshot"],
+                    dashboard_runtime_meta=fallback_meta,
+                    requested_from=ctx.from_date.isoformat(),
+                    requested_to=ctx.to_date.isoformat(),
+                    cache_source="persisted",
+                    freshness_snapshot=freshness_snapshot,
+                    freshness_source=freshness_source,
+                    persisted_read_status=recent_default_fallback.get("status"),
+                    persisted_read_ms=recent_default_fallback.get("readMs"),
+                    cache_status_override="persisted_recent_fallback_while_revalidate",
+                    default_resolution_path="persisted_recent_fallback",
+                )
+    else:
+        ctx = build_dashboard_date_context(from_date or "", to_date or "")
+        trusted_end_iso = ctx.to_date.isoformat()
+        freshness_resolution = _cached_freshness_resolution(allow_live=False)
+        freshness_snapshot = freshness_resolution.get("snapshot")
+        freshness_source = freshness_resolution.get("source")
+
+    requested_from = from_date or ctx.from_date.isoformat()
+    requested_to = to_date or ctx.to_date.isoformat()
+
+    memory_snapshot, memory_meta, memory_state = peek_dashboard_snapshot(ctx)
+    if memory_state == "fresh" and memory_snapshot is not None and memory_meta is not None:
+        return _build_dashboard_api_payload(
+            ctx=ctx,
+            trusted_end_date=trusted_end_iso,
+            dashboard_data=memory_snapshot,
+            dashboard_runtime_meta=memory_meta,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            cache_source="memory",
+            freshness_snapshot=freshness_snapshot,
+            freshness_source=freshness_source,
+            default_resolution_path="memory",
+        )
+
+    persisted_snapshot = _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))
+    persisted_read_status = persisted_snapshot.get("status")
+    persisted_read_ms = persisted_snapshot.get("readMs")
+
+    if default_request and persisted_snapshot.get("status") != "hit" and not recent_default_fallback_checked:
+        recent_default_fallback = _load_recent_default_dashboard_snapshot(ctx.to_date)
+        recent_default_fallback_checked = True
+
+    if (
+        default_request
+        and persisted_snapshot.get("status") != "hit"
+        and recent_default_fallback is not None
+        and recent_default_fallback.get("status") == "hit"
+    ):
+        fallback_meta = dict(recent_default_fallback.get("meta") or {})
+        fallback_meta["isStale"] = True
+        prime_dashboard_snapshot(
+            recent_default_fallback["ctx"],
+            recent_default_fallback["snapshot"],
+            fallback_meta,
+            cached_at_ts=recent_default_fallback["snapshotBuiltAt"].timestamp(),
+        )
+        _ensure_background_dashboard_refresh(
+            recent_default_fallback["ctx"],
+            trusted_end_date=str(
+                recent_default_fallback.get("trustedEndDate")
+                or recent_default_fallback["ctx"].to_date.isoformat()
+            ),
+            write_default_alias=True,
+        )
+        return _build_dashboard_api_payload(
+            ctx=recent_default_fallback["ctx"],
+            trusted_end_date=str(
+                recent_default_fallback.get("trustedEndDate")
+                or recent_default_fallback["ctx"].to_date.isoformat()
+            ),
+            dashboard_data=recent_default_fallback["snapshot"],
+            dashboard_runtime_meta=fallback_meta,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            cache_source="persisted",
+            freshness_snapshot=freshness_snapshot,
+            freshness_source=freshness_source,
+            persisted_read_status=recent_default_fallback.get("status"),
+            persisted_read_ms=recent_default_fallback.get("readMs"),
+            cache_status_override="persisted_recent_fallback_while_revalidate",
+            default_resolution_path="persisted_recent_fallback",
+        )
+
+    if persisted_snapshot.get("status") == "hit":
+        persisted_meta = dict(persisted_snapshot.get("meta") or {})
+        persisted_meta["isStale"] = not _is_persisted_snapshot_fresh(persisted_snapshot.get("snapshotBuiltAt"))
+        if not persisted_meta["isStale"]:
+            prime_dashboard_snapshot(
+                ctx,
+                persisted_snapshot["snapshot"],
+                persisted_meta,
+                cached_at_ts=persisted_snapshot["snapshotBuiltAt"].timestamp(),
+            )
+            return _build_dashboard_api_payload(
+                ctx=ctx,
+                trusted_end_date=trusted_end_iso,
+                dashboard_data=persisted_snapshot["snapshot"],
+                dashboard_runtime_meta=persisted_meta,
+                requested_from=requested_from,
+                requested_to=requested_to,
+                cache_source="persisted",
+                freshness_snapshot=freshness_snapshot,
+                freshness_source=freshness_source,
+                persisted_read_status=persisted_read_status,
+                persisted_read_ms=persisted_read_ms,
+                cache_status_override="persisted_fresh",
+                default_resolution_path="persisted_range",
+            )
+
+        if _is_persisted_snapshot_usable(persisted_snapshot.get("snapshotBuiltAt")):
+            prime_dashboard_snapshot(
+                ctx,
+                persisted_snapshot["snapshot"],
+                persisted_meta,
+                cached_at_ts=persisted_snapshot["snapshotBuiltAt"].timestamp(),
+            )
+            refresh_started = _ensure_background_dashboard_refresh(
+                ctx,
+                trusted_end_date=trusted_end_iso,
+                write_default_alias=default_request,
+            )
+            return _build_dashboard_api_payload(
+                ctx=ctx,
+                trusted_end_date=trusted_end_iso,
+                dashboard_data=persisted_snapshot["snapshot"],
+                dashboard_runtime_meta=persisted_meta,
+                requested_from=requested_from,
+                requested_to=requested_to,
+                cache_source="persisted",
+                freshness_snapshot=freshness_snapshot,
+                freshness_source=freshness_source,
+                persisted_read_status=persisted_read_status,
+                persisted_read_ms=persisted_read_ms,
+                cache_status_override=(
+                    "persisted_stale_while_revalidate" if refresh_started else "persisted_stale_refresh_inflight"
+                ),
+                default_resolution_path="persisted_range",
+            )
+
+    if _should_use_historical_fastpath(default_request=default_request):
+        snapshot, runtime_meta = build_dashboard_snapshot_once(
+            ctx,
+            skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
+            cache_status="historical_fastpath_uncached",
+        )
+        refresh_started = _ensure_background_dashboard_refresh(
+            ctx,
+            trusted_end_date=trusted_end_iso,
+            write_default_alias=default_request,
+        )
+        return _build_dashboard_api_payload(
+            ctx=ctx,
+            trusted_end_date=trusted_end_iso,
+            dashboard_data=snapshot,
+            dashboard_runtime_meta=runtime_meta,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            cache_source="fastpath",
+            freshness_snapshot=freshness_snapshot,
+            freshness_source=freshness_source,
+            persisted_read_status=persisted_read_status,
+            persisted_read_ms=persisted_read_ms,
+            cache_status_override="historical_fastpath_while_revalidate" if refresh_started else "historical_fastpath_uncached",
+            default_resolution_path="fastpath",
+        )
+
+    dashboard_snapshot, dashboard_runtime_meta = get_dashboard_snapshot(ctx, force_refresh=True)
+    _persist_dashboard_snapshot_async(
+        ctx,
+        dashboard_snapshot,
+        dashboard_runtime_meta,
+        trusted_end_date=trusted_end_iso,
+        write_default_alias=default_request,
+    )
+    return _build_dashboard_api_payload(
+        ctx=ctx,
+        trusted_end_date=trusted_end_iso,
+        dashboard_data=dashboard_snapshot,
+        dashboard_runtime_meta=dashboard_runtime_meta,
+        requested_from=requested_from,
+        requested_to=requested_to,
+        cache_source="rebuild",
+        freshness_snapshot=freshness_snapshot,
+        freshness_source=freshness_source,
+        persisted_read_status=persisted_read_status,
+        persisted_read_ms=persisted_read_ms,
+        default_resolution_path="rebuild",
+    )
 
 
 _init_sentry()
@@ -1402,6 +2166,9 @@ def _start_opportunity_cards_scheduler() -> None:
 def _start_topic_overviews_scheduler() -> None:
     """Start recurring topic-overview materialization scheduler."""
     global topic_overviews_scheduler
+    if not _should_run_topic_overviews_materializer():
+        logger.info("Topic overviews scheduler skipped | background jobs or feature flag disabled")
+        return
 
     interval = max(15, int(topic_overviews.get_topic_overviews_refresh_minutes()))
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -1844,51 +2611,21 @@ async def dashboard(
     Cached for 15 minutes by default. Call POST /api/cache/clear to refresh.
     """
     try:
-        freshness = _dashboard_freshness_snapshot(force_refresh=False)
-        trusted_end = _trusted_end_date_from_freshness(freshness)
-        if not from_date or not to_date:
-            ctx = _default_dashboard_context(freshness)
-        else:
-            ctx = build_dashboard_date_context(from_date, to_date)
-        loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        dashboard_data, dashboard_runtime_meta = await loop.run_in_executor(None, lambda: get_dashboard_snapshot(ctx))
+        response = await run_request(lambda: _build_dashboard_response_payload(from_date, to_date))
         _record_query_timing(
             request,
             query_started_at,
-            cache_status=str(dashboard_runtime_meta.get("cacheStatus") or ""),
+            cache_status=str(response.get("meta", {}).get("cacheStatus") or ""),
         )
-        trimmed_dashboard_data = _trim_dashboard_payload(dashboard_data)
-        response = {
-            "data": trimmed_dashboard_data,
-            "meta": {
-                "from": ctx.from_date.isoformat(),
-                "to": ctx.to_date.isoformat(),
-                "requestedFrom": from_date or ctx.from_date.isoformat(),
-                "requestedTo": to_date or ctx.to_date.isoformat(),
-                "days": ctx.days,
-                "mode": "operational" if ctx.is_operational else "intelligence",
-                "rangeLabel": ctx.range_label,
-                "trustedEndDate": trusted_end.isoformat(),
-                "degradedTiers": dashboard_runtime_meta.get("degradedTiers", []),
-                "suppressedDegradedTiers": dashboard_runtime_meta.get("suppressedDegradedTiers", []),
-                "tierTimes": dashboard_runtime_meta.get("tierTimes", {}),
-                "snapshotBuiltAt": dashboard_runtime_meta.get("snapshotBuiltAt"),
-                "cacheStatus": dashboard_runtime_meta.get("cacheStatus"),
-                "isStale": dashboard_runtime_meta.get("isStale", False),
-                "buildElapsedSeconds": dashboard_runtime_meta.get("buildElapsedSeconds"),
-                "buildMode": dashboard_runtime_meta.get("buildMode"),
-                "refreshFailureCount": dashboard_runtime_meta.get("refreshFailureCount", 0),
-                "freshness": {
-                    "status": freshness.get("health", {}).get("status"),
-                    "generatedAt": freshness.get("generated_at"),
-                },
-            },
-        }
-        response["meta"]["responseBytes"] = -1  # measured by proxy/CDN; removed double-serialize overhead
-        response["meta"]["responseSerializeMs"] = 0
         request.state.dashboard_meta = response["meta"]
         return _dashboard_response(response)
+    except TimeoutError as e:
+        logger.warning(f"Dashboard endpoint warming timeout: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Dashboard is still warming this date range. Please retry in a few seconds.",
+        )
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2877,6 +3614,14 @@ async def get_scraper_scheduler_status():
 async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
+        if not force:
+            cached = _cached_freshness_resolution(allow_live=False)
+            snapshot = cached.get("snapshot")
+            source = str(cached.get("source") or "")
+            if isinstance(snapshot, dict) and snapshot:
+                if "stale" in source:
+                    _ensure_background_freshness_refresh()
+                return snapshot
         return get_freshness_snapshot(
             get_supabase_writer(),
             scheduler_status=get_current_scraper_scheduler_status(),
