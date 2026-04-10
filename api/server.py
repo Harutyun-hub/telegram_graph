@@ -3517,7 +3517,7 @@ async def kb_list_documents(collection_name: str):
         for doc in docs:
             doc["chunk_count"] = chunk_counts.get(doc["doc_id"], 0)
         return {"documents": docs}
-    except Exception as exc:
+    except Exception:
         raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name}")
 
 
