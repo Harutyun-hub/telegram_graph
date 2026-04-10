@@ -107,6 +107,7 @@ def get_trend_lines(ctx: DashboardDateContext) -> list[dict]:
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
         CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)

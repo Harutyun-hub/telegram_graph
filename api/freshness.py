@@ -114,9 +114,16 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append(
             f"{backlog.get('unprocessed_comments')} comments are waiting for AI processing."
         )
+    if _to_int(backlog.get("runnable_posts"), 0) > 0 or _to_int(backlog.get("runnable_comment_groups"), 0) > 0:
+        notes.append(
+            f"Runnable AI backlog: {backlog.get('runnable_posts')} posts and "
+            f"{backlog.get('runnable_comment_groups')} comment groups."
+        )
     if _to_int(backlog.get("dead_letter_scopes"), 0) > 0:
         notes.append(
-            f"{backlog.get('dead_letter_scopes')} AI scopes are in dead-letter state and need operator retry."
+            f"{backlog.get('dead_letter_scopes')} AI scopes are blocked in dead-letter state "
+            f"({backlog.get('transient_dead_letter_scopes')} transient, "
+            f"{backlog.get('permanent_dead_letter_scopes')} permanent)."
         )
     if _to_int(backlog.get("retry_blocked_scopes"), 0) > 0:
         notes.append(
@@ -152,8 +159,10 @@ def _compute_health_score(snapshot: dict) -> int:
 
     backlog = snapshot.get("backlog", {})
     score -= min(20, _to_int(backlog.get("unsynced_posts"), 0) // 25)
-    score -= min(15, _to_int(backlog.get("unprocessed_comments"), 0) // 40)
-    score -= min(10, _to_int(backlog.get("unprocessed_posts"), 0) // 20)
+    score -= min(15, _to_int(backlog.get("runnable_comment_groups"), 0) // 20)
+    score -= min(10, _to_int(backlog.get("runnable_posts"), 0) // 20)
+    score -= min(8, _to_int(backlog.get("transient_dead_letter_scopes"), 0) // 25)
+    score -= min(8, _to_int(backlog.get("permanent_dead_letter_scopes"), 0) // 25)
 
     drift = snapshot.get("drift", {})
     score -= min(15, _to_int(drift.get("latest_post_delta_minutes"), 0) // 60)
@@ -315,7 +324,7 @@ def get_freshness_snapshot(
     sync_rate_per_hour = _avg_rate_per_hour(recent_history, "neo4j_synced_posts")
     scrape_rate_per_hour = _avg_rate_per_hour(recent_history, "scraped_items")
 
-    ai_queue = _to_int(supa.get("unprocessed_comments"), 0) + _to_int(supa.get("unprocessed_posts"), 0)
+    ai_queue = _to_int(supa.get("runnable_comment_groups"), 0) + _to_int(supa.get("runnable_posts"), 0)
     graph_queue = _to_int(supa.get("unsynced_posts"), 0)
 
     eta_ai = _eta_minutes(ai_queue, ai_rate_per_hour)
@@ -368,6 +377,16 @@ def get_freshness_snapshot(
             "unsynced_analysis": _to_int(supa.get("unsynced_analysis"), 0),
             "dead_letter_scopes": _to_int(supa.get("dead_letter_scopes"), 0),
             "retry_blocked_scopes": _to_int(supa.get("retry_blocked_scopes"), 0),
+            "transient_dead_letter_scopes": _to_int(supa.get("transient_dead_letter_scopes"), 0),
+            "permanent_dead_letter_scopes": _to_int(supa.get("permanent_dead_letter_scopes"), 0),
+            "recent_transient_failures": _to_int(supa.get("recent_transient_failures"), 0),
+            "recent_permanent_failures": _to_int(supa.get("recent_permanent_failures"), 0),
+            "runnable_posts": _to_int(supa.get("runnable_posts"), 0),
+            "runnable_comment_groups": _to_int(supa.get("runnable_comment_groups"), 0),
+            "blocked_dead_letter_posts": _to_int(supa.get("blocked_dead_letter_posts"), 0),
+            "blocked_dead_letter_comment_groups": _to_int(supa.get("blocked_dead_letter_comment_groups"), 0),
+            "blocked_retry_posts": _to_int(supa.get("blocked_retry_posts"), 0),
+            "blocked_retry_comment_groups": _to_int(supa.get("blocked_retry_comment_groups"), 0),
             "resolution_due_jobs": _to_int(resolution.get("due_jobs"), 0),
             "resolution_leased_jobs": _to_int(resolution.get("leased_jobs"), 0),
             "resolution_dead_letter_jobs": _to_int(resolution.get("dead_letter_jobs"), 0),
@@ -393,6 +412,7 @@ def get_freshness_snapshot(
         "pulse": {
             "queue": {
                 "ai_items": ai_queue,
+                "ai_raw_items": _to_int(supa.get("unprocessed_comments"), 0) + _to_int(supa.get("unprocessed_posts"), 0),
                 "graph_posts": graph_queue,
             },
             "processed": {

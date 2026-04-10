@@ -59,9 +59,9 @@ class ClientTests(unittest.TestCase):
             api_key="sk_test",
         )
 
-        self.assertEqual(config.timeout, 35.0)
-        self.assertEqual(config.max_retries, 2)
-        self.assertEqual(config.backoff_base, 0.5)
+        self.assertEqual(config.timeout, 40.0)
+        self.assertEqual(config.max_retries, 3)
+        self.assertEqual(config.backoff_base, 0.75)
 
     @mock.patch("client.time.sleep", autospec=True)
     @mock.patch("client.urllib_request.urlopen", autospec=True)

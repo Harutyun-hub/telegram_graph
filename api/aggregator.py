@@ -48,6 +48,10 @@ WAIT_FOR_EMPTY_REFRESH_SECONDS = max(
     float(os.getenv("DASH_WAIT_FOR_EMPTY_REFRESH_SECONDS", str(REFRESH_TIMEOUT_SECONDS + 2.0))),
 )
 MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
+CRITICAL_DEGRADED_STALE_SECONDS = max(
+    WAIT_FOR_REFRESH_SECONDS,
+    int(os.getenv("DASH_CRITICAL_DEGRADED_STALE_SECONDS", "300")),
+)
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
 TOPICS_PAGE_CACHE_TTL_SECONDS = max(
@@ -321,11 +325,24 @@ def _cache_entry_age_seconds(entry: DashboardCacheEntry | None, now: float) -> f
     return max(0.0, now - entry[0])
 
 
+def _entry_max_stale_seconds(entry: DashboardCacheEntry | None) -> float:
+    if entry is None:
+        return float(MAX_STALE_SECONDS)
+    try:
+        raw_value = entry[2].get("maxServeAgeSeconds")
+        if raw_value is None:
+            return float(MAX_STALE_SECONDS)
+        value = float(raw_value)
+    except Exception:
+        return float(MAX_STALE_SECONDS)
+    return max(1.0, value)
+
+
 def _can_serve_stale(entry: DashboardCacheEntry | None, now: float) -> bool:
     if entry is None:
         return False
     ts, snapshot, _meta = entry
-    return bool(snapshot) and (now - ts) < MAX_STALE_SECONDS
+    return bool(snapshot) and (now - ts) < _entry_max_stale_seconds(entry)
 
 
 def _with_refresh_state(cache_key: str, meta: DashboardCacheMeta, *, stale_age_seconds: float | None = None) -> DashboardCacheMeta:
@@ -797,7 +814,10 @@ def _refresh_dashboard_snapshot(
                     f"| key={cache_key} degraded={critical_degraded} elapsed={elapsed}s mode={mode}"
                 )
                 build_meta["cacheStatus"] = "refresh_success_uncached_degraded"
+                build_meta["isStale"] = True
+                build_meta["maxServeAgeSeconds"] = CRITICAL_DEGRADED_STALE_SECONDS
                 build_meta["refreshFailureCount"] = failure_count
+                _cache_entries[cache_key] = (time.time(), data, dict(build_meta))
             else:
                 _record_refresh_success(cache_key)
                 build_meta["refreshFailureCount"] = 0

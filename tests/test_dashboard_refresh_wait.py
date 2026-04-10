@@ -85,40 +85,40 @@ class DashboardRefreshWaitTests(unittest.TestCase):
         with aggregator._cache_lock:
             self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
 
-    def test_refresh_failure_with_no_stale_cache_returns_emergency_degraded_snapshot(self) -> None:
+    def test_critical_degraded_rebuild_becomes_short_lived_stale_snapshot(self) -> None:
         ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        tier_times = {
+            "pulse": 1.2,
+            "strategic": None,
+            "behavioral": 2.1,
+            "network": 0.8,
+            "psychographic": 0.5,
+            "predictive": 1.0,
+            "actionable": 0.9,
+            "comparative": 1.1,
+            "derived": 0.0,
+        }
+        snapshot = {"communityHealth": {"score": 68}}
 
         with patch.object(
             aggregator,
             "_build_snapshot_with_timeout",
-            side_effect=TimeoutError("Dashboard rebuild exceeded 30.0s timeout"),
+            return_value=(snapshot, tier_times, 12.4, "parallel"),
         ):
-            payload, runtime_meta = aggregator.get_dashboard_snapshot(ctx)
+            payload, runtime_meta = aggregator.get_dashboard_snapshot(ctx, force_refresh=True)
 
-        self.assertEqual(runtime_meta.get("cacheStatus"), "emergency_degraded")
-        self.assertEqual(runtime_meta.get("buildMode"), "emergency_fallback")
+        self.assertEqual(payload, snapshot)
+        self.assertEqual(runtime_meta.get("cacheStatus"), "refresh_success_uncached_degraded")
         self.assertTrue(runtime_meta.get("isStale"))
-        self.assertIn("pulse", runtime_meta.get("degradedTiers") or [])
-        self.assertEqual(payload.get("trendingTopics"), [])
-        with aggregator._cache_lock:
-            self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
 
-    def test_follower_wait_timeout_with_no_stale_cache_returns_emergency_degraded_snapshot(self) -> None:
-        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
-        state = aggregator.DashboardRefreshState(inflight=True)
-        state.event.clear()
-        with aggregator._refresh_state_lock:
-            aggregator._refresh_states[ctx.cache_key] = state
+        with patch.object(aggregator, "_ensure_background_refresh", return_value=True) as refresh_mock, \
+             patch.object(aggregator, "_build_snapshot_with_timeout", side_effect=AssertionError("unexpected rebuild")):
+            second_payload, second_meta = aggregator.get_dashboard_snapshot(ctx)
 
-        with patch.object(aggregator, "WAIT_FOR_EMPTY_REFRESH_SECONDS", 0.01):
-            payload, runtime_meta = aggregator.get_dashboard_snapshot(ctx)
-
-        self.assertEqual(runtime_meta.get("cacheStatus"), "emergency_degraded")
-        self.assertEqual(runtime_meta.get("buildMode"), "emergency_fallback")
-        self.assertTrue(runtime_meta.get("isStale"))
-        self.assertEqual(payload.get("weeklyShifts"), [])
-        with aggregator._cache_lock:
-            self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
+        self.assertEqual(second_payload, snapshot)
+        self.assertEqual(second_meta.get("cacheStatus"), "stale_while_revalidate")
+        self.assertTrue(second_meta.get("isStale"))
+        refresh_mock.assert_called_once_with(ctx.cache_key, ctx)
 
 
 if __name__ == "__main__":
