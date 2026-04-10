@@ -172,26 +172,70 @@ def _run_ai_process_and_sync_blocking(
 
     try:
         writer = _get_background_writer()
-        for post in posts_to_sync:
+        batch_size = max(1, int(getattr(config, "NEO4J_SYNC_BATCH_CHUNK_SIZE", 20)))
+        for start in range(0, len(posts_to_sync), batch_size):
             if time.monotonic() >= sync_deadline:
                 result["sync_timeout"] = True
                 logger.warning("Neo4j sync stage budget reached; deferring remaining posts to next cycle")
                 break
+            post_chunk = posts_to_sync[start:start + batch_size]
             try:
-                bundle = supabase_writer.get_post_bundle(post)
-                writer.sync_bundle(bundle)
-                supabase_writer.mark_post_neo4j_synced(post["id"])
-                analysis_records = bundle.get("analysis_records") or list(bundle["analyses"].values())
-                for analysis in analysis_records:
-                    analysis_id = analysis.get("id")
-                    if analysis_id:
-                        supabase_writer.mark_analysis_synced(analysis_id)
-                result["posts_synced"] += 1
+                bundles = supabase_writer.get_post_bundles_batch(post_chunk)
+                if not bundles:
+                    continue
+                writer.sync_post_batch(bundles)
+
+                synced_post_ids = [
+                    str(post_payload["id"])
+                    for bundle in bundles
+                    for post_payload in [bundle.get("post") or {}]
+                    if post_payload.get("id")
+                ]
+                analysis_ids = sorted({
+                    str(analysis.get("id"))
+                    for bundle in bundles
+                    for analysis in (bundle.get("analysis_records") or list((bundle.get("analyses") or {}).values()))
+                    if analysis.get("id")
+                })
+                supabase_writer.mark_posts_neo4j_synced(synced_post_ids)
+                if analysis_ids:
+                    supabase_writer.mark_analyses_synced(analysis_ids)
+                result["posts_synced"] += len(synced_post_ids)
             except Exception as e:
-                result["sync_errors"] += 1
-                logger.error(f"Neo4j sync failed for post {post.get('id')}: {e}")
-                if "serviceunavailable" in str(e).lower() or "connection" in str(e).lower():
+                error_text = str(e).lower()
+                if "serviceunavailable" in error_text or "connection" in error_text:
+                    result["sync_errors"] += 1
                     result["sync_error"] = str(e)
+                    logger.error(f"Neo4j batch sync failed for posts {[post.get('id') for post in post_chunk]}: {e}")
+                    break
+
+                logger.warning(
+                    "Neo4j batch sync failed for posts {}. Falling back to single-post sync: {}",
+                    [post.get("id") for post in post_chunk],
+                    e,
+                )
+                for post in post_chunk:
+                    if time.monotonic() >= sync_deadline:
+                        result["sync_timeout"] = True
+                        logger.warning("Neo4j sync stage budget reached during fallback; deferring remaining posts")
+                        break
+                    try:
+                        bundle = supabase_writer.get_post_bundle(post)
+                        writer.sync_bundle(bundle)
+                        supabase_writer.mark_post_neo4j_synced(post["id"])
+                        analysis_records = bundle.get("analysis_records") or list(bundle["analyses"].values())
+                        for analysis in analysis_records:
+                            analysis_id = analysis.get("id")
+                            if analysis_id:
+                                supabase_writer.mark_analysis_synced(analysis_id)
+                        result["posts_synced"] += 1
+                    except Exception as inner:
+                        result["sync_errors"] += 1
+                        logger.error(f"Neo4j sync failed for post {post.get('id')}: {inner}")
+                        if "serviceunavailable" in str(inner).lower() or "connection" in str(inner).lower():
+                            result["sync_error"] = str(inner)
+                            break
+                if result.get("sync_error"):
                     break
     except Exception as e:
         logger.error(f"Neo4j writer init failed: {e}")
