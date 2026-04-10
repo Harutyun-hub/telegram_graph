@@ -9,6 +9,7 @@ This skill is intended to stay simple:
 - no env var renames
 - compact JSON output for agent consumption
 - reliable enough for Railway cold starts and first-hit latency
+- graph intelligence through the existing API surface, not direct Neo4j access
 
 ## Runtime assumptions
 
@@ -73,6 +74,19 @@ The CLI defaults are tuned for production-style backend latency:
 
 This keeps exponential backoff while tolerating Railway cold starts better.
 
+## Operator rollout guardrails
+
+Before changing the live OpenClaw config on Hostinger, back up the current OpenClaw config:
+
+```bash
+sudo cp /docker/openclaw-k5ni/data/.openclaw/openclaw.json /docker/openclaw-k5ni/data/.openclaw/openclaw.json.bak.$(date +%s)
+```
+
+Before debugging live behavior, verify deployment parity:
+
+- compare the live `telegram-analytics-bridge` folder in the container with the current local skill folder
+- if they differ, treat that as deployment drift before investigating logic issues
+
 ## Local usage
 
 Pretty JSON:
@@ -87,9 +101,9 @@ Insight synthesis:
 python3 skills/telegram-analytics-bridge/scripts/bridge.py ask_insights --window 7d --question "What is driving concern about residency permits?" --json
 ```
 
-## Phase 2A bounded investigation actions
+## Bounded investigation and Level 2 graph analyst actions
 
-These actions extend the existing summary skill without changing the deployment model:
+These actions extend the existing summary skill without changing the deployment model or creating a second overlapping analytics skill.
 
 - `search_entities`
 - `get_topic_detail`
@@ -97,6 +111,11 @@ These actions extend the existing summary skill without changing the deployment 
 - `get_freshness_status`
 - `investigate_topic`
 - `investigate_question`
+- `get_graph_snapshot`
+- `get_node_context`
+- `investigate_channel`
+- `compare_topics`
+- `compare_channels`
 
 `investigate_question` is intentionally capped to low fanout by design. It is not an open-ended autonomous investigation workflow.
 
@@ -150,6 +169,26 @@ python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_topic --t
 python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_question --window 7d --question "What is driving concern about residency permits?" --json
 ```
 
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_graph_snapshot --window 7d --max-nodes 12 --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_node_context --entity "Residency permits" --type topic --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_channel --channel "Docs Chat" --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py compare_topics --topic-a "Residency permits" --topic-b "Rental costs" --window 7d --json
+```
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py compare_channels --channel-a "Docs Chat" --channel-b "Visa Support" --window 7d --json
+```
+
 ## Confirm backend connectivity
 
 Health check:
@@ -167,6 +206,29 @@ curl -i \
 ```
 
 If the health endpoint works but the dashboard call is slow, the backend may be cold-starting.
+
+Graph API sanity checks:
+
+```bash
+curl -i \
+  -X POST \
+  -H "Authorization: Bearer $ANALYTICS_API_KEY" \
+  -H "Content-Type: application/json" \
+  "$ANALYTICS_API_BASE_URL/api/graph" \
+  -d '{"timeframe":"Last 7 Days","sourceDetail":"minimal","max_nodes":12}'
+```
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $ANALYTICS_API_KEY" \
+  "$ANALYTICS_API_BASE_URL/api/graph-insights?timeframe=Last%207%20Days"
+```
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $ANALYTICS_API_KEY" \
+  "$ANALYTICS_API_BASE_URL/api/node-details?nodeId=topic%3AResidency%20permits&nodeType=topic&timeframe=Last%207%20Days"
+```
 
 ## Actions
 
@@ -313,11 +375,54 @@ python3 skills/telegram-analytics-bridge/scripts/bridge.py get_topic_evidence --
 python3 skills/telegram-analytics-bridge/scripts/bridge.py get_freshness_status --json
 ```
 
+### `get_graph_snapshot(window, category?, signal_focus?, max_nodes?)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_graph_snapshot --window 7d --max-nodes 12 --json
+```
+
+### `get_node_context(entity, type, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py get_node_context --entity "Residency permits" --type topic --window 7d --json
+```
+
+### `investigate_channel(channel, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_channel --channel "Docs Chat" --window 7d --json
+```
+
+### `compare_topics(topic_a, topic_b, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py compare_topics --topic-a "Residency permits" --topic-b "Rental costs" --window 7d --json
+```
+
+### `compare_channels(channel_a, channel_b, window)`
+
+```bash
+python3 skills/telegram-analytics-bridge/scripts/bridge.py compare_channels --channel-a "Docs Chat" --channel-b "Visa Support" --window 7d --json
+```
+
 ### `investigate_topic(topic, category?, window)`
 
 ```bash
 python3 skills/telegram-analytics-bridge/scripts/bridge.py investigate_topic --topic "Residency permits" --window 7d --json
 ```
+
+## Current routing model
+
+- Keep one analytics skill only: `telegram-analytics-bridge`
+- Use exact actions for direct operator-style lookups
+- Use `investigate_question` for bounded user-facing investigation
+- Let `investigate_question` route into:
+  - topic investigation when the question is topic-specific
+  - channel investigation when the question is channel-specific
+  - category/node context when graph search resolves a category
+  - graph snapshot when the question is ecosystem-wide
+
+This keeps the agent professional without giving it unrestricted graph or database access.
 
 ### `investigate_question(question, window)`
 
@@ -333,13 +438,16 @@ Add this to the existing main OpenClaw agent prompt source in your compose env w
 When a user asks about Telegram community analytics, trends, sentiment, recurring questions, issue spikes, alerts, or what is driving a discussion, use the telegram-analytics-bridge skill instead of answering from memory.
 
 Prefer:
-- ask_insights for "why", "what is driving", or synthesis questions
+- investigate_question for bounded analyst-style user questions
 - get_top_topics for top trends
 - get_declining_topics for fading topics
 - get_problem_spikes for issue escalation
 - get_question_clusters for repeated user questions
 - get_sentiment_overview for mood/sentiment
 - get_active_alerts for urgent current risks
+- investigate_channel for channel-specific asks
+- get_graph_snapshot for ecosystem-wide graph context
+- compare_topics or compare_channels for direct comparisons
 
 Always request compact JSON and use the skill's telegram_text as the primary user-facing reply. Do not paste raw large JSON unless the user explicitly asks for it. If the skill returns low_confidence, respond cautiously and say the current evidence is limited rather than guessing.
 ```
@@ -399,6 +507,19 @@ Fix:
 - retry after the backend wakes up
 - keep the default `35s` timeout and `2` retries unless you have strong evidence to change them
 - confirm `/api/health` is fast and `/api/dashboard` is the slower endpoint
+
+### Sentiment endpoint failure
+
+Symptoms:
+
+- `get_sentiment_overview` returns `low_confidence`
+- the response caveat mentions `/api/sentiment-distribution`
+
+Fix:
+
+- treat this as a backend issue first, not a skill-auth issue
+- check `/api/sentiment-distribution?timeframe=Last%207%20Days` directly
+- the skill now degrades gracefully and still returns dashboard health context while operators fix the backend query
 
 ### Skill works in shell but not chat
 

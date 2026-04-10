@@ -184,7 +184,10 @@ class SchedulerDistributedLockTests(unittest.TestCase):
                 await asyncio.gather(task_a, task_b)
 
                 self.assertEqual(run_calls, 1)
-                self.assertEqual(service_a.last_result, {"mode": "normal", "ok": True})
+                self.assertIsNotNone(service_a.last_result)
+                self.assertEqual(service_a.last_result.get("mode"), "normal")
+                self.assertEqual(service_a.last_result.get("ok"), True)
+                self.assertIn("cycle_duration_seconds", service_a.last_result)
                 self.assertIsNone(service_b.last_result)
                 self.assertEqual(coordinator._locks, {})
 
@@ -226,7 +229,10 @@ class SchedulerDistributedLockTests(unittest.TestCase):
                 await asyncio.gather(task_a, task_b)
 
                 self.assertEqual(run_calls, 1)
-                self.assertEqual(service_a.last_result, {"mode": "catchup", "ok": True})
+                self.assertIsNotNone(service_a.last_result)
+                self.assertEqual(service_a.last_result.get("mode"), "catchup")
+                self.assertEqual(service_a.last_result.get("ok"), True)
+                self.assertIn("cycle_duration_seconds", service_a.last_result)
                 self.assertIsNone(service_b.last_result)
                 self.assertEqual(coordinator._locks, {})
 

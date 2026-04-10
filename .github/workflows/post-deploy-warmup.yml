@@ -1,0 +1,81 @@
+name: Post-Deploy Warmup
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  warmup:
+    runs-on: ubuntu-latest
+    env:
+      PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+      ANALYTICS_API_KEY_FRONTEND: ${{ secrets.ANALYTICS_API_KEY_FRONTEND }}
+    steps:
+      - name: Skip when warmup secrets are not configured
+        if: ${{ env.PRODUCTION_BASE_URL == '' || env.ANALYTICS_API_KEY_FRONTEND == '' }}
+        run: echo "Skipping warmup because PRODUCTION_BASE_URL or ANALYTICS_API_KEY_FRONTEND is not configured."
+
+      - name: Wait for readiness and warm dashboard cache
+        if: ${{ env.PRODUCTION_BASE_URL != '' && env.ANALYTICS_API_KEY_FRONTEND != '' }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          base_url = os.environ["PRODUCTION_BASE_URL"].rstrip("/")
+          token = os.environ["ANALYTICS_API_KEY_FRONTEND"]
+          deadline = time.time() + 180
+          consecutive_dashboard_hits = 0
+
+          def fetch(path: str, timeout: int = 20) -> int:
+              request = urllib.request.Request(
+                  f"{base_url}{path}",
+                  headers={"Authorization": f"Bearer {token}"},
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  response.read()
+                  return response.status
+
+          while time.time() < deadline:
+              remaining = int(max(1, deadline - time.time()))
+              try:
+                  with urllib.request.urlopen(f"{base_url}/readyz", timeout=min(15, remaining)) as response:
+                      if response.status == 200:
+                          print("Service is ready.")
+                          break
+              except Exception as exc:
+                  print(f"Still waiting for readiness: {exc}")
+              time.sleep(5)
+          else:
+              raise SystemExit("Timed out waiting for /readyz within 180 seconds")
+
+          while time.time() < deadline:
+              remaining = int(max(1, deadline - time.time()))
+              try:
+                  status = fetch("/api/dashboard", timeout=min(20, remaining))
+                  if status == 200:
+                      consecutive_dashboard_hits += 1
+                      print(f"Dashboard warmup hit {consecutive_dashboard_hits}/2 returned 200.")
+                      if consecutive_dashboard_hits >= 2:
+                          break
+                  else:
+                      consecutive_dashboard_hits = 0
+                      print(f"Dashboard warmup returned unexpected status {status}.")
+              except urllib.error.HTTPError as exc:
+                  consecutive_dashboard_hits = 0
+                  print(f"Dashboard warmup HTTP error: {exc.code}")
+              except Exception as exc:
+                  consecutive_dashboard_hits = 0
+                  print(f"Dashboard warmup failed: {exc}")
+              time.sleep(5)
+          else:
+              raise SystemExit("Timed out waiting for /api/dashboard to return 200 twice in a row")
+
+          topics_status = fetch("/api/topics?page=0&size=100", timeout=min(20, int(max(1, deadline - time.time()))))
+          if topics_status != 200:
+              raise SystemExit(f"/api/topics warmup returned unexpected status {topics_status}")
+          print("Dashboard and topics warmup completed.")
+          PY

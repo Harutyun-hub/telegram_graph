@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Share2, Settings, Search, Bell, User, Hash, Radio,
   Calendar, Users, LogOut, ChevronRight, AlertTriangle, TrendingUp,
   Newspaper, CheckCheck, X, Shield, Menu, Globe, Sparkles, ChevronUp,
-  PlusCircle, Loader2, Megaphone,
+  PlusCircle, Loader2,
 } from 'lucide-react';
 import { LogoIcon } from '@/app/components/Logo';
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -197,7 +197,6 @@ export function AdminLayout() {
   const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
   const ru = lang === 'ru';
   const isMobile = useIsMobile();
-  const isGraphRoute = location.pathname.startsWith('/graph');
   // UI state
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showMobileDatePicker, setShowMobileDatePicker] = useState(false);
@@ -240,8 +239,6 @@ export function AdminLayout() {
     { label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
     { label: ru ? 'Граф связей' : 'Graph', path: '/graph', icon: Share2 },
     { label: ru ? 'Источники' : 'Sources', path: '/sources', icon: PlusCircle },
-    { label: ru ? 'ИИ Агент' : 'AI Agent', path: '/agent', icon: Sparkles },
-    { label: ru ? 'Social Media' : 'Social Media', path: '/social', icon: Megaphone },
     { label: ru ? 'Админ' : 'Admin', path: '/admin', icon: Shield },
     { label: ru ? 'Настройки' : 'Settings', path: '/settings', icon: Settings },
   ];
@@ -298,7 +295,7 @@ export function AdminLayout() {
   const markRead = useCallback((id: number) => setNotifications(p => p.map(n => n.id === id ? { ...n, read: true } : n)), []);
   const dismissNotif = useCallback((id: number, e: React.MouseEvent) => { e.stopPropagation(); setNotifications(p => p.filter(n => n.id !== id)); }, []);
   const handleLogout = useCallback(() => {
-    void logout();
+    logout();
     setShowAccount(false);
     setDrawerOpen(false);
     navigate('/login', { replace: true });
@@ -366,50 +363,41 @@ export function AdminLayout() {
       {/* ════════════════════════════════════════════
           DESKTOP SIDEBAR
       ════════════════════════════════════════════ */}
-      <aside className={`hidden md:flex bg-slate-800 flex-col shrink-0 transition-[width] duration-200 ${isGraphRoute ? 'w-20' : 'w-64'}`}>
-        <div className={`border-b border-slate-700 ${isGraphRoute ? 'px-3 py-5' : 'p-6'}`}>
-          <div className={`flex items-center ${isGraphRoute ? 'justify-center' : 'gap-3'}`}>
+      <aside className="hidden md:flex w-64 bg-slate-800 flex-col shrink-0">
+        <div className="p-6 border-b border-slate-700">
+          <div className="flex items-center gap-3">
             <LogoIcon size={36} />
-            {!isGraphRoute && (
-              <div>
-                <h1 className="text-white text-sm" style={{ fontWeight: 600 }}>Радар Общины</h1>
-                <p className="text-slate-400 text-xs">{ru ? 'Платформа' : 'Community Platform'}</p>
-              </div>
-            )}
+            <div>
+              <h1 className="text-white text-sm" style={{ fontWeight: 600 }}>Радар Общины</h1>
+              <p className="text-slate-400 text-xs">{ru ? 'Платформа' : 'Community Platform'}</p>
+            </div>
           </div>
         </div>
-        <nav className={`flex-1 overflow-y-auto ${isGraphRoute ? 'px-2 py-4 space-y-2' : 'px-4 py-6 space-y-1'}`}>
-          {!isGraphRoute && (
-            <div className="text-slate-400 text-xs uppercase tracking-wider mb-3 px-3" style={{ fontWeight: 700 }}>
-              {ru ? 'Меню' : 'General'}
-            </div>
-          )}
+        <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
+          <div className="text-slate-400 text-xs uppercase tracking-wider mb-3 px-3" style={{ fontWeight: 700 }}>
+            {ru ? 'Меню' : 'General'}
+          </div>
           {navItems.map(item => {
             const isActive = item.path === '/' ? location.pathname === '/' : location.pathname.startsWith(item.path);
             const Icon = item.icon;
             return (
               <Link key={item.path} to={item.path}
-                title={item.label}
-                className={`flex rounded-lg transition-colors ${isGraphRoute ? 'justify-center px-0 py-3' : 'items-center gap-3 px-3 py-2.5'} ${isActive ? 'bg-slate-700 text-white' : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'}`}>
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors ${isActive ? 'bg-slate-700 text-white' : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'}`}>
                 <Icon className="w-5 h-5 flex-shrink-0" />
-                {!isGraphRoute && (
-                  <span className="text-sm" style={{ fontWeight: 500 }}>{item.label}</span>
-                )}
+                <span className="text-sm" style={{ fontWeight: 500 }}>{item.label}</span>
               </Link>
             );
           })}
         </nav>
-        <div className={`border-t border-slate-700 ${isGraphRoute ? 'px-2 py-3' : 'p-4'}`}>
-          <div className={`flex ${isGraphRoute ? 'justify-center px-0 py-2' : 'items-center gap-3 px-3 py-2'}`}>
+        <div className="p-4 border-t border-slate-700">
+          <div className="flex items-center gap-3 px-3 py-2">
             <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}>
               <User className="w-4 h-4 text-white" />
             </div>
-            {!isGraphRoute && (
-              <div className="flex-1 min-w-0">
-                <p className="text-white text-sm" style={{ fontWeight: 500 }}>Admin</p>
-                <p className="text-slate-400 text-xs truncate">{ru ? 'Администратор' : 'Administrator'}</p>
-              </div>
-            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-white text-sm" style={{ fontWeight: 500 }}>Admin</p>
+              <p className="text-slate-400 text-xs truncate">{ru ? 'Администратор' : 'Administrator'}</p>
+            </div>
           </div>
         </div>
       </aside>
@@ -420,23 +408,23 @@ export function AdminLayout() {
         {/* ════════════════════════════════════════════
             DESKTOP HEADER
         ════════════════════════════════════════════ */}
-        <header className={`hidden md:flex items-center justify-between bg-white border-b border-gray-200 flex-shrink-0 ${isGraphRoute ? 'h-16 px-5 py-3' : 'px-8 py-4'}`}>
+        <header className="hidden md:flex items-center justify-between bg-white border-b border-gray-200 px-8 py-4 flex-shrink-0">
           {/* Search */}
-          <div className={`flex-1 ${isGraphRoute ? 'max-w-[320px]' : 'max-w-md'}`}>
+          <div className="flex-1 max-w-md">
             <div className="relative">
-              <Search className={`absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 ${isGraphRoute ? 'w-4 h-4' : 'w-5 h-5'}`} />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
               <input type="text"
                 placeholder={ru ? 'Поиск по темам, каналам, участникам...' : 'Search topics, channels, members...'}
-                className={`w-full border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${isGraphRoute ? 'pl-9 pr-3 py-1.5 text-[13px]' : 'pl-10 pr-4 py-2 text-sm'}`} />
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
             </div>
           </div>
 
           {/* Date picker */}
-          <div className={`relative ${isGraphRoute ? 'ml-3' : 'ml-4'}`} ref={datePickerRef}>
+          <div className="relative ml-4" ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)}
               title={isRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
-              className={`flex items-center gap-2 rounded-lg border transition-colors ${isGraphRoute ? 'px-3 py-1.5 text-[13px]' : 'px-3 py-2 text-sm'} ${showDatePicker ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
-              <Calendar className={isGraphRoute ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-colors ${showDatePicker ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
+              <Calendar className="w-4 h-4" />
               {activeRange ? activeRange.label : `${formatDisplayDate(range.from, lang)} — ${formatDisplayDate(range.to, lang)}`}
               {isRefreshing && (
                 <Loader2
@@ -450,18 +438,18 @@ export function AdminLayout() {
                 <DatePickerContent />
               </div>
             )}
-            <p className={`mt-1 text-gray-400 text-right ${isGraphRoute ? 'text-[10px]' : 'text-[11px]'}`}>
+            <p className="mt-1 text-[11px] text-gray-400 text-right">
               {freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`)}
             </p>
           </div>
 
           {/* Right controls */}
-          <div className={`flex items-center ml-4 ${isGraphRoute ? 'gap-2' : 'gap-3'}`}>
+          <div className="flex items-center gap-3 ml-4">
             {/* Language toggle */}
             <div className="flex items-center rounded-lg border border-gray-200 overflow-hidden">
               {(['en', 'ru'] as Lang[]).map(l => (
                 <button key={l} onClick={() => setLang(l)}
-                  className={`${isGraphRoute ? 'px-2.5 py-1' : 'px-3 py-1.5'} text-xs transition-colors ${lang === l ? 'bg-slate-800 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+                  className={`px-3 py-1.5 text-xs transition-colors ${lang === l ? 'bg-slate-800 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}
                   style={{ fontWeight: 600 }}>
                   {l === 'en' ? 'EN' : 'РУ'}
                 </button>
@@ -491,16 +479,14 @@ export function AdminLayout() {
             {/* Desktop Account */}
             <div className="relative" ref={accountRef}>
               <button onClick={() => { setShowAccount(v => !v); setShowNotifications(false); }}
-                className={`flex items-center rounded-lg transition-colors ${isGraphRoute ? 'gap-1.5 px-1.5 py-1' : 'gap-2 px-2 py-1.5'} ${showAccount ? 'bg-gray-100' : 'hover:bg-gray-100'}`}>
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${showAccount ? 'bg-gray-100' : 'hover:bg-gray-100'}`}>
                 <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}>
                   <User className="w-4 h-4 text-white" />
                 </div>
-                {!isGraphRoute && (
-                  <div className="text-left">
-                    <p className="text-sm text-gray-900" style={{ fontWeight: 600 }}>Admin</p>
-                    <p className="text-xs text-gray-500">{ru ? 'Администратор' : 'Administrator'}</p>
-                  </div>
-                )}
+                <div className="text-left">
+                  <p className="text-sm text-gray-900" style={{ fontWeight: 600 }}>Admin</p>
+                  <p className="text-xs text-gray-500">{ru ? 'Администратор' : 'Administrator'}</p>
+                </div>
               </button>
               <AnimatePresence>
                 {showAccount && !isMobile && (

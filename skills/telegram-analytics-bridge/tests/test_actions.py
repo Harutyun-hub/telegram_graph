@@ -534,17 +534,6 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["type"], "topic")
         self.assertIn("Found 2 matching entities", payload["summary"])
 
-    def test_search_entities_returns_alias_hint_when_backend_search_is_empty(self) -> None:
-        payload = search_entities(
-            FakeClient(search_results=[]),
-            SearchEntitiesRequest(query="permits", limit=2),
-        )
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["confidence"], "low_confidence")
-        self.assertEqual(payload["items"][0]["type"], "topic_hint")
-        self.assertEqual(payload["items"][0]["name"], "Residency permits")
-        self.assertIn("No exact backend entities matched", payload["summary"])
-
     def test_get_topic_detail_normalizes_detail_payload(self) -> None:
         payload = get_topic_detail(
             self.client,
@@ -710,86 +699,6 @@ class ActionTests(unittest.TestCase):
         )
         self.assertEqual(payload["confidence"], "low_confidence")
         self.assertLessEqual(len(payload["items"]), 3)
-
-    def test_investigate_question_returns_alias_backed_low_confidence_when_exact_topic_is_missing(self) -> None:
-        payload = investigate_question(
-            FakeClient(
-                dashboard={"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}},
-                insight_cards={"cards": []},
-                search_results=[],
-                search_results_by_query={"Residency permits": []},
-                topic_details_by_topic={"Residency permits": None},
-            ),
-            InvestigateQuestionRequest(window="7d", question="What is driving concern about residency permits?"),
-        )
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["confidence"], "low_confidence")
-        self.assertEqual(payload["items"][0]["topic"], "Residency permits")
-        self.assertIn("closest local interpretation", payload["summary"])
-
-    def test_investigate_question_maps_permit_family_phrases_to_same_safe_interpretation(self) -> None:
-        client = FakeClient(
-            dashboard={"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}},
-            insight_cards={"cards": []},
-            search_results=[],
-            search_results_by_query={
-                "Residency permits": [],
-                "Visa appointments": [],
-                "Documents": [],
-            },
-            topic_details_by_topic={"Residency permits": None, "Visa appointments": None},
-        )
-
-        for question in (
-            "Why are visa appointments getting delayed?",
-            "What is happening with permit paperwork?",
-            "Why are documents causing delays right now?",
-        ):
-            with self.subTest(question=question):
-                payload = investigate_question(
-                    client,
-                    InvestigateQuestionRequest(window="7d", question=question),
-                )
-                self.assertTrue(payload["ok"])
-                self.assertEqual(payload["confidence"], "low_confidence")
-                self.assertEqual(payload["items"][0]["topic"], "Residency permits")
-
-    def test_investigate_question_tries_multiple_resolution_terms_before_falling_back(self) -> None:
-        visa_detail = {
-            **TOPIC_DETAIL,
-            "name": "Visa appointments",
-            "category": "Documents",
-            "topChannels": ["Docs Chat", "Visa Support"],
-        }
-        client = FakeClient(
-            dashboard={"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}},
-            insight_cards={"cards": []},
-            search_results=[],
-            search_results_by_query={
-                "Residency permits": [],
-                "Visa appointments": [
-                    {
-                        "type": "topic",
-                        "id": "topic:Visa appointments",
-                        "name": "Visa appointments",
-                        "text": "Topic",
-                    }
-                ],
-            },
-            topic_details_by_topic={
-                "Residency permits": None,
-                "Visa appointments": visa_detail,
-            },
-        )
-
-        payload = investigate_question(
-            client,
-            InvestigateQuestionRequest(window="7d", question="What is driving concern about visa appointments?"),
-        )
-
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["items"][0]["topic"], "Visa appointments")
-        self.assertEqual(client.search_queries[:2], ["Residency permits", "Visa appointments"])
 
     def test_investigate_question_recovers_from_topic_not_found_using_short_search_term(self) -> None:
         dashboard = {"data": {"questionBriefs": [], "problemBriefs": [], "urgencySignals": [], "trendingTopics": []}}

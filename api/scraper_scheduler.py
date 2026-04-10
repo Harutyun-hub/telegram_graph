@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -63,6 +64,8 @@ class ScraperSchedulerService:
 
         self._run_lock = asyncio.Lock()
         self._resolution_run_lock = asyncio.Lock()
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
         self._client: Optional[TelegramClient] = None
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -85,11 +88,13 @@ class ScraperSchedulerService:
         if not self.scheduler.running:
             self.scheduler.start()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, wait_for_cycle_seconds: float = 30.0) -> None:
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
             pass
+
+        await self.wait_for_idle(timeout_seconds=wait_for_cycle_seconds)
 
         if self._client:
             try:
@@ -103,6 +108,14 @@ class ScraperSchedulerService:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
+
+    async def wait_for_idle(self, *, timeout_seconds: float = 30.0) -> bool:
+        try:
+            await asyncio.wait_for(self._idle_event.wait(), timeout=max(0.1, float(timeout_seconds)))
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for scheduler idle state | timeout_s={}", timeout_seconds)
+            return False
 
     def _upsert_interval_job(self) -> None:
         try:
@@ -120,14 +133,6 @@ class ScraperSchedulerService:
             misfire_grace_time=120,
         )
 
-    def _next_run_iso(self) -> Optional[str]:
-        if not self.desired_active:
-            return None
-        job = self.scheduler.get_job(self.job_id)
-        if not job:
-            return None
-        return _iso(job.next_run_time)
-
     def _upsert_resolution_job(self) -> None:
         try:
             self.scheduler.remove_job(self.resolution_job_id)
@@ -144,6 +149,14 @@ class ScraperSchedulerService:
             misfire_grace_time=120,
         )
 
+    def _next_run_iso(self) -> Optional[str]:
+        if not self.desired_active:
+            return None
+        job = self.scheduler.get_job(self.job_id)
+        if not job:
+            return None
+        return _iso(job.next_run_time)
+
     def _next_resolution_run_iso(self) -> Optional[str]:
         if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
             return None
@@ -151,6 +164,12 @@ class ScraperSchedulerService:
         if not job:
             return None
         return _iso(job.next_run_time)
+
+    def _sync_idle_event(self) -> None:
+        if self.running_now or self.resolution_running_now:
+            self._idle_event.clear()
+        else:
+            self._idle_event.set()
 
     async def _get_or_create_client(self) -> TelegramClient:
         if self._client and self._client.is_connected():
@@ -206,18 +225,25 @@ class ScraperSchedulerService:
                 logger.warning("Scraper cycle skipped: runtime coordinator lock is already held")
                 return
             self.running_now = True
+            self._sync_idle_event()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            logger.info(
+                "Scheduler cycle started | mode=normal interval_minutes={} executorClass=background",
+                self.interval_minutes,
+            )
 
             try:
                 client = await self._get_or_create_client()
+                cycle_started_at = time.monotonic()
                 result = await run_full_cycle(client, self.db)
+                result["cycle_duration_seconds"] = round(max(0.0, time.monotonic() - cycle_started_at), 2)
                 self.last_mode = "normal"
                 self.last_result = result
                 self.last_success_at = datetime.now(timezone.utc)
                 self._record_success_run(result=result, mode="normal")
-                logger.success(f"Pipeline cycle completed: {result}")
+                logger.success("Pipeline cycle completed | mode=normal result={}", result)
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"Pipeline cycle failed: {e}")
@@ -225,6 +251,7 @@ class ScraperSchedulerService:
                 coordinator.release_lock("worker:scrape-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._sync_idle_event()
 
     async def _run_catchup_cycle(self) -> None:
         if self._run_lock.locked():
@@ -244,18 +271,22 @@ class ScraperSchedulerService:
                 logger.warning("Catch-up cycle skipped: runtime coordinator lock is already held")
                 return
             self.running_now = True
+            self._sync_idle_event()
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            logger.info("Scheduler cycle started | mode=catchup executorClass=background")
 
             try:
                 client = await self._get_or_create_client()
+                cycle_started_at = time.monotonic()
                 result = await run_catchup_cycle(client, self.db)
+                result["cycle_duration_seconds"] = round(max(0.0, time.monotonic() - cycle_started_at), 2)
                 self.last_mode = "catchup"
                 self.last_result = result
                 self.last_success_at = datetime.now(timezone.utc)
                 self._record_success_run(result=result, mode="catchup")
-                logger.success(f"Catch-up cycle completed: {result}")
+                logger.success("Catch-up cycle completed | mode=catchup result={}", result)
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"Catch-up cycle failed: {e}")
@@ -263,6 +294,7 @@ class ScraperSchedulerService:
                 coordinator.release_lock("worker:catchup-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._sync_idle_event()
 
     async def _run_source_resolution_cycle(self) -> None:
         if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
@@ -272,16 +304,8 @@ class ScraperSchedulerService:
             return
 
         async with self._resolution_run_lock:
-            coordinator = get_runtime_coordinator()
-            lock_token = coordinator.acquire_lock(
-                "worker:source-resolution-cycle",
-                ttl_seconds=max(120, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES) * 60),
-            )
-            if not lock_token:
-                logger.warning("Source resolution cycle skipped: runtime coordinator lock is already held")
-                return
-
             self.resolution_running_now = True
+            self._sync_idle_event()
             self.resolution_last_error = None
             self.resolution_last_run_started_at = datetime.now(timezone.utc)
             self.resolution_last_run_finished_at = None
@@ -303,9 +327,9 @@ class ScraperSchedulerService:
                 self.resolution_last_error = str(e)
                 logger.error(f"Source resolution cycle failed: {e}")
             finally:
-                coordinator.release_lock("worker:source-resolution-cycle", lock_token)
                 self.resolution_last_run_finished_at = datetime.now(timezone.utc)
                 self.resolution_running_now = False
+                self._sync_idle_event()
 
     async def start(self) -> dict:
         self._ensure_scheduler_started()
@@ -417,6 +441,7 @@ class ScraperSchedulerService:
                 "due_jobs": 0,
                 "leased_jobs": 0,
                 "dead_letter_jobs": 0,
+                "stale_nonclaimable_jobs": 0,
                 "cooldown_slots": 0,
                 "cooldown_until": None,
                 "oldest_due_age_seconds": None,

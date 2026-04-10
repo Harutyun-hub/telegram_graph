@@ -14,10 +14,12 @@ from uuid import uuid4
 from loguru import logger
 from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, FloodWaitError
-from telethon.tl.types import Channel, Message
+from telethon.tl.types import Channel, InputPeerChannel, Message
 
 import config
+from api.source_resolution import build_pending_source_payload, ensure_resolution_job
 from scraper.channel_metadata import (
+    channel_peer_ref_from_entity,
     minimal_source_metadata_from_entity,
     resolve_source_metadata,
     source_type_from_entity,
@@ -127,6 +129,17 @@ def _thread_top_message_id(message: Message) -> int:
     return int(message.id)
 
 
+def _peer_ref_to_input_peer(peer_ref: dict | None) -> InputPeerChannel | None:
+    if not peer_ref:
+        return None
+    try:
+        peer_id = int(peer_ref.get("peer_id"))
+        access_hash = int(peer_ref.get("access_hash"))
+    except Exception:
+        return None
+    return InputPeerChannel(channel_id=peer_id, access_hash=access_hash)
+
+
 async def prepare_source_for_scrape(
     client: TelegramClient,
     channel_record: dict,
@@ -137,10 +150,34 @@ async def prepare_source_for_scrape(
     """
     username = channel_record["channel_username"]
     channel_uuid = channel_record["id"]
+    entity_lookup = username
+    used_peer_ref = False
+    if config.FEATURE_SOURCE_PEER_REF_LOOKUP:
+        peer_ref = supabase_writer.get_channel_peer_ref(channel_uuid, "primary")
+        input_peer = _peer_ref_to_input_peer(peer_ref)
+        if input_peer is not None:
+            entity_lookup = input_peer
+            used_peer_ref = True
+        elif config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            ensure_resolution_job(supabase_writer, channel_record, priority=20)
+            logger.info(f"[{username}] Missing peer ref; queued source resolution and skipping scrape cycle")
+            return supabase_writer.get_channel_by_id(channel_uuid), None
 
     try:
-        entity = await client.get_entity(username)
+        entity = await client.get_entity(entity_lookup)
     except (ValueError, ChannelPrivateError) as exc:
+        if used_peer_ref and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            supabase_writer.update_channel(
+                channel_uuid,
+                build_pending_source_payload(
+                    channel_title=(channel_record.get("channel_title") or username or "").strip() or username,
+                    error_message=str(exc)[:500],
+                ),
+            )
+            refreshed = supabase_writer.get_channel_by_id(channel_uuid) or channel_record
+            ensure_resolution_job(supabase_writer, refreshed, priority=10 if refreshed.get("is_active") else 30)
+            logger.warning(f"[{username}] Peer ref is stale or inaccessible; queued source re-resolution")
+            return refreshed, None
         supabase_writer.update_channel(
             channel_uuid,
             {
@@ -161,6 +198,12 @@ async def prepare_source_for_scrape(
 
     try:
         metadata, resolved_entity = await resolve_source_metadata(client, username=username, entity=entity)
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE or config.FEATURE_SOURCE_PEER_REF_LOOKUP:
+            supabase_writer.upsert_channel_peer_ref(
+                channel_uuid,
+                "primary",
+                channel_peer_ref_from_entity(resolved_entity, username=username),
+            )
         supabase_writer.update_channel(channel_uuid, metadata)
         refreshed = supabase_writer.get_channel_by_id(channel_uuid) or {**channel_record, **metadata}
         return refreshed, resolved_entity

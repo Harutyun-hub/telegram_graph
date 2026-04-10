@@ -23,9 +23,12 @@ Relationship Types (20):
   CO_OCCURS_WITH, BELONGS_TO_CATEGORY, IN_DOMAIN,
   MENTIONS, MENTIONS_ENTITY, HAS_SENTIMENT_TAG
 """
-from neo4j import GraphDatabase
-from loguru import logger
 from typing import cast
+
+from loguru import logger
+from neo4j import ManagedTransaction
+
+from api import db
 from utils.topic_normalizer import (
     normalize_model_topics,
     normalize_topics,
@@ -34,79 +37,71 @@ from utils.topic_normalizer import (
     normalize_topic_category,
     normalize_topic_domain,
 )
-import config
+
+
+SCHEMA_CONSTRAINTS = [
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Channel)             REQUIRE n.uuid IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Post)                REQUIRE n.uuid IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Comment)             REQUIRE n.uuid IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:User)                REQUIRE n.telegram_user_id IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Topic)               REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicCategory)       REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicDomain)         REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Entity)              REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Intent)              REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Sentiment)           REQUIRE n.label IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:SentimentTag)        REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:GeopoliticalStance)  REQUIRE n.alignment IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:LifeStage)           REQUIRE n.name IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (n:BusinessOpportunity) REQUIRE n.type IS UNIQUE",
+    "CREATE INDEX post_time_idx        IF NOT EXISTS FOR (p:Post)    ON (p.channel_uuid, p.posted_at)",
+    "CREATE INDEX user_lang_idx        IF NOT EXISTS FOR (u:User)    ON (u.language, u.inferred_gender)",
+    "CREATE INDEX comment_time_idx     IF NOT EXISTS FOR (c:Comment) ON (c.telegram_user_id, c.posted_at)",
+    "CREATE INDEX user_nostalgia_idx   IF NOT EXISTS FOR (u:User)    ON (u.soviet_nostalgia)",
+    "CREATE INDEX user_distress_idx    IF NOT EXISTS FOR (u:User)    ON (u.financial_distress_level)",
+    "CREATE INDEX user_locus_idx       IF NOT EXISTS FOR (u:User)    ON (u.locus_of_control)",
+    "CREATE INDEX comment_tod_idx      IF NOT EXISTS FOR (c:Comment) ON (c.time_of_day, c.posting_hour)",
+]
+
+SCHEMA_FULLTEXT_INDEXES = [
+    "CREATE FULLTEXT INDEX post_text_ft    IF NOT EXISTS FOR (p:Post)    ON EACH [p.text]",
+    "CREATE FULLTEXT INDEX comment_text_ft IF NOT EXISTS FOR (c:Comment) ON EACH [c.text]",
+]
+
+
+def ensure_schema(*, driver_key: str = db.BACKGROUND_DRIVER_KEY) -> None:
+    def _work(tx: ManagedTransaction) -> None:
+        for stmt in SCHEMA_CONSTRAINTS:
+            try:
+                tx.run(stmt).consume()
+            except Exception as exc:
+                logger.debug("Index/constraint skip: {}", exc)
+        for stmt in SCHEMA_FULLTEXT_INDEXES:
+            try:
+                tx.run(stmt).consume()
+            except Exception as exc:
+                logger.debug("Full-text index skip: {}", exc)
+
+    db.execute_write(_work, driver_key=driver_key, op_name="ensure_schema")
+    logger.info("Neo4j indexes and constraints ready")
 
 
 class Neo4jWriter:
 
-    def __init__(self):
-        # neo4j+ssc:// = routing protocol + SSL + skip certificate verification
-        # Resolves macOS SSL cert errors with AuraDB
-        uri = config.NEO4J_URI
-        if uri.startswith("neo4j+s://"):
-            uri = uri.replace("neo4j+s://", "neo4j+ssc://")
-        self.driver = GraphDatabase.driver(
-            uri,
-            auth=(config.NEO4J_USERNAME, config.NEO4J_PASSWORD),
-        )
-        self._setup_indexes()
+    def __init__(self, *, driver_key: str = db.BACKGROUND_DRIVER_KEY):
+        self.driver_key = driver_key
 
     def close(self):
-        self.driver.close()
+        # Drivers are process-shared and managed centrally; nothing to close here.
+        return None
 
     def clear_graph(self):
         """Delete graph nodes/relationships while preserving constraints and indexes."""
-        with self.driver.session(database=config.NEO4J_DATABASE) as session:
-            session.run("MATCH (n) DETACH DELETE n").consume()
-        logger.warning("Neo4j graph data cleared")
+        def _work(tx: ManagedTransaction) -> None:
+            tx.run("MATCH (n) DETACH DELETE n").consume()
 
-    def _setup_indexes(self):
-        """
-        Create uniqueness constraints and performance indexes.
-        Expert Rule: indexes first, data second — never the other way around.
-        """
-        constraints = [
-            # Uniqueness constraints (also create implicit B-tree indexes)
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Channel)             REQUIRE n.uuid IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Post)                REQUIRE n.uuid IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Comment)             REQUIRE n.uuid IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:User)                REQUIRE n.telegram_user_id IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Topic)               REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicCategory)       REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:TopicDomain)         REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Entity)              REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Intent)              REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Sentiment)           REQUIRE n.label IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:SentimentTag)        REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:GeopoliticalStance)  REQUIRE n.alignment IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:LifeStage)           REQUIRE n.name IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:BusinessOpportunity) REQUIRE n.type IS UNIQUE",
-            # Composite indexes for common traversal patterns
-            "CREATE INDEX post_time_idx        IF NOT EXISTS FOR (p:Post)    ON (p.channel_uuid, p.posted_at)",
-            "CREATE INDEX user_lang_idx        IF NOT EXISTS FOR (u:User)    ON (u.language, u.inferred_gender)",
-            "CREATE INDEX comment_time_idx     IF NOT EXISTS FOR (c:Comment) ON (c.telegram_user_id, c.posted_at)",
-            # New behavioral intelligence indexes
-            "CREATE INDEX user_nostalgia_idx   IF NOT EXISTS FOR (u:User)    ON (u.soviet_nostalgia)",
-            "CREATE INDEX user_distress_idx    IF NOT EXISTS FOR (u:User)    ON (u.financial_distress_level)",
-            "CREATE INDEX user_locus_idx       IF NOT EXISTS FOR (u:User)    ON (u.locus_of_control)",
-            "CREATE INDEX comment_tod_idx      IF NOT EXISTS FOR (c:Comment) ON (c.time_of_day, c.posting_hour)",
-        ]
-        full_text = [
-            "CREATE FULLTEXT INDEX post_text_ft    IF NOT EXISTS FOR (p:Post)    ON EACH [p.text]",
-            "CREATE FULLTEXT INDEX comment_text_ft IF NOT EXISTS FOR (c:Comment) ON EACH [c.text]",
-        ]
-        with self.driver.session(database=config.NEO4J_DATABASE) as session:
-            for stmt in constraints:
-                try:
-                    session.run(stmt)
-                except Exception as e:
-                    logger.debug(f"Index/constraint skip: {e}")
-            for stmt in full_text:
-                try:
-                    session.run(stmt)
-                except Exception as e:
-                    logger.debug(f"Full-text index skip: {e}")
-        logger.info("Neo4j indexes and constraints ready")
+        db.execute_write(_work, driver_key=self.driver_key, op_name="writer.clear_graph")
+        logger.warning("Neo4j graph data cleared")
 
     # ── Enterprise Bundle Sync ────────────────────────────────────────────────
 
@@ -128,9 +123,9 @@ class Neo4jWriter:
         post_analysis  = bundle.get("post_analysis")
         reply_user_map = bundle.get("reply_user_map", {})
 
-        with self.driver.session(database=config.NEO4J_DATABASE) as session:
+        def _work(tx: ManagedTransaction) -> None:
             # 1. Channel + Post (foundation — must exist before anything else)
-            session.run(_CYPHER_CHANNEL_POST, _channel_post_params(channel, post))
+            tx.run(_CYPHER_CHANNEL_POST, _channel_post_params(channel, post)).consume()
 
             # 2. Comments + Users (with full AI analysis per user)
             for comment in comments:
@@ -140,20 +135,22 @@ class Neo4jWriter:
                 reply_to_msg_id  = comment.get("reply_to_message_id")
                 reply_to_user_id = reply_user_map.get(int(reply_to_msg_id)) if reply_to_msg_id else None
                 params = _comment_params(comment, post, analysis, reply_to_user_id)
-                session.run(_CYPHER_COMMENT, params)
+                tx.run(_CYPHER_COMMENT, params).consume()
 
             # 3. Topics — posts are tagged only from direct post analysis.
             topic_items = _collect_post_topic_items(post_analysis)
             post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
             if topic_items or post_sentiment or post_social_sentiment_tags:
-                session.run(_CYPHER_POST_TOPICS, {
+                tx.run(_CYPHER_POST_TOPICS, {
                     "post_uuid":    post["id"],
                     "channel_uuid": channel["id"],
                     "posted_at":    str(post.get("posted_at")),
                     "topics":       topic_items,
                     "post_sentiment": post_sentiment,
                     "post_social_sentiment_tags": post_social_sentiment_tags,
-                })
+                }).consume()
+
+        db.execute_write(_work, driver_key=self.driver_key, op_name="writer.sync_bundle")
 
     # ── Orphan Check (Expert Rule 6) ─────────────────────────────────────────
 
@@ -162,15 +159,18 @@ class Neo4jWriter:
         Verify graph integrity: no orphan posts or comments.
         Run periodically to detect data issues.
         """
-        with self.driver.session(database=config.NEO4J_DATABASE) as session:
-            orphan_posts = session.run(
+        def _work(tx: ManagedTransaction) -> dict:
+            orphan_posts = tx.run(
                 "MATCH (p:Post) WHERE NOT (p)-[:IN_CHANNEL]->(:Channel) RETURN count(p) AS n"
             ).single()["n"]
-            orphan_comments = session.run(
+            orphan_comments = tx.run(
                 "MATCH (c:Comment) WHERE NOT (c)-[:REPLIES_TO]->(:Post) RETURN count(c) AS n"
             ).single()["n"]
+            return {"orphan_posts": orphan_posts, "orphan_comments": orphan_comments}
 
-        result = {"orphan_posts": orphan_posts, "orphan_comments": orphan_comments}
+        result = db.execute_read(_work, driver_key=self.driver_key, op_name="writer.check_orphans")
+        orphan_posts = int(result.get("orphan_posts") or 0)
+        orphan_comments = int(result.get("orphan_comments") or 0)
         if orphan_posts > 0 or orphan_comments > 0:
             logger.warning(f"Graph integrity issue: {result}")
         return result
@@ -204,8 +204,8 @@ class Neo4jWriter:
         LIMIT $limit
         """
 
-        with self.driver.session(database=config.NEO4J_DATABASE) as session:
-            rows = session.run(
+        def _work(tx: ManagedTransaction) -> list[dict]:
+            rows = tx.run(
                 query,
                 {
                     "min_discuss_count": max(1, int(min_discuss_count)),
@@ -214,6 +214,8 @@ class Neo4jWriter:
                 },
             )
             return [dict(row) for row in rows]
+
+        return db.execute_read(_work, driver_key=self.driver_key, op_name="writer.list_topic_promotion_candidates")
 
 
 # ── Cypher Templates ──────────────────────────────────────────────────────────

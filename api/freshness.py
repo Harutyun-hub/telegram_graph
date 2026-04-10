@@ -122,6 +122,16 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append(
             f"{backlog.get('retry_blocked_scopes')} AI scopes are temporarily backoff-blocked."
         )
+    if _to_int(backlog.get("resolution_due_jobs"), 0) > 0:
+        notes.append(
+            f"{backlog.get('resolution_due_jobs')} source-resolution jobs are waiting to run."
+        )
+    if _to_int(backlog.get("resolution_stale_nonclaimable_jobs"), 0) > 0:
+        notes.append(
+            f"{backlog.get('resolution_stale_nonclaimable_jobs')} source-resolution jobs need operator triage."
+        )
+    if _to_int(backlog.get("resolution_cooldown_slots"), 0) > 0:
+        notes.append("Telegram source resolution is cooling down due to flood-wait limits.")
     if drift.get("latest_post_delta_minutes") is not None and _to_int(drift.get("latest_post_delta_minutes"), 0) > 120:
         notes.append("Latest post timestamp differs by more than 2 hours between Supabase and Neo4j.")
     if pipeline.get("scrape", {}).get("status") == "stale":
@@ -239,6 +249,34 @@ def _eta_confidence(run_history: list[dict], running_now: bool) -> str:
     return "medium" if running_now else "low"
 
 
+def freshness_cache_ttl_seconds() -> int:
+    return _CACHE_TTL_SECONDS
+
+
+def get_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
+    global _CACHE, _CACHE_TS
+    now = datetime.now(timezone.utc)
+    if _CACHE and _CACHE_TS and (now - _CACHE_TS).total_seconds() < _CACHE_TTL_SECONDS:
+        return dict(_CACHE), _CACHE_TS
+    return None, _CACHE_TS
+
+
+def prime_freshness_snapshot(snapshot: dict, *, cached_at: Optional[datetime] = None) -> None:
+    global _CACHE, _CACHE_TS
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+
+    ts = cached_at or _parse_iso(snapshot.get("generated_at")) or datetime.now(timezone.utc)
+    _CACHE = dict(snapshot)
+    _CACHE_TS = ts
+
+
+def clear_cached_freshness_snapshot() -> None:
+    global _CACHE, _CACHE_TS
+    _CACHE = None
+    _CACHE_TS = None
+
+
 def get_freshness_snapshot(
     supabase_writer,
     *,
@@ -256,6 +294,22 @@ def get_freshness_snapshot(
     scheduler = scheduler_status or {}
     interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
     supa = supabase_writer.get_pipeline_freshness_snapshot()
+    resolution = (
+        supabase_writer.get_source_resolution_snapshot(session_slot="primary")
+        if hasattr(supabase_writer, "get_source_resolution_snapshot")
+        else {
+            "slot_key": "primary",
+            "due_jobs": 0,
+            "leased_jobs": 0,
+            "dead_letter_jobs": 0,
+            "stale_nonclaimable_jobs": 0,
+            "cooldown_slots": 0,
+            "cooldown_until": None,
+            "oldest_due_age_seconds": None,
+            "active_pending_sources": 0,
+            "active_missing_peer_refs": 0,
+        }
+    )
     recent = supabase_writer.get_recent_pipeline_snapshot()
     neo = _neo4j_snapshot()
     retention_days = max(1, _to_int(recent.get("window_days"), int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15))))
@@ -361,6 +415,13 @@ def get_freshness_snapshot(
             "unsynced_analysis": _to_int(supa.get("unsynced_analysis"), 0),
             "dead_letter_scopes": _to_int(supa.get("dead_letter_scopes"), 0),
             "retry_blocked_scopes": _to_int(supa.get("retry_blocked_scopes"), 0),
+            "resolution_due_jobs": _to_int(resolution.get("due_jobs"), 0),
+            "resolution_leased_jobs": _to_int(resolution.get("leased_jobs"), 0),
+            "resolution_dead_letter_jobs": _to_int(resolution.get("dead_letter_jobs"), 0),
+            "resolution_stale_nonclaimable_jobs": _to_int(resolution.get("stale_nonclaimable_jobs"), 0),
+            "resolution_cooldown_slots": _to_int(resolution.get("cooldown_slots"), 0),
+            "resolution_oldest_due_age_seconds": _to_int(resolution.get("oldest_due_age_seconds"), 0),
+            "active_pending_sources": _to_int(resolution.get("active_pending_sources"), 0),
         },
         "drift": {
             "analytics_window_days": retention_days,
@@ -376,6 +437,7 @@ def get_freshness_snapshot(
             "neo4j_channel_count": _to_int(neo.get("channel_count"), 0),
             "neo4j_topic_count": _to_int(neo.get("topic_count"), 0),
         },
+        "resolution": resolution,
         "pulse": {
             "queue": {
                 "ai_items": ai_queue,

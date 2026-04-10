@@ -16,6 +16,7 @@ class _FakeRuntimeBucket:
         self.files: dict[str, bytes] = {}
         self.download_overrides: dict[str, bytes | Exception] = {}
         self.fail_duplicate_upload = False
+        self.signed_url_calls = 0
 
     def download(self, path: str) -> bytes:
         override = self.download_overrides.get(path)
@@ -30,8 +31,13 @@ class _FakeRuntimeBucket:
     def update(self, path: str, body: bytes, _options: dict) -> None:
         self.files[path] = body
 
-    def upload(self, path: str, body: bytes, _options: dict) -> None:
-        if self.fail_duplicate_upload and path in self.files:
+    def create_signed_url(self, _path: str, _expires_in: int) -> dict:
+        self.signed_url_calls += 1
+        raise RuntimeError("signed-url-should-not-be-used")
+
+    def upload(self, path: str, body: bytes, options: dict) -> None:
+        upsert = str(options.get("upsert", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if self.fail_duplicate_upload and path in self.files and not upsert:
             raise RuntimeError("Duplicate")
         self.files[path] = body
 
@@ -76,6 +82,18 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
 
 
 class RuntimePersistenceTests(unittest.TestCase):
+    def test_persist_freshness_snapshot_uses_valid_log_level(self) -> None:
+        snapshot = {"generated_at": "2026-03-28T07:54:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "get_supabase_writer") as writer_mock, \
+             patch.object(server.logger, "log") as log_mock:
+            writer_mock.return_value.save_runtime_blob.return_value = True
+
+            result = server._persist_freshness_snapshot_sync(snapshot)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(log_mock.call_args[0][0], "INFO")
+
     def test_get_runtime_json_reads_via_authenticated_download(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": False}}}).encode("utf-8")
@@ -94,7 +112,7 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertFalse(saved)
 
-    def test_save_runtime_json_overwrites_duplicate_by_replacing_object(self) -> None:
+    def test_save_runtime_json_overwrites_duplicate_with_upsert(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.fail_duplicate_upload = True
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": True}}}).encode("utf-8")
@@ -105,6 +123,47 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertTrue(saved)
         self.assertEqual(stored["widgets"]["w1"]["enabled"], False)
+
+    def test_save_runtime_blob_persists_binary_payload(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        writer = _make_writer(bucket)
+
+        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"compressed-payload")
+
+        self.assertTrue(saved)
+        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"compressed-payload")
+
+    def test_save_runtime_blob_overwrites_duplicate_with_upsert(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.fail_duplicate_upload = True
+        bucket.files["dashboard-cache/v1/test.json.gz"] = b"old"
+        writer = _make_writer(bucket)
+
+        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"new-payload")
+
+        self.assertTrue(saved)
+        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"new-payload")
+
+    def test_read_runtime_blob_returns_timeout_status(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        writer = _make_writer(bucket)
+
+        with patch.object(writer, "_read_runtime_blob_bytes", side_effect=TimeoutError("timed out")):
+            result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["body"], b"")
+
+    def test_read_runtime_blob_prefers_authenticated_download(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["dashboard-cache/v1/test.json.gz"] = b"cached"
+        writer = _make_writer(bucket)
+
+        result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["body"], b"cached")
+        self.assertEqual(bucket.signed_url_calls, 0)
 
     def test_update_admin_config_returns_500_when_persistence_cannot_be_verified(self) -> None:
         payload = server.AdminConfigPatchRequest(runtime={"openaiModel": "gpt-4o-mini"})

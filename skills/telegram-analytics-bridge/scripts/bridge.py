@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import sys
 
@@ -32,9 +31,6 @@ from formatters import build_error
 from models import (
     AskInsightsRequest,
     ClientConfig,
-    DEFAULT_BACKOFF_BASE,
-    DEFAULT_MAX_RETRIES,
-    DEFAULT_TIMEOUT,
     CompareChannelsRequest,
     CompareTopicsRequest,
     GetFreshnessStatusRequest,
@@ -52,16 +48,8 @@ from models import (
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
-    ValidationError,
 )
-
-
-def _configure_logging() -> None:
-    if os.getenv("TELEGRAM_ANALYTICS_BRIDGE_DEBUG") == "1":
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(levelname)s %(name)s: %(message)s",
-        )
+from pydantic import ValidationError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,9 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--base-url", default=os.getenv("ANALYTICS_API_BASE_URL", ""))
     common.add_argument("--api-key", default=os.getenv("ANALYTICS_API_KEY", ""))
-    common.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
-    common.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
-    common.add_argument("--backoff-base", type=float, default=DEFAULT_BACKOFF_BASE)
+    common.add_argument("--timeout", type=float, default=35.0)
+    common.add_argument("--max-retries", type=int, default=2)
+    common.add_argument("--backoff-base", type=float, default=0.5)
     common.add_argument("--json", action="store_true", help="emit compact JSON")
 
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -158,7 +146,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    _configure_logging()
     parser = build_parser()
     args = parser.parse_args()
 
