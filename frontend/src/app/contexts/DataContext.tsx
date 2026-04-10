@@ -47,7 +47,9 @@ interface DashboardMeta {
   responseSerializeMs?: number;
 }
 
-const DASHBOARD_TIMEOUT_MS = 30_000;
+// Keep the browser timeout above the backend cold-start budget so the client
+// does not abort a request that the server is still about to satisfy.
+const DASHBOARD_TIMEOUT_MS = 45_000;
 
 interface DataContextValue {
   data: AppData;
