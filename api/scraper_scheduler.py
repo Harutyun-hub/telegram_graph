@@ -34,6 +34,8 @@ class ScraperSchedulerService:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "scraper_runtime_job"
         self.resolution_job_id = "source_resolution_runtime_job"
+        self.pipeline_queue_repair_job_id = "pipeline_queue_repair_job"
+        self.pipeline_queue_reclaim_job_id = "pipeline_queue_reclaim_job"
 
         self.interval_minutes = 15
         self.desired_active = False
@@ -53,9 +55,23 @@ class ScraperSchedulerService:
         self.resolution_last_error: Optional[str] = None
         self.resolution_last_result: Optional[dict] = None
         self._resolution_run_history = deque(maxlen=20)
+        self.pipeline_queue_repair_running_now = False
+        self.pipeline_queue_repair_last_run_started_at: Optional[datetime] = None
+        self.pipeline_queue_repair_last_run_finished_at: Optional[datetime] = None
+        self.pipeline_queue_repair_last_success_at: Optional[datetime] = None
+        self.pipeline_queue_repair_last_error: Optional[str] = None
+        self.pipeline_queue_repair_last_result: Optional[dict] = None
+        self.pipeline_queue_reclaim_running_now = False
+        self.pipeline_queue_reclaim_last_run_started_at: Optional[datetime] = None
+        self.pipeline_queue_reclaim_last_run_finished_at: Optional[datetime] = None
+        self.pipeline_queue_reclaim_last_success_at: Optional[datetime] = None
+        self.pipeline_queue_reclaim_last_error: Optional[str] = None
+        self.pipeline_queue_reclaim_last_result: Optional[dict] = None
 
         self._run_lock = asyncio.Lock()
         self._resolution_run_lock = asyncio.Lock()
+        self._pipeline_queue_repair_run_lock = asyncio.Lock()
+        self._pipeline_queue_reclaim_run_lock = asyncio.Lock()
         self._client: Optional[TelegramClient] = None
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -69,6 +85,9 @@ class ScraperSchedulerService:
             self._upsert_interval_job()
         if config.FEATURE_SOURCE_RESOLUTION_WORKER:
             self._upsert_resolution_job()
+        if config.PIPELINE_QUEUE_ENABLED:
+            self._upsert_pipeline_queue_repair_job()
+            self._upsert_pipeline_queue_reclaim_job()
 
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
@@ -121,6 +140,10 @@ class ScraperSchedulerService:
             return None
         return _iso(job.next_run_time)
 
+    async def _run_blocking(self, func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
     def _upsert_resolution_job(self) -> None:
         try:
             self.scheduler.remove_job(self.resolution_job_id)
@@ -137,10 +160,58 @@ class ScraperSchedulerService:
             misfire_grace_time=120,
         )
 
+    def _upsert_pipeline_queue_repair_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.pipeline_queue_repair_job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._run_pipeline_queue_repair_cycle,
+            "interval",
+            minutes=max(1, int(config.PIPELINE_QUEUE_REPAIR_INTERVAL_MINUTES)),
+            id=self.pipeline_queue_repair_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+        )
+
+    def _upsert_pipeline_queue_reclaim_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.pipeline_queue_reclaim_job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._run_pipeline_queue_reclaim_cycle,
+            "interval",
+            minutes=max(1, int(config.PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES)),
+            id=self.pipeline_queue_reclaim_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+        )
+
     def _next_resolution_run_iso(self) -> Optional[str]:
         if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
             return None
         job = self.scheduler.get_job(self.resolution_job_id)
+        if not job:
+            return None
+        return _iso(job.next_run_time)
+
+    def _next_pipeline_queue_repair_run_iso(self) -> Optional[str]:
+        if not config.PIPELINE_QUEUE_ENABLED:
+            return None
+        job = self.scheduler.get_job(self.pipeline_queue_repair_job_id)
+        if not job:
+            return None
+        return _iso(job.next_run_time)
+
+    def _next_pipeline_queue_reclaim_run_iso(self) -> Optional[str]:
+        if not config.PIPELINE_QUEUE_ENABLED:
+            return None
+        job = self.scheduler.get_job(self.pipeline_queue_reclaim_job_id)
         if not job:
             return None
         return _iso(job.next_run_time)
@@ -300,6 +371,85 @@ class ScraperSchedulerService:
                 self.resolution_last_run_finished_at = datetime.now(timezone.utc)
                 self.resolution_running_now = False
 
+    async def _run_pipeline_queue_repair_cycle(self) -> None:
+        if not config.PIPELINE_QUEUE_ENABLED:
+            return
+        if self._pipeline_queue_repair_run_lock.locked():
+            logger.warning("Pipeline queue repair skipped: previous run still active")
+            return
+
+        async with self._pipeline_queue_repair_run_lock:
+            coordinator = get_runtime_coordinator()
+            lock_token = coordinator.acquire_lock(
+                "worker:pipeline-queue-repair",
+                ttl_seconds=max(120, int(config.PIPELINE_QUEUE_REPAIR_INTERVAL_MINUTES) * 60),
+            )
+            if not lock_token:
+                logger.warning("Pipeline queue repair skipped: runtime coordinator lock is already held")
+                return
+
+            self.pipeline_queue_repair_running_now = True
+            self.pipeline_queue_repair_last_error = None
+            self.pipeline_queue_repair_last_run_started_at = datetime.now(timezone.utc)
+            self.pipeline_queue_repair_last_run_finished_at = None
+
+            try:
+                result = await self._run_blocking(
+                    self.db.repair_pipeline_stage_queues,
+                    limit=config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE,
+                )
+                self.pipeline_queue_repair_last_result = result
+                self.pipeline_queue_repair_last_success_at = datetime.now(timezone.utc)
+                logger.success(f"Pipeline queue repair completed: {result}")
+            except Exception as e:
+                self.pipeline_queue_repair_last_error = str(e)
+                logger.error(f"Pipeline queue repair failed: {e}")
+            finally:
+                coordinator.release_lock("worker:pipeline-queue-repair", lock_token)
+                self.pipeline_queue_repair_last_run_finished_at = datetime.now(timezone.utc)
+                self.pipeline_queue_repair_running_now = False
+
+    async def _run_pipeline_queue_reclaim_cycle(self) -> None:
+        if not config.PIPELINE_QUEUE_ENABLED:
+            return
+        if self._pipeline_queue_reclaim_run_lock.locked():
+            logger.warning("Pipeline queue reclaim skipped: previous run still active")
+            return
+
+        async with self._pipeline_queue_reclaim_run_lock:
+            coordinator = get_runtime_coordinator()
+            lock_token = coordinator.acquire_lock(
+                "worker:pipeline-queue-reclaim",
+                ttl_seconds=max(120, int(config.PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES) * 60),
+            )
+            if not lock_token:
+                logger.warning("Pipeline queue reclaim skipped: runtime coordinator lock is already held")
+                return
+
+            self.pipeline_queue_reclaim_running_now = True
+            self.pipeline_queue_reclaim_last_error = None
+            self.pipeline_queue_reclaim_last_run_started_at = datetime.now(timezone.utc)
+            self.pipeline_queue_reclaim_last_run_finished_at = None
+
+            try:
+                result = await self._run_blocking(
+                    lambda: {
+                        "ai_post_jobs_reclaimed": self.db.reclaim_expired_ai_post_jobs(),
+                        "ai_comment_group_jobs_reclaimed": self.db.reclaim_expired_ai_comment_group_jobs(),
+                        "neo4j_sync_jobs_reclaimed": self.db.reclaim_expired_neo4j_sync_jobs(),
+                    }
+                )
+                self.pipeline_queue_reclaim_last_result = result
+                self.pipeline_queue_reclaim_last_success_at = datetime.now(timezone.utc)
+                logger.success(f"Pipeline queue reclaim completed: {result}")
+            except Exception as e:
+                self.pipeline_queue_reclaim_last_error = str(e)
+                logger.error(f"Pipeline queue reclaim failed: {e}")
+            finally:
+                coordinator.release_lock("worker:pipeline-queue-reclaim", lock_token)
+                self.pipeline_queue_reclaim_last_run_finished_at = datetime.now(timezone.utc)
+                self.pipeline_queue_reclaim_running_now = False
+
     async def start(self) -> dict:
         self._ensure_scheduler_started()
         self.desired_active = True
@@ -446,6 +596,29 @@ class ScraperSchedulerService:
                 "last_result": self.resolution_last_result,
                 "run_history": list(self._resolution_run_history),
                 "snapshot": resolution_snapshot,
+            },
+            "pipeline_queue": {
+                "enabled": bool(config.PIPELINE_QUEUE_ENABLED),
+                "repair": {
+                    "running_now": self.pipeline_queue_repair_running_now,
+                    "interval_minutes": max(1, int(config.PIPELINE_QUEUE_REPAIR_INTERVAL_MINUTES)),
+                    "last_run_started_at": _iso(self.pipeline_queue_repair_last_run_started_at),
+                    "last_run_finished_at": _iso(self.pipeline_queue_repair_last_run_finished_at),
+                    "last_success_at": _iso(self.pipeline_queue_repair_last_success_at),
+                    "next_run_at": self._next_pipeline_queue_repair_run_iso(),
+                    "last_error": self.pipeline_queue_repair_last_error,
+                    "last_result": self.pipeline_queue_repair_last_result,
+                },
+                "reclaim": {
+                    "running_now": self.pipeline_queue_reclaim_running_now,
+                    "interval_minutes": max(1, int(config.PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES)),
+                    "last_run_started_at": _iso(self.pipeline_queue_reclaim_last_run_started_at),
+                    "last_run_finished_at": _iso(self.pipeline_queue_reclaim_last_run_finished_at),
+                    "last_success_at": _iso(self.pipeline_queue_reclaim_last_success_at),
+                    "next_run_at": self._next_pipeline_queue_reclaim_run_iso(),
+                    "last_error": self.pipeline_queue_reclaim_last_error,
+                    "last_result": self.pipeline_queue_reclaim_last_result,
+                },
             },
             "persisted": persisted,
         }
