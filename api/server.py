@@ -31,7 +31,6 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-config.validate()
 
 from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -183,6 +182,7 @@ _init_sentry()
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    config.validate()
     startup_started_at = time.perf_counter()
     startup_phases: dict[str, float] = {}
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
