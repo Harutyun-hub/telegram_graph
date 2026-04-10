@@ -111,6 +111,14 @@ export function DashboardDateRangeProvider({ children }: { children: ReactNode }
 
     async function initialize() {
       const savedRange = parseStoredRange(typeof window === 'undefined' ? null : window.localStorage.getItem(STORAGE_KEY));
+      const initialRange = savedRange
+        ? shiftRangeToTrustedEnd(savedRange, fallbackTrustedEnd)
+        : fallbackRange;
+
+      setTrustedEndDate(formatDateInput(fallbackTrustedEnd));
+      setRange(initialRange);
+      setReady(true);
+
       try {
         const snapshot = await apiFetch<any>('/freshness');
         if (cancelled) return;
@@ -121,16 +129,15 @@ export function DashboardDateRangeProvider({ children }: { children: ReactNode }
           : buildPresetRange('last_15_days', trustedEnd);
         setTrustedEndDate(trustedEndInput);
         setFreshness(summary);
-        setRange(nextRange);
+        setRange((currentRange) => (
+          currentRange.from === nextRange.from
+          && currentRange.to === nextRange.to
+          && currentRange.presetId === nextRange.presetId
+            ? currentRange
+            : nextRange
+        ));
       } catch {
         if (cancelled) return;
-        const nextRange = savedRange
-          ? shiftRangeToTrustedEnd(savedRange, fallbackTrustedEnd)
-          : fallbackRange;
-        setTrustedEndDate(formatDateInput(fallbackTrustedEnd));
-        setRange(nextRange);
-      } finally {
-        if (!cancelled) setReady(true);
       }
     }
 

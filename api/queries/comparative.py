@@ -924,6 +924,7 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                 sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
         }
         CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -977,6 +978,7 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                    size([channel IN channels WHERE channel IS NOT NULL]) AS distinctChannels
         }
         CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)

@@ -59,6 +59,7 @@ export async function getAdminConfig(): Promise<AdminConfigResult> {
     method: 'GET',
     headers: { Accept: 'application/json' },
     cache: 'no-store',
+    includeUserAuth: true,
     timeoutMs: 25_000,
   });
   const config = mergeAdminConfig(payload);
@@ -73,6 +74,7 @@ export async function patchAdminConfig(patch: AdminConfigPatch): Promise<AdminCo
   const payload = await apiFetch<AdminConfigEnvelope>('/admin/config', {
     method: 'PATCH',
     body: JSON.stringify(patch),
+    includeUserAuth: true,
     timeoutMs: 25_000,
   });
   const config = mergeAdminConfig(payload);
