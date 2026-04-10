@@ -1,10 +1,10 @@
 """
-graph_dashboard.py — topic-first graph projection for the /graph page.
+graph_dashboard.py — analyst graph projection for the /graph page.
 
 This module intentionally exposes a lightweight conversation map:
-categories anchor the landscape, topics are the primary actors, and channels
-stay as bounded source context. Evidence continues to come from the dedicated
-topic/channel detail endpoints.
+channels provide source context, categories anchor the landscape, and topics
+remain drill-down detail under categories. Evidence continues to come from the
+dedicated topic/channel detail endpoints and graph node details.
 """
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ from typing import Any
 
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api.db import run_query
+from api import topic_overviews
+from api.queries import comparative
+from utils.topic_normalizer import classify_topic
 
 _NOISY_TOPIC_KEYS = {"", "null", "unknown", "none", "n/a", "na"}
 _EXCLUDED_CATEGORY_KEYS = {"general"}
@@ -263,15 +266,15 @@ def _resolve_filters(raw_filters: dict | None = None) -> dict[str, Any]:
 def _row_matches_sentiments(row: dict[str, Any], sentiments: list[str]) -> bool:
     if not sentiments:
         return True
-    if "Positive" in sentiments and _to_int(row.get("sentimentPositive")) > 0:
-        return True
-    if "Neutral" in sentiments and _to_int(row.get("sentimentNeutral")) > 0:
-        return True
-    if "Negative" in sentiments and _to_int(row.get("sentimentNegative")) > 0:
-        return True
-    if "Urgent" in sentiments and _to_int(row.get("urgentSignals")) > 0:
-        return True
-    return False
+    dominant = _dominant_sentiment(
+        {
+            "sentimentPositive": row.get("sentimentPositive", row.get("positiveScore")),
+            "sentimentNeutral": row.get("sentimentNeutral", row.get("neutralScore")),
+            "sentimentNegative": row.get("sentimentNegative", row.get("negativeScore")),
+            "urgentSignals": row.get("urgentSignals", row.get("urgentScore")),
+        }
+    )
+    return dominant in sentiments
 
 
 def _row_matches_signal_focus(row: dict[str, Any], signal_focus: str) -> bool:
@@ -324,6 +327,115 @@ def _topic_label_id(name: str) -> str:
 
 def _category_label_id(name: str) -> str:
     return f"category:{name}"
+
+
+def _merge_top_channels(*channel_sets: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for channels in channel_sets:
+        for channel in channels or []:
+            channel_id = str(channel.get("id") or "").strip()
+            channel_name = _safe_name(channel.get("name"), channel_id.replace("channel:", ""))
+            mentions = max(0, _to_int(channel.get("mentions"), 0))
+            if not channel_id and not channel_name:
+                continue
+            key = channel_id or f"channel:{channel_name}"
+            entry = merged.setdefault(
+                key,
+                {
+                    "id": key,
+                    "name": channel_name,
+                    "mentions": 0,
+                },
+            )
+            entry["mentions"] = _to_int(entry.get("mentions")) + mentions
+            if channel_name and not str(entry.get("name") or "").strip():
+                entry["name"] = channel_name
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (-_to_int(item.get("mentions")), str(item.get("name") or "")),
+    )[:12]
+
+
+def _canonicalize_topic_rows(topic_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    canonical_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    existing_topic_names = {
+        _safe_name(row.get("name"), "").strip().lower()
+        for row in topic_rows
+        if _safe_name(row.get("name"), "").strip()
+    }
+
+    for row in topic_rows:
+        raw_name = _safe_name(row.get("name"), "")
+        raw_category = _safe_name(row.get("category"), "General")
+        classification = classify_topic(raw_name)
+        canonical_candidate = _safe_name((classification or {}).get("taxonomy_topic") or raw_name, raw_name)
+        canonical_exists = canonical_candidate.strip().lower() in existing_topic_names
+        use_canonical_name = canonical_exists or canonical_candidate.strip().lower() == raw_name.strip().lower()
+        canonical_name = canonical_candidate if use_canonical_name else raw_name
+        canonical_category = _safe_name(
+            ((classification or {}).get("closest_category") if use_canonical_name else raw_category) or raw_category,
+            raw_category,
+        )
+        if not canonical_name:
+            continue
+
+        key = (canonical_name.lower(), canonical_category.lower())
+        if key not in canonical_rows:
+            canonical_rows[key] = {
+                **row,
+                "id": _topic_label_id(canonical_name),
+                "name": canonical_name,
+                "category": canonical_category,
+                "topChannels": list(row.get("topChannels") or []),
+            }
+            continue
+
+        entry = canonical_rows[key]
+        entry["mentionCount"] = _to_int(entry.get("mentionCount")) + _to_int(row.get("mentionCount"))
+        entry["postCount"] = _to_int(entry.get("postCount")) + _to_int(row.get("postCount"))
+        entry["commentCount"] = _to_int(entry.get("commentCount")) + _to_int(row.get("commentCount"))
+        entry["evidenceCount"] = _to_int(entry.get("evidenceCount")) + _to_int(row.get("evidenceCount"))
+        entry["distinctUsers"] = max(_to_int(entry.get("distinctUsers")), _to_int(row.get("distinctUsers")))
+        entry["askSignalCount"] = _to_int(entry.get("askSignalCount")) + _to_int(row.get("askSignalCount"))
+        entry["needSignalCount"] = _to_int(entry.get("needSignalCount")) + _to_int(row.get("needSignalCount"))
+        entry["fearSignalCount"] = _to_int(entry.get("fearSignalCount")) + _to_int(row.get("fearSignalCount"))
+        entry["urgentSignals"] = _to_int(entry.get("urgentSignals")) + _to_int(row.get("urgentSignals"))
+        entry["_positive_raw"] = _to_int(entry.get("_positive_raw")) + _to_int(row.get("_positive_raw"))
+        entry["_neutral_raw"] = _to_int(entry.get("_neutral_raw")) + _to_int(row.get("_neutral_raw"))
+        entry["_negative_raw"] = _to_int(entry.get("_negative_raw")) + _to_int(row.get("_negative_raw"))
+        entry["lastSeen"] = max(
+            str(entry.get("lastSeen") or ""),
+            str(row.get("lastSeen") or ""),
+        ) or entry.get("lastSeen") or row.get("lastSeen")
+        entry["sampleEvidenceId"] = entry.get("sampleEvidenceId") or row.get("sampleEvidenceId")
+        entry["topChannels"] = _merge_top_channels(entry.get("topChannels") or [], row.get("topChannels") or [])
+
+    output: list[dict[str, Any]] = []
+    for entry in canonical_rows.values():
+        positive_raw = _to_int(entry.get("_positive_raw"))
+        neutral_raw = _to_int(entry.get("_neutral_raw"))
+        negative_raw = _to_int(entry.get("_negative_raw"))
+        sentiment_total = positive_raw + neutral_raw + negative_raw
+        distinct_channels = len({str(channel.get("name") or "").strip().lower() for channel in entry.get("topChannels") or [] if str(channel.get("name") or "").strip()})
+        mention_count = _to_int(entry.get("mentionCount"))
+
+        entry["distinctChannels"] = max(distinct_channels, _to_int(entry.get("distinctChannels")))
+        entry["sentimentPositive"] = _to_int(round(100.0 * positive_raw / sentiment_total)) if sentiment_total > 0 else 0
+        entry["sentimentNeutral"] = _to_int(round(100.0 * neutral_raw / sentiment_total)) if sentiment_total > 0 else 0
+        entry["sentimentNegative"] = _to_int(round(100.0 * negative_raw / sentiment_total)) if sentiment_total > 0 else 0
+        entry["dominantSentiment"] = _dominant_sentiment(entry)
+        entry["val"] = _topic_value(
+            {
+                "mentionCount": mention_count,
+                "trendPct": entry.get("trendPct"),
+                "distinctChannels": entry.get("distinctChannels"),
+            }
+        )
+        output.append(entry)
+
+    output.sort(key=lambda row: _topic_sort_key(row, "volume"))
+    return output
 
 
 def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list[dict[str, Any]]:
@@ -605,11 +717,14 @@ def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list
             "sampleEvidenceId": _to_iso(row.get("sampleEvidenceId")),
             "lastSeen": _to_iso(row.get("latestAt")),
             "topChannels": list(row.get("topChannels") or []),
+            "_positive_raw": _to_int(row.get("positiveScore")),
+            "_neutral_raw": _to_int(row.get("neutralScore")),
+            "_negative_raw": _to_int(row.get("negativeScore")),
         }
         topic_row["dominantSentiment"] = _dominant_sentiment(topic_row)
         topic_row["val"] = _topic_value(topic_row)
         output.append(topic_row)
-    return output
+    return _canonicalize_topic_rows(output)
 
 
 def _filter_topic_rows(topic_rows: list[dict[str, Any]], filters: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -656,9 +771,9 @@ def _build_category_nodes(visible_topics: list[dict[str, Any]]) -> tuple[dict[st
         )
         category_node["val"] = round(_to_float(category_node.get("val")) + _to_float(topic.get("val")), 2)
         category_node["mentionCount"] = _to_int(category_node.get("mentionCount")) + _to_int(topic.get("mentionCount"))
-        category_node["_positive_raw"] += _to_int(topic.get("sentimentPositive"))
-        category_node["_neutral_raw"] += _to_int(topic.get("sentimentNeutral"))
-        category_node["_negative_raw"] += _to_int(topic.get("sentimentNegative"))
+        category_node["_positive_raw"] += _to_int(topic.get("_positive_raw"))
+        category_node["_neutral_raw"] += _to_int(topic.get("_neutral_raw"))
+        category_node["_negative_raw"] += _to_int(topic.get("_negative_raw"))
         category_node["_urgent_raw"] += _to_int(topic.get("urgentSignals"))
         category_node["askSignalCount"] += _to_int(topic.get("askSignalCount"))
         category_node["needSignalCount"] += _to_int(topic.get("needSignalCount"))
@@ -698,41 +813,55 @@ def _build_channel_nodes(
     visible_topics: list[dict[str, Any]],
     source_detail: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    per_topic_limit, global_limit = _source_detail_limits(source_detail)
+    per_category_limit, global_limit = _source_detail_limits(source_detail)
     channel_scores: dict[str, dict[str, Any]] = {}
+    category_channel_scores: dict[tuple[str, str], dict[str, Any]] = {}
+
     for topic in visible_topics:
+        category_name = _safe_name(topic.get("category"), "General")
         for idx, channel in enumerate(topic.get("topChannels") or []):
-            if idx >= max(per_topic_limit * 2, 3):
+            if idx >= max(per_category_limit * 2, 3):
                 break
             channel_id = str(channel.get("id") or "").strip()
             channel_name = _safe_name(channel.get("name"), channel_id.replace("channel:", ""))
             mentions = max(1, _to_int(channel.get("mentions"), 1))
             entry = channel_scores.setdefault(
                 channel_id,
-                {"id": channel_id, "name": channel_name, "mentions": 0, "topicCount": 0},
+                {"id": channel_id, "name": channel_name, "mentions": 0, "topicCount": 0, "_categories": set()},
             )
             entry["mentions"] += mentions
             entry["topicCount"] += 1
+            entry["_categories"].add(category_name)
+            pair = category_channel_scores.setdefault(
+                (channel_id, category_name),
+                {"id": channel_id, "name": channel_name, "category": category_name, "mentions": 0},
+            )
+            pair["mentions"] += mentions
     allowed_channel_ids = {
         row["id"]
         for row in sorted(
             channel_scores.values(),
-            key=lambda item: (-_to_int(item.get("mentions")), -_to_int(item.get("topicCount")), str(item.get("name") or "")),
+            key=lambda item: (
+                -_to_int(item.get("mentions")),
+                -len(item.get("_categories") or set()),
+                -_to_int(item.get("topicCount")),
+                str(item.get("name") or ""),
+            ),
         )[:global_limit]
     }
 
     channel_nodes: dict[str, dict[str, Any]] = {}
     links: dict[tuple[str, str], dict[str, Any]] = {}
-    for topic in visible_topics:
-        added = 0
-        for channel in topic.get("topChannels") or []:
-            channel_id = str(channel.get("id") or "").strip()
-            if channel_id not in allowed_channel_ids:
-                continue
-            if added >= per_topic_limit:
-                break
-            channel_name = _safe_name(channel.get("name"), channel_id.replace("channel:", ""))
-            mentions = max(1, _to_int(channel.get("mentions"), 1))
+    category_buckets: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for pair in category_channel_scores.values():
+        if pair["id"] in allowed_channel_ids:
+            category_buckets[str(pair.get("category") or "General")].append(pair)
+
+    for category_name, rows in category_buckets.items():
+        for pair in sorted(rows, key=lambda item: (-_to_int(item.get("mentions")), str(item.get("name") or "")))[:per_category_limit]:
+            channel_id = str(pair.get("id") or "").strip()
+            channel_name = _safe_name(pair.get("name"), channel_id.replace("channel:", ""))
+            mentions = max(1, _to_int(pair.get("mentions"), 1))
             node = channel_nodes.setdefault(
                 channel_id,
                 {
@@ -742,26 +871,107 @@ def _build_channel_nodes(
                     "val": 0.0,
                     "mentionCount": 0,
                     "topicCount": 0,
+                    "categoryCount": 0,
+                    "_categories": set(),
                 },
             )
             node["val"] = round(_to_float(node.get("val")) + mentions * 2.2, 2)
             node["mentionCount"] = _to_int(node.get("mentionCount")) + mentions
             node["topicCount"] = _to_int(node.get("topicCount")) + 1
-            links[(channel_id, topic["id"])] = {
+            node["_categories"].add(category_name)
+            links[(channel_id, _category_label_id(category_name))] = {
                 "source": channel_id,
-                "target": topic["id"],
+                "target": _category_label_id(category_name),
                 "value": mentions,
-                "type": "channel-topic",
+                "type": "channel-category",
             }
-            added += 1
+
+    for node in channel_nodes.values():
+        categories = node.pop("_categories", set())
+        node["categoryCount"] = len(categories)
+
     return channel_nodes, links
+
+
+def _load_evidence_for_topic_names(
+    topic_names: list[str],
+    ctx: DashboardDateContext,
+    channels: list[str] | None = None,
+    *,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    cleaned_topics = [str(name or "").strip() for name in topic_names if str(name or "").strip()]
+    if not cleaned_topics:
+        return []
+    normalized_channels = _normalize_channels(channels)
+
+    rows = run_query(
+        f"""
+        UNWIND $topics AS topic_name
+        MATCH (t:Topic {{name: topic_name}})
+        CALL {{
+            WITH t
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+            WITH p, ch, t
+            WHERE {_channel_predicate('ch')}
+            RETURN {{
+                id: coalesce(p.uuid, 'post:' + elementId(p)),
+                channel: coalesce(ch.title, ch.username, 'Community message'),
+                author: coalesce(ch.title, ch.username, 'Community message'),
+                text: trim(coalesce(p.text, '')),
+                timestamp: toString(p.posted_at),
+                reactions: coalesce(p.views, 0),
+                replies: coalesce(p.comment_count, 0),
+                topic: t.name
+            }} AS evidence
+
+            UNION ALL
+
+            WITH t
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+            OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+            WITH c, u, ch, t
+            WHERE {_channel_predicate('ch')}
+            RETURN {{
+                id: coalesce(c.uuid, 'comment:' + elementId(c)),
+                channel: coalesce(ch.title, ch.username, 'Community message'),
+                author: coalesce(toString(u.telegram_user_id), coalesce(ch.title, ch.username, 'Community member')),
+                text: trim(coalesce(c.text, '')),
+                timestamp: toString(c.posted_at),
+                reactions: 0,
+                replies: 0,
+                topic: t.name
+            }} AS evidence
+        }}
+        WITH evidence
+        WHERE evidence.text <> ''
+        RETURN evidence
+        ORDER BY evidence.timestamp DESC, evidence.id DESC
+        LIMIT $limit
+        """,
+        {
+            "topics": cleaned_topics,
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+            "channels": normalized_channels,
+            "channel_count": len(normalized_channels),
+            "limit": max(1, min(int(limit), 24)),
+        },
+    )
+    return [dict(row.get("evidence") or {}) for row in rows if isinstance(row.get("evidence"), dict)]
 
 
 def get_graph_data(filters: dict | None = None) -> dict:
     resolved_filters = _resolve_filters(filters)
     ctx = _resolve_context(filters)
     cache_key = _cache_key(
-        "graph:data:v1",
+        "graph:data:v2",
         {
             "scope": ctx.cache_key,
             "channels": resolved_filters["channels"],
@@ -890,7 +1100,7 @@ def get_node_details(
         timeframe=timeframe,
     )
     cache_key = _cache_key(
-        "graph:node_details:v1",
+        "graph:node_details:v3",
         {
             "scope": ctx.cache_key,
             "node_id": str(node_id or "").strip(),
@@ -919,6 +1129,12 @@ def get_node_details(
             scoped_topics = [row for row in topic_rows if str(row.get("category") or "") == category_name]
             if not scoped_topics:
                 return None
+            evidence = _load_evidence_for_topic_names(
+                [str(row.get("name") or "") for row in scoped_topics[:12]],
+                scoped_ctx,
+                channels=channels,
+                limit=8,
+            )
             topic_payload = [
                 {
                     "name": row["name"],
@@ -938,6 +1154,17 @@ def get_node_details(
             ]
             mention_total = sum(_to_int(row.get("mentionCount")) for row in scoped_topics)
             weighted_growth = sum(_to_float(row.get("trendPct")) * max(1, _to_int(row.get("mentionCount"))) for row in scoped_topics)
+            overview = topic_overviews.get_category_overview(
+                category_name,
+                [
+                    {
+                        "name": str(row.get("name") or ""),
+                        "mentions": _to_int(row.get("mentionCount")),
+                        "dominantSentiment": row.get("dominantSentiment"),
+                    }
+                    for row in scoped_topics[:8]
+                ],
+            )
             return {
                 "id": _category_label_id(category_name),
                 "name": category_name,
@@ -958,6 +1185,8 @@ def get_node_details(
                 "fearSignalCount": sum(_to_int(row.get("fearSignalCount")) for row in scoped_topics),
                 "topTopics": topic_payload,
                 "topChannels": top_channels,
+                "overview": overview,
+                "evidence": evidence,
                 "from": scoped_ctx.from_date.isoformat(),
                 "to": scoped_ctx.to_date.isoformat(),
             }
@@ -966,6 +1195,33 @@ def get_node_details(
             row = next((item for item in topic_rows if str(item.get("name") or "") == topic_name), None)
             if not row:
                 return None
+            topic_detail = comparative.get_topic_detail(
+                topic_name,
+                str(row.get("category") or ""),
+                scoped_ctx,
+            ) or {}
+            topic_evidence = comparative.get_topic_evidence_page(
+                topic_name,
+                str(row.get("category") or ""),
+                "all",
+                0,
+                20,
+                None,
+                scoped_ctx,
+            ) or {}
+            topic_questions = comparative.get_topic_evidence_page(
+                topic_name,
+                str(row.get("category") or ""),
+                "questions",
+                0,
+                20,
+                None,
+                scoped_ctx,
+            ) or {}
+            overview = topic_overviews.get_topic_overview(
+                str(topic_detail.get("sourceTopic") or row.get("name") or topic_name),
+                str(topic_detail.get("category") or row.get("category") or ""),
+            )
             related_topics = run_query(
                 """
                 MATCH (t:Topic {name: $topic})-[r:CO_OCCURS_WITH]-(other:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -999,6 +1255,15 @@ def get_node_details(
                 "fearSignalCount": _to_int(row.get("fearSignalCount")),
                 "topChannels": row.get("topChannels") or [],
                 "relatedTopics": related_topics,
+                "overview": overview,
+                "evidence": list(topic_evidence.get("items") or []),
+                "questionEvidence": list(topic_questions.get("items") or []),
+                "dailyRows": list(topic_detail.get("dailyRows") or []),
+                "weeklyRows": list(topic_detail.get("weeklyRows") or []),
+                "sampleEvidence": topic_detail.get("sampleEvidence"),
+                "sampleQuote": topic_detail.get("sampleQuote"),
+                "sourceTopic": topic_detail.get("sourceTopic") or row.get("name"),
+                "lastSeen": topic_detail.get("latestAt") or row.get("lastSeen"),
                 "from": scoped_ctx.from_date.isoformat(),
                 "to": scoped_ctx.to_date.isoformat(),
             }
@@ -1014,19 +1279,26 @@ def get_node_details(
                     OR toLower(coalesce(ch.username, '')) = $channel_key
                 )
                   AND coalesce(ch.source_type, 'channel') = 'channel'
-                OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
-                WHERE p.posted_at >= datetime($start)
-                  AND p.posted_at < datetime($end)
-                  AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-                  AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-                  AND NOT toLower(trim(coalesce(cat.name, 'General'))) IN $excluded_categories
+                CALL {{
+                    WITH ch
+                    OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+                    WHERE p.posted_at >= datetime($start)
+                      AND p.posted_at < datetime($end)
+                      AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+                      AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+                      AND NOT toLower(trim(coalesce(cat.name, 'General'))) IN $excluded_categories
+                    WITH p, t, cat
+                    ORDER BY coalesce(p.posted_at, datetime($start)) DESC
+                    RETURN count(DISTINCT p) AS postCount,
+                           collect(DISTINCT {{
+                               name: t.name,
+                               category: cat.name
+                           }})[..24] AS rawTopics
+                }}
                 RETURN coalesce(ch.title, ch.username) AS name,
                        ch.username AS username,
-                       count(DISTINCT p) AS postCount,
-                       collect(DISTINCT {{
-                           name: t.name,
-                           category: cat.name
-                       }})[..10] AS topics
+                       postCount,
+                       rawTopics
                 LIMIT 1
                 """,
                 {
@@ -1041,8 +1313,22 @@ def get_node_details(
             if not rows:
                 return None
             row = rows[0]
+            canonical_topics: dict[tuple[str, str], dict[str, Any]] = {}
+            for topic in row.get("rawTopics") or []:
+                raw_topic_name = _safe_name(topic.get("name"), "")
+                raw_category = _safe_name(topic.get("category"), "General")
+                if not raw_topic_name:
+                    continue
+                classification = classify_topic(raw_topic_name)
+                canonical_name = _safe_name((classification or {}).get("taxonomy_topic") or raw_topic_name, raw_topic_name)
+                canonical_category = _safe_name((classification or {}).get("closest_category") or raw_category, raw_category)
+                key = (canonical_name.lower(), canonical_category.lower())
+                canonical_topics[key] = {
+                    "name": canonical_name,
+                    "category": canonical_category,
+                }
             category_counts: defaultdict[str, int] = defaultdict(int)
-            for topic in row.get("topics") or []:
+            for topic in canonical_topics.values():
                 category_counts[_safe_name(topic.get("category"), "General")] += 1
             return {
                 "id": node_id if node_id.startswith("channel:") else f"channel:{channel_id}",
@@ -1050,7 +1336,7 @@ def get_node_details(
                 "type": "channel",
                 "username": row.get("username"),
                 "postCount": _to_int(row.get("postCount")),
-                "topics": row.get("topics") or [],
+                "topics": list(canonical_topics.values())[:12],
                 "categories": [
                     {"name": name, "topicCount": topic_count}
                     for name, topic_count in sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -1217,7 +1503,7 @@ def get_sentiment_distribution(timeframe: str | None = None) -> list[dict]:
     def build_distribution() -> list[dict[str, Any]]:
         return run_query(
             """
-            CALL () {
+            CALL {
                 MATCH (p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)

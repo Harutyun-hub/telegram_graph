@@ -54,6 +54,10 @@ CRITICAL_DEGRADED_STALE_SECONDS = max(
 )
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+TOPICS_PAGE_CACHE_TTL_SECONDS = max(
+    DETAIL_CACHE_TTL_SECONDS,
+    int(os.getenv("TOPICS_PAGE_CACHE_TTL_SECONDS", "300")),
+)
 DETAIL_MAX_STALE_SECONDS = max(
     DETAIL_CACHE_TTL_SECONDS,
     int(os.getenv("DETAIL_MAX_STALE_SECONDS", "1800")),
@@ -66,6 +70,16 @@ DETAIL_REFRESH_TIMEOUT_SECONDS = max(
 # If one of these tiers falls back during refresh, prefer preserving an
 # existing healthy cache instead of replacing it with an empty/degraded view.
 CRITICAL_TIERS = {"pulse", "strategic"}
+ALL_TIER_NAMES = (
+    "pulse",
+    "strategic",
+    "behavioral",
+    "network",
+    "psychographic",
+    "predictive",
+    "actionable",
+    "comparative",
+)
 
 
 DashboardCacheMeta = Dict[str, object]
@@ -172,6 +186,13 @@ def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
     )
     has_health_shape = any(key in health for key in ("components", "score", "totalUsers"))
     return has_brief_volume and has_health_shape and len(trending) > 0
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _should_bypass_cached_snapshot(snapshot: Optional[dict], meta: Optional[DashboardCacheMeta]) -> bool:
@@ -680,6 +701,30 @@ def _snapshot_meta(
     }
 
 
+def _emergency_degraded_snapshot(
+    cache_key: str,
+    reason: str,
+) -> tuple[dict, DashboardCacheMeta]:
+    """Return an all-fallback snapshot when no fresh or stale cache is available."""
+    data: dict = {}
+    tier_times: Dict[str, Optional[float]] = {}
+    for name in ALL_TIER_NAMES:
+        data.update(_fallback_for_tier(name))
+        tier_times[name] = None
+    data.update(_tier_derived(data))
+    tier_times["derived"] = 0.0
+    failure_count = _record_refresh_failure(cache_key, reason)
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=0.0,
+        mode="emergency_fallback",
+        cache_status="emergency_degraded",
+        is_stale=True,
+        refresh_failure_count=failure_count,
+    )
+    return data, _with_refresh_state(cache_key, meta)
+
+
 # ── Main aggregation API ─────────────────────────────────────────────────────
 
 def _default_dashboard_context() -> DashboardDateContext:
@@ -797,7 +842,7 @@ def _refresh_dashboard_snapshot(
                 stale_age_seconds=max(0.0, time.time() - stale_ts),
             )
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
-        raise
+        return _emergency_degraded_snapshot(cache_key, str(exc))
 
 
 def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateContext) -> None:
@@ -889,9 +934,11 @@ def get_dashboard_snapshot(
                 stale_meta,
                 stale_age_seconds=stale_age_seconds,
             )
-        raise TimeoutError(
+        reason = (
             f"Dashboard refresh did not complete within {wait_timeout:.1f}s and no stale snapshot is available"
         )
+        logger.warning(reason)
+        return _emergency_degraded_snapshot(cache_key, reason)
 
     try:
         return _refresh_dashboard_snapshot(cache_key, resolved_ctx, stale_entry=stale_entry)
@@ -1125,7 +1172,70 @@ def get_topics_page(
 ) -> list[dict]:
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"topics:{resolved_ctx.cache_key}:{page}:{size}"
-    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_topics(page, size, resolved_ctx))
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_all_topics(page, size, resolved_ctx),
+        ttl_seconds=TOPICS_PAGE_CACHE_TTL_SECONDS,
+    )
+
+
+def _build_topic_overview_fallback(topic_row: dict, ctx: DashboardDateContext) -> dict:
+    topic = str(topic_row.get("name") or topic_row.get("sourceTopic") or "Topic").strip() or "Topic"
+    category = str(topic_row.get("category") or "General").strip() or "General"
+    mentions = max(0, _to_int(topic_row.get("mentionCount") or topic_row.get("postCount") or 0))
+    current_mentions = max(0, _to_int(topic_row.get("currentMentions"), mentions))
+    previous_mentions = max(0, _to_int(topic_row.get("previousMentions") or topic_row.get("prev7Mentions") or 0))
+    growth = _to_int(topic_row.get("growth7dPct") or 0)
+    positive = max(0, _to_int(topic_row.get("sentimentPositive") or 0))
+    negative = max(0, _to_int(topic_row.get("sentimentNegative") or 0))
+    distinct_users = max(0, _to_int(topic_row.get("distinctUsers") or topic_row.get("userCount") or 0))
+    distinct_channels = max(0, _to_int(topic_row.get("distinctChannels") or 0))
+    top_channels = [str(ch).strip() for ch in (topic_row.get("topChannels") or []) if str(ch).strip()]
+    channel_label = ", ".join(top_channels[:2]) if top_channels else "multiple channels"
+    channel_label_ru = ", ".join(top_channels[:2]) if top_channels else "нескольких каналах"
+    latest_at = str(topic_row.get("sampleEvidence", {}).get("timestamp") or "")[:10]
+    evidence_ids = [
+        str(item.get("id")).strip()
+        for item in ((topic_row.get("questionEvidence") or []) + (topic_row.get("evidence") or []))
+        if str(item.get("id") or "").strip()
+    ]
+
+    sentiment_label = "negative" if negative >= positive else "mixed-to-positive"
+    sentiment_label_ru = "скорее негативную" if negative >= positive else "смешанную или скорее позитивную"
+    summary_en = (
+        f'"{topic}" is active in the current selected window with {mentions} mentions '
+        f'({growth:+d}% versus the previous comparison window). '
+        f'The discussion is concentrated in {channel_label} and currently leans {sentiment_label}.'
+    )
+    summary_ru = (
+        f'Тема "{topic}" заметна в текущем выбранном окне: {mentions} упоминаний '
+        f'({growth:+d}% к предыдущему окну сравнения). '
+        f'Обсуждение сосредоточено в {channel_label_ru} и сейчас имеет {sentiment_label_ru} тональность.'
+    )
+    signals_en = [
+        f"Volume: {current_mentions} mentions in the selected window versus {previous_mentions} in the previous comparison window.",
+        f"Sentiment: {negative}% negative and {positive}% positive across {distinct_users} distinct participants.",
+        f"Spread: activity spans {distinct_channels or len(top_channels)} channels; latest evidence date {latest_at or 'recent'}.",
+    ]
+    signals_ru = [
+        f"Объём: {current_mentions} упоминаний в выбранном окне против {previous_mentions} в предыдущем окне сравнения.",
+        f"Тональность: {negative}% негатива и {positive}% позитива при {distinct_users} уникальных участниках.",
+        f"Ширина сигнала: активность идёт в {distinct_channels or len(top_channels)} каналах; последняя дата доказательства {latest_at or 'недавняя'}.",
+    ]
+    return {
+        "topic": topic,
+        "category": category,
+        "status": "fallback",
+        "summaryEn": summary_en,
+        "summaryRu": summary_ru,
+        "signalsEn": signals_en,
+        "signalsRu": signals_ru,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "windowStart": ctx.from_date.isoformat(),
+        "windowEnd": ctx.to_date.isoformat(),
+        "windowDays": int(ctx.days),
+        "evidenceIds": evidence_ids[:12],
+    }
 
 
 def get_channels_page(ctx: Optional[DashboardDateContext] = None) -> list[dict]:
@@ -1151,7 +1261,12 @@ def get_topic_detail(
 ) -> Optional[dict]:
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"topic-detail:{resolved_ctx.cache_key}:{topic_name}:{category or ''}"
-    return _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
+    payload = _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
+    if payload is None:
+        return None
+    normalized = dict(payload)
+    normalized.setdefault("overview", _build_topic_overview_fallback(normalized, resolved_ctx))
+    return normalized
 
 
 def get_topic_evidence_page(

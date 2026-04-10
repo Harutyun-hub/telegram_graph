@@ -201,7 +201,7 @@ export function ActivityTimeline() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Паттерны активности' : 'Activity Patterns'}
         </h3>
@@ -348,7 +348,7 @@ export function NewcomerFlow() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <h3 className="text-gray-900" style={{ fontSize: '1.05rem' }}>
           {ru ? 'Карта пути новичка' : 'Newcomer Journey Map'}
         </h3>

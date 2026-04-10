@@ -943,3 +943,98 @@ def get_topic_overview(topic_name: str, category: str | None = None) -> dict | N
     index = _snapshot_index(payload)
     item = index.get(_topic_key(clean_topic, clean_category))
     return copy.deepcopy(item) if isinstance(item, dict) else None
+
+
+def get_category_overview(category_name: str, topics: list[dict[str, Any]] | None = None) -> dict | None:
+    clean_category = _as_str(category_name, "").strip()
+    topic_rows = [row for row in (topics or []) if isinstance(row, dict) and _as_str(row.get("name"), "").strip()]
+    if not clean_category or not topic_rows:
+        return None
+
+    payload = get_topic_overviews_snapshot()
+    index = _snapshot_index(payload)
+    generated_at = _as_str(payload.get("generatedAt"), "")
+
+    matched_overviews: list[dict[str, Any]] = []
+    for row in topic_rows:
+        topic_name = _as_str(row.get("name"), "").strip()
+        item = index.get(_topic_key(topic_name, clean_category))
+        if isinstance(item, dict):
+            matched_overviews.append(item)
+
+    if not matched_overviews:
+        return None
+
+    lead_topics = [
+        topic_name
+        for topic_name in [_as_str(row.get("name"), "").strip() for row in topic_rows[:3]]
+        if topic_name
+    ]
+    lead_topic_phrase_en = ", ".join(lead_topics[:-1]) + (
+        f", and {lead_topics[-1]}"
+        if len(lead_topics) > 2
+        else (f" and {lead_topics[-1]}" if len(lead_topics) == 2 else (lead_topics[0] if lead_topics else "its main topics"))
+    )
+    lead_topic_phrase_ru = ", ".join(lead_topics[:-1]) + (
+        f" и {lead_topics[-1]}"
+        if len(lead_topics) >= 2
+        else (lead_topics[0] if lead_topics else "ключевые темы")
+    )
+
+    def _unique_signals(key: str) -> list[str]:
+        seen: set[str] = set()
+        output: list[str] = []
+        for item in matched_overviews:
+            for signal in item.get(key) or []:
+                text = _as_str(signal, "").strip()
+                lowered = text.lower()
+                if not text or lowered in seen:
+                    continue
+                seen.add(lowered)
+                output.append(text)
+                if len(output) >= 3:
+                    return output
+        return output
+
+    signals_en = _unique_signals("signalsEn")
+    signals_ru = _unique_signals("signalsRu")
+
+    summary_fragments_en = [
+        _as_str(item.get("summaryEn"), "").strip()
+        for item in matched_overviews
+        if _as_str(item.get("summaryEn"), "").strip()
+    ]
+    summary_fragments_ru = [
+        _as_str(item.get("summaryRu"), "").strip()
+        for item in matched_overviews
+        if _as_str(item.get("summaryRu"), "").strip()
+    ]
+
+    summary_en = (
+        f"{clean_category} is currently being shaped by {lead_topic_phrase_en}. "
+        f"The strongest recurring patterns in this category point to {signals_en[0].rstrip('.')}."
+        if signals_en
+        else (summary_fragments_en[0] if summary_fragments_en else "")
+    )
+    if len(signals_en) > 1:
+        summary_en += f" Analysts should also watch how {signals_en[1].rstrip('.').lower()}."
+
+    summary_ru = (
+        f"Сейчас категорию {clean_category} формируют {lead_topic_phrase_ru}. "
+        f"Наиболее устойчивый повторяющийся сигнал здесь: {signals_ru[0].rstrip('.')}."
+        if signals_ru
+        else (summary_fragments_ru[0] if summary_fragments_ru else "")
+    )
+    if len(signals_ru) > 1:
+        summary_ru += f" Дополнительно важно отслеживать, как {signals_ru[1].rstrip('.').lower()}."
+
+    return {
+        "category": clean_category,
+        "status": "derived_from_topics",
+        "summaryEn": summary_en.strip(),
+        "summaryRu": summary_ru.strip(),
+        "signalsEn": signals_en[:3],
+        "signalsRu": signals_ru[:3],
+        "generatedAt": generated_at,
+        "sourceTopics": lead_topics,
+    }

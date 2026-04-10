@@ -17,6 +17,7 @@ import {
   Network,
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { apiFetch } from '../services/api';
 import type { TrackedChannel, ChannelStatus } from '../types/data';
 
 type SourceApiItem = {
@@ -305,23 +306,11 @@ function toTrackedChannel(item: SourceApiItem, ru: boolean): TrackedChannel {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  const normalizedPath = path.startsWith('/api/') ? path.slice(4) : path;
+  return apiFetch<T>(normalizedPath, {
     ...init,
+    includeUserAuth: true,
   });
-
-  if (!response.ok) {
-    let message = `HTTP ${response.status}`;
-    try {
-      const json = await response.json();
-      if (typeof json?.detail === 'string') message = json.detail;
-    } catch {
-      // ignore
-    }
-    throw new Error(message);
-  }
-
-  return (await response.json()) as T;
 }
 
 function AddChannelModal({

@@ -289,6 +289,16 @@ class SourceImportApiClient:
     def get_freshness(self) -> dict[str, Any]:
         return self._request("/freshness?force=true")
 
+    def get_source_resolution_status(self) -> dict[str, Any]:
+        return self._request("/sources/resolution")
+
+    def run_source_resolution_once(self) -> dict[str, Any]:
+        return self._request("/sources/resolution/run-once", method="POST")
+
+    def backfill_peer_refs(self, *, active_only: bool = True, limit: int = DEFAULT_WAVE_SIZE) -> dict[str, Any]:
+        query = f"/sources/resolution/backfill-peer-refs?active_only={'true' if active_only else 'false'}&limit={max(1, int(limit))}"
+        return self._request(query, method="POST")
+
 
 def _existing_source_lookup(existing_sources: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     lookup: dict[str, dict[str, Any]] = {}

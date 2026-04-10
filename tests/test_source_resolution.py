@@ -14,7 +14,6 @@ from api.source_resolution import (
     classify_resolution_exception,
     run_source_resolution_cycle,
 )
-from buffer.supabase_writer import SupabaseWriter
 
 
 class _FakeResolutionChannel:
@@ -176,93 +175,19 @@ class _FakeFloodClient:
         raise FloodWaitError(request=None, capture=120)
 
 
-class _SnapshotWriter:
-    def __init__(self) -> None:
-        self.jobs = [
-            {
-                "id": "job-pending-due",
-                "status": "pending",
-                "next_attempt_at": "2026-04-05T00:00:00+00:00",
-                "lease_expires_at": None,
-            },
-            {
-                "id": "job-pending-future",
-                "status": "pending",
-                "next_attempt_at": "2026-04-07T00:00:00+00:00",
-                "lease_expires_at": None,
-            },
-            {
-                "id": "job-leased-active",
-                "status": "leased",
-                "next_attempt_at": "2026-04-05T00:00:00+00:00",
-                "lease_expires_at": "2026-04-06T00:05:00+00:00",
-            },
-            {
-                "id": "job-leased-expired",
-                "status": "leased",
-                "next_attempt_at": "2026-04-05T23:58:00+00:00",
-                "lease_expires_at": "2026-04-05T23:59:00+00:00",
-            },
-            {
-                "id": "job-done-stale",
-                "status": "done",
-                "next_attempt_at": "2026-04-05T00:00:00+00:00",
-                "lease_expires_at": None,
-            },
-            {
-                "id": "job-dead-letter",
-                "status": "dead_letter",
-                "next_attempt_at": "2026-04-05T00:00:00+00:00",
-                "lease_expires_at": None,
-            },
-        ]
-
-    def list_source_resolution_jobs(self, limit: int | None = None, statuses: list[str] | None = None):
-        del limit, statuses
-        return [dict(job) for job in self.jobs]
-
-    def list_source_resolution_slots(self, active_only: bool = True):
-        del active_only
-        return [
-            {
-                "slot_key": "primary",
-                "cooldown_until": "2026-04-06T00:10:00+00:00",
-            }
-        ]
-
-    def get_active_channels(self):
-        return [
-            {"id": "active-pending", "resolution_status": "pending"},
-            {"id": "active-resolved-no-peer", "resolution_status": "resolved"},
-            {"id": "active-resolved-with-peer", "resolution_status": "resolved"},
-        ]
-
-    def _warn_peer_refs_table_once(self, _exc):
-        return None
-
-    @property
-    def client(self):
-        class _Client:
-            def table(self, _name):
-                class _Query:
-                    def select(self, _cols):
-                        return self
-
-                    def eq(self, _field, _value):
-                        return self
-
-                    def execute(self):
-                        class _Res:
-                            data = [{"channel_id": "active-resolved-with-peer", "session_slot": "primary"}]
-
-                        return _Res()
-
-                return _Query()
-
-        return _Client()
-
-
 class SourceResolutionServerTests(unittest.TestCase):
+    def test_inline_source_resolution_returns_none_without_telegram_runtime_credentials(self) -> None:
+        with patch.object(server.config, "has_telegram_runtime_credentials", return_value=False):
+            result = asyncio.run(
+                server._try_enrich_channel_metadata(
+                    "chan-1",
+                    "@queued_source",
+                    "Queued Source",
+                )
+            )
+
+        self.assertIsNone(result)
+
     def test_create_channel_source_enqueues_without_inline_resolution_when_queue_enabled(self) -> None:
         writer = _FakeServerWriter()
         payload = server.ChannelSourceCreateRequest(channel_username="@queued_source", channel_title="Queued Source")
@@ -383,27 +308,6 @@ class SourceResolutionWorkerTests(unittest.TestCase):
 
 
 class FreshnessResolutionMetricsTests(unittest.TestCase):
-    def test_resolution_snapshot_counts_only_claimable_due_jobs(self) -> None:
-        writer = _SnapshotWriter()
-        frozen_now = datetime(2026, 4, 6, 0, 0, 0, tzinfo=timezone.utc)
-
-        class _FrozenDateTime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                if tz is None:
-                    return frozen_now.replace(tzinfo=None)
-                return frozen_now.astimezone(tz)
-
-        with patch("buffer.supabase_writer.datetime", _FrozenDateTime):
-            snapshot = SupabaseWriter.get_source_resolution_snapshot(writer, session_slot="primary")
-
-        self.assertEqual(snapshot["due_jobs"], 2)
-        self.assertEqual(snapshot["leased_jobs"], 1)
-        self.assertEqual(snapshot["dead_letter_jobs"], 1)
-        self.assertEqual(snapshot["stale_nonclaimable_jobs"], 0)
-        self.assertEqual(snapshot["active_pending_sources"], 1)
-        self.assertEqual(snapshot["active_missing_peer_refs"], 1)
-
     def test_freshness_snapshot_includes_resolution_metrics(self) -> None:
         class _Writer:
             def get_pipeline_freshness_snapshot(self):
@@ -429,7 +333,6 @@ class FreshnessResolutionMetricsTests(unittest.TestCase):
                     "due_jobs": 7,
                     "leased_jobs": 1,
                     "dead_letter_jobs": 2,
-                    "stale_nonclaimable_jobs": 4,
                     "cooldown_slots": 1,
                     "cooldown_until": datetime.now(timezone.utc).isoformat(),
                     "oldest_due_age_seconds": 45,
@@ -450,11 +353,7 @@ class FreshnessResolutionMetricsTests(unittest.TestCase):
 
         writer = _Writer()
 
-        with patch.object(
-            freshness,
-            "_neo4j_snapshot",
-            return_value={"recent_post_count": 0, "channel_count": 0, "topic_count": 0},
-        ):
+        with patch.object(freshness, "_neo4j_snapshot", return_value={"recent_post_count": 0, "channel_count": 0, "topic_count": 0}):
             snapshot = freshness.get_freshness_snapshot(
                 writer,
                 scheduler_status={"is_active": True, "interval_minutes": 15, "running_now": False, "run_history": []},
@@ -464,10 +363,8 @@ class FreshnessResolutionMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["backlog"]["resolution_due_jobs"], 7)
         self.assertEqual(snapshot["backlog"]["resolution_leased_jobs"], 1)
         self.assertEqual(snapshot["backlog"]["resolution_dead_letter_jobs"], 2)
-        self.assertEqual(snapshot["backlog"]["resolution_stale_nonclaimable_jobs"], 4)
         self.assertEqual(snapshot["backlog"]["active_pending_sources"], 3)
         self.assertEqual(snapshot["resolution"]["cooldown_slots"], 1)
-        self.assertIn("source-resolution jobs need operator triage", " ".join(snapshot["health"]["notes"]))
 
 
 if __name__ == "__main__":

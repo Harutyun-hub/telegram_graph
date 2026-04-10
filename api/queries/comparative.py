@@ -81,14 +81,6 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
-def _safe_str(value: Any, fallback: str = "") -> str:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return fallback
-    return str(value)
-
-
 def _normalize_sentiment_label(value: Any) -> str | None:
     if value is None:
         return None
@@ -258,8 +250,6 @@ def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
 
 def _exclude_thread_anchors(query):
     return query.neq("entry_kind", "thread_anchor")
-
-
 def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
     return _paginate(
         lambda from_idx, to_idx: _exclude_thread_anchors(
@@ -372,6 +362,14 @@ def _safe_int(value, fallback: int = 0) -> int:
         return int(value)
     except Exception:
         return fallback
+
+
+def _safe_str(value: Any, fallback: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return fallback
+    return str(value)
 
 
 def _safe_pct(numerator: int, denominator: int) -> int:
@@ -805,7 +803,6 @@ def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)-[:IN_CHANNEL]->(ch:Channel)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         OPTIONAL MATCH (p)-[:TAGGED]->(t:Topic)
         WITH p, ch, collect(t.name)[..3] AS topics
         RETURN p.uuid AS uuid,
@@ -825,7 +822,6 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         WITH coalesce(p.media_type, 'text') AS mediaType,
              count(p) AS count,
              avg(p.views) AS avgViews,
@@ -844,21 +840,9 @@ def get_vitality_indicators() -> dict:
         MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
         RETURN count(u) AS n
     """) or {}).get("n", 0)
-    total_topics = (run_single("""
-        MATCH (p:Post)-[:TAGGED]->(t:Topic)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(DISTINCT t) AS n
-    """) or {}).get("n", 0)
-    total_posts = (run_single("""
-        MATCH (p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(p) AS n
-    """) or {}).get("n", 0)
-    total_comments = (run_single("""
-        MATCH (c:Comment)-[:REPLIES_TO]->(p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(c) AS n
-    """) or {}).get("n", 0)
+    total_topics = (run_single("MATCH (t:Topic) RETURN count(t) AS n") or {}).get("n", 0)
+    total_posts = (run_single("MATCH (p:Post) RETURN count(p) AS n") or {}).get("n", 0)
+    total_comments = (run_single("MATCH (c:Comment) RETURN count(c) AS n") or {}).get("n", 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {
@@ -1066,9 +1050,9 @@ def _topic_overview_quality_tier(
     distinct_users: int,
     distinct_channels: int,
 ) -> str:
-    if mentions >= 8 and evidence_count >= 8 and distinct_users >= 3 and distinct_channels >= 2:
+    if mentions >= 40 and evidence_count >= 12 and distinct_users >= 8 and distinct_channels >= 3:
         return "high"
-    if mentions >= 4 and evidence_count >= 4 and distinct_channels >= 2:
+    if mentions >= 18 and evidence_count >= 8 and distinct_users >= 4 and distinct_channels >= 2:
         return "medium"
     return "low"
 
@@ -1078,18 +1062,17 @@ def _map_topic_overview_evidence(rows: Any, *, limit: int) -> list[dict]:
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        text = str(row.get("text") or "").strip()
-        evidence_id = str(row.get("id") or "").strip()
-        if not text or not evidence_id:
+        text = _safe_str(row.get("text"), "").strip()
+        if not text:
             continue
         output.append(
             {
-                "id": evidence_id,
-                "type": str(row.get("type") or "message").strip() or "message",
-                "author": str(row.get("author") or "unknown").strip() or "unknown",
-                "channel": str(row.get("channel") or "unknown").strip() or "unknown",
-                "text": text[:1200],
-                "timestamp": str(row.get("timestamp") or "").strip(),
+                "id": _safe_str(row.get("id"), ""),
+                "type": _safe_str(row.get("type"), "message"),
+                "author": _safe_str(row.get("author"), "unknown"),
+                "channel": _safe_str(row.get("channel"), "unknown"),
+                "text": text,
+                "timestamp": _safe_str(row.get("timestamp"), ""),
                 "reactions": _safe_int(row.get("reactions")),
                 "replies": _safe_int(row.get("replies")),
             }
@@ -1117,7 +1100,6 @@ def get_topic_overview_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1172,7 +1154,6 @@ def get_topic_overview_candidates(
             RETURN collect(event) AS currentRows
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1357,7 +1338,6 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             RETURN count(c) AS commentsPrev
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1377,7 +1357,6 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             RETURN collect({day: day, count: count}) AS dailyRows
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1421,7 +1400,6 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
                 sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1443,7 +1421,6 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             RETURN collect(channel)[..3] AS topChannels
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1498,7 +1475,6 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
                    size([channel IN channels WHERE channel IS NOT NULL]) AS distinctChannels
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1628,7 +1604,6 @@ def get_topic_evidence_page_v1(
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1666,7 +1641,6 @@ def get_topic_evidence_page_v1(
             RETURN count(*) AS total
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1715,7 +1689,6 @@ def get_topic_evidence_page_v1(
             }) AS items
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1799,7 +1772,6 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1853,7 +1825,6 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
             RETURN collect(event) AS currentRows
         }
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -2002,7 +1973,6 @@ def get_topic_evidence_page_v2(
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         CALL {
-            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)

@@ -14,7 +14,8 @@ from uuid import uuid4
 from loguru import logger
 from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, FloodWaitError
-from telethon.tl.types import Channel, InputPeerChannel, Message
+from telethon.tl.types import InputPeerChannel
+from telethon.tl.types import Channel, Message
 
 import config
 from api.source_resolution import build_pending_source_payload, ensure_resolution_job

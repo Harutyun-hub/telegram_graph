@@ -420,10 +420,7 @@ async def run_source_resolution_cycle(
     requeued = 0
     dead_lettered = 0
     halted_for_cooldown = False
-    min_interval = max(
-        1,
-        int(min_interval_seconds or slot.get("min_resolve_interval_seconds") or config.SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS),
-    )
+    min_interval = max(1, int(min_interval_seconds or slot.get("min_resolve_interval_seconds") or config.SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS))
     results: list[dict[str, Any]] = []
 
     for index, job in enumerate(claimed_jobs):
@@ -433,10 +430,7 @@ async def run_source_resolution_cycle(
         channel_id = str(job.get("channel_id") or "").strip()
         channel_row = channels.get(channel_id)
         if not channel_row:
-            writer.complete_source_resolution_job(
-                str(job.get("id") or ""),
-                attempt_count=int(job.get("attempt_count") or 0),
-            )
+            writer.complete_source_resolution_job(str(job.get("id") or ""), attempt_count=int(job.get("attempt_count") or 0))
             continue
 
         outcome = await resolve_source_job(

@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { Sparkles, X, Send, RotateCcw, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useLocation } from 'react-router';
 import { useLanguage } from '../contexts/LanguageContext';
-import { askAI } from '../services/api';
+import { aiHelperChat, getAiHelperHistory, resetAiHelper } from '../services/api';
 
 interface Message {
   id: string;
@@ -24,6 +25,47 @@ const SUGGESTED_PROMPTS_RU = [
   'Кто самые влиятельные участники?',
   'Сводка настроений по жилью',
 ];
+const MAX_MESSAGE_CHARS = 2000;
+const AI_CHAT_SESSION_STORAGE_KEY = 'radar.ai-chat.session.v1';
+
+function generateAiChatSessionId() {
+  const randomPart = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `web_${randomPart.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
+function getOrCreateAiChatSessionId() {
+  if (typeof window === 'undefined') {
+    return generateAiChatSessionId();
+  }
+  const existing = window.localStorage.getItem(AI_CHAT_SESSION_STORAGE_KEY);
+  if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) {
+    return existing;
+  }
+  const next = generateAiChatSessionId();
+  window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, next);
+  return next;
+}
+
+function persistAiChatSessionId(value: string) {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, value);
+  }
+}
+
+function parseTimestamp(value: string | Date | undefined) {
+  if (value instanceof Date) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  return new Date();
+}
 
 function renderMarkdown(text: string) {
   return text.split('\n').map((line, i) => {
@@ -43,12 +85,15 @@ function renderMarkdown(text: string) {
 // ─── Chat content (shared between mobile sheet and desktop panel) ──
 function ChatContent({
   messages, typing, suggested, input, setInput, onSend, onReset, onClose, ru, inputRef, bottomRef,
+  remainingChars, busy,
 }: {
   messages: Message[]; typing: boolean; suggested: string[];
   input: string; setInput: (v: string) => void;
   onSend: (text: string) => void; onReset: () => void; onClose: () => void;
   ru: boolean; inputRef: React.RefObject<HTMLInputElement | null>; bottomRef: React.RefObject<HTMLDivElement | null>;
+  remainingChars: number; busy: boolean;
 }) {
+  const inputTooLong = remainingChars < 0;
   return (
     <>
       {/* Header */}
@@ -69,7 +114,7 @@ function ChatContent({
           </div>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={onReset}
+          <button onClick={onReset} disabled={busy}
             className="p-1.5 rounded-lg hover:bg-white/10 text-white/70 hover:text-white transition-colors"
             title={ru ? 'Очистить чат' : 'Clear chat'}>
             <RotateCcw className="w-3.5 h-3.5" />
@@ -140,15 +185,29 @@ function ChatContent({
       {/* Input */}
       <div className="flex-shrink-0 bg-white border-t border-gray-100 px-3 py-3">
         <div className="flex items-center gap-2 bg-gray-50 rounded-xl border border-gray-200 px-3 py-2 focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-100 transition-all">
-          <input ref={inputRef} type="text" value={input} onChange={e => setInput(e.target.value)}
+          <input ref={inputRef} type="text" value={input} maxLength={MAX_MESSAGE_CHARS}
+            onChange={e => setInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(input); } }}
             placeholder={ru ? 'Спросите о трендах, темах...' : 'Ask about trends, topics...'}
-            className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 focus:outline-none" />
-          <button onClick={() => onSend(input)} disabled={!input.trim()}
+            className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 focus:outline-none"
+            disabled={busy} />
+          <button onClick={() => onSend(input)} disabled={!input.trim() || inputTooLong || busy}
             className="w-8 h-8 rounded-lg flex items-center justify-center transition-all disabled:opacity-30"
             style={{ background: input.trim() ? 'linear-gradient(135deg, #8b5cf6, #7c3aed)' : '#e5e7eb' }}>
             <Send className="w-3.5 h-3.5 text-white" />
           </button>
+        </div>
+        <div className="mt-2 flex items-center justify-between px-1">
+          <p className={`text-[11px] ${inputTooLong ? 'text-rose-500' : 'text-gray-400'}`}>
+            {ru
+              ? `Символы: ${input.length}/${MAX_MESSAGE_CHARS}`
+              : `Characters: ${input.length}/${MAX_MESSAGE_CHARS}`}
+          </p>
+          {inputTooLong && (
+            <p className="text-[11px] text-rose-500">
+              {ru ? 'Сократите сообщение перед отправкой.' : 'Shorten your message before sending.'}
+            </p>
+          )}
         </div>
       </div>
     </>
@@ -163,16 +222,23 @@ interface AIAssistantProps {
 }
 
 export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}) {
+  const location = useLocation();
   const { lang } = useLanguage();
   const ru = lang === 'ru';
   const [desktopOpen, setDesktopOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [typing, setTyping] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [sessionId, setSessionId] = useState(() => getOrCreateAiChatSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const historyRequestedRef = useRef(false);
 
   const suggested = ru ? SUGGESTED_PROMPTS_RU : SUGGESTED_PROMPTS_EN;
+  const remainingChars = MAX_MESSAGE_CHARS - input.length;
+  const busy = typing || resetting;
 
   const initMessages = (resetId: string) => [{
     id: resetId,
@@ -183,40 +249,90 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     timestamp: new Date(),
   }];
 
-  // Initialize when any panel opens
   useEffect(() => {
-    if ((desktopOpen || mobileOpen) && messages.length === 0) {
+    const isOpen = desktopOpen || mobileOpen;
+    if (!isOpen) {
+      return;
+    }
+    if (messages.length === 0) {
       setMessages(initMessages('welcome'));
     }
-    if (desktopOpen || mobileOpen) {
-      setTimeout(() => inputRef.current?.focus(), 150);
+    if (!historyLoaded && !historyRequestedRef.current) {
+      let cancelled = false;
+      historyRequestedRef.current = true;
+      void (async () => {
+        try {
+          const history = await getAiHelperHistory(sessionId);
+          if (cancelled) {
+            return;
+          }
+          if (history.length > 0) {
+            setMessages(history.map((message, index) => ({
+              id: `history-${index}`,
+              role: message.role,
+              text: message.text,
+              timestamp: parseTimestamp(message.timestamp),
+            })));
+          }
+        } catch (error: any) {
+          if (cancelled) {
+            return;
+          }
+          setMessages(prev => {
+            const base = prev.length > 0 ? prev : initMessages('welcome-history-error');
+            return [
+              ...base,
+              {
+                id: `history-error-${Date.now()}`,
+                role: 'assistant',
+                text: ru
+                  ? `Не удалось загрузить историю помощника.\n\n${String(error?.message || 'Неизвестная ошибка.')}`
+                  : `I couldn't load the helper history.\n\n${String(error?.message || 'Unknown error.')}`,
+                timestamp: new Date(),
+              },
+            ];
+          });
+        } finally {
+          if (!cancelled) {
+            setHistoryLoaded(true);
+          }
+        }
+      })();
+      return () => {
+        cancelled = true;
+        historyRequestedRef.current = false;
+      };
     }
-  }, [desktopOpen, mobileOpen, messages.length]);
+    const timer = window.setTimeout(() => inputRef.current?.focus(), 150);
+    return () => window.clearTimeout(timer);
+  }, [desktopOpen, mobileOpen, historyLoaded, messages.length, ru, sessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, typing]);
+  }, [messages, typing, resetting]);
 
   const sendMessage = async (text: string) => {
-    if (!text.trim()) return;
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text: text.trim(), timestamp: new Date() }]);
+    const trimmed = text.trim();
+    if (!trimmed || remainingChars < 0 || busy) return;
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text: trimmed, timestamp: new Date() }]);
     setInput('');
     setTyping(true);
     try {
-      const response = await askAI(text.trim());
+      const response = await aiHelperChat(trimmed, sessionId);
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        text: String(response?.answer || (ru ? 'Не удалось получить ответ.' : 'No answer was returned.')),
-        timestamp: new Date(),
+        text: String(response?.text || (ru ? 'Не удалось получить ответ.' : 'No answer was returned.')),
+        timestamp: parseTimestamp(response?.timestamp),
       }]);
+      setHistoryLoaded(true);
     } catch (error: any) {
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         text: ru
-          ? `Не удалось получить ответ из аналитического API.\n\n${String(error?.message || 'Неизвестная ошибка.')}`
-          : `I couldn't reach the analytics API.\n\n${String(error?.message || 'Unknown error.')}`,
+          ? `Не удалось получить ответ от помощника.\n\n${String(error?.message || 'Неизвестная ошибка.')}`
+          : `I couldn't reach the AI helper.\n\n${String(error?.message || 'Unknown error.')}`,
         timestamp: new Date(),
       }]);
     } finally {
@@ -224,9 +340,34 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     }
   };
 
-  const handleReset = () => {
-    setMessages(initMessages('welcome-reset'));
+  const handleReset = async () => {
+    if (resetting) {
+      return;
+    }
+    setResetting(true);
+    try {
+      await resetAiHelper(sessionId);
+      const nextSessionId = generateAiChatSessionId();
+      persistAiChatSessionId(nextSessionId);
+      historyRequestedRef.current = false;
+      setSessionId(nextSessionId);
+      setMessages(initMessages('welcome-reset'));
+      setHistoryLoaded(false);
+    } catch (error: any) {
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `reset-error-${Date.now()}`,
+          role: 'assistant',
+          text: ru
+            ? `Не удалось сбросить сессию помощника.\n\n${String(error?.message || 'Неизвестная ошибка.')}`
+            : `I couldn't reset the helper session.\n\n${String(error?.message || 'Unknown error.')}`,
+          timestamp: new Date(),
+        },
+      ]);
+    }
     setInput('');
+    setResetting(false);
   };
 
   const springConfig = { type: 'spring', damping: 30, stiffness: 300 };
@@ -234,7 +375,12 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
   const chatProps = {
     messages, typing, suggested, input, setInput,
     onSend: sendMessage, onReset: handleReset, ru, inputRef, bottomRef,
+    remainingChars, busy,
   };
+
+  if (location.pathname.startsWith('/graph')) {
+    return null;
+  }
 
   return (
     <>

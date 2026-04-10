@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Sparkles, ChevronRight, MessageSquare, Info, Loader2, Send, Bot } from 'lucide-react';
 import { askAI, type AIClientFilters, type AIEvidenceItem, type AIDataScope } from '@/app/graph/services/api';
 import { NodeInspector } from '@/app/graph/components/NodeInspector';
@@ -24,11 +24,20 @@ interface AISidebarProps {
   filters?: AIClientFilters;
   onApplyFilters: (filters: AIClientFilters) => void;
   selectedNode?: any;
+  isCollapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
   onCloseInspector: () => void;
 }
 
-export function AISidebar({ filters, onApplyFilters, selectedNode, onCloseInspector }: AISidebarProps) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
+export function AISidebar({
+  filters,
+  onApplyFilters,
+  selectedNode,
+  isCollapsed: externalCollapsed,
+  onCollapsedChange,
+  onCloseInspector,
+}: AISidebarProps) {
+  const [internalCollapsed, setInternalCollapsed] = useState(true);
   const [activeTab, setActiveTab] = useState<SidebarTab>('chat');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [query, setQuery] = useState('');
@@ -39,6 +48,20 @@ export function AISidebar({ filters, onApplyFilters, selectedNode, onCloseInspec
   const placeholder = useMemo(() => {
     return "Ask anything like: 'Who is talking about cashback most?'";
   }, []);
+
+  const isCollapsed = externalCollapsed ?? internalCollapsed;
+
+  useEffect(() => {
+    if (externalCollapsed == null) return;
+    setInternalCollapsed(externalCollapsed);
+  }, [externalCollapsed]);
+
+  const setCollapsed = (collapsed: boolean) => {
+    if (externalCollapsed == null) {
+      setInternalCollapsed(collapsed);
+    }
+    onCollapsedChange?.(collapsed);
+  };
 
   const submitQuery = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,12 +115,12 @@ export function AISidebar({ filters, onApplyFilters, selectedNode, onCloseInspec
   return (
     <div
       className={`absolute right-4 top-4 bottom-4 bg-slate-950/40 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl flex flex-col z-40 overflow-hidden transition-all duration-300 ${
-        isCollapsed ? 'w-12' : 'w-80'
+        isCollapsed ? 'w-14' : 'w-[296px]'
       }`}
     >
       {!isCollapsed && (
         <button
-          onClick={() => setIsCollapsed(true)}
+          onClick={() => setCollapsed(true)}
           className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-center transition-colors z-50"
           title="Collapse AI assistant"
         >
@@ -108,7 +131,7 @@ export function AISidebar({ filters, onApplyFilters, selectedNode, onCloseInspec
       {isCollapsed ? (
         <div className="flex flex-col items-center justify-center h-full gap-4 py-6">
           <button
-            onClick={() => setIsCollapsed(false)}
+            onClick={() => setCollapsed(false)}
             className="w-10 h-10 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 flex items-center justify-center transition-colors"
             title="Expand AI assistant"
           >
