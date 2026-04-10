@@ -64,7 +64,6 @@ from api.aggregator import (
     CACHE_TTL_SECONDS as DASHBOARD_CACHE_TTL_SECONDS,
     CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
     MAX_STALE_SECONDS as DASHBOARD_MAX_STALE_SECONDS,
-    DetailRefreshUnavailableError,
     build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
@@ -95,7 +94,7 @@ from api.source_resolution import (
 )
 from buffer.supabase_writer import SupabaseWriter
 from api.scraper_scheduler import ScraperSchedulerService
-from api.runtime_executors import run_background, run_request
+from api.runtime_executors import run_request
 from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
 from social.store import SocialStore
