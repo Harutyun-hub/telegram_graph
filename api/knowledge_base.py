@@ -11,10 +11,13 @@ import io
 import os
 import re
 import textwrap
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from utils.ai_usage import log_openai_usage
 
 # ── Optional heavy imports (guarded so the module loads even if a dep is missing) ──
 
@@ -541,11 +544,19 @@ def generate_answer(
         {"role": "user", "content": f"Context:\n\n{context}\n\nQuestion: {question}"},
     ]
 
+    request_started_at = time.perf_counter()
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.1,
         max_completion_tokens=800,
+    )
+    log_openai_usage(
+        feature="knowledge_base_answer",
+        model=model,
+        response=resp,
+        started_at=request_started_at,
+        extra={"max_completion_tokens": 800},
     )
     answer = resp.choices[0].message.content.strip()
 

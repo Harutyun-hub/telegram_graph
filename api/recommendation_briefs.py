@@ -17,6 +17,7 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import network
 from buffer.supabase_writer import SupabaseWriter
+from utils.ai_usage import log_openai_usage
 
 try:
     from openai import OpenAI
@@ -320,6 +321,7 @@ def _extract_recommendations_ai(candidates: list[dict]) -> list[dict]:
         }
 
         try:
+            request_started_at = time.perf_counter()
             response = _client.chat.completions.create(
                 model=_runtime_recommendation_model(),
                 messages=[
@@ -329,6 +331,13 @@ def _extract_recommendations_ai(candidates: list[dict]) -> list[dict]:
                 response_format={"type": "json_object"},
                 max_completion_tokens=1000,
                 timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+            )
+            log_openai_usage(
+                feature="recommendation_briefs",
+                model=_runtime_recommendation_model(),
+                response=response,
+                started_at=request_started_at,
+                extra={"max_completion_tokens": 1000},
             )
 
             raw = _as_str(response.choices[0].message.content)

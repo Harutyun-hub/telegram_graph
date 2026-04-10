@@ -8,6 +8,7 @@ from loguru import logger
 from openai import OpenAI
 
 import config
+from utils.ai_usage import log_openai_usage
 
 
 def _trimmed(value: Any) -> str:
@@ -92,6 +93,7 @@ class SocialActivityAnalyzer:
         last_error: Exception | None = None
         for attempt in range(retry_limit + 1):
             try:
+                request_started_at = time.perf_counter()
                 response = self.client.chat.completions.create(
                     model=config.SOCIAL_ANALYSIS_MODEL,
                     messages=[
@@ -100,6 +102,16 @@ class SocialActivityAnalyzer:
                     ],
                     max_completion_tokens=max(1200, 800 * max(1, len(payload.get("items") or []))),
                     timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+                )
+                log_openai_usage(
+                    feature="social_analysis",
+                    model=config.SOCIAL_ANALYSIS_MODEL,
+                    response=response,
+                    started_at=request_started_at,
+                    extra={
+                        "attempt": attempt + 1,
+                        "items": len(payload.get("items") or []),
+                    },
                 )
                 return _trimmed(response.choices[0].message.content)
             except Exception as exc:  # pragma: no cover - network/provider failures

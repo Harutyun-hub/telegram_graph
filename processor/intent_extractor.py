@@ -23,6 +23,7 @@ import json
 import time
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
+from utils.ai_usage import log_openai_usage
 from utils.taxonomy import TAXONOMY_VERSION, compact_taxonomy_prompt
 from utils.topic_normalizer import normalize_model_topics
 
@@ -541,12 +542,23 @@ def _request_json(*, system_prompt: str, user_context: str, max_tokens: int, req
     for attempt in range(retry_limit + 1):
         try:
             attempt_max_tokens = max_tokens + (attempt * 400)
+            request_started_at = time.perf_counter()
             response = client.chat.completions.create(
                 model=model_name,
                 messages=messages,  # pyright: ignore[reportArgumentType]
                 response_format={"type": "json_object"},
                 max_completion_tokens=attempt_max_tokens,
                 timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+            )
+            log_openai_usage(
+                feature="intent_extractor",
+                model=model_name,
+                response=response,
+                started_at=request_started_at,
+                extra={
+                    "attempt": attempt + 1,
+                    "max_completion_tokens": attempt_max_tokens,
+                },
             )
             logger.debug(
                 f"{request_label}: AI response received id={getattr(response, 'id', 'unknown')} model={model_name}"
