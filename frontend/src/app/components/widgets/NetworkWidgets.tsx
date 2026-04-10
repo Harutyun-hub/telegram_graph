@@ -283,7 +283,7 @@ export function RecommendationTracker() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="recommendation_tracker">
           {ru ? 'Рекомендации сообщества' : 'Community Recommendations'}
         </WidgetTitle>
@@ -439,7 +439,7 @@ export function InformationVelocity() {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
-      <div className="flex items-center justify-between mb-1">
+      <div className="mb-1 flex flex-col items-start gap-2 sm:flex-row sm:items-start sm:justify-between">
         <WidgetTitle widgetId="information_velocity">
           {ru ? 'Скорость распространения информации' : 'Information Velocity'}
         </WidgetTitle>

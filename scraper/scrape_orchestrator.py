@@ -13,7 +13,7 @@ from telethon import TelegramClient
 
 import config
 from api.runtime_executors import run_background
-from scraper.channel_scraper import scrape_channel
+from scraper.channel_scraper import prepare_source_for_scrape, scrape_channel
 from scraper.comment_scraper import scrape_comments_for_post
 from processor.intent_extractor import extract_intents, extract_post_intents
 from ingester.neo4j_writer import Neo4jWriter
@@ -48,18 +48,30 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
 
     for channel in channels:
         username = channel["channel_username"]
-        channel_uuid = channel["id"]
         try:
-            post_count = await scrape_channel(client, channel, supabase_writer)
-            total_posts += int(post_count)
+            prepared_channel, entity = await prepare_source_for_scrape(client, channel, supabase_writer)
+            if not prepared_channel or entity is None:
+                await asyncio.sleep(5)
+                continue
 
-            if channel.get("scrape_comments", True):
+            scrape_result = await scrape_channel(
+                client,
+                prepared_channel,
+                supabase_writer,
+                entity=entity,
+            )
+            total_posts += int(scrape_result.get("posts_found", 0) or 0)
+            total_comments += int(scrape_result.get("comments_found", 0) or 0)
+
+            if (
+                str(prepared_channel.get("source_type") or "").strip().lower() == "channel"
+                and prepared_channel.get("scrape_comments", True)
+            ):
                 posts_with_comments = supabase_writer.get_posts_with_comments_pending_for_channel(
-                    channel_uuid,
+                    prepared_channel["id"],
                     limit=20,
                 )
                 if posts_with_comments:
-                    entity = await client.get_entity(username)
                     for post in posts_with_comments:
                         comment_count = await scrape_comments_for_post(client, entity, post, supabase_writer)
                         total_comments += int(comment_count)

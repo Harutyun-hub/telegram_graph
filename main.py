@@ -16,7 +16,7 @@ import config
 config.validate()
 
 from scraper.session_manager  import get_client
-from scraper.channel_scraper  import scrape_channel
+from scraper.channel_scraper  import prepare_source_for_scrape, scrape_channel
 from scraper.comment_scraper  import scrape_comments_for_post
 from buffer.supabase_writer   import SupabaseWriter
 from processor.intent_extractor import extract_intents, extract_post_intents
@@ -47,15 +47,28 @@ async def scrape_job():
     for channel in channels:
         username = channel["channel_username"]
         try:
+            prepared_channel, entity = await prepare_source_for_scrape(_client, channel, db)
+            if not prepared_channel or entity is None:
+                await asyncio.sleep(5)
+                continue
+
             # 1. Scrape new posts
-            post_count = await scrape_channel(_client, channel, db)
-            logger.info(f"[{username}] {post_count} new posts")
+            scrape_result = await scrape_channel(_client, prepared_channel, db, entity=entity)
+            logger.info(
+                f"[{username}] posts={int(scrape_result.get('posts_found', 0) or 0)} "
+                f"comments={int(scrape_result.get('comments_found', 0) or 0)}"
+            )
 
             # 2. Scrape comments for posts that have them
-            if channel.get("scrape_comments", True):
-                posts_with_comments = db.get_posts_with_comments_pending(limit=20)
+            if (
+                str(prepared_channel.get("source_type") or "").strip().lower() == "channel"
+                and prepared_channel.get("scrape_comments", True)
+            ):
+                posts_with_comments = db.get_posts_with_comments_pending_for_channel(
+                    prepared_channel["id"],
+                    limit=20,
+                )
                 for post in posts_with_comments:
-                    entity = await _client.get_entity(username)
                     comment_count = await scrape_comments_for_post(_client, entity, post, db)
                     logger.info(f"  └─ Post {post['telegram_message_id']}: {comment_count} comments")
                     await asyncio.sleep(1)   # polite pause between posts

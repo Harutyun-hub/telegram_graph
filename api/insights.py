@@ -36,6 +36,7 @@ def _query_top_topics(days: int, channels: list[str] | None) -> list[dict]:
     MATCH (p:Post)-[:TAGGED]->(t:Topic)
     OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
     WHERE p.posted_at >= datetime() - duration({days: $days})
+      AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
       AND ($channels_empty OR coalesce(ch.title, ch.username, ch.uuid) IN $channels)
     RETURN t.name AS topic,
            count(DISTINCT p) AS posts,
