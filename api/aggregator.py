@@ -66,6 +66,16 @@ DETAIL_REFRESH_TIMEOUT_SECONDS = max(
 # If one of these tiers falls back during refresh, prefer preserving an
 # existing healthy cache instead of replacing it with an empty/degraded view.
 CRITICAL_TIERS = {"pulse", "strategic"}
+ALL_TIER_NAMES = (
+    "pulse",
+    "strategic",
+    "behavioral",
+    "network",
+    "psychographic",
+    "predictive",
+    "actionable",
+    "comparative",
+)
 
 
 DashboardCacheMeta = Dict[str, object]
@@ -674,6 +684,30 @@ def _snapshot_meta(
     }
 
 
+def _emergency_degraded_snapshot(
+    cache_key: str,
+    reason: str,
+) -> tuple[dict, DashboardCacheMeta]:
+    """Return an all-fallback snapshot when no fresh or stale cache is available."""
+    data: dict = {}
+    tier_times: Dict[str, Optional[float]] = {}
+    for name in ALL_TIER_NAMES:
+        data.update(_fallback_for_tier(name))
+        tier_times[name] = None
+    data.update(_tier_derived(data))
+    tier_times["derived"] = 0.0
+    failure_count = _record_refresh_failure(cache_key, reason)
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=0.0,
+        mode="emergency_fallback",
+        cache_status="emergency_degraded",
+        is_stale=True,
+        refresh_failure_count=failure_count,
+    )
+    return data, _with_refresh_state(cache_key, meta)
+
+
 # ── Main aggregation API ─────────────────────────────────────────────────────
 
 def _default_dashboard_context() -> DashboardDateContext:
@@ -788,7 +822,7 @@ def _refresh_dashboard_snapshot(
                 stale_age_seconds=max(0.0, time.time() - stale_ts),
             )
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
-        raise
+        return _emergency_degraded_snapshot(cache_key, str(exc))
 
 
 def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateContext) -> None:
@@ -880,9 +914,11 @@ def get_dashboard_snapshot(
                 stale_meta,
                 stale_age_seconds=stale_age_seconds,
             )
-        raise TimeoutError(
+        reason = (
             f"Dashboard refresh did not complete within {wait_timeout:.1f}s and no stale snapshot is available"
         )
+        logger.warning(reason)
+        return _emergency_degraded_snapshot(cache_key, reason)
 
     try:
         return _refresh_dashboard_snapshot(cache_key, resolved_ctx, stale_entry=stale_entry)

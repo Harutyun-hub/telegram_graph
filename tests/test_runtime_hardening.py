@@ -56,6 +56,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
              patch.object(server, "_start_behavioral_cards_scheduler") as behavioral_scheduler, \
              patch.object(server, "_start_opportunity_cards_scheduler") as opportunity_scheduler, \
              patch.object(server, "_start_topic_overviews_scheduler") as topic_scheduler, \
+             patch.object(server, "_warm_dashboard_cache", new=AsyncMock()) as warm_dashboard_cache, \
              patch.object(server.db, "close"):
             asyncio.run(enter_lifespan())
 
@@ -65,6 +66,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         behavioral_scheduler.assert_not_called()
         opportunity_scheduler.assert_not_called()
         topic_scheduler.assert_not_called()
+        warm_dashboard_cache.assert_awaited_once()
 
     def test_worker_role_starts_background_scheduler_stack(self) -> None:
         async def enter_lifespan() -> None:

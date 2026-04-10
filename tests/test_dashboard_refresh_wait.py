@@ -85,6 +85,41 @@ class DashboardRefreshWaitTests(unittest.TestCase):
         with aggregator._cache_lock:
             self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
 
+    def test_refresh_failure_with_no_stale_cache_returns_emergency_degraded_snapshot(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+
+        with patch.object(
+            aggregator,
+            "_build_snapshot_with_timeout",
+            side_effect=TimeoutError("Dashboard rebuild exceeded 30.0s timeout"),
+        ):
+            payload, runtime_meta = aggregator.get_dashboard_snapshot(ctx)
+
+        self.assertEqual(runtime_meta.get("cacheStatus"), "emergency_degraded")
+        self.assertEqual(runtime_meta.get("buildMode"), "emergency_fallback")
+        self.assertTrue(runtime_meta.get("isStale"))
+        self.assertIn("pulse", runtime_meta.get("degradedTiers") or [])
+        self.assertEqual(payload.get("trendingTopics"), [])
+        with aggregator._cache_lock:
+            self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
+
+    def test_follower_wait_timeout_with_no_stale_cache_returns_emergency_degraded_snapshot(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        state = aggregator.DashboardRefreshState(inflight=True)
+        state.event.clear()
+        with aggregator._refresh_state_lock:
+            aggregator._refresh_states[ctx.cache_key] = state
+
+        with patch.object(aggregator, "WAIT_FOR_EMPTY_REFRESH_SECONDS", 0.01):
+            payload, runtime_meta = aggregator.get_dashboard_snapshot(ctx)
+
+        self.assertEqual(runtime_meta.get("cacheStatus"), "emergency_degraded")
+        self.assertEqual(runtime_meta.get("buildMode"), "emergency_fallback")
+        self.assertTrue(runtime_meta.get("isStale"))
+        self.assertEqual(payload.get("weeklyShifts"), [])
+        with aggregator._cache_lock:
+            self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
+
 
 if __name__ == "__main__":
     unittest.main()

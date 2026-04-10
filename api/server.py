@@ -225,6 +225,10 @@ async def app_lifespan(_app: FastAPI):
             startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
     else:
         logger.info("Web-only runtime ready | background jobs disabled")
+        if APP_ROLE == "web":
+            warmers_started_at = time.perf_counter()
+            asyncio.create_task(_warm_dashboard_cache())
+            startup_phases["dashboardWarmupEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
 
     startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
     logger.info(
