@@ -672,11 +672,6 @@ def get_passive_freshness_snapshot(
         _CACHE_TS = _parse_iso(shared.get("generated_at")) or now
         return shared
 
-    if _CACHE and _CACHE_TS:
-        cache_age = (now - _CACHE_TS).total_seconds()
-        if cache_age < _CACHE_TTL_SECONDS:
-            return _CACHE
-
     try:
         snapshot = _build_supabase_only_freshness_snapshot(
             supabase_writer,
@@ -691,6 +686,10 @@ def get_passive_freshness_snapshot(
         _CACHE_TS = now
         return snapshot
     except Exception:
+        if _CACHE and _CACHE_TS:
+            cache_age = (now - _CACHE_TS).total_seconds()
+            if cache_age < _CACHE_TTL_SECONDS:
+                return _CACHE
         if shared:
             _CACHE = shared
             _CACHE_TS = _parse_iso(shared.get("generated_at")) or now

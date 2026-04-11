@@ -1479,6 +1479,7 @@ def get_current_social_runtime_status() -> dict[str, Any]:
 
 
 _last_shared_scraper_status: dict[str, Any] | None = None
+_last_shared_scraper_status_ts: datetime | None = None
 
 
 def _default_scraper_scheduler_status() -> dict[str, Any]:
@@ -1533,18 +1534,25 @@ def _default_scraper_scheduler_status() -> dict[str, Any]:
 
 
 def get_current_scraper_scheduler_status() -> dict[str, Any]:
-    global _last_shared_scraper_status
+    global _last_shared_scraper_status, _last_shared_scraper_status_ts
     if not _should_run_background_jobs():
+        now = datetime.now(timezone.utc)
         try:
-            shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={}, timeout_seconds=1.5)
+            shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={}, timeout_seconds=2.5)
         except Exception as exc:
             logger.warning(f"Shared scraper runtime snapshot read failed on passive web: {exc}")
             shared = {}
         if shared:
             _last_shared_scraper_status = dict(shared)
+            _last_shared_scraper_status_ts = now
             return dict(shared)
-        if _last_shared_scraper_status:
+        if (
+            _last_shared_scraper_status
+            and _last_shared_scraper_status_ts
+            and (now - _last_shared_scraper_status_ts).total_seconds() <= 10
+        ):
             return dict(_last_shared_scraper_status)
+        return _default_scraper_scheduler_status()
     if scraper_scheduler is None:
         return _default_scraper_scheduler_status()
     return scraper_scheduler.status()
