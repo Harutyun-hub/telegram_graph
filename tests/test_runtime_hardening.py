@@ -97,6 +97,31 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         opportunity_scheduler.assert_called_once()
         topic_scheduler.assert_called_once()
 
+    def test_web_role_reads_shared_scheduler_snapshot(self) -> None:
+        shared = {
+            "status": "active",
+            "is_active": True,
+            "interval_minutes": 15,
+            "running_now": True,
+            "last_run_started_at": "2026-04-11T10:00:00+00:00",
+            "last_run_finished_at": None,
+            "last_success_at": "2026-04-11T09:45:00+00:00",
+            "next_run_at": "2026-04-11T10:15:00+00:00",
+            "last_error": None,
+            "last_result": {"mode": "normal"},
+            "last_mode": "normal",
+        }
+        writer = SimpleNamespace(get_shared_scraper_runtime_snapshot=lambda default=None: shared)
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "scraper_scheduler", None), \
+             patch.object(server, "get_supabase_writer", return_value=writer):
+            payload = server.get_current_scraper_scheduler_status()
+
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(payload["next_run_at"], "2026-04-11T10:15:00+00:00")
+        self.assertTrue(payload["running_now"])
+
     def test_app_lifespan_requires_healthy_redis_in_locked_env(self) -> None:
         async def enter_lifespan() -> None:
             async with server.app_lifespan(server.app):

@@ -259,10 +259,18 @@ def get_freshness_snapshot(
     *,
     scheduler_status: Optional[dict] = None,
     force_refresh: bool = False,
+    prefer_shared_snapshot: bool = False,
+    persist_shared_snapshot: bool = False,
 ) -> dict:
     global _CACHE, _CACHE_TS
 
     now = datetime.now(timezone.utc)
+    if prefer_shared_snapshot and not force_refresh:
+        shared = supabase_writer.get_shared_freshness_snapshot(default={})
+        if shared:
+            _CACHE = shared
+            _CACHE_TS = _parse_iso(shared.get("generated_at")) or now
+            return shared
     if not force_refresh and _CACHE and _CACHE_TS:
         cache_age = (now - _CACHE_TS).total_seconds()
         if cache_age < _CACHE_TTL_SECONDS:
@@ -447,5 +455,7 @@ def get_freshness_snapshot(
 
     _CACHE = snapshot
     _CACHE_TS = now
+    if persist_shared_snapshot:
+        supabase_writer.save_shared_freshness_snapshot(snapshot)
     return snapshot
     

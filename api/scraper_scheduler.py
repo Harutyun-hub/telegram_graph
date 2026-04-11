@@ -15,6 +15,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 import config
+from api.freshness import get_freshness_snapshot
 from api.runtime_coordinator import get_runtime_coordinator
 from api.source_resolution import run_source_resolution_cycle
 from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
@@ -99,6 +100,8 @@ class ScraperSchedulerService:
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
         )
+        self._persist_shared_status()
+        self._persist_shared_freshness()
 
     def _ensure_scheduler_started(self) -> None:
         if not self.scheduler.running:
@@ -280,6 +283,7 @@ class ScraperSchedulerService:
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            self._persist_shared_status()
 
             try:
                 client = await self._get_or_create_client()
@@ -296,6 +300,8 @@ class ScraperSchedulerService:
                 coordinator.release_lock("worker:scrape-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._persist_shared_status()
+                self._persist_shared_freshness()
 
     async def _run_catchup_cycle(self) -> None:
         if self._run_lock.locked():
@@ -318,6 +324,7 @@ class ScraperSchedulerService:
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
+            self._persist_shared_status()
 
             try:
                 client = await self._get_or_create_client()
@@ -334,6 +341,8 @@ class ScraperSchedulerService:
                 coordinator.release_lock("worker:catchup-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
+                self._persist_shared_status()
+                self._persist_shared_freshness()
 
     async def _run_source_resolution_cycle(self) -> None:
         if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
@@ -465,7 +474,9 @@ class ScraperSchedulerService:
             is_active=self.desired_active,
             interval_minutes=self.interval_minutes,
         )
-        return self.status(persisted)
+        status = self.status(persisted)
+        self._persist_shared_status(status)
+        return status
 
     async def stop(self) -> dict:
         self.desired_active = False
@@ -478,7 +489,9 @@ class ScraperSchedulerService:
             is_active=self.desired_active,
             interval_minutes=self.interval_minutes,
         )
-        return self.status(persisted)
+        status = self.status(persisted)
+        self._persist_shared_status(status)
+        return status
 
     async def set_interval(self, interval_minutes: int) -> dict:
         self.interval_minutes = int(interval_minutes)
@@ -499,7 +512,9 @@ class ScraperSchedulerService:
             interval_minutes=self.interval_minutes,
         )
         self.desired_active = persisted_is_active
-        return self.status(persisted)
+        status = self.status(persisted)
+        self._persist_shared_status(status)
+        return status
 
     async def run_once(self) -> dict:
         if self.running_now:
@@ -683,3 +698,27 @@ class ScraperSchedulerService:
                 "raw": result,
             }
         )
+
+    def _persist_shared_status(self, status_payload: Optional[dict] = None) -> None:
+        payload = status_payload or self.status()
+        try:
+            save_fn = getattr(self.db, "save_shared_scraper_runtime_snapshot", None)
+            if not callable(save_fn):
+                return
+            if not save_fn(payload):
+                logger.warning("Failed to persist shared scraper runtime snapshot")
+        except Exception as exc:
+            logger.warning(f"Failed to persist shared scraper runtime snapshot: {exc}")
+
+    def _persist_shared_freshness(self) -> None:
+        try:
+            if not callable(getattr(self.db, "save_shared_freshness_snapshot", None)):
+                return
+            get_freshness_snapshot(
+                self.db,
+                scheduler_status=self.status(),
+                force_refresh=True,
+                persist_shared_snapshot=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to persist shared freshness snapshot: {exc}")
