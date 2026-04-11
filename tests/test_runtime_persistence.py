@@ -332,6 +332,32 @@ class RuntimePersistenceTests(unittest.TestCase):
         stored = json.loads(bucket.files["scraper/scheduler_control.json"].decode("utf-8"))
         self.assertEqual(stored["action"], "run_once")
 
+    def test_shared_scheduler_control_fast_write_replaces_duplicate_object(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["scraper/scheduler_control.json"] = json.dumps(
+            {"request_id": "old", "action": "run_once"}
+        ).encode("utf-8")
+        writer = _make_writer(bucket)
+
+        upload_calls = {"count": 0}
+        original_upload = bucket.upload
+
+        def flaky_upload(path: str, body: bytes, options: dict) -> None:
+            if path == "scraper/scheduler_control.json" and upload_calls["count"] == 0:
+                upload_calls["count"] += 1
+                raise RuntimeError("Duplicate")
+            upload_calls["count"] += 1
+            original_upload(path, body, options)
+
+        bucket.upload = flaky_upload  # type: ignore[assignment]
+
+        saved = writer.save_shared_scraper_control_command({"request_id": "new", "action": "catchup_once"})
+
+        self.assertTrue(saved)
+        stored = json.loads(bucket.files["scraper/scheduler_control.json"].decode("utf-8"))
+        self.assertEqual(stored["request_id"], "new")
+        self.assertEqual(stored["action"], "catchup_once")
+
 
 if __name__ == "__main__":
     unittest.main()

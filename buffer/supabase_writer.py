@@ -1469,17 +1469,30 @@ class SupabaseWriter:
             raise ValueError("Runtime JSON path is empty")
 
         bucket = self.client.storage.from_(self._runtime_bucket_name)
+        file_options = {"content-type": "application/json", "upsert": "true"}
+
+        def _upload() -> None:
+            bucket.upload(key, body, file_options)
+
+        def _replace_and_upload() -> None:
+            bucket.remove([key])
+            bucket.upload(key, body, file_options)
+
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    bucket.upload,
-                    key,
-                    body,
-                    {"content-type": "application/json", "upsert": "true"},
-                )
+                future = executor.submit(_upload)
                 future.result(timeout=timeout_seconds)
         except FuturesTimeoutError as exc:
             raise TimeoutError(f"runtime JSON upload timed out after {timeout_seconds}s") from exc
+        except Exception as exc:
+            if "duplicate" not in str(exc).lower():
+                raise
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_replace_and_upload)
+                    future.result(timeout=timeout_seconds)
+            except FuturesTimeoutError as timeout_exc:
+                raise TimeoutError(f"runtime JSON upload timed out after {timeout_seconds}s") from timeout_exc
 
     @staticmethod
     def _classify_runtime_read_error(error: Exception) -> str:
