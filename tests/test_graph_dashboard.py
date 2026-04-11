@@ -120,5 +120,18 @@ class GraphDashboardNodeDetailsTests(unittest.TestCase):
         self.assertEqual(evidence_mock.call_count, 2)
 
 
+class GraphDashboardSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        graph_dashboard.invalidate_graph_cache()
+
+    def test_search_graph_uses_unscoped_subquery(self) -> None:
+        with patch.object(graph_dashboard, "run_query", return_value=[]) as run_query_mock:
+            graph_dashboard.search_graph("permits", 5)
+
+        query = run_query_mock.call_args.args[0]
+        self.assertIn("CALL {", query)
+        self.assertNotIn("CALL (t) {", query)
+
+
 if __name__ == "__main__":
     unittest.main()

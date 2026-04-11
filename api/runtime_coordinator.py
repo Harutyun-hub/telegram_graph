@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional in local dev until installed
 _LOCAL_LOCK = threading.Lock()
 _LOCAL_LOCKS: dict[str, tuple[str, float]] = {}
 _LOCAL_COUNTERS: dict[str, tuple[int, float]] = {}
+_LOCAL_JSON: dict[str, tuple[str, float]] = {}
 _COORDINATOR_LOCK = threading.Lock()
 _COORDINATOR: "RuntimeCoordinator | None" = None
 
@@ -32,6 +33,7 @@ return 0
 class RuntimeCoordinator:
     def __init__(self) -> None:
         self._client = None
+        self._warned_disabled = False
 
         redis_url = str(getattr(config, "REDIS_URL", "") or "").strip()
         if not redis_url:
@@ -126,35 +128,52 @@ class RuntimeCoordinator:
 
     def get_json(self, name: str) -> Any | None:
         key = f"coord:json:{name}"
-        if self._client is None:
-            return None
-        try:
-            return self._client.get(key)
-        except Exception as exc:  # pragma: no cover - network/runtime specific
-            logger.warning(f"Runtime coordinator Redis read failed for {name}: {exc}")
-            return None
+        if self._client is not None:
+            try:
+                raw = self._client.get(key)
+                if raw is None:
+                    return None
+                return raw
+            except Exception as exc:  # pragma: no cover - network/runtime specific
+                logger.warning(f"Runtime coordinator Redis read failed for {name}: {exc}")
+
+        now = time.monotonic()
+        with _LOCAL_LOCK:
+            current = _LOCAL_JSON.get(key)
+            if current is None:
+                return None
+            value, expires_at = current
+            if expires_at <= now:
+                _LOCAL_JSON.pop(key, None)
+                return None
+            return value
 
     def set_json(self, name: str, value: str, ttl_seconds: int) -> bool:
         key = f"coord:json:{name}"
-        if self._client is None:
-            return False
-        try:
-            self._client.set(key, value, ex=max(1, int(ttl_seconds)))
-            return True
-        except Exception as exc:  # pragma: no cover - network/runtime specific
-            logger.warning(f"Runtime coordinator Redis write failed for {name}: {exc}")
-            return False
+        ttl = max(1, int(ttl_seconds))
+        if self._client is not None:
+            try:
+                self._client.set(key, value, ex=ttl)
+                return True
+            except Exception as exc:  # pragma: no cover - network/runtime specific
+                logger.warning(f"Runtime coordinator Redis write failed for {name}: {exc}")
+
+        with _LOCAL_LOCK:
+            _LOCAL_JSON[key] = (value, time.monotonic() + ttl)
+        return True
 
     def delete_json(self, name: str) -> bool:
         key = f"coord:json:{name}"
-        if self._client is None:
-            return False
-        try:
-            self._client.delete(key)
-            return True
-        except Exception as exc:  # pragma: no cover - network/runtime specific
-            logger.warning(f"Runtime coordinator Redis delete failed for {name}: {exc}")
-            return False
+        if self._client is not None:
+            try:
+                self._client.delete(key)
+                return True
+            except Exception as exc:  # pragma: no cover - network/runtime specific
+                logger.warning(f"Runtime coordinator Redis delete failed for {name}: {exc}")
+
+        with _LOCAL_LOCK:
+            removed = _LOCAL_JSON.pop(key, None)
+        return removed is not None
 
 
 def get_runtime_coordinator() -> RuntimeCoordinator:

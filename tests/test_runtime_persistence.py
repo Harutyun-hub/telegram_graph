@@ -94,6 +94,39 @@ class RuntimePersistenceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(log_mock.call_args[0][0], "INFO")
 
+    def test_freshness_endpoint_serves_stale_snapshot_and_triggers_background_refresh(self) -> None:
+        snapshot = {"generated_at": "2026-03-30T07:00:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": snapshot, "source": "persisted_stale"}), \
+             patch.object(server, "_ensure_background_freshness_refresh", return_value=True) as refresh_mock, \
+             patch.object(server, "get_freshness_snapshot") as live_mock:
+            payload = asyncio.run(server.freshness_snapshot(force=False))
+
+        self.assertEqual(payload, snapshot)
+        refresh_mock.assert_called_once()
+        live_mock.assert_not_called()
+
+    def test_persist_dashboard_snapshot_schedules_default_topics_warm(self) -> None:
+        snapshot = {"communityHealth": {"score": 72}}
+        meta = {"snapshotBuiltAt": "2026-03-22T00:00:00+00:00", "cacheStatus": "refresh_success", "degradedTiers": []}
+        ctx = server.build_dashboard_date_context("2026-03-08", "2026-03-22")
+
+        with patch.object(server, "get_supabase_writer") as writer_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
+             patch.object(server, "_schedule_default_topics_prewarm", return_value=True) as warm_mock:
+            writer_mock.return_value.save_runtime_blob.return_value = True
+            result = server._persist_dashboard_snapshot_sync(
+                ctx,
+                snapshot,
+                meta,
+                trusted_end_date="2026-03-22",
+                write_default_alias=True,
+            )
+
+        self.assertTrue(result["ok"])
+        prime_mock.assert_called_once()
+        warm_mock.assert_called_once_with(ctx)
+
     def test_get_runtime_json_reads_via_authenticated_download(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": False}}}).encode("utf-8")

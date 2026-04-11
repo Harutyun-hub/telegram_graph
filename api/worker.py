@@ -39,8 +39,10 @@ async def _shutdown_background_services() -> None:
 
 async def run_worker() -> None:
     logger.info("Starting dedicated worker runtime")
-    if config.IS_STAGING:
+    if config.IS_STAGING and not config.STAGING_ENABLE_BACKGROUND_JOBS:
         raise RuntimeError("Staging/testing environments are web-only. Dedicated worker startup is disabled.")
+    if config.IS_STAGING and config.STAGING_ENABLE_BACKGROUND_JOBS:
+        logger.warning("Staging dedicated worker enabled for controlled AI backend testing")
     coordinator = get_runtime_coordinator()
     if config.IS_LOCKED_ENV and not coordinator.ping():
         raise RuntimeError("Locked environments require a healthy Redis runtime coordinator.")

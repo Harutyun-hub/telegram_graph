@@ -141,16 +141,50 @@ class Neo4jWriter:
             topic_items = _collect_post_topic_items(post_analysis)
             post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
             if topic_items or post_sentiment or post_social_sentiment_tags:
-                tx.run(_CYPHER_POST_TOPICS, {
-                    "post_uuid":    post["id"],
-                    "channel_uuid": channel["id"],
-                    "posted_at":    str(post.get("posted_at")),
-                    "topics":       topic_items,
-                    "post_sentiment": post_sentiment,
-                    "post_social_sentiment_tags": post_social_sentiment_tags,
-                }).consume()
+                tx.run(_CYPHER_POST_TOPICS, _post_topics_params(post, channel, post_analysis)).consume()
 
         db.execute_write(_work, driver_key=self.driver_key, op_name="writer.sync_bundle")
+
+    def sync_post_batch(self, bundles: list[dict]) -> None:
+        """Sync many post bundles in a small number of UNWIND-based Neo4j writes."""
+        payloads = [bundle for bundle in (bundles or []) if isinstance(bundle, dict) and bundle.get("post")]
+        if not payloads:
+            return
+
+        foundation_rows: list[dict] = []
+        comment_rows: list[dict] = []
+        topic_rows: list[dict] = []
+
+        for bundle in payloads:
+            post = bundle["post"]
+            channel = bundle.get("channel") or {"id": post.get("channel_id")}
+            comments = bundle.get("comments") or []
+            analyses = bundle.get("analyses") or {}
+            post_analysis = bundle.get("post_analysis")
+            reply_user_map = bundle.get("reply_user_map") or {}
+
+            foundation_rows.append(_channel_post_params(channel, post))
+
+            for comment in comments:
+                uid = str(comment.get("telegram_user_id") or "anonymous")
+                analysis = analyses.get(uid) or {}
+                reply_to_msg_id = comment.get("reply_to_message_id")
+                reply_to_user_id = reply_user_map.get(int(reply_to_msg_id)) if reply_to_msg_id else None
+                comment_rows.append(_comment_params(comment, post, analysis, reply_to_user_id))
+
+            topic_items = _collect_post_topic_items(post_analysis)
+            post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
+            if topic_items or post_sentiment or post_social_sentiment_tags:
+                topic_rows.append(_post_topics_params(post, channel, post_analysis))
+
+        def _work(tx: ManagedTransaction) -> None:
+            tx.run(_CYPHER_CHANNEL_POST_BATCH, {"rows": foundation_rows}).consume()
+            if comment_rows:
+                tx.run(_CYPHER_COMMENT_BATCH, {"rows": comment_rows}).consume()
+            if topic_rows:
+                tx.run(_CYPHER_POST_TOPICS_BATCH, {"rows": topic_rows}).consume()
+
+        db.execute_write(_work, driver_key=self.driver_key, op_name="writer.sync_post_batch")
 
     # ── Orphan Check (Expert Rule 6) ─────────────────────────────────────────
 
@@ -250,6 +284,29 @@ SET   p.telegram_message_id = $telegram_message_id,
                                END
 
 // ── Post → Channel (anchor relationship) ──
+MERGE (p)-[:IN_CHANNEL]->(ch)
+"""
+
+_CYPHER_CHANNEL_POST_BATCH = """
+UNWIND $rows AS row
+MERGE (ch:Channel {uuid: row.channel_uuid})
+SET   ch.username            = row.channel_username,
+      ch.title               = row.channel_title,
+      ch.member_count        = row.member_count,
+      ch.description         = row.channel_description,
+      ch.telegram_channel_id = row.telegram_channel_id
+
+MERGE (p:Post {uuid: row.post_uuid})
+SET   p.telegram_message_id = row.telegram_message_id,
+      p.channel_uuid        = row.channel_uuid,
+      p.text                = row.text,
+      p.posted_at           = datetime(row.posted_at),
+      p.views               = row.views,
+      p.forwards            = row.forwards,
+      p.reactions           = row.reactions,
+      p.comment_count       = row.comment_count,
+      p.media_type          = row.media_type
+
 MERGE (p)-[:IN_CHANNEL]->(ch)
 """
 
@@ -470,6 +527,200 @@ FOREACH (_ IN CASE WHEN $telegram_user_id IS NOT NULL
 )
 """
 
+_CYPHER_COMMENT_BATCH = """
+UNWIND $rows AS row
+MERGE (c:Comment {uuid: row.comment_uuid})
+SET   c.telegram_message_id = row.telegram_message_id,
+      c.telegram_user_id    = row.telegram_user_id,
+      c.text                = row.text,
+      c.posted_at           = datetime(row.posted_at),
+      c.time_of_day         = row.time_of_day,
+      c.posting_hour        = row.posting_hour
+
+MERGE (p:Post {uuid: row.post_uuid})
+MERGE (c)-[rcp:REPLIES_TO]->(p)
+ON CREATE SET rcp.posted_at = datetime(row.posted_at)
+
+FOREACH (_ IN CASE WHEN row.sentiment IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (smsg:Sentiment {label: row.sentiment})
+  MERGE (c)-[rcs:HAS_SENTIMENT]->(smsg)
+  ON CREATE SET rcs.count = 1,
+                rcs.first_seen = datetime(row.posted_at),
+                rcs.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rcs.count = coalesce(rcs.count, 0) + 1,
+                rcs.last_seen = datetime(row.posted_at)
+)
+
+FOREACH (tag IN row.social_sentiment_tags |
+  MERGE (st:SentimentTag {name: tag})
+  MERGE (c)-[rct:HAS_SENTIMENT_TAG]->(st)
+  ON CREATE SET rct.count = 1,
+                rct.first_seen = datetime(row.posted_at),
+                rct.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rct.count = coalesce(rct.count, 0) + 1,
+                rct.last_seen = datetime(row.posted_at)
+)
+
+FOREACH (_ IN CASE WHEN row.telegram_user_id IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (u:User {telegram_user_id: row.telegram_user_id})
+  SET   u.inferred_gender          = row.inferred_gender,
+        u.inferred_age_bracket     = row.inferred_age_bracket,
+        u.language                 = row.language,
+        u.community_role           = row.community_role,
+        u.communication_style      = row.communication_style,
+        u.migration_intent         = row.migration_intent,
+        u.diaspora_signals         = row.diaspora_signals,
+        u.authority_attitude       = row.authority_attitude,
+        u.last_seen                = datetime(row.posted_at),
+        u.soviet_nostalgia         = row.soviet_nostalgia,
+        u.locus_of_control         = row.locus_of_control,
+        u.coping_style             = row.coping_style,
+        u.security_vs_freedom      = row.security_vs_freedom,
+        u.trust_government         = row.trust_government,
+        u.trust_media              = row.trust_media,
+        u.trust_peers              = row.trust_peers,
+        u.trust_foreign            = row.trust_foreign,
+        u.code_switching           = row.code_switching,
+        u.certainty_level          = row.certainty_level,
+        u.rhetorical_strategy      = row.rhetorical_strategy,
+        u.pronoun_pattern          = row.pronoun_pattern,
+        u.financial_distress_level = row.financial_distress_level,
+        u.price_sensitivity        = row.price_sensitivity
+
+  MERGE (u)-[rw:WROTE]->(c)
+  ON CREATE SET rw.posted_at = datetime(row.posted_at)
+
+  FOREACH (_ IN CASE WHEN row.primary_intent IS NOT NULL THEN [1] ELSE [] END |
+    MERGE (i:Intent {name: row.primary_intent})
+    MERGE (u)-[ri:EXHIBITS]->(i)
+    ON CREATE SET ri.count = 1,
+                  ri.avg_sentiment = row.sentiment_score,
+                  ri.first_seen = datetime(row.posted_at),
+                  ri.last_seen = datetime(row.posted_at)
+    ON MATCH  SET ri.count = ri.count + 1,
+                  ri.avg_sentiment = (ri.avg_sentiment * ri.count + row.sentiment_score) / (ri.count + 1),
+                  ri.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (_ IN CASE WHEN row.sentiment IS NOT NULL THEN [1] ELSE [] END |
+    MERGE (s:Sentiment {label: row.sentiment})
+    MERGE (u)-[rs:HAS_SENTIMENT]->(s)
+    ON CREATE SET rs.count = 1,
+                  rs.first_seen = datetime(row.posted_at),
+                  rs.last_seen = datetime(row.posted_at)
+    ON MATCH  SET rs.count = rs.count + 1,
+                  rs.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (tag IN row.social_sentiment_tags |
+    MERGE (st:SentimentTag {name: tag})
+    MERGE (u)-[rst:HAS_SENTIMENT_TAG]->(st)
+    ON CREATE SET rst.count = 1,
+                  rst.first_seen = datetime(row.posted_at),
+                  rst.last_seen = datetime(row.posted_at)
+    ON MATCH  SET rst.count = coalesce(rst.count, 0) + 1,
+                  rst.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (_ IN CASE WHEN row.geopolitical_alignment IS NOT NULL
+                      AND row.geopolitical_alignment <> 'Neutral'
+                      AND row.geopolitical_alignment <> 'Ambiguous'
+                      AND row.geopolitical_alignment <> 'null'
+                      AND row.geopolitical_alignment <> 'None'
+               THEN [1] ELSE [] END |
+    MERGE (g:GeopoliticalStance {alignment: row.geopolitical_alignment})
+    MERGE (u)-[rg:ALIGNED_WITH]->(g)
+    ON CREATE SET rg.first_seen = datetime(row.posted_at), rg.confidence = 0.7
+  )
+
+  FOREACH (_ IN CASE WHEN row.collective_memory IS NOT NULL
+                      AND row.collective_memory <> 'null'
+               THEN [1] ELSE [] END |
+    MERGE (m:CollectiveMemory {event: row.collective_memory})
+    MERGE (u)-[rm:REMEMBERS]->(m)
+    ON CREATE SET rm.first_seen = datetime(row.posted_at)
+    ON MATCH  SET rm.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (_ IN CASE WHEN row.life_stage IS NOT NULL AND row.life_stage <> 'null'
+               THEN [1] ELSE [] END |
+    MERGE (l:LifeStage {name: row.life_stage})
+    MERGE (u)-[:IN_LIFE_STAGE]->(l)
+  )
+
+  FOREACH (_ IN CASE WHEN row.business_opportunity_type IS NOT NULL
+                      AND row.business_opportunity_type <> 'none'
+                      AND row.business_opportunity_type <> 'null'
+               THEN [1] ELSE [] END |
+    MERGE (b:BusinessOpportunity {type: row.business_opportunity_type})
+    SET b.description = row.business_opportunity_desc
+    MERGE (u)-[ro:SIGNALS_OPPORTUNITY]->(b)
+    ON CREATE SET ro.count = 1,
+                  ro.first_seen = datetime(row.posted_at),
+                  ro.last_seen = datetime(row.posted_at)
+    ON MATCH  SET ro.count = coalesce(ro.count, 0) + 1,
+                  ro.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (topic IN row.user_topics |
+    MERGE (t:Topic {name: topic})
+    MERGE (u)-[rt:INTERESTED_IN]->(t)
+    ON CREATE SET rt.count = 1,
+                  rt.first_seen = datetime(row.posted_at),
+                  rt.last_seen = datetime(row.posted_at)
+    ON MATCH  SET rt.count = rt.count + 1,
+                  rt.last_seen = datetime(row.posted_at)
+  )
+
+  FOREACH (item IN row.comment_topics |
+    MERGE (t:Topic {name: item.name})
+    ON CREATE SET t.proposed = coalesce(item.proposed, false),
+                  t.created_at = datetime(row.posted_at)
+    ON MATCH  SET t.proposed = coalesce(t.proposed, false) OR coalesce(item.proposed, false)
+    MERGE (cat:TopicCategory {name: item.category})
+    MERGE (dom:TopicDomain {name: item.domain})
+    MERGE (cat)-[:IN_DOMAIN]->(dom)
+    MERGE (t)-[:BELONGS_TO_CATEGORY]->(cat)
+    MERGE (c)-[:TAGGED]->(t)
+  )
+
+  FOREACH (entity IN row.entities |
+    MERGE (e:Entity {name: entity.name})
+    ON CREATE SET e.type = entity.type
+    ON MATCH  SET e.type = coalesce(e.type, entity.type)
+    MERGE (u)-[rm:MENTIONS]->(e)
+    ON CREATE SET rm.count = 1,
+                  rm.first_seen = datetime(row.posted_at),
+                  rm.last_seen = datetime(row.posted_at),
+                  rm.sentiment = entity.sentiment_toward
+    ON MATCH  SET rm.count = rm.count + 1,
+                  rm.last_seen = datetime(row.posted_at),
+                  rm.sentiment = coalesce(entity.sentiment_toward, rm.sentiment)
+  )
+)
+
+FOREACH (entity IN row.entities |
+  MERGE (e:Entity {name: entity.name})
+  ON CREATE SET e.type = entity.type
+  ON MATCH  SET e.type = coalesce(e.type, entity.type)
+  MERGE (c)-[:MENTIONS_ENTITY]->(e)
+)
+
+FOREACH (_ IN CASE WHEN row.telegram_user_id IS NOT NULL
+                    AND row.reply_to_telegram_user_id IS NOT NULL
+                    AND row.telegram_user_id <> row.reply_to_telegram_user_id
+               THEN [1] ELSE [] END |
+  MERGE (commenter:User {telegram_user_id: row.telegram_user_id})
+  MERGE (replied_to:User {telegram_user_id: row.reply_to_telegram_user_id})
+  MERGE (commenter)-[rru:REPLIED_TO_USER]->(replied_to)
+  ON CREATE SET rru.count = 1,
+                rru.first_seen = datetime(row.posted_at),
+                rru.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rru.count = rru.count + 1,
+                rru.last_seen = datetime(row.posted_at)
+)
+"""
+
 _CYPHER_POST_TOPICS = """
 // ── Post + Channel Topic Tagging + Category Hierarchy ──
 MERGE (p:Post {uuid: $post_uuid})
@@ -534,6 +785,66 @@ FOREACH (tag IN $post_social_sentiment_tags |
                 rpt.last_seen = datetime($posted_at)
   ON MATCH  SET rpt.count = coalesce(rpt.count, 0) + 1,
                 rpt.last_seen = datetime($posted_at)
+)
+"""
+
+_CYPHER_POST_TOPICS_BATCH = """
+UNWIND $rows AS row
+MERGE (p:Post {uuid: row.post_uuid})
+MERGE (ch:Channel {uuid: row.channel_uuid})
+
+FOREACH (item IN row.topics |
+  MERGE (t:Topic {name: item.name})
+  ON CREATE SET t.proposed = coalesce(item.proposed, false),
+                t.created_at = datetime(row.posted_at)
+  ON MATCH  SET t.proposed = coalesce(t.proposed, false) OR coalesce(item.proposed, false)
+
+  MERGE (cat:TopicCategory {name: item.category})
+  MERGE (dom:TopicDomain {name: item.domain})
+  MERGE (cat)-[:IN_DOMAIN]->(dom)
+  MERGE (t)-[:BELONGS_TO_CATEGORY]->(cat)
+
+  MERGE (p)-[:TAGGED]->(t)
+
+  MERGE (ch)-[rd:DISCUSSES]->(t)
+  ON CREATE SET rd.count = 1,
+                rd.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rd.count = rd.count + 1,
+                rd.last_seen = datetime(row.posted_at)
+)
+
+FOREACH (t1 IN row.topics |
+  FOREACH (t2 IN row.topics |
+    FOREACH (_ IN CASE WHEN t1.name < t2.name THEN [1] ELSE [] END |
+      MERGE (n1:Topic {name: t1.name})
+      MERGE (n2:Topic {name: t2.name})
+      MERGE (n1)-[r:CO_OCCURS_WITH]-(n2)
+      ON CREATE SET r.count = 1,
+                    r.last_seen = datetime(row.posted_at)
+      ON MATCH  SET r.count = r.count + 1,
+                    r.last_seen = datetime(row.posted_at)
+    )
+  )
+)
+
+FOREACH (_ IN CASE WHEN row.post_sentiment IS NOT NULL THEN [1] ELSE [] END |
+  MERGE (smsg:Sentiment {label: row.post_sentiment})
+  MERGE (p)-[rps:HAS_SENTIMENT]->(smsg)
+  ON CREATE SET rps.count = 1,
+                rps.first_seen = datetime(row.posted_at),
+                rps.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rps.count = coalesce(rps.count, 0) + 1,
+                rps.last_seen = datetime(row.posted_at)
+)
+
+FOREACH (tag IN row.post_social_sentiment_tags |
+  MERGE (st:SentimentTag {name: tag})
+  MERGE (p)-[rpt:HAS_SENTIMENT_TAG]->(st)
+  ON CREATE SET rpt.count = 1,
+                rpt.first_seen = datetime(row.posted_at),
+                rpt.last_seen = datetime(row.posted_at)
+  ON MATCH  SET rpt.count = coalesce(rpt.count, 0) + 1,
+                rpt.last_seen = datetime(row.posted_at)
 )
 """
 
@@ -813,6 +1124,19 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
         "comment_topics":               comment_topic_items,
         # ── Entity mentions for user/comment linking ──
         "entities":                     entities,
+    }
+
+
+def _post_topics_params(post: dict, channel: dict, post_analysis: dict | None) -> dict:
+    topic_items = _collect_post_topic_items(post_analysis)
+    post_sentiment, post_social_sentiment_tags = _extract_sentiment_payload_from_analysis(post_analysis or {})
+    return {
+        "post_uuid": post["id"],
+        "channel_uuid": channel.get("id") or post.get("channel_id"),
+        "posted_at": str(post.get("posted_at")),
+        "topics": topic_items,
+        "post_sentiment": post_sentiment,
+        "post_social_sentiment_tags": post_social_sentiment_tags,
     }
 
 

@@ -47,6 +47,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
 
         with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server.config, "validate"), \
              patch.object(server.config, "IS_LOCKED_ENV", False), \
              patch.object(server.config, "REDIS_URL", ""), \
              patch.object(server, "RUN_STARTUP_WARMERS", False), \
@@ -56,6 +57,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
              patch.object(server, "_start_behavioral_cards_scheduler") as behavioral_scheduler, \
              patch.object(server, "_start_opportunity_cards_scheduler") as opportunity_scheduler, \
              patch.object(server, "_start_topic_overviews_scheduler") as topic_scheduler, \
+             patch.object(server, "_warm_dashboard_cache", new=AsyncMock()) as warm_dashboard_cache, \
              patch.object(server.db, "close"):
             asyncio.run(enter_lifespan())
 
@@ -65,6 +67,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         behavioral_scheduler.assert_not_called()
         opportunity_scheduler.assert_not_called()
         topic_scheduler.assert_not_called()
+        warm_dashboard_cache.assert_awaited_once()
 
     def test_worker_role_starts_background_scheduler_stack(self) -> None:
         async def enter_lifespan() -> None:
@@ -74,6 +77,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
 
         with patch.object(server, "APP_ROLE", "worker"), \
+             patch.object(server.config, "validate"), \
              patch.object(server.config, "IS_LOCKED_ENV", False), \
              patch.object(server.config, "REDIS_URL", ""), \
              patch.object(server, "RUN_STARTUP_WARMERS", False), \
@@ -99,6 +103,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
                 return None
 
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "validate"), \
              patch.object(server, "get_runtime_coordinator", return_value=_CoordinatorStub(ping_result=False)), \
              patch.object(server, "_should_run_background_jobs", return_value=False):
             with self.assertRaises(RuntimeError) as ctx:
@@ -184,12 +189,52 @@ class SchedulerDistributedLockTests(unittest.TestCase):
                 await asyncio.gather(task_a, task_b)
 
                 self.assertEqual(run_calls, 1)
-                self.assertIsNotNone(service_a.last_result)
-                self.assertEqual(service_a.last_result.get("mode"), "normal")
-                self.assertEqual(service_a.last_result.get("ok"), True)
-                self.assertIn("cycle_duration_seconds", service_a.last_result)
+                self.assertEqual(service_a.last_result, {"mode": "normal", "ok": True})
                 self.assertIsNone(service_b.last_result)
                 self.assertEqual(coordinator._locks, {})
+
+        asyncio.run(scenario())
+
+    def test_pipeline_queue_repair_cycle_exits_when_flag_disabled(self) -> None:
+        async def scenario() -> None:
+            db = SimpleNamespace(repair_pipeline_stage_queues=AsyncMock())
+            service = ScraperSchedulerService(db)
+
+            with patch.object(server.config, "PIPELINE_QUEUE_ENABLED", False), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", False):
+                await service._run_pipeline_queue_repair_cycle()
+
+            db.repair_pipeline_stage_queues.assert_not_called()
+            self.assertIsNone(service.pipeline_queue_repair_last_result)
+
+        asyncio.run(scenario())
+
+    def test_pipeline_queue_reclaim_cycle_runs_all_reclaimers(self) -> None:
+        coordinator = _CoordinatorStub()
+
+        async def scenario() -> None:
+            db = SimpleNamespace(
+                reclaim_expired_ai_post_jobs=lambda: 2,
+                reclaim_expired_ai_comment_group_jobs=lambda: 3,
+                reclaim_expired_neo4j_sync_jobs=lambda: 4,
+            )
+            service = ScraperSchedulerService(db)
+
+            with patch("api.scraper_scheduler.get_runtime_coordinator", return_value=coordinator), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", True), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES", 1):
+                await service._run_pipeline_queue_reclaim_cycle()
+
+            self.assertEqual(
+                service.pipeline_queue_reclaim_last_result,
+                {
+                    "ai_post_jobs_reclaimed": 2,
+                    "ai_comment_group_jobs_reclaimed": 3,
+                    "neo4j_sync_jobs_reclaimed": 4,
+                },
+            )
+            self.assertIsNone(service.pipeline_queue_reclaim_last_error)
+            self.assertEqual(coordinator._locks, {})
 
         asyncio.run(scenario())
 
@@ -229,10 +274,7 @@ class SchedulerDistributedLockTests(unittest.TestCase):
                 await asyncio.gather(task_a, task_b)
 
                 self.assertEqual(run_calls, 1)
-                self.assertIsNotNone(service_a.last_result)
-                self.assertEqual(service_a.last_result.get("mode"), "catchup")
-                self.assertEqual(service_a.last_result.get("ok"), True)
-                self.assertIn("cycle_duration_seconds", service_a.last_result)
+                self.assertEqual(service_a.last_result, {"mode": "catchup", "ok": True})
                 self.assertIsNone(service_b.last_result)
                 self.assertEqual(coordinator._locks, {})
 

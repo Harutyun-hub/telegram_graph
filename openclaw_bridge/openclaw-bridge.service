@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenClaw Private Bridge
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=harut
+Group=docker
+WorkingDirectory=/opt/openclaw-bridge
+EnvironmentFile=/opt/openclaw-bridge/.env
+ExecStart=/opt/openclaw-bridge/.venv/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8544
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -86,8 +86,10 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($lookback_start)
                   AND p.posted_at < datetime($end)
@@ -146,8 +148,10 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
           AND currentMentions >= 3
           AND currentMentions > previousMentions
           AND (currentActiveDays >= 2 OR currentComments >= 2 OR currentChannels >= 2)
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at IS NOT NULL
                 RETURN p.posted_at AS ts
@@ -168,8 +172,10 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
              currentChannels
         WHERE firstSeen IS NOT NULL
           AND firstSeen >= datetime($lookback_start)
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($lookback_start)
                   AND p.posted_at < datetime($end)
@@ -189,8 +195,10 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
             ORDER BY ts ASC, channel ASC
             RETURN head(collect(channel)) AS originChannel
         }
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
                 WHERE p.posted_at >= datetime($current_start)
@@ -525,7 +533,8 @@ def get_growth_funnel(ctx: DashboardDateContext) -> list[dict]:
 
     user_rows = run_query("""
         MATCH (u:User)
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -542,14 +551,16 @@ def get_growth_funnel(ctx: DashboardDateContext) -> list[dict]:
                        THEN coalesce(c.uuid, elementId(c))
                    END) AS askComments
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[ri:EXHIBITS]->(intent:Intent)
             WHERE ri.last_seen >= datetime($start)
               AND ri.last_seen < datetime($end)
             RETURN count(DISTINCT CASE WHEN intent.name = 'Information Seeking' THEN intent END) AS infoSeekingSignals,
                    count(DISTINCT CASE WHEN intent.name = 'Support / Help' THEN intent END) AS supportSignals
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
             WHERE coalesce(r.last_seen, r.first_seen) >= datetime($start)
               AND coalesce(r.last_seen, r.first_seen) < datetime($end)

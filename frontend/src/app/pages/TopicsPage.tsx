@@ -141,11 +141,6 @@ export function TopicsPage() {
     }
   }, [requestedTopic, searchParams, allTopics, selectedTopic?.id]);
 
-  useEffect(() => {
-    if (!requestedTopic || selectedTopic || !selectedTopicDetail) return;
-    setSelectedTopic(selectedTopicDetail);
-  }, [requestedTopic, selectedTopic, selectedTopicDetail]);
-
   const selectTopic = (topic: TopicDetail, view: 'evidence' | 'questions' = proofView, evidenceId?: string) => {
     setSelectedTopic(topic);
     setProofView(view);
@@ -180,8 +175,12 @@ export function TopicsPage() {
       setSelectedTopic(fresh);
     }
   }, [allTopics, selectedTopic]);
+  useEffect(() => {
+    setHighlightEvidenceId('');
+  }, [range.from, range.to]);
   const activeTopic = selectedTopicDetail || selectedTopic;
   const activeOverview = activeTopic?.overview || null;
+  const overviewState = activeOverview?.status || 'unavailable';
   const {
     data: evidenceFeed,
     loading: evidenceLoading,
@@ -529,7 +528,18 @@ export function TopicsPage() {
                     <div className="h-9 rounded-xl bg-slate-50 border border-slate-100" />
                   </div>
                 </div>
-              ) : !activeOverview || activeOverview.status === 'insufficient_evidence' ? (
+              ) : overviewState === 'unavailable' ? (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <p className="text-sm text-slate-700" style={{ fontWeight: 600 }}>
+                    {ru ? 'AI-обзор темы ещё не готов.' : 'AI Topic Overview is not ready yet.'}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {ru
+                      ? 'Детали темы, динамика и доказательства уже доступны. Обзор появится автоматически после фонового обновления.'
+                      : 'Topic evidence, trend, and detail data are already available. The overview will appear automatically after the next background refresh.'}
+                  </p>
+                </div>
+              ) : overviewState === 'insufficient_evidence' ? (
                 <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-3">
                   <p className="text-sm text-slate-700" style={{ fontWeight: 600 }}>
                     {ru ? 'Недостаточно недавних сигналов для надёжного обзора.' : 'Not enough recent evidence for a reliable overview yet.'}

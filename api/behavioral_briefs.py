@@ -18,6 +18,7 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import behavioral
 from buffer.supabase_writer import SupabaseWriter
+from utils.ai_usage import log_openai_usage
 
 try:
     from openai import OpenAI
@@ -990,6 +991,7 @@ def _support_gate(cluster: dict, kind: str) -> bool:
 def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload: dict) -> dict:
     if not _client:
         return {}
+    request_started_at = time.perf_counter()
     response = _client.chat.completions.create(
         model=model,
         messages=[
@@ -999,6 +1001,13 @@ def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload:
         response_format={"type": "json_object"},
         max_completion_tokens=max_tokens,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+    )
+    log_openai_usage(
+        feature="behavioral_briefs",
+        model=model,
+        response=response,
+        started_at=request_started_at,
+        extra={"max_completion_tokens": max_tokens},
     )
     raw = _as_str(response.choices[0].message.content)
     return json.loads(raw) if raw else {}
