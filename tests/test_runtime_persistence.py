@@ -78,6 +78,7 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
     writer._runtime_bucket_name = "runtime-config"
     writer._scheduler_settings_path = "scraper/scheduler_settings.json"
     writer._scheduler_runtime_path = "scraper/scheduler_runtime.json"
+    writer._scheduler_control_path = "scraper/scheduler_control.json"
     writer._freshness_snapshot_path = "pipeline/freshness_snapshot.json"
     writer._failure_table_warning_emitted = False
     writer._topic_review_warning_emitted = False

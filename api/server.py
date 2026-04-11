@@ -116,13 +116,41 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
 
 
-def _require_worker_scheduler_control() -> None:
-    if _should_run_background_jobs():
-        return
-    raise HTTPException(
-        status_code=503,
-        detail="Scheduler control is worker-only. Use the worker service.",
-    )
+def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | None = None) -> dict[str, Any]:
+    writer = get_supabase_writer()
+    save_fn = getattr(writer, "save_shared_scraper_control_command", None)
+    if not callable(save_fn):
+        raise HTTPException(
+            status_code=503,
+            detail="Worker scheduler control is unavailable. Shared control storage is not configured.",
+        )
+
+    command = {
+        "request_id": str(uuid.uuid4()),
+        "action": str(action or "").strip().lower(),
+        "status": "pending",
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "requested_by_role": _normalize_app_role(APP_ROLE),
+    }
+    if interval_minutes is not None:
+        command["interval_minutes"] = max(1, int(interval_minutes))
+
+    if not save_fn(command):
+        raise HTTPException(
+            status_code=503,
+            detail="Worker scheduler control is unavailable. Failed to persist control command.",
+        )
+
+    status = dict(get_current_scraper_scheduler_status() or {})
+    status["worker_control"] = {
+        "request_id": command["request_id"],
+        "action": command["action"],
+        "status": "pending",
+        "requested_at": command["requested_at"],
+    }
+    if interval_minutes is not None:
+        status["interval_minutes"] = max(1, int(interval_minutes))
+    return status
 
 
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
@@ -3759,7 +3787,8 @@ async def trending_widget_quality_snapshot(
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
-        _require_worker_scheduler_control()
+        if not _should_run_background_jobs():
+            return _enqueue_worker_scheduler_control("start")
         return await get_scraper_scheduler().start()
     except HTTPException:
         raise
@@ -3772,7 +3801,11 @@ async def start_scraper_scheduler():
 async def stop_scraper_scheduler():
     """Stop recurring scraper schedule."""
     try:
+        if not _should_run_background_jobs():
+            return _enqueue_worker_scheduler_control("stop")
         return await get_scraper_scheduler().stop()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Stop scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3782,7 +3815,14 @@ async def stop_scraper_scheduler():
 async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
     """Update scraper scheduler interval in minutes."""
     try:
+        if not _should_run_background_jobs():
+            return _enqueue_worker_scheduler_control(
+                "set_interval",
+                interval_minutes=payload.interval_minutes,
+            )
         return await get_scraper_scheduler().set_interval(payload.interval_minutes)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Update scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3792,7 +3832,8 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
 async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
-        _require_worker_scheduler_control()
+        if not _should_run_background_jobs():
+            return _enqueue_worker_scheduler_control("run_once")
         return await get_scraper_scheduler().run_once()
     except HTTPException:
         raise
@@ -3805,7 +3846,8 @@ async def run_scraper_once():
 async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
-        _require_worker_scheduler_control()
+        if not _should_run_background_jobs():
+            return _enqueue_worker_scheduler_control("catchup_once")
         return await get_scraper_scheduler().run_catchup_once()
     except HTTPException:
         raise

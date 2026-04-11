@@ -45,6 +45,7 @@ class ScraperSchedulerService:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "scraper_runtime_job"
         self.resolution_job_id = "source_resolution_runtime_job"
+        self.control_job_id = "scraper_control_runtime_job"
         self.pipeline_queue_repair_job_id = "pipeline_queue_repair_job"
         self.pipeline_queue_reclaim_job_id = "pipeline_queue_reclaim_job"
 
@@ -81,10 +82,12 @@ class ScraperSchedulerService:
 
         self._run_lock = asyncio.Lock()
         self._resolution_run_lock = asyncio.Lock()
+        self._control_run_lock = asyncio.Lock()
         self._pipeline_queue_repair_run_lock = asyncio.Lock()
         self._pipeline_queue_reclaim_run_lock = asyncio.Lock()
         self._client: Optional[TelegramClient] = None
         self._background_tasks: set[asyncio.Task] = set()
+        self._last_control_request_id: Optional[str] = None
 
     async def startup(self) -> None:
         self._ensure_scheduler_started()
@@ -113,6 +116,8 @@ class ScraperSchedulerService:
             )
         if config.FEATURE_SOURCE_RESOLUTION_WORKER:
             self._upsert_resolution_job()
+        if _runtime_role_allows_background_jobs():
+            self._upsert_control_job()
         if config.PIPELINE_QUEUE_ENABLED:
             self._upsert_pipeline_queue_repair_job()
             self._upsert_pipeline_queue_reclaim_job()
@@ -233,6 +238,22 @@ class ScraperSchedulerService:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=120,
+        )
+
+    def _upsert_control_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.control_job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._run_control_cycle,
+            "interval",
+            seconds=max(2, int(config.SCRAPER_CONTROL_POLL_SECONDS)),
+            id=self.control_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=10,
         )
 
     def _upsert_pipeline_queue_repair_job(self) -> None:
@@ -637,6 +658,75 @@ class ScraperSchedulerService:
 
         task.add_done_callback(_on_done)
         return self.status()
+
+    async def _run_control_cycle(self) -> None:
+        if not _runtime_role_allows_background_jobs():
+            return
+        if self._control_run_lock.locked():
+            return
+
+        async with self._control_run_lock:
+            try:
+                load_fn = getattr(self.db, "get_shared_scraper_control_command", None)
+                save_fn = getattr(self.db, "save_shared_scraper_control_command", None)
+                if not callable(load_fn) or not callable(save_fn):
+                    return
+
+                command = load_fn(default={}) or {}
+                if not isinstance(command, dict):
+                    return
+                request_id = str(command.get("request_id") or "").strip()
+                if not request_id or request_id == self._last_control_request_id:
+                    return
+                if str(command.get("status") or "").strip().lower() != "pending":
+                    return
+
+                action = str(command.get("action") or "").strip().lower()
+                in_progress = {
+                    **command,
+                    "status": "processing",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "processed_by_role": "worker",
+                }
+                save_fn(in_progress)
+
+                try:
+                    if action == "start":
+                        status = await self.start()
+                    elif action == "stop":
+                        status = await self.stop()
+                    elif action == "set_interval":
+                        interval = int(command.get("interval_minutes") or self.interval_minutes or 15)
+                        status = await self.set_interval(interval)
+                    elif action == "run_once":
+                        status = await self.run_once()
+                    elif action == "catchup_once":
+                        status = await self.run_catchup_once()
+                    else:
+                        raise ValueError(f"Unsupported scheduler control action: {action}")
+
+                    save_fn(
+                        {
+                            **in_progress,
+                            "status": "completed",
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "scheduler_status": status,
+                        }
+                    )
+                except Exception as exc:
+                    save_fn(
+                        {
+                            **in_progress,
+                            "status": "failed",
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "error": str(exc),
+                        }
+                    )
+                    raise
+                finally:
+                    self._last_control_request_id = request_id
+            except Exception as exc:
+                logger.warning(f"Scheduler control cycle failed: {exc}")
 
     def status(self, persisted: Optional[dict] = None, *, include_resolution_snapshot: bool = False) -> dict:
         resolution_snapshot = None
