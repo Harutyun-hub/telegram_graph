@@ -558,22 +558,24 @@ class ScraperSchedulerService:
         task.add_done_callback(_on_done)
         return self.status()
 
-    def status(self, persisted: Optional[dict] = None) -> dict:
-        resolution_snapshot = (
-            self.db.get_source_resolution_snapshot(session_slot="primary")
-            if hasattr(self.db, "get_source_resolution_snapshot")
-            else {
-                "slot_key": "primary",
-                "due_jobs": 0,
-                "leased_jobs": 0,
-                "dead_letter_jobs": 0,
-                "cooldown_slots": 0,
-                "cooldown_until": None,
-                "oldest_due_age_seconds": None,
-                "active_pending_sources": 0,
-                "active_missing_peer_refs": 0,
-            }
-        )
+    def status(self, persisted: Optional[dict] = None, *, include_resolution_snapshot: bool = False) -> dict:
+        resolution_snapshot = None
+        if include_resolution_snapshot:
+            resolution_snapshot = (
+                self.db.get_source_resolution_snapshot(session_slot="primary")
+                if hasattr(self.db, "get_source_resolution_snapshot")
+                else {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                }
+            )
         return {
             "status": "active" if self.desired_active else "stopped",
             "is_active": self.desired_active,

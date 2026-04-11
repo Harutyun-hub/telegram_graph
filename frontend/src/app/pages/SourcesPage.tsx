@@ -573,7 +573,7 @@ export function SourcesPage() {
   const loadFreshnessStatus = async (quiet = false) => {
     if (!quiet) setFreshnessLoading(true);
     try {
-      const response = await requestJson<PipelineFreshnessSnapshot>('/api/freshness?force=true');
+      const response = await requestJson<PipelineFreshnessSnapshot>('/api/freshness');
       setFreshness(response);
       setFreshnessError(null);
     } catch (err: any) {

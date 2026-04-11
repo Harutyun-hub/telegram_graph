@@ -3604,7 +3604,7 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 @app.get("/api/sources/resolution", dependencies=[Depends(require_operator_access)])
 async def get_source_resolution_status():
     """Current source resolution worker status and queue snapshot."""
-    return get_scraper_scheduler().status().get("resolution") or {}
+    return get_scraper_scheduler().status(include_resolution_snapshot=True).get("resolution") or {}
 
 
 @app.post("/api/sources/resolution/run-once", dependencies=[Depends(require_operator_access)])
@@ -3632,7 +3632,7 @@ async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
             "queued": queued,
             "active_only": bool(active_only),
             "limit": capped_limit,
-            "resolution": get_scraper_scheduler().status().get("resolution") or {},
+            "resolution": get_scraper_scheduler().status(include_resolution_snapshot=True).get("resolution") or {},
         }
     except Exception as e:
         logger.error(f"Backfill source peer refs error: {e}")

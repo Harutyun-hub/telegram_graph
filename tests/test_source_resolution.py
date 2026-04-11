@@ -262,7 +262,7 @@ class SourceResolutionServerTests(unittest.TestCase):
         ]
 
         class _Scheduler:
-            def status(self):
+            def status(self, **_kwargs):
                 return {"resolution": {"snapshot": {"active_missing_peer_refs": 1}}}
 
         with patch.object(server, "get_supabase_writer", return_value=writer), patch.object(
