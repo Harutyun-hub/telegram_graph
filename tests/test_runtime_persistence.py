@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
 
+from api import freshness
 from api import server
 from buffer.supabase_writer import SupabaseWriter
 
@@ -75,6 +77,8 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
     writer.client = _FakeClient(bucket)
     writer._runtime_bucket_name = "runtime-config"
     writer._scheduler_settings_path = "scraper/scheduler_settings.json"
+    writer._scheduler_runtime_path = "scraper/scheduler_runtime.json"
+    writer._freshness_snapshot_path = "pipeline/freshness_snapshot.json"
     writer._failure_table_warning_emitted = False
     writer._topic_review_warning_emitted = False
     writer._topic_promotion_warning_emitted = False
@@ -209,6 +213,31 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 500)
         self.assertIn("could not round-trip", str(ctx.exception.detail))
+
+    def test_freshness_prefers_shared_snapshot_when_requested(self) -> None:
+        writer = SimpleNamespace(
+            get_shared_freshness_snapshot=lambda default=None: {
+                "generated_at": "2026-04-11T14:15:15.876280+00:00",
+                "pipeline": {"scrape": {"last_scrape_at": "2026-04-11T14:08:06.134560+00:00"}},
+            },
+        )
+        old_cache = freshness._CACHE
+        old_cache_ts = freshness._CACHE_TS
+        try:
+            freshness._CACHE = {"generated_at": "2026-04-10T13:13:18.510055+00:00"}
+            freshness._CACHE_TS = None
+
+            snapshot = freshness.get_freshness_snapshot(
+                writer,
+                scheduler_status={},
+                force_refresh=False,
+                prefer_shared_snapshot=True,
+            )
+
+            self.assertEqual(snapshot["generated_at"], "2026-04-11T14:15:15.876280+00:00")
+        finally:
+            freshness._CACHE = old_cache
+            freshness._CACHE_TS = old_cache_ts
 
 
 if __name__ == "__main__":

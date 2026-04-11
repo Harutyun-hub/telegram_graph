@@ -1438,6 +1438,10 @@ def get_current_social_runtime_status() -> dict[str, Any]:
 
 
 def get_current_scraper_scheduler_status() -> dict[str, Any]:
+    if not _should_run_background_jobs():
+        shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={})
+        if shared:
+            return shared
     if scraper_scheduler is None:
         return {
             "status": "stopped",
@@ -2059,6 +2063,7 @@ def _dashboard_freshness_snapshot(force_refresh: bool = False) -> dict:
         get_supabase_writer(),
         scheduler_status=get_current_scraper_scheduler_status(),
         force_refresh=force_refresh,
+        prefer_shared_snapshot=not _should_run_background_jobs(),
     )
 
 
@@ -2939,6 +2944,7 @@ async def graph_data(payload: GraphRequest):
         freshness = get_freshness_snapshot(
             get_supabase_writer(),
             scheduler_status=get_current_scraper_scheduler_status(),
+            prefer_shared_snapshot=not _should_run_background_jobs(),
         )
         if not isinstance(graph, dict):
             return graph
@@ -3604,7 +3610,7 @@ async def update_channel_source(channel_id: str, payload: ChannelSourceUpdateReq
 @app.get("/api/sources/resolution", dependencies=[Depends(require_operator_access)])
 async def get_source_resolution_status():
     """Current source resolution worker status and queue snapshot."""
-    return get_scraper_scheduler().status(include_resolution_snapshot=True).get("resolution") or {}
+    return get_current_scraper_scheduler_status().get("resolution") or {}
 
 
 @app.post("/api/sources/resolution/run-once", dependencies=[Depends(require_operator_access)])
@@ -3632,7 +3638,7 @@ async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
             "queued": queued,
             "active_only": bool(active_only),
             "limit": capped_limit,
-            "resolution": get_scraper_scheduler().status(include_resolution_snapshot=True).get("resolution") or {},
+            "resolution": get_current_scraper_scheduler_status().get("resolution") or {},
         }
     except Exception as e:
         logger.error(f"Backfill source peer refs error: {e}")
@@ -3642,7 +3648,7 @@ async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
 @app.get("/api/scraper/scheduler", dependencies=[Depends(require_operator_access)])
 async def get_scraper_scheduler_status():
     """Current scraper scheduler runtime status."""
-    return get_scraper_scheduler().status()
+    return get_current_scraper_scheduler_status()
 
 
 @app.get("/api/freshness", dependencies=[Depends(require_analytics_access)])
@@ -3661,6 +3667,7 @@ async def freshness_snapshot(force: bool = Query(False)):
             get_supabase_writer(),
             scheduler_status=get_current_scraper_scheduler_status(),
             force_refresh=force,
+            prefer_shared_snapshot=not _should_run_background_jobs(),
         )
     except Exception as e:
         logger.error(f"Freshness endpoint error: {e}")

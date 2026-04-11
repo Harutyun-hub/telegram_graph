@@ -141,6 +141,8 @@ class SupabaseWriter:
         self._pipeline_queue_warning_emitted: set[str] = set()
         self._runtime_bucket_name = "runtime-config"
         self._scheduler_settings_path = "scraper/scheduler_settings.json"
+        self._scheduler_runtime_path = "scraper/scheduler_runtime.json"
+        self._freshness_snapshot_path = "pipeline/freshness_snapshot.json"
         self.refresh_runtime_topic_aliases()
 
     def _warn_failure_table_once(self, error: Exception):
@@ -274,6 +276,22 @@ class SupabaseWriter:
             {"content-type": "application/json", "upsert": "true"},
         )
         return payload
+
+    def get_shared_scraper_runtime_snapshot(self, default: dict | None = None) -> dict:
+        """Load the latest persisted worker-side scraper runtime snapshot."""
+        return self.get_runtime_json(self._scheduler_runtime_path, default=default)
+
+    def save_shared_scraper_runtime_snapshot(self, payload: dict) -> bool:
+        """Persist the latest worker-side scraper runtime snapshot."""
+        return self.save_runtime_json(self._scheduler_runtime_path, payload)
+
+    def get_shared_freshness_snapshot(self, default: dict | None = None) -> dict:
+        """Load the latest persisted worker-side freshness snapshot."""
+        return self.get_runtime_json(self._freshness_snapshot_path, default=default)
+
+    def save_shared_freshness_snapshot(self, payload: dict) -> bool:
+        """Persist the latest worker-side freshness snapshot."""
+        return self.save_runtime_json(self._freshness_snapshot_path, payload)
 
     # ── Source Resolution ────────────────────────────────────────────────────
 
