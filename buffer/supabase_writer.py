@@ -9,6 +9,7 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
 import ssl
+import uuid
 from urllib.request import urlopen
 from loguru import logger
 import config
@@ -52,6 +53,73 @@ def _looks_like_versioned_runtime_json_name(name: str) -> bool:
     )
 
 
+AI_FAILURE_CLASS_TRANSIENT = "transient"
+AI_FAILURE_CLASS_PERMANENT = "permanent"
+AI_FAILURE_ERROR_TRANSIENT_UNKNOWN = "transient_unknown"
+AI_FAILURE_ERROR_PERMANENT_UNKNOWN = "permanent_unknown"
+AI_FAILURE_ERROR_TRANSIENT_EXHAUSTED = "transient_recovery_exhausted"
+
+_TRANSIENT_FAILURE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("insufficient_quota", "openai_insufficient_quota"),
+    ("rate limit", "provider_rate_limit"),
+    ("rate-limit", "provider_rate_limit"),
+    ("429", "provider_rate_limit"),
+    ("connectionterminated", "transport_connection_terminated"),
+    ("connection terminated", "transport_connection_terminated"),
+    ("service unavailable", "upstream_service_unavailable"),
+    ("temporarily unavailable", "upstream_temporarily_unavailable"),
+    ("timeout", "transport_timeout"),
+    ("timed out", "transport_timeout"),
+    ("connection reset", "transport_connection_reset"),
+    ("connection aborted", "transport_connection_aborted"),
+    ("connection error", "transport_connection_error"),
+    ("server disconnected", "transport_connection_error"),
+    ("bad gateway", "upstream_bad_gateway"),
+    ("gateway timeout", "upstream_gateway_timeout"),
+    ("internal server error", "upstream_internal_error"),
+    ("resource temporarily unavailable", "runtime_resource_temporarily_unavailable"),
+)
+
+_PERMANENT_FAILURE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("missing parsed payload", "missing_parsed_payload"),
+    ("jsondecodeerror", "invalid_json_response"),
+    ("expecting value", "invalid_json_response"),
+    ("invalid json", "invalid_json_response"),
+    ("validationerror", "invalid_schema_response"),
+    ("schema", "invalid_schema_response"),
+    ("malformed", "malformed_response"),
+)
+
+
+def _classify_processing_error(error: str | Exception) -> dict[str, str]:
+    text = str(error or "").strip()
+    lowered = text.lower()
+
+    for needle, code in _TRANSIENT_FAILURE_PATTERNS:
+        if needle in lowered:
+            return {
+                "error_code": code,
+                "failure_class": AI_FAILURE_CLASS_TRANSIENT,
+            }
+
+    for needle, code in _PERMANENT_FAILURE_PATTERNS:
+        if needle in lowered:
+            return {
+                "error_code": code,
+                "failure_class": AI_FAILURE_CLASS_PERMANENT,
+            }
+
+    return {
+        "error_code": AI_FAILURE_ERROR_TRANSIENT_UNKNOWN,
+        "failure_class": AI_FAILURE_CLASS_TRANSIENT,
+    }
+
+
+def _chunked_strings(values: list[str], size: int = 200) -> list[list[str]]:
+    step = max(1, int(size))
+    return [values[index:index + step] for index in range(0, len(values), step)]
+
+
 class SupabaseWriter:
 
     def __init__(self):
@@ -62,8 +130,13 @@ class SupabaseWriter:
         self._failure_table_warning_emitted = False
         self._topic_review_warning_emitted = False
         self._topic_promotion_warning_emitted = False
+        self._resolution_jobs_warning_emitted = False
+        self._resolution_slots_warning_emitted = False
+        self._peer_refs_warning_emitted = False
         self._runtime_bucket_name = "runtime-config"
         self._scheduler_settings_path = "scraper/scheduler_settings.json"
+        self._scheduler_runtime_path = "scraper/scheduler_runtime.json"
+        self._freshness_snapshot_path = "pipeline/freshness_snapshot.json"
         self.refresh_runtime_topic_aliases()
 
     def _warn_failure_table_once(self, error: Exception):
@@ -90,6 +163,33 @@ class SupabaseWriter:
         self._topic_promotion_warning_emitted = True
         logger.warning(
             "topic_taxonomy_promotions table unavailable; runtime taxonomy promotions are disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_resolution_jobs_table_once(self, error: Exception):
+        if self._resolution_jobs_warning_emitted:
+            return
+        self._resolution_jobs_warning_emitted = True
+        logger.warning(
+            "telegram_source_resolution_jobs table unavailable; source resolution queue is disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_resolution_slots_table_once(self, error: Exception):
+        if self._resolution_slots_warning_emitted:
+            return
+        self._resolution_slots_warning_emitted = True
+        logger.warning(
+            "telegram_session_slots table unavailable; source resolution session pacing is disabled until migration is applied "
+            f"({error})"
+        )
+
+    def _warn_peer_refs_table_once(self, error: Exception):
+        if self._peer_refs_warning_emitted:
+            return
+        self._peer_refs_warning_emitted = True
+        logger.warning(
+            "telegram_channel_peer_refs table unavailable; peer-ref lookup is disabled until migration is applied "
             f"({error})"
         )
 
@@ -149,6 +249,497 @@ class SupabaseWriter:
             {"content-type": "application/json", "upsert": "true"},
         )
         return payload
+
+    def get_shared_scraper_runtime_snapshot(self, default: dict | None = None) -> dict:
+        """Load the latest persisted worker-side scraper runtime snapshot."""
+        return self.get_runtime_json(self._scheduler_runtime_path, default=default)
+
+    def save_shared_scraper_runtime_snapshot(self, payload: dict) -> bool:
+        """Persist the latest worker-side scraper runtime snapshot."""
+        return self.save_runtime_json(self._scheduler_runtime_path, payload)
+
+    def get_shared_freshness_snapshot(self, default: dict | None = None) -> dict:
+        """Load the latest persisted worker-side freshness snapshot."""
+        return self.get_runtime_json(self._freshness_snapshot_path, default=default)
+
+    def save_shared_freshness_snapshot(self, payload: dict) -> bool:
+        """Persist the latest worker-side freshness snapshot."""
+        return self.save_runtime_json(self._freshness_snapshot_path, payload)
+
+    # ── Source Resolution ────────────────────────────────────────────────────
+
+    def get_source_resolution_slot(self, slot_key: str) -> dict | None:
+        key = str(slot_key or "").strip() or "primary"
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .select("*") \
+                .eq("slot_key", key) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return None
+
+    def list_source_resolution_slots(self, *, active_only: bool = False) -> list[dict]:
+        try:
+            query = self.client.table("telegram_session_slots") \
+                .select("*") \
+                .order("priority", desc=False)
+            if active_only:
+                query = query.eq("is_active", True)
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return []
+
+    def ensure_source_resolution_slot(
+        self,
+        slot_key: str = "primary",
+        *,
+        is_active: bool = True,
+        priority: int = 100,
+        min_resolve_interval_seconds: int | None = None,
+        max_concurrent_resolves: int = 1,
+    ) -> dict:
+        key = str(slot_key or "").strip() or "primary"
+        existing = self.get_source_resolution_slot(key)
+        if existing:
+            return existing
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "slot_key": key,
+            "is_active": bool(is_active),
+            "priority": int(priority),
+            "min_resolve_interval_seconds": int(
+                min_resolve_interval_seconds or config.SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS
+            ),
+            "max_concurrent_resolves": max(1, int(max_concurrent_resolves)),
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .insert(payload) \
+                .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+        return payload
+
+    def update_source_resolution_slot(self, slot_key: str, payload: dict) -> dict | None:
+        key = str(slot_key or "").strip() or "primary"
+        if not payload:
+            return self.get_source_resolution_slot(key)
+        update_payload = dict(payload)
+        update_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            res = self.client.table("telegram_session_slots") \
+                .update(update_payload) \
+                .eq("slot_key", key) \
+                .execute()
+            if res.data:
+                return res.data[0]
+            return self.get_source_resolution_slot(key)
+        except Exception as e:
+            self._warn_resolution_slots_table_once(e)
+            return None
+
+    def get_channel_peer_ref(self, channel_uuid: str, session_slot: str = "primary") -> dict | None:
+        if not channel_uuid:
+            return None
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("*") \
+                .eq("channel_id", channel_uuid) \
+                .eq("session_slot", session_slot) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+            return None
+
+    def upsert_channel_peer_ref(self, channel_uuid: str, session_slot: str, payload: dict) -> dict | None:
+        if not channel_uuid:
+            return None
+        peer_id = payload.get("peer_id")
+        access_hash = payload.get("access_hash")
+        if peer_id is None or access_hash is None:
+            return None
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        row = {
+            "channel_id": channel_uuid,
+            "session_slot": str(session_slot or "").strip() or "primary",
+            "peer_id": int(peer_id),
+            "access_hash": int(access_hash),
+            "resolved_username": (payload.get("resolved_username") or None),
+            "resolved_at": payload.get("resolved_at") or now_iso,
+            "last_verified_at": payload.get("last_verified_at") or now_iso,
+            "updated_at": now_iso,
+            "created_at": now_iso,
+        }
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .upsert(row, on_conflict="channel_id,session_slot") \
+                .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+        return None
+
+    def list_channels_missing_peer_refs(
+        self,
+        *,
+        session_slot: str = "primary",
+        active_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict]:
+        try:
+            channels = self.get_active_channels() if active_only else self.list_channels()
+        except Exception:
+            channels = []
+        if not channels:
+            return []
+
+        refs = {}
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("channel_id, session_slot") \
+                .eq("session_slot", session_slot) \
+                .execute()
+            refs = {
+                str(item.get("channel_id") or ""): item
+                for item in (res.data or [])
+                if item.get("channel_id")
+            }
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+            return []
+
+        missing: list[dict] = []
+        for channel in channels:
+            channel_id = str(channel.get("id") or "").strip()
+            if not channel_id or channel_id in refs:
+                continue
+            missing.append(channel)
+            if len(missing) >= max(1, int(limit)):
+                break
+        return missing
+
+    def get_source_resolution_job(self, channel_uuid: str, job_kind: str = "resolve_metadata") -> dict | None:
+        if not channel_uuid:
+            return None
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .select("*") \
+                .eq("channel_id", channel_uuid) \
+                .eq("job_kind", job_kind) \
+                .limit(1) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def list_source_resolution_jobs(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        try:
+            query = self.client.table("telegram_source_resolution_jobs") \
+                .select("*") \
+                .order("priority", desc=False) \
+                .order("next_attempt_at", desc=False)
+            normalized_statuses = [str(value or "").strip() for value in (statuses or []) if str(value or "").strip()]
+            if normalized_statuses:
+                query = query.in_("status", normalized_statuses)
+            if limit is not None:
+                query = query.limit(max(1, int(limit)))
+            res = query.execute()
+            return res.data or []
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return []
+
+    def enqueue_source_resolution_job(
+        self,
+        channel_uuid: str,
+        *,
+        job_kind: str = "resolve_metadata",
+        priority: int = 30,
+        next_attempt_at: str | None = None,
+    ) -> dict | None:
+        if not channel_uuid:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "channel_id": channel_uuid,
+            "job_kind": str(job_kind or "").strip() or "resolve_metadata",
+            "priority": int(priority),
+            "status": "pending",
+            "next_attempt_at": next_attempt_at or now_iso,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "last_error_code": None,
+            "last_error_message": None,
+            "finished_at": None,
+            "updated_at": now_iso,
+        }
+        existing = self.get_source_resolution_job(channel_uuid, payload["job_kind"])
+        try:
+            if existing and existing.get("id"):
+                payload["attempt_count"] = int(existing.get("attempt_count") or 0)
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .update(payload) \
+                    .eq("id", existing["id"]) \
+                    .execute()
+            else:
+                payload["attempt_count"] = 0
+                payload["created_at"] = now_iso
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .insert(payload) \
+                    .execute()
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+        return existing
+
+    def claim_due_source_resolution_jobs(
+        self,
+        *,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        lease_expires_at = (now + timedelta(seconds=max(30, int(lease_seconds)))).isoformat()
+        due_jobs = []
+        jobs = self.list_source_resolution_jobs(statuses=["pending", "leased"], limit=max(10, int(limit) * 5))
+        for job in jobs:
+            status = str(job.get("status") or "").strip().lower()
+            next_attempt_at = _parse_iso_datetime(job.get("next_attempt_at")) or now
+            lease_expires = _parse_iso_datetime(job.get("lease_expires_at"))
+            lease_active = status == "leased" and lease_expires is not None and lease_expires > now
+            if lease_active:
+                continue
+            if next_attempt_at > now:
+                continue
+            due_jobs.append(job)
+
+        claimed: list[dict] = []
+        for job in due_jobs[:max(1, int(limit))]:
+            token = str(uuid.uuid4())
+            try:
+                res = self.client.table("telegram_source_resolution_jobs") \
+                    .update(
+                        {
+                            "status": "leased",
+                            "lease_token": token,
+                            "lease_expires_at": lease_expires_at,
+                            "updated_at": now.isoformat(),
+                            "finished_at": None,
+                        }
+                    ) \
+                    .eq("id", job["id"]) \
+                    .execute()
+                if res.data:
+                    claimed.append(res.data[0])
+            except Exception as e:
+                self._warn_resolution_jobs_table_once(e)
+                break
+        return claimed
+
+    def complete_source_resolution_job(self, job_id: str, *, attempt_count: int | None = None) -> dict | None:
+        if not job_id:
+            return None
+        payload = {
+            "status": "done",
+            "lease_token": None,
+            "lease_expires_at": None,
+            "last_error_code": None,
+            "last_error_message": None,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if attempt_count is not None:
+            payload["attempt_count"] = int(attempt_count)
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(payload) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def requeue_source_resolution_job(
+        self,
+        job_id: str,
+        *,
+        attempt_count: int,
+        next_attempt_at: str,
+        last_error_code: str | None,
+        last_error_message: str | None,
+    ) -> dict | None:
+        if not job_id:
+            return None
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(
+                    {
+                        "status": "pending",
+                        "attempt_count": int(attempt_count),
+                        "next_attempt_at": next_attempt_at,
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "last_error_code": (last_error_code or None),
+                        "last_error_message": (last_error_message or None),
+                        "finished_at": None,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def dead_letter_source_resolution_job(
+        self,
+        job_id: str,
+        *,
+        attempt_count: int,
+        last_error_code: str | None,
+        last_error_message: str | None,
+    ) -> dict | None:
+        if not job_id:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = self.client.table("telegram_source_resolution_jobs") \
+                .update(
+                    {
+                        "status": "dead_letter",
+                        "attempt_count": int(attempt_count),
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "last_error_code": (last_error_code or None),
+                        "last_error_message": (last_error_message or None),
+                        "finished_at": now_iso,
+                        "updated_at": now_iso,
+                    }
+                ) \
+                .eq("id", job_id) \
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            self._warn_resolution_jobs_table_once(e)
+            return None
+
+    def get_channels_by_ids(self, channel_ids: list[str]) -> dict[str, dict]:
+        ids = [str(channel_id).strip() for channel_id in (channel_ids or []) if str(channel_id).strip()]
+        if not ids:
+            return {}
+        try:
+            res = self.client.table("telegram_channels") \
+                .select("*") \
+                .in_("id", ids) \
+                .execute()
+            return {
+                str(item.get("id")): item
+                for item in (res.data or [])
+                if item.get("id")
+            }
+        except Exception:
+            return {}
+
+    def get_source_resolution_snapshot(self, *, session_slot: str = "primary") -> dict:
+        now = datetime.now(timezone.utc)
+        jobs = self.list_source_resolution_jobs(limit=5000)
+        due_jobs = 0
+        leased_jobs = 0
+        dead_letter_jobs = 0
+        stale_nonclaimable_jobs = 0
+        oldest_due_age_seconds: int | None = None
+
+        for job in jobs:
+            status = str(job.get("status") or "").strip().lower()
+            next_attempt_at = _parse_iso_datetime(job.get("next_attempt_at")) or now
+            lease_expires_at = _parse_iso_datetime(job.get("lease_expires_at"))
+            if status == "dead_letter":
+                dead_letter_jobs += 1
+                continue
+            if status == "leased" and lease_expires_at and lease_expires_at > now:
+                leased_jobs += 1
+                continue
+            is_claimable_due = status == "pending" or (status == "leased" and (lease_expires_at is None or lease_expires_at <= now))
+            if is_claimable_due and next_attempt_at <= now:
+                due_jobs += 1
+                age_seconds = max(0, int((now - next_attempt_at).total_seconds()))
+                if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
+                    oldest_due_age_seconds = age_seconds
+                continue
+            if next_attempt_at <= now:
+                stale_nonclaimable_jobs += 1
+
+        slots = self.list_source_resolution_slots(active_only=True)
+        cooldown_slots = 0
+        max_cooldown_until: str | None = None
+        for slot in slots:
+            cooldown_until = _parse_iso_datetime(slot.get("cooldown_until"))
+            if cooldown_until and cooldown_until > now:
+                cooldown_slots += 1
+                cooldown_iso = cooldown_until.isoformat()
+                if max_cooldown_until is None or cooldown_iso > max_cooldown_until:
+                    max_cooldown_until = cooldown_iso
+
+        active_pending_sources = 0
+        active_missing_peer_refs = 0
+        active_channels = self.get_active_channels()
+        peer_refs = {}
+        try:
+            res = self.client.table("telegram_channel_peer_refs") \
+                .select("channel_id, session_slot") \
+                .eq("session_slot", session_slot) \
+                .execute()
+            peer_refs = {
+                str(item.get("channel_id") or ""): True
+                for item in (res.data or [])
+                if item.get("channel_id")
+            }
+        except Exception as e:
+            self._warn_peer_refs_table_once(e)
+
+        for channel in active_channels:
+            resolution_status = str(channel.get("resolution_status") or "").strip().lower()
+            if resolution_status == "pending":
+                active_pending_sources += 1
+            channel_id = str(channel.get("id") or "").strip()
+            if resolution_status == "resolved" and channel_id and channel_id not in peer_refs:
+                active_missing_peer_refs += 1
+
+        return {
+            "slot_key": session_slot,
+            "due_jobs": due_jobs,
+            "leased_jobs": leased_jobs,
+            "dead_letter_jobs": dead_letter_jobs,
+            "stale_nonclaimable_jobs": stale_nonclaimable_jobs,
+            "cooldown_slots": cooldown_slots,
+            "cooldown_until": max_cooldown_until,
+            "oldest_due_age_seconds": oldest_due_age_seconds,
+            "active_pending_sources": active_pending_sources,
+            "active_missing_peer_refs": active_missing_peer_refs,
+        }
 
     def get_runtime_json(self, path: str, default: dict | None = None) -> dict:
         """Load a JSON object from runtime-config storage bucket."""
@@ -587,6 +1178,92 @@ class SupabaseWriter:
             .eq("id", comment_uuid) \
             .execute()
 
+    def _iter_unprocessed_rows(self, *, table_name: str, select_columns: str, page_size: int = 500):
+        start = 0
+        size = max(50, int(page_size))
+        while True:
+            res = self.client.table(table_name) \
+                .select(select_columns) \
+                .eq("is_processed", False) \
+                .not_.is_("text", "null") \
+                .order("posted_at", desc=False) \
+                .range(start, start + size - 1) \
+                .execute()
+            rows = res.data or []
+            if not rows:
+                break
+            yield rows
+            if len(rows) < size:
+                break
+            start += len(rows)
+
+    def _get_ai_scope_backlog_stats(self, *, scope_type: str) -> dict[str, int]:
+        if scope_type not in {"post", "comment_group"}:
+            return {
+                "runnable": 0,
+                "blocked_dead_letter": 0,
+                "blocked_retry": 0,
+                "processable_rows": 0,
+                "processable_scopes": 0,
+            }
+
+        scope_keys: list[str] = []
+        processable_rows = 0
+        if scope_type == "post":
+            for rows in self._iter_unprocessed_rows(
+                table_name="telegram_posts",
+                select_columns="id",
+            ):
+                processable_rows += len(rows)
+                scope_keys.extend(str(row.get("id") or "").strip() for row in rows if row.get("id"))
+        else:
+            seen: set[str] = set()
+            for rows in self._iter_unprocessed_rows(
+                table_name="telegram_comments",
+                select_columns="id, post_id, channel_id, telegram_user_id",
+            ):
+                processable_rows += len(rows)
+                for row in rows:
+                    key = self._comment_failure_scope_key(row)
+                    if key and key not in seen:
+                        seen.add(key)
+                        scope_keys.append(key)
+
+        if not scope_keys:
+            return {
+                "runnable": 0,
+                "blocked_dead_letter": 0,
+                "blocked_retry": 0,
+                "processable_rows": processable_rows,
+                "processable_scopes": 0,
+            }
+
+        blocked_dead_letter = 0
+        blocked_retry = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        failure_rows: dict[str, dict] = {}
+        for chunk in _chunked_strings(scope_keys, size=200):
+            failure_rows.update(self._load_failure_rows(scope_type=scope_type, scope_keys=chunk))
+
+        for key in scope_keys:
+            row = failure_rows.get(key) or {}
+            if bool(row.get("is_dead_letter", False)):
+                blocked_dead_letter += 1
+                continue
+            next_retry_at = row.get("next_retry_at")
+            if next_retry_at and str(next_retry_at) > now_iso:
+                blocked_retry += 1
+
+        total_scopes = len(scope_keys)
+        runnable = max(0, total_scopes - blocked_dead_letter - blocked_retry)
+        return {
+            "runnable": runnable,
+            "blocked_dead_letter": blocked_dead_letter,
+            "blocked_retry": blocked_retry,
+            "processable_rows": processable_rows,
+            "processable_scopes": total_scopes,
+        }
+
     # ── Users ─────────────────────────────────────────────────────────────────
 
     def upsert_user(self, user: dict) -> str | None:
@@ -808,35 +1485,72 @@ class SupabaseWriter:
         value = base * (2 ** max(0, int(attempt_count) - 1))
         return int(min(max_backoff, value))
 
+    def _transient_recovery_after(self, now: datetime) -> str:
+        return (
+            now + timedelta(minutes=max(1, int(config.AI_TRANSIENT_RECOVERY_COOLDOWN_MINUTES)))
+        ).isoformat()
+
+    def _recent_ai_success_count(self, *, minutes: int) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(minutes)))
+        try:
+            res = self.client.table("ai_analysis") \
+                .select("id", count="exact") \
+                .gte("created_at", cutoff.isoformat()) \
+                .limit(1) \
+                .execute()
+            count = getattr(res, "count", None)
+            if count is None and isinstance(res, dict):
+                count = res.get("count")
+            return int(count or 0)
+        except Exception:
+            return 0
+
+    def _load_failure_rows(self, *, scope_type: str, scope_keys: list[str]) -> dict[str, dict]:
+        keys = [str(key).strip() for key in (scope_keys or []) if str(key).strip()]
+        if not keys:
+            return {}
+
+        try:
+            try:
+                res = self.client.table("ai_processing_failures") \
+                    .select(
+                        "scope_key, is_dead_letter, next_retry_at, error_code, failure_class, "
+                        "recovery_after_at, auto_recovery_attempts"
+                    ) \
+                    .eq("scope_type", scope_type) \
+                    .in_("scope_key", keys) \
+                    .execute()
+            except Exception:
+                res = self.client.table("ai_processing_failures") \
+                    .select("scope_key, is_dead_letter, next_retry_at") \
+                    .eq("scope_type", scope_type) \
+                    .in_("scope_key", keys) \
+                    .execute()
+            return {
+                str(row.get("scope_key") or "").strip(): row
+                for row in (res.data or [])
+                if str(row.get("scope_key") or "").strip()
+            }
+        except Exception as e:
+            self._warn_failure_table_once(e)
+            return {}
+
     def get_blocked_scopes(self, scope_type: str, scope_keys: list[str]) -> set[str]:
         """Return scope keys blocked by retry delay or dead-letter state."""
         keys = [str(key).strip() for key in (scope_keys or []) if str(key).strip()]
         if not keys:
             return set()
 
-        try:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            res = self.client.table("ai_processing_failures") \
-                .select("scope_key, is_dead_letter, next_retry_at") \
-                .eq("scope_type", scope_type) \
-                .in_("scope_key", keys) \
-                .execute()
-
-            blocked: set[str] = set()
-            for row in (res.data or []):
-                key = str(row.get("scope_key") or "").strip()
-                if not key:
-                    continue
-                if bool(row.get("is_dead_letter", False)):
-                    blocked.add(key)
-                    continue
-                next_retry_at = row.get("next_retry_at")
-                if next_retry_at and str(next_retry_at) > now_iso:
-                    blocked.add(key)
-            return blocked
-        except Exception as e:
-            self._warn_failure_table_once(e)
-            return set()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        blocked: set[str] = set()
+        for key, row in self._load_failure_rows(scope_type=scope_type, scope_keys=keys).items():
+            if bool(row.get("is_dead_letter", False)):
+                blocked.add(key)
+                continue
+            next_retry_at = row.get("next_retry_at")
+            if next_retry_at and str(next_retry_at) > now_iso:
+                blocked.add(key)
+        return blocked
 
     def record_processing_failure(
         self,
@@ -848,15 +1562,18 @@ class SupabaseWriter:
         telegram_user_id: int | None,
         error: str,
     ) -> dict:
-        """Increment failure tracking with backoff and dead-letter thresholds."""
+        """Increment failure tracking with backoff, transient recovery, and dead-letter thresholds."""
         scope_key_norm = str(scope_key or "").strip()
         if not scope_key_norm:
             return {"attempt_count": 0, "is_dead_letter": False}
 
         try:
             now = datetime.now(timezone.utc)
+            classification = _classify_processing_error(error)
+            failure_class = classification["failure_class"]
+            error_code = classification["error_code"]
             existing_res = self.client.table("ai_processing_failures") \
-                .select("id, attempt_count, first_failed_at") \
+                .select("id, attempt_count, first_failed_at, auto_recovery_attempts") \
                 .eq("scope_type", scope_type) \
                 .eq("scope_key", scope_key_norm) \
                 .limit(1) \
@@ -864,8 +1581,13 @@ class SupabaseWriter:
             existing = (existing_res.data or [None])[0]
 
             attempt_count = int(existing.get("attempt_count") or 0) + 1 if existing else 1
-            dead_letter = attempt_count >= max(1, int(config.AI_FAILURE_MAX_RETRIES))
+            dead_letter = (
+                failure_class == AI_FAILURE_CLASS_PERMANENT
+                or attempt_count >= max(1, int(config.AI_FAILURE_MAX_RETRIES))
+            )
             next_retry_at = now + timedelta(seconds=self._failure_backoff_seconds(attempt_count))
+            recovery_after_at = self._transient_recovery_after(now) if dead_letter and failure_class == AI_FAILURE_CLASS_TRANSIENT else None
+            auto_recovery_attempts = int(existing.get("auto_recovery_attempts") or 0) if existing else 0
 
             payload = {
                 "scope_type": scope_type,
@@ -875,10 +1597,15 @@ class SupabaseWriter:
                 "telegram_user_id": telegram_user_id,
                 "attempt_count": attempt_count,
                 "last_error": (error or "")[:1800],
+                "error_code": error_code,
+                "failure_class": failure_class,
                 "last_failed_at": now.isoformat(),
                 "next_retry_at": next_retry_at.isoformat(),
                 "is_dead_letter": dead_letter,
+                "recovery_after_at": recovery_after_at,
                 "resolved_at": None,
+                "auto_recovery_attempts": auto_recovery_attempts,
+                "last_recovery_attempt_at": None,
                 "updated_at": now.isoformat(),
             }
 
@@ -900,7 +1627,10 @@ class SupabaseWriter:
             return {
                 "attempt_count": attempt_count,
                 "is_dead_letter": dead_letter,
+                "error_code": error_code,
+                "failure_class": failure_class,
                 "next_retry_at": next_retry_at.isoformat(),
+                "recovery_after_at": recovery_after_at,
             }
         except Exception as e:
             self._warn_failure_table_once(e)
@@ -971,6 +1701,8 @@ class SupabaseWriter:
                     "attempt_count": 0,
                     "is_dead_letter": False,
                     "next_retry_at": now_iso,
+                    "recovery_after_at": None,
+                    "last_recovery_attempt_at": now_iso,
                     "updated_at": now_iso,
                 }) \
                 .eq("scope_type", scope_type) \
@@ -981,30 +1713,153 @@ class SupabaseWriter:
             self._warn_failure_table_once(e)
             return 0
 
+    def auto_recover_transient_failures(self) -> dict[str, int]:
+        """Unlock a bounded number of transient dead-letter scopes after cooldown."""
+        result = {
+            "post_retried": 0,
+            "comment_group_retried": 0,
+            "promoted_permanent": 0,
+        }
+        if not bool(getattr(config, "AI_TRANSIENT_RECOVERY_ENABLED", True)):
+            return result
+
+        recent_successes = self._recent_ai_success_count(
+            minutes=max(1, int(config.AI_TRANSIENT_RECOVERY_SUCCESS_WINDOW_MINUTES))
+        )
+        per_type_limit = max(
+            1,
+            int(
+                config.AI_TRANSIENT_RECOVERY_BATCH_LIMIT
+                if recent_successes > 0
+                else config.AI_TRANSIENT_RECOVERY_CANARY_LIMIT
+            ),
+        )
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        max_attempts = max(1, int(config.AI_TRANSIENT_RECOVERY_MAX_ATTEMPTS))
+
+        for scope_type in ("post", "comment_group"):
+            try:
+                res = self.client.table("ai_processing_failures") \
+                    .select("id, scope_key, auto_recovery_attempts") \
+                    .eq("scope_type", scope_type) \
+                    .eq("is_dead_letter", True) \
+                    .eq("failure_class", AI_FAILURE_CLASS_TRANSIENT) \
+                    .lte("recovery_after_at", now_iso) \
+                    .order("last_failed_at", desc=False) \
+                    .limit(per_type_limit) \
+                    .execute()
+                rows = res.data or []
+            except Exception as e:
+                self._warn_failure_table_once(e)
+                rows = []
+
+            if not rows:
+                continue
+
+            unlock_keys: list[str] = []
+            promote_ids: list[int] = []
+            for row in rows:
+                recovery_attempts = int(row.get("auto_recovery_attempts") or 0)
+                if recovery_attempts >= max_attempts:
+                    row_id = row.get("id")
+                    if row_id is not None:
+                        promote_ids.append(int(row_id))
+                    continue
+                scope_key = str(row.get("scope_key") or "").strip()
+                if scope_key:
+                    unlock_keys.append(scope_key)
+
+            if unlock_keys:
+                for row in rows:
+                    scope_key = str(row.get("scope_key") or "").strip()
+                    if not scope_key or scope_key not in unlock_keys:
+                        continue
+                    recovery_attempts = int(row.get("auto_recovery_attempts") or 0) + 1
+                    self.client.table("ai_processing_failures") \
+                        .update({
+                            "attempt_count": 0,
+                            "is_dead_letter": False,
+                            "next_retry_at": now_iso,
+                            "recovery_after_at": None,
+                            "auto_recovery_attempts": recovery_attempts,
+                            "last_recovery_attempt_at": now_iso,
+                            "updated_at": now_iso,
+                        }) \
+                        .eq("scope_type", scope_type) \
+                        .eq("scope_key", scope_key) \
+                        .execute()
+                result[f"{scope_type}_retried"] = len(unlock_keys)
+
+            if promote_ids:
+                self.client.table("ai_processing_failures") \
+                    .update({
+                        "failure_class": AI_FAILURE_CLASS_PERMANENT,
+                        "error_code": AI_FAILURE_ERROR_TRANSIENT_EXHAUSTED,
+                        "recovery_after_at": None,
+                        "updated_at": now_iso,
+                    }) \
+                    .in_("id", promote_ids) \
+                    .execute()
+                result["promoted_permanent"] += len(promote_ids)
+
+        return result
+
     def get_processing_failure_counts(self) -> dict:
-        """Return dead-letter and retry-blocked failure scope counts."""
+        """Return AI failure counters grouped by retryability and scope type."""
         try:
-            dead = self.client.table("ai_processing_failures") \
-                .select("id") \
-                .eq("is_dead_letter", True) \
-                .execute()
-
+            try:
+                rows_res = self.client.table("ai_processing_failures") \
+                    .select("scope_type, is_dead_letter, next_retry_at, failure_class, updated_at") \
+                    .execute()
+            except Exception:
+                rows_res = self.client.table("ai_processing_failures") \
+                    .select("scope_type, is_dead_letter, next_retry_at") \
+                    .execute()
+            rows = rows_res.data or []
             now_iso = datetime.now(timezone.utc).isoformat()
-            blocked = self.client.table("ai_processing_failures") \
-                .select("id") \
-                .eq("is_dead_letter", False) \
-                .gt("next_retry_at", now_iso) \
-                .execute()
+            recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-            return {
-                "dead_letter_scopes": len(dead.data or []),
-                "retry_blocked_scopes": len(blocked.data or []),
+            counts = {
+                "dead_letter_scopes": 0,
+                "retry_blocked_scopes": 0,
+                "transient_dead_letter_scopes": 0,
+                "permanent_dead_letter_scopes": 0,
+                "recent_transient_failures": 0,
+                "recent_permanent_failures": 0,
             }
+
+            for row in rows:
+                is_dead_letter = bool(row.get("is_dead_letter", False))
+                failure_class = str(row.get("failure_class") or AI_FAILURE_CLASS_TRANSIENT).strip().lower()
+                updated_at = str(row.get("updated_at") or "")
+                if is_dead_letter:
+                    counts["dead_letter_scopes"] += 1
+                    if failure_class == AI_FAILURE_CLASS_TRANSIENT:
+                        counts["transient_dead_letter_scopes"] += 1
+                    else:
+                        counts["permanent_dead_letter_scopes"] += 1
+                else:
+                    next_retry_at = row.get("next_retry_at")
+                    if next_retry_at and str(next_retry_at) > now_iso:
+                        counts["retry_blocked_scopes"] += 1
+
+                if updated_at and updated_at >= recent_cutoff:
+                    if failure_class == AI_FAILURE_CLASS_TRANSIENT:
+                        counts["recent_transient_failures"] += 1
+                    else:
+                        counts["recent_permanent_failures"] += 1
+
+            return counts
         except Exception as e:
             self._warn_failure_table_once(e)
             return {
                 "dead_letter_scopes": 0,
                 "retry_blocked_scopes": 0,
+                "transient_dead_letter_scopes": 0,
+                "permanent_dead_letter_scopes": 0,
+                "recent_transient_failures": 0,
+                "recent_permanent_failures": 0,
             }
 
     def refresh_runtime_topic_aliases(self) -> int:
@@ -1587,6 +2442,8 @@ class SupabaseWriter:
     def get_backlog_counts(self) -> dict:
         """Return key pipeline queue counters used for runtime backpressure."""
         failure_counts = self.get_processing_failure_counts()
+        post_stats = self._get_ai_scope_backlog_stats(scope_type="post")
+        comment_stats = self._get_ai_scope_backlog_stats(scope_type="comment_group")
         return {
             "unprocessed_posts": self._count_rows("telegram_posts", {"is_processed": False}),
             "unprocessed_comments": self._count_rows("telegram_comments", {"is_processed": False}),
@@ -1594,6 +2451,16 @@ class SupabaseWriter:
             "unsynced_analysis": self._count_rows("ai_analysis", {"neo4j_synced": False}),
             "dead_letter_scopes": failure_counts.get("dead_letter_scopes", 0),
             "retry_blocked_scopes": failure_counts.get("retry_blocked_scopes", 0),
+            "transient_dead_letter_scopes": failure_counts.get("transient_dead_letter_scopes", 0),
+            "permanent_dead_letter_scopes": failure_counts.get("permanent_dead_letter_scopes", 0),
+            "recent_transient_failures": failure_counts.get("recent_transient_failures", 0),
+            "recent_permanent_failures": failure_counts.get("recent_permanent_failures", 0),
+            "runnable_posts": post_stats.get("runnable", 0),
+            "runnable_comment_groups": comment_stats.get("runnable", 0),
+            "blocked_dead_letter_posts": post_stats.get("blocked_dead_letter", 0),
+            "blocked_dead_letter_comment_groups": comment_stats.get("blocked_dead_letter", 0),
+            "blocked_retry_posts": post_stats.get("blocked_retry", 0),
+            "blocked_retry_comment_groups": comment_stats.get("blocked_retry", 0),
         }
 
     def get_posts_by_ids(self, post_ids: list[str]) -> dict[str, dict]:
@@ -1722,6 +2589,8 @@ class SupabaseWriter:
         Return Supabase-side freshness/backlog snapshot for trust monitoring.
         """
         failure_counts = self.get_processing_failure_counts()
+        post_stats = self._get_ai_scope_backlog_stats(scope_type="post")
+        comment_stats = self._get_ai_scope_backlog_stats(scope_type="comment_group")
         active_channels = self.get_active_channels()
         scraped_times = []
         active_never_scraped = 0
@@ -1756,6 +2625,16 @@ class SupabaseWriter:
             "unsynced_analysis": self._count_rows("ai_analysis", {"neo4j_synced": False}),
             "dead_letter_scopes": failure_counts.get("dead_letter_scopes", 0),
             "retry_blocked_scopes": failure_counts.get("retry_blocked_scopes", 0),
+            "transient_dead_letter_scopes": failure_counts.get("transient_dead_letter_scopes", 0),
+            "permanent_dead_letter_scopes": failure_counts.get("permanent_dead_letter_scopes", 0),
+            "recent_transient_failures": failure_counts.get("recent_transient_failures", 0),
+            "recent_permanent_failures": failure_counts.get("recent_permanent_failures", 0),
+            "runnable_posts": post_stats.get("runnable", 0),
+            "runnable_comment_groups": comment_stats.get("runnable", 0),
+            "blocked_dead_letter_posts": post_stats.get("blocked_dead_letter", 0),
+            "blocked_dead_letter_comment_groups": comment_stats.get("blocked_dead_letter", 0),
+            "blocked_retry_posts": post_stats.get("blocked_retry", 0),
+            "blocked_retry_comment_groups": comment_stats.get("blocked_retry", 0),
             "total_posts": self._count_rows("telegram_posts"),
             "total_comments": self._count_rows("telegram_comments"),
             "total_analysis": self._count_rows("ai_analysis"),
