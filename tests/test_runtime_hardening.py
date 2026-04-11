@@ -343,15 +343,17 @@ class SchedulerDistributedLockTests(unittest.TestCase):
             )
 
             service = ScraperSchedulerService(writer)
-            run_once_mock = AsyncMock(return_value={"status": "active", "running_now": True})
+            service.desired_active = True
+            run_cycle_mock = AsyncMock(side_effect=lambda: setattr(service, "last_success_at", service.last_run_started_at))
 
             with patch("api.scraper_scheduler._runtime_role_allows_background_jobs", return_value=True), \
-                 patch.object(service, "run_once", run_once_mock):
+                 patch.object(service, "_run_cycle", run_cycle_mock), \
+                 patch.object(service, "status", return_value={"status": "active", "running_now": False}):
                 await service._run_control_cycle()
 
             self.assertEqual(command_store["status"], "completed")
             self.assertEqual(command_store["scheduler_status"]["status"], "active")
-            run_once_mock.assert_awaited_once()
+            run_cycle_mock.assert_awaited_once()
 
         asyncio.run(scenario())
 

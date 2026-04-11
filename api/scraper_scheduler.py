@@ -699,9 +699,11 @@ class ScraperSchedulerService:
                         interval = int(command.get("interval_minutes") or self.interval_minutes or 15)
                         status = await self.set_interval(interval)
                     elif action == "run_once":
-                        status = await self.run_once()
+                        await self._run_cycle()
+                        status = self.status()
                     elif action == "catchup_once":
-                        status = await self.run_catchup_once()
+                        await self._run_catchup_cycle()
+                        status = self.status()
                     else:
                         raise ValueError(f"Unsupported scheduler control action: {action}")
 
