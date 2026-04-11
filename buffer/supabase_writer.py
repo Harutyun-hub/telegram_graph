@@ -280,27 +280,27 @@ class SupabaseWriter:
 
     def get_shared_scraper_runtime_snapshot(self, default: dict | None = None) -> dict:
         """Load the latest persisted worker-side scraper runtime snapshot."""
-        return self.get_runtime_json(self._scheduler_runtime_path, default=default)
+        return self.get_runtime_json_fast(self._scheduler_runtime_path, default=default)
 
     def save_shared_scraper_runtime_snapshot(self, payload: dict) -> bool:
         """Persist the latest worker-side scraper runtime snapshot."""
-        return self.save_runtime_json(self._scheduler_runtime_path, payload)
+        return self.save_runtime_json_fast(self._scheduler_runtime_path, payload)
 
     def get_shared_scraper_control_command(self, default: dict | None = None) -> dict:
         """Load the latest shared scraper control command for the worker."""
-        return self.get_runtime_json(self._scheduler_control_path, default=default)
+        return self.get_runtime_json_fast(self._scheduler_control_path, default=default)
 
     def save_shared_scraper_control_command(self, payload: dict) -> bool:
         """Persist the latest shared scraper control command for the worker."""
-        return self.save_runtime_json(self._scheduler_control_path, payload)
+        return self.save_runtime_json_fast(self._scheduler_control_path, payload)
 
     def get_shared_freshness_snapshot(self, default: dict | None = None) -> dict:
         """Load the latest persisted worker-side freshness snapshot."""
-        return self.get_runtime_json(self._freshness_snapshot_path, default=default)
+        return self.get_runtime_json_fast(self._freshness_snapshot_path, default=default)
 
     def save_shared_freshness_snapshot(self, payload: dict) -> bool:
         """Persist the latest worker-side freshness snapshot."""
-        return self.save_runtime_json(self._freshness_snapshot_path, payload)
+        return self.save_runtime_json_fast(self._freshness_snapshot_path, payload)
 
     # ── Source Resolution ────────────────────────────────────────────────────
 
@@ -1248,6 +1248,19 @@ class SupabaseWriter:
         payload = result.get("payload")
         return dict(payload) if isinstance(payload, dict) else dict(fallback)
 
+    def get_runtime_json_fast(self, path: str, default: dict | None = None) -> dict:
+        """Load runtime JSON through the authenticated Storage API without signed-URL verification."""
+        fallback = default if isinstance(default, dict) else {}
+        key = str(path or "").strip()
+        if not key:
+            return dict(fallback)
+
+        result = self.read_runtime_json(key, prefer_signed_read=False)
+        if result["status"] != "ok":
+            return dict(fallback)
+        payload = result.get("payload")
+        return dict(payload) if isinstance(payload, dict) else dict(fallback)
+
     def save_runtime_json(self, path: str, payload: dict) -> bool:
         """Persist a JSON object to runtime-config storage bucket."""
         key = str(path or "").strip()
@@ -1293,7 +1306,28 @@ class SupabaseWriter:
             logger.error("Runtime JSON write failed | path={} error={}", key, exc)
             return False
 
-    def read_runtime_json(self, path: str) -> dict:
+    def save_runtime_json_fast(self, path: str, payload: dict) -> bool:
+        """Persist runtime JSON through the authenticated Storage API without read-back verification."""
+        key = str(path or "").strip()
+        if not key:
+            return False
+
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            self._ensure_runtime_bucket()
+            bucket = self.client.storage.from_(self._runtime_bucket_name)
+            body = json.dumps(data, ensure_ascii=True).encode("utf-8")
+            bucket.upload(
+                key,
+                body,
+                {"content-type": "application/json", "upsert": "true"},
+            )
+            return True
+        except Exception as exc:
+            logger.error("Runtime JSON fast write failed | path={} error={}", key, exc)
+            return False
+
+    def read_runtime_json(self, path: str, *, prefer_signed_read: bool = True) -> dict:
         """Load runtime-config JSON with status metadata for callers that need diagnostics."""
         key = str(path or "").strip()
         if not key:
@@ -1327,7 +1361,7 @@ class SupabaseWriter:
             logger.warning("Runtime JSON invalid JSON | path={} error=root JSON value must be an object", key)
             return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
 
-        if self._should_prefer_signed_read(key):
+        if prefer_signed_read and self._should_prefer_signed_read(key):
             signed = self._read_runtime_json_via_signed_url(key)
             if signed["status"] == "ok":
                 return signed

@@ -240,6 +240,29 @@ class RuntimePersistenceTests(unittest.TestCase):
             freshness._CACHE = old_cache
             freshness._CACHE_TS = old_cache_ts
 
+    def test_shared_freshness_snapshot_fast_read_skips_signed_url(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["pipeline/freshness_snapshot.json"] = json.dumps(
+            {"generated_at": "2026-04-11T10:00:00+00:00", "health": {"status": "healthy"}}
+        ).encode("utf-8")
+        writer = _make_writer(bucket)
+
+        payload = writer.get_shared_freshness_snapshot(default={})
+
+        self.assertEqual(payload["generated_at"], "2026-04-11T10:00:00+00:00")
+        self.assertEqual(bucket.signed_url_calls, 0)
+
+    def test_shared_scheduler_control_fast_write_skips_readback_verification(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.download_overrides["scraper/scheduler_control.json"] = RuntimeError("readback would fail")
+        writer = _make_writer(bucket)
+
+        saved = writer.save_shared_scraper_control_command({"request_id": "cmd-1", "action": "run_once"})
+
+        self.assertTrue(saved)
+        stored = json.loads(bucket.files["scraper/scheduler_control.json"].decode("utf-8"))
+        self.assertEqual(stored["action"], "run_once")
+
 
 if __name__ == "__main__":
     unittest.main()
