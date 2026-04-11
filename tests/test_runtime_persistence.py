@@ -99,16 +99,18 @@ class RuntimePersistenceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(log_mock.call_args[0][0], "INFO")
 
-    def test_freshness_endpoint_serves_stale_snapshot_and_triggers_background_refresh(self) -> None:
+    def test_freshness_endpoint_uses_passive_shared_snapshot_on_web_role(self) -> None:
         snapshot = {"generated_at": "2026-03-30T07:00:00+00:00", "health": {"status": "healthy"}}
 
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": snapshot, "source": "persisted_stale"}), \
-             patch.object(server, "_ensure_background_freshness_refresh", return_value=True) as refresh_mock, \
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_supabase_writer", return_value=SimpleNamespace()), \
+             patch.object(server, "get_current_scraper_scheduler_status", return_value={}), \
+             patch.object(server, "get_passive_freshness_snapshot", return_value=snapshot) as passive_mock, \
              patch.object(server, "get_freshness_snapshot") as live_mock:
             payload = asyncio.run(server.freshness_snapshot(force=False))
 
         self.assertEqual(payload, snapshot)
-        refresh_mock.assert_called_once()
+        passive_mock.assert_called_once()
         live_mock.assert_not_called()
 
     def test_persist_dashboard_snapshot_schedules_default_topics_warm(self) -> None:
@@ -217,7 +219,7 @@ class RuntimePersistenceTests(unittest.TestCase):
 
     def test_freshness_prefers_shared_snapshot_when_requested(self) -> None:
         writer = SimpleNamespace(
-            get_shared_freshness_snapshot=lambda default=None: {
+            get_shared_freshness_snapshot=lambda default=None, timeout_seconds=1.5: {
                 "generated_at": "2026-04-11T14:15:15.876280+00:00",
                 "pipeline": {"scrape": {"last_scrape_at": "2026-04-11T14:08:06.134560+00:00"}},
             },
@@ -251,6 +253,73 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertEqual(payload["generated_at"], "2026-04-11T10:00:00+00:00")
         self.assertEqual(bucket.signed_url_calls, 0)
+
+    def test_passive_freshness_rebuilds_when_shared_snapshot_is_stale(self) -> None:
+        writer = SimpleNamespace(
+            get_shared_freshness_snapshot=lambda default=None, timeout_seconds=1.5: {
+                "generated_at": "2026-04-10T13:13:18.510055+00:00",
+                "pipeline": {"scrape": {"last_scrape_at": "2026-04-08T19:13:16.187192+00:00"}},
+            },
+            get_pipeline_freshness_snapshot=lambda: {
+                "active_channels": 157,
+                "active_channels_never_scraped": 0,
+                "last_scrape_at": "2026-04-11T18:40:00+00:00",
+                "last_post_at": "2026-04-11T18:40:00+00:00",
+                "last_process_at": "2026-04-11T18:55:00+00:00",
+                "last_graph_sync_at": "2026-04-11T19:00:00+00:00",
+                "unprocessed_posts": 12,
+                "unprocessed_comments": 34,
+                "unsynced_posts": 5,
+                "unsynced_analysis": 8,
+                "dead_letter_scopes": 0,
+                "retry_blocked_scopes": 0,
+                "transient_dead_letter_scopes": 0,
+                "permanent_dead_letter_scopes": 0,
+                "recent_transient_failures": 0,
+                "recent_permanent_failures": 0,
+                "runnable_posts": 12,
+                "runnable_comment_groups": 20,
+                "blocked_dead_letter_posts": 0,
+                "blocked_dead_letter_comment_groups": 0,
+                "blocked_retry_posts": 0,
+                "blocked_retry_comment_groups": 0,
+            },
+            get_recent_pipeline_snapshot=lambda: {
+                "window_days": 15,
+                "window_start_at": "2026-03-27T00:00:00+00:00",
+                "recent_posts": 222,
+                "recent_comments": 333,
+                "recent_unsynced_posts": 5,
+                "recent_last_post_at": "2026-04-11T18:40:00+00:00",
+                "recent_last_graph_sync_post_at": "2026-04-11T19:00:00+00:00",
+            },
+        )
+
+        old_cache = freshness._CACHE
+        old_cache_ts = freshness._CACHE_TS
+        try:
+            freshness._CACHE = None
+            freshness._CACHE_TS = None
+            snapshot = freshness.get_passive_freshness_snapshot(
+                writer,
+                scheduler_status={
+                    "is_active": True,
+                    "interval_minutes": 60,
+                    "running_now": False,
+                    "last_run_finished_at": "2026-04-11T19:05:15.841400+00:00",
+                    "last_success_at": "2026-04-11T19:05:15.838513+00:00",
+                    "next_run_at": "2026-04-11T20:05:15.838513+00:00",
+                    "last_error": None,
+                    "run_history": [],
+                },
+            )
+        finally:
+            freshness._CACHE = old_cache
+            freshness._CACHE_TS = old_cache_ts
+
+        self.assertEqual(snapshot["pipeline"]["scrape"]["last_scrape_at"], "2026-04-11T18:40:00+00:00")
+        self.assertEqual(snapshot["pipeline"]["sync"]["last_graph_sync_at"], "2026-04-11T19:00:00+00:00")
+        self.assertEqual(snapshot["pulse"]["queue"]["graph_posts"], 5)
 
     def test_shared_scheduler_control_fast_write_skips_readback_verification(self) -> None:
         bucket = _FakeRuntimeBucket()

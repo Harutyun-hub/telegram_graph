@@ -278,29 +278,68 @@ class SupabaseWriter:
         )
         return payload
 
-    def get_shared_scraper_runtime_snapshot(self, default: dict | None = None) -> dict:
+    def get_shared_scraper_runtime_snapshot(
+        self,
+        default: dict | None = None,
+        *,
+        timeout_seconds: float = 1.5,
+    ) -> dict:
         """Load the latest persisted worker-side scraper runtime snapshot."""
-        return self.get_runtime_json_fast(self._scheduler_runtime_path, default=default)
+        return self.get_runtime_json_fast(
+            self._scheduler_runtime_path,
+            default=default,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def save_shared_scraper_runtime_snapshot(self, payload: dict) -> bool:
+    def save_shared_scraper_runtime_snapshot(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest worker-side scraper runtime snapshot."""
-        return self.save_runtime_json_fast(self._scheduler_runtime_path, payload)
+        return self.save_runtime_json_fast(
+            self._scheduler_runtime_path,
+            payload,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def get_shared_scraper_control_command(self, default: dict | None = None) -> dict:
+    def get_shared_scraper_control_command(
+        self,
+        default: dict | None = None,
+        *,
+        timeout_seconds: float = 1.5,
+    ) -> dict:
         """Load the latest shared scraper control command for the worker."""
-        return self.get_runtime_json_fast(self._scheduler_control_path, default=default)
+        return self.get_runtime_json_fast(
+            self._scheduler_control_path,
+            default=default,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def save_shared_scraper_control_command(self, payload: dict) -> bool:
+    def save_shared_scraper_control_command(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest shared scraper control command for the worker."""
-        return self.save_runtime_json_fast(self._scheduler_control_path, payload)
+        return self.save_runtime_json_fast(
+            self._scheduler_control_path,
+            payload,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def get_shared_freshness_snapshot(self, default: dict | None = None) -> dict:
+    def get_shared_freshness_snapshot(
+        self,
+        default: dict | None = None,
+        *,
+        timeout_seconds: float = 1.5,
+    ) -> dict:
         """Load the latest persisted worker-side freshness snapshot."""
-        return self.get_runtime_json_fast(self._freshness_snapshot_path, default=default)
+        return self.get_runtime_json_fast(
+            self._freshness_snapshot_path,
+            default=default,
+            timeout_seconds=timeout_seconds,
+        )
 
-    def save_shared_freshness_snapshot(self, payload: dict) -> bool:
+    def save_shared_freshness_snapshot(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest worker-side freshness snapshot."""
-        return self.save_runtime_json_fast(self._freshness_snapshot_path, payload)
+        return self.save_runtime_json_fast(
+            self._freshness_snapshot_path,
+            payload,
+            timeout_seconds=timeout_seconds,
+        )
 
     # ── Source Resolution ────────────────────────────────────────────────────
 
@@ -1248,14 +1287,24 @@ class SupabaseWriter:
         payload = result.get("payload")
         return dict(payload) if isinstance(payload, dict) else dict(fallback)
 
-    def get_runtime_json_fast(self, path: str, default: dict | None = None) -> dict:
+    def get_runtime_json_fast(
+        self,
+        path: str,
+        default: dict | None = None,
+        *,
+        timeout_seconds: float = 1.5,
+    ) -> dict:
         """Load runtime JSON through the authenticated Storage API without signed-URL verification."""
         fallback = default if isinstance(default, dict) else {}
         key = str(path or "").strip()
         if not key:
             return dict(fallback)
 
-        result = self.read_runtime_json(key, prefer_signed_read=False)
+        result = self.read_runtime_json(
+            key,
+            prefer_signed_read=False,
+            timeout_seconds=timeout_seconds,
+        )
         if result["status"] != "ok":
             return dict(fallback)
         payload = result.get("payload")
@@ -1306,7 +1355,7 @@ class SupabaseWriter:
             logger.error("Runtime JSON write failed | path={} error={}", key, exc)
             return False
 
-    def save_runtime_json_fast(self, path: str, payload: dict) -> bool:
+    def save_runtime_json_fast(self, path: str, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist runtime JSON through the authenticated Storage API without read-back verification."""
         key = str(path or "").strip()
         if not key:
@@ -1314,24 +1363,50 @@ class SupabaseWriter:
 
         data = payload if isinstance(payload, dict) else {}
         try:
-            self._ensure_runtime_bucket()
-            bucket = self.client.storage.from_(self._runtime_bucket_name)
             body = json.dumps(data, ensure_ascii=True).encode("utf-8")
-            bucket.upload(
+            self._write_runtime_json_bytes_fast(
                 key,
                 body,
-                {"content-type": "application/json", "upsert": "true"},
+                timeout_seconds=max(0.1, float(timeout_seconds)),
             )
             return True
         except Exception as exc:
             logger.error("Runtime JSON fast write failed | path={} error={}", key, exc)
             return False
 
-    def read_runtime_json(self, path: str, *, prefer_signed_read: bool = True) -> dict:
+    def read_runtime_json(
+        self,
+        path: str,
+        *,
+        prefer_signed_read: bool = True,
+        timeout_seconds: float | None = None,
+    ) -> dict:
         """Load runtime-config JSON with status metadata for callers that need diagnostics."""
         key = str(path or "").strip()
         if not key:
             return {"status": "invalid_path", "payload": {}, "error": "Runtime JSON path is empty"}
+
+        if timeout_seconds is not None:
+            started_at = time.perf_counter()
+            try:
+                raw = self._read_runtime_json_bytes_fast(
+                    key,
+                    timeout_seconds=max(0.1, float(timeout_seconds)),
+                )
+            except TimeoutError as exc:
+                elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+                logger.warning("Runtime JSON read timed out | path={} timeout_s={} error={}", key, timeout_seconds, exc)
+                return {"status": "timeout", "payload": {}, "error": str(exc), "elapsed_ms": elapsed_ms}
+            except Exception as exc:
+                elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+                status = self._classify_runtime_read_error(exc)
+                if status == "missing":
+                    logger.info("Runtime JSON missing | path={}", key)
+                else:
+                    logger.warning("Runtime JSON unreadable | path={} error={}", key, exc)
+                return {"status": status, "payload": {}, "error": str(exc), "elapsed_ms": elapsed_ms}
+
+            return self._parse_runtime_json_bytes(key, raw)
 
         try:
             self._ensure_runtime_bucket()
@@ -1344,6 +1419,18 @@ class SupabaseWriter:
                 logger.warning("Runtime JSON unreadable | path={} error={}", key, exc)
             return {"status": status, "payload": {}, "error": str(exc)}
 
+        parsed_result = self._parse_runtime_json_bytes(key, raw)
+        if parsed_result["status"] != "ok":
+            return parsed_result
+
+        if prefer_signed_read and self._should_prefer_signed_read(key):
+            signed = self._read_runtime_json_via_signed_url(key)
+            if signed["status"] == "ok":
+                return signed
+
+        return parsed_result
+
+    def _parse_runtime_json_bytes(self, key: str, raw: bytes) -> dict:
         if not raw:
             logger.warning("Runtime JSON unreadable | path={} error=empty response body", key)
             return {"status": "unreadable", "payload": {}, "error": "Empty response body"}
@@ -1361,12 +1448,38 @@ class SupabaseWriter:
             logger.warning("Runtime JSON invalid JSON | path={} error=root JSON value must be an object", key)
             return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
 
-        if prefer_signed_read and self._should_prefer_signed_read(key):
-            signed = self._read_runtime_json_via_signed_url(key)
-            if signed["status"] == "ok":
-                return signed
-
         return {"status": "ok", "payload": parsed, "error": ""}
+
+    def _read_runtime_json_bytes_fast(self, path: str, timeout_seconds: float) -> bytes:
+        key = str(path or "").strip()
+        if not key:
+            raise ValueError("Runtime JSON path is empty")
+
+        bucket = self.client.storage.from_(self._runtime_bucket_name)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(bucket.download, key)
+                return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as exc:
+            raise TimeoutError(f"authenticated runtime JSON download timed out after {timeout_seconds}s") from exc
+
+    def _write_runtime_json_bytes_fast(self, path: str, body: bytes, *, timeout_seconds: float) -> None:
+        key = str(path or "").strip()
+        if not key:
+            raise ValueError("Runtime JSON path is empty")
+
+        bucket = self.client.storage.from_(self._runtime_bucket_name)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    bucket.upload,
+                    key,
+                    body,
+                    {"content-type": "application/json", "upsert": "true"},
+                )
+                future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as exc:
+            raise TimeoutError(f"runtime JSON upload timed out after {timeout_seconds}s") from exc
 
     @staticmethod
     def _classify_runtime_read_error(error: Exception) -> str:

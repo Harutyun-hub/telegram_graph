@@ -111,7 +111,9 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
             "last_result": {"mode": "normal"},
             "last_mode": "normal",
         }
-        writer = SimpleNamespace(get_shared_scraper_runtime_snapshot=lambda default=None: shared)
+        writer = SimpleNamespace(
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: shared
+        )
 
         with patch.object(server, "APP_ROLE", "web"), \
              patch.object(server, "scraper_scheduler", None), \
@@ -122,6 +124,27 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertEqual(payload["next_run_at"], "2026-04-11T10:15:00+00:00")
         self.assertTrue(payload["running_now"])
 
+    def test_web_role_scheduler_status_falls_back_to_default_when_shared_read_fails(self) -> None:
+        writer = SimpleNamespace(
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: (_ for _ in ()).throw(
+                RuntimeError("storage timed out")
+            )
+        )
+        old_cached = server._last_shared_scraper_status
+
+        try:
+            server._last_shared_scraper_status = None
+            with patch.object(server, "APP_ROLE", "web"), \
+                 patch.object(server, "scraper_scheduler", None), \
+                 patch.object(server, "get_supabase_writer", return_value=writer):
+                payload = server.get_current_scraper_scheduler_status()
+        finally:
+            server._last_shared_scraper_status = old_cached
+
+        self.assertEqual(payload["status"], "stopped")
+        self.assertFalse(payload["is_active"])
+        self.assertIsNone(payload["next_run_at"])
+
     def test_web_run_now_enqueues_worker_control_command(self) -> None:
         saved: dict[str, object] = {}
 
@@ -131,7 +154,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
 
         writer = SimpleNamespace(
             save_shared_scraper_control_command=save_control,
-            get_shared_scraper_runtime_snapshot=lambda default=None: {
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: {
                 "status": "active",
                 "is_active": True,
                 "interval_minutes": 15,
@@ -155,6 +178,18 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertEqual(payload["worker_control"]["action"], "run_once")
         self.assertEqual(payload["worker_control"]["status"], "pending")
 
+    def test_web_freshness_endpoint_uses_passive_shared_snapshot(self) -> None:
+        snapshot = {"generated_at": "2026-04-11T10:00:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_supabase_writer", return_value=SimpleNamespace()), \
+             patch.object(server, "get_current_scraper_scheduler_status", return_value={}), \
+             patch.object(server, "get_passive_freshness_snapshot", return_value=snapshot) as passive_mock:
+            payload = asyncio.run(server.freshness_snapshot(force=False))
+
+        passive_mock.assert_called_once()
+        self.assertEqual(payload["generated_at"], "2026-04-11T10:00:00+00:00")
+
     def test_web_set_interval_enqueues_worker_control_command(self) -> None:
         saved: dict[str, object] = {}
 
@@ -164,7 +199,7 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
 
         writer = SimpleNamespace(
             save_shared_scraper_control_command=save_control,
-            get_shared_scraper_runtime_snapshot=lambda default=None: {
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: {
                 "status": "active",
                 "is_active": True,
                 "interval_minutes": 15,
@@ -303,7 +338,7 @@ class SchedulerDistributedLockTests(unittest.TestCase):
             }
 
             writer = SimpleNamespace(
-                get_shared_scraper_control_command=lambda default=None: dict(command_store),
+                get_shared_scraper_control_command=lambda default=None, timeout_seconds=1.5: dict(command_store),
                 save_shared_scraper_control_command=lambda payload: command_store.update(payload) or True,
             )
 

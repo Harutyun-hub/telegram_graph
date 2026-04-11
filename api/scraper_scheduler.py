@@ -15,7 +15,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 import config
-from api.freshness import get_freshness_snapshot
+from api.freshness import get_freshness_snapshot, get_passive_freshness_snapshot
 from api.runtime_coordinator import get_runtime_coordinator
 from api.source_resolution import run_source_resolution_cycle
 from scraper.scrape_orchestrator import run_full_cycle, run_catchup_cycle
@@ -879,3 +879,12 @@ class ScraperSchedulerService:
             )
         except Exception as exc:
             logger.warning(f"Failed to persist shared freshness snapshot: {exc}")
+            try:
+                fallback_snapshot = get_passive_freshness_snapshot(
+                    self.db,
+                    scheduler_status=self.status(),
+                )
+                if not self.db.save_shared_freshness_snapshot(fallback_snapshot):
+                    logger.warning("Failed to persist fallback shared freshness snapshot")
+            except Exception as inner_exc:
+                logger.warning(f"Failed to persist fallback shared freshness snapshot: {inner_exc}")

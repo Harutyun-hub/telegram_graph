@@ -73,7 +73,7 @@ from api.aggregator import (
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
-from api.freshness import get_freshness_snapshot
+from api.freshness import get_freshness_snapshot, get_passive_freshness_snapshot
 from api import insights
 from api import behavioral_briefs
 from api import opportunity_briefs
@@ -141,7 +141,11 @@ def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | No
             detail="Worker scheduler control is unavailable. Failed to persist control command.",
         )
 
-    status = dict(get_current_scraper_scheduler_status() or {})
+    try:
+        status = dict(get_current_scraper_scheduler_status() or {})
+    except Exception as exc:
+        logger.warning(f"Falling back to default scraper status after control enqueue error: {exc}")
+        status = _default_scraper_scheduler_status()
     status["worker_control"] = {
         "request_id": command["request_id"],
         "action": command["action"],
@@ -1474,60 +1478,75 @@ def get_current_social_runtime_status() -> dict[str, Any]:
     return social_runtime_service.status()
 
 
-def get_current_scraper_scheduler_status() -> dict[str, Any]:
-    if not _should_run_background_jobs():
-        shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={})
-        if shared:
-            return shared
-    if scraper_scheduler is None:
-        return {
-            "status": "stopped",
-            "is_active": False,
-            "interval_minutes": 15,
+_last_shared_scraper_status: dict[str, Any] | None = None
+
+
+def _default_scraper_scheduler_status() -> dict[str, Any]:
+    return {
+        "status": "stopped",
+        "is_active": False,
+        "interval_minutes": 15,
+        "running_now": False,
+        "last_run_started_at": None,
+        "last_run_finished_at": None,
+        "last_success_at": None,
+        "next_run_at": None,
+        "last_error": None,
+        "last_result": None,
+        "last_mode": "normal",
+        "catchup_limits": {
+            "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
+            "post_limit": config.AI_CATCHUP_POST_LIMIT,
+            "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
+        },
+        "normal_limits": {
+            "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
+            "post_limit": config.AI_NORMAL_POST_LIMIT,
+            "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
+        },
+        "run_history": [],
+        "resolution": {
+            "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
             "running_now": False,
+            "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
             "last_run_started_at": None,
             "last_run_finished_at": None,
             "last_success_at": None,
             "next_run_at": None,
             "last_error": None,
             "last_result": None,
-            "last_mode": "normal",
-            "catchup_limits": {
-                "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
-                "post_limit": config.AI_CATCHUP_POST_LIMIT,
-                "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
-            },
-            "normal_limits": {
-                "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
-                "post_limit": config.AI_NORMAL_POST_LIMIT,
-                "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
-            },
             "run_history": [],
-            "resolution": {
-                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
-                "running_now": False,
-                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
-                "last_run_started_at": None,
-                "last_run_finished_at": None,
-                "last_success_at": None,
-                "next_run_at": None,
-                "last_error": None,
-                "last_result": None,
-                "run_history": [],
-                "snapshot": {
-                    "slot_key": "primary",
-                    "due_jobs": 0,
-                    "leased_jobs": 0,
-                    "dead_letter_jobs": 0,
-                    "cooldown_slots": 0,
-                    "cooldown_until": None,
-                    "oldest_due_age_seconds": None,
-                    "active_pending_sources": 0,
-                    "active_missing_peer_refs": 0,
-                },
+            "snapshot": {
+                "slot_key": "primary",
+                "due_jobs": 0,
+                "leased_jobs": 0,
+                "dead_letter_jobs": 0,
+                "cooldown_slots": 0,
+                "cooldown_until": None,
+                "oldest_due_age_seconds": None,
+                "active_pending_sources": 0,
+                "active_missing_peer_refs": 0,
             },
-            "persisted": None,
-        }
+        },
+        "persisted": None,
+    }
+
+
+def get_current_scraper_scheduler_status() -> dict[str, Any]:
+    global _last_shared_scraper_status
+    if not _should_run_background_jobs():
+        try:
+            shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={}, timeout_seconds=1.5)
+        except Exception as exc:
+            logger.warning(f"Shared scraper runtime snapshot read failed on passive web: {exc}")
+            shared = {}
+        if shared:
+            _last_shared_scraper_status = dict(shared)
+            return dict(shared)
+        if _last_shared_scraper_status:
+            return dict(_last_shared_scraper_status)
+    if scraper_scheduler is None:
+        return _default_scraper_scheduler_status()
     return scraper_scheduler.status()
 
 
@@ -3187,7 +3206,8 @@ async def update_admin_config(payload: AdminConfigPatchRequest):
 async def list_channel_sources():
     """List configured Telegram channel sources from Supabase."""
     try:
-        items = get_supabase_writer().list_channels()
+        loop = asyncio.get_running_loop()
+        items = await loop.run_in_executor(None, lambda: get_supabase_writer().list_channels())
         return {"count": len(items), "items": items}
     except Exception as e:
         logger.error(f"List source channels error: {e}")
@@ -3685,26 +3705,36 @@ async def backfill_source_peer_refs(active_only: bool = True, limit: int = 100):
 @app.get("/api/scraper/scheduler", dependencies=[Depends(require_operator_access)])
 async def get_scraper_scheduler_status():
     """Current scraper scheduler runtime status."""
-    return get_current_scraper_scheduler_status()
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, get_current_scraper_scheduler_status)
+    except Exception as e:
+        logger.error(f"Scraper scheduler status error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/freshness", dependencies=[Depends(require_analytics_access)])
 async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
-        if not force:
-            cached = _cached_freshness_resolution(allow_live=False)
-            snapshot = cached.get("snapshot")
-            source = str(cached.get("source") or "")
-            if isinstance(snapshot, dict) and snapshot:
-                if "stale" in source:
-                    _ensure_background_freshness_refresh()
-                return snapshot
-        return get_freshness_snapshot(
-            get_supabase_writer(),
-            scheduler_status=get_current_scraper_scheduler_status(),
-            force_refresh=force,
-            prefer_shared_snapshot=not _should_run_background_jobs(),
+        loop = asyncio.get_running_loop()
+        if not _should_run_background_jobs():
+            return await loop.run_in_executor(
+                None,
+                lambda: get_passive_freshness_snapshot(
+                    get_supabase_writer(),
+                    scheduler_status=get_current_scraper_scheduler_status(),
+                ),
+            )
+
+        return await loop.run_in_executor(
+            None,
+            lambda: get_freshness_snapshot(
+                get_supabase_writer(),
+                scheduler_status=get_current_scraper_scheduler_status(),
+                force_refresh=force,
+                prefer_shared_snapshot=False,
+            ),
         )
     except Exception as e:
         logger.error(f"Freshness endpoint error: {e}")
@@ -3788,7 +3818,8 @@ async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
         if not _should_run_background_jobs():
-            return _enqueue_worker_scheduler_control("start")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("start"))
         return await get_scraper_scheduler().start()
     except HTTPException:
         raise
@@ -3802,7 +3833,8 @@ async def stop_scraper_scheduler():
     """Stop recurring scraper schedule."""
     try:
         if not _should_run_background_jobs():
-            return _enqueue_worker_scheduler_control("stop")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("stop"))
         return await get_scraper_scheduler().stop()
     except HTTPException:
         raise
@@ -3816,9 +3848,13 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
     """Update scraper scheduler interval in minutes."""
     try:
         if not _should_run_background_jobs():
-            return _enqueue_worker_scheduler_control(
-                "set_interval",
-                interval_minutes=payload.interval_minutes,
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: _enqueue_worker_scheduler_control(
+                    "set_interval",
+                    interval_minutes=payload.interval_minutes,
+                ),
             )
         return await get_scraper_scheduler().set_interval(payload.interval_minutes)
     except HTTPException:
@@ -3833,7 +3869,8 @@ async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
         if not _should_run_background_jobs():
-            return _enqueue_worker_scheduler_control("run_once")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("run_once"))
         return await get_scraper_scheduler().run_once()
     except HTTPException:
         raise
@@ -3847,7 +3884,8 @@ async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
         if not _should_run_background_jobs():
-            return _enqueue_worker_scheduler_control("catchup_once")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("catchup_once"))
         return await get_scraper_scheduler().run_catchup_once()
     except HTTPException:
         raise
