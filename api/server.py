@@ -116,6 +116,15 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
 
 
+def _require_worker_scheduler_control() -> None:
+    if _should_run_background_jobs():
+        return
+    raise HTTPException(
+        status_code=503,
+        detail="Scheduler control is worker-only. Use the worker service.",
+    )
+
+
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
     if config.IS_STAGING:
         if config.STAGING_ENABLE_BACKGROUND_JOBS:
@@ -3750,7 +3759,10 @@ async def trending_widget_quality_snapshot(
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
+        _require_worker_scheduler_control()
         return await get_scraper_scheduler().start()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Start scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3780,7 +3792,10 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
 async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
+        _require_worker_scheduler_control()
         return await get_scraper_scheduler().run_once()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Run-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3790,7 +3805,10 @@ async def run_scraper_once():
 async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
+        _require_worker_scheduler_control()
         return await get_scraper_scheduler().run_catchup_once()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Catchup-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
