@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -68,6 +69,22 @@ class OperatorAuthTests(unittest.TestCase):
                     "Authorization": "Bearer analytics-proxy-token",
                     "X-Supabase-Authorization": "Bearer user-session-token",
                 },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("widgets", response.json())
+
+    def test_operator_route_accepts_simple_password_header(self) -> None:
+        basic_token = base64.b64encode(b"admin:simple-secret").decode("ascii")
+
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server.config, "SIMPLE_AUTH_USERNAME", "admin"), \
+             patch.object(server.config, "SIMPLE_AUTH_PASSWORD", "simple-secret"), \
+             patch.object(server, "_admin_config_response", return_value={"widgets": {"w1": {"enabled": True}}}):
+            response = self.client.get(
+                "/api/admin/config",
+                headers={"X-Admin-Authorization": f"Basic {basic_token}"},
             )
 
         self.assertEqual(response.status_code, 200)

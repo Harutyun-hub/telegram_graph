@@ -165,6 +165,8 @@ def main() -> int:
         if not topic_name:
             continue
         cls = classify_topic(topic_name)
+        if not cls:
+            continue
         canonical = str(cls.get("taxonomy_topic") or "").strip()
         if canonical and canonical != topic_name:
             merge_plan.append((topic_name, canonical, bool(cls.get("proposed", False))))

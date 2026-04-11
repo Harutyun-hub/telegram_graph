@@ -14,6 +14,7 @@ Run:
   venv/bin/python -m uvicorn api.server:app --reload --port 8001
 """
 from __future__ import annotations
+import base64
 import gzip
 import sys, os
 import json
@@ -1731,6 +1732,38 @@ def _extract_bearer_token(raw_value: str | None) -> str:
     return ""
 
 
+def _extract_basic_credentials(raw_value: str | None) -> tuple[str, str] | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    scheme, _, token = text.partition(" ")
+    if scheme.lower() != "basic" or not token.strip():
+        return None
+    try:
+        decoded = base64.b64decode(token.strip()).decode("utf-8")
+    except Exception:
+        return None
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return None
+    return username.strip(), password
+
+
+def _simple_auth_credentials_are_valid(raw_value: str | None) -> bool:
+    credentials = _extract_basic_credentials(raw_value)
+    if not credentials:
+        return False
+    configured_username = str(getattr(config, "SIMPLE_AUTH_USERNAME", "") or "").strip()
+    configured_password = str(getattr(config, "SIMPLE_AUTH_PASSWORD", "") or "")
+    if not configured_username or not configured_password:
+        return False
+    provided_username, provided_password = credentials
+    return (
+        hmac.compare_digest(provided_username.strip().lower(), configured_username.lower())
+        and hmac.compare_digest(provided_password, configured_password)
+    )
+
+
 def get_ai_helper_provider():
     return get_default_ai_helper_provider()
 
@@ -1871,6 +1904,9 @@ async def require_operator_access(
     admin_token = _extract_bearer_token(x_admin_authorization) or _extract_bearer_token(authorization)
     if admin_api_key and admin_token and hmac.compare_digest(admin_token, admin_api_key):
         return {"id": "admin-api-key", "email": "", "auth": "api_key"}
+    if _simple_auth_credentials_are_valid(x_admin_authorization):
+        username, _ = _extract_basic_credentials(x_admin_authorization) or ("", "")
+        return {"id": f"simple-auth:{username.strip().lower()}", "email": "", "auth": "simple_auth"}
 
     if _allow_local_operator_bypass(
         x_supabase_authorization=x_supabase_authorization,

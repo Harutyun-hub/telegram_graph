@@ -7,6 +7,7 @@
 // live in that separate app. See integration.md Section 7 for details.
 // ================================================================
 
+import { buildSimpleAuthApiAuthorization } from '../auth';
 import { getSupabaseBrowserClient } from './supabaseClient';
 
 // ── Configuration ──────────────────────────────────────────────
@@ -66,6 +67,11 @@ export async function apiFetch<T>(
     const token = await getAuthToken();
     if (token) {
       headers.set('X-Supabase-Authorization', `Bearer ${token}`);
+    } else {
+      const simpleAuthHeader = buildSimpleAuthApiAuthorization();
+      if (simpleAuthHeader) {
+        headers.set('X-Admin-Authorization', simpleAuthHeader);
+      }
     }
   }
 

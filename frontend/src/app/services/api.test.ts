@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch, kbListCollections, kbUploadDocument } from './api';
 
 const getSession = vi.fn();
+const buildSimpleAuthApiAuthorization = vi.fn();
+
+vi.mock('../auth', () => ({
+  buildSimpleAuthApiAuthorization,
+}));
 
 vi.mock('./supabaseClient', () => ({
   getSupabaseBrowserClient: () => ({
@@ -15,6 +20,8 @@ vi.mock('./supabaseClient', () => ({
 describe('apiFetch', () => {
   beforeEach(() => {
     getSession.mockReset();
+    buildSimpleAuthApiAuthorization.mockReset();
+    buildSimpleAuthApiAuthorization.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -42,6 +49,24 @@ describe('apiFetch', () => {
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const headers = new Headers(init.headers);
     expect(headers.get('X-Supabase-Authorization')).toBe('Bearer user-token');
+  });
+
+  it('falls back to simple auth for protected routes when no Supabase session exists', async () => {
+    getSession.mockResolvedValue({ data: { session: null } });
+    buildSimpleAuthApiAuthorization.mockReturnValue('Basic YWRtaW46c2VjcmV0');
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiFetch('/admin/config', { includeUserAuth: true });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.get('X-Admin-Authorization')).toBe('Basic YWRtaW46c2VjcmV0');
+    expect(headers.get('X-Supabase-Authorization')).toBeNull();
   });
 
   it('surfaces API detail messages on failure', async () => {

@@ -649,7 +649,7 @@ export function useTopicsDetailData() {
   const { range } = useDashboardDateRange();
   const fetcher = useCallback(() => fetchTopicSummaries(range.from, range.to), [range.from, range.to]);
   return useCachedResource<TopicDetail[]>(
-    `radar.details.topics.summary.v4:${range.from}:${range.to}`,
+    `radar.details.topics.summary.v5:${range.from}:${range.to}`,
     fetcher,
     [],
   );
@@ -659,7 +659,7 @@ export function useTopicDetail(topic: string | null, category: string | null) {
   const { range } = useDashboardDateRange();
   const enabled = Boolean(topic);
   const fetcher = useCallback(() => fetchTopicDetailRow(topic || '', category || '', range.from, range.to), [topic, category, range.from, range.to]);
-  const key = enabled ? `radar.details.topic.v6:${range.from}:${range.to}:${topic}:${category || ''}` : null;
+  const key = enabled ? `radar.details.topic.v7:${range.from}:${range.to}:${topic}:${category || ''}` : null;
   return useCachedResource<TopicDetail | null>(key, fetcher, null, enabled);
 }
 
@@ -677,7 +677,7 @@ export function useTopicEvidenceFeed(
       fetchTopicEvidencePage(topic || '', category || '', view, range.from, range.to, page, size, pageFocusId),
     [topic, category, view, range.from, range.to],
   );
-  const key = active ? `radar.feed.topic.v3:${range.from}:${range.to}:${topic}:${category || ''}:${view}:${focusId || ''}` : null;
+  const key = active ? `radar.feed.topic.v4:${range.from}:${range.to}:${topic}:${category || ''}:${view}:${focusId || ''}` : null;
   return usePaginatedResource<TopicEvidence>(
     key,
     fetcher,

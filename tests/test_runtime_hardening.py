@@ -131,6 +131,28 @@ class SchedulerDistributedLockTests(unittest.TestCase):
     def _service(self) -> ScraperSchedulerService:
         return ScraperSchedulerService(SimpleNamespace())
 
+    def test_set_interval_preserves_active_state_in_web_only_runtime(self) -> None:
+        async def scenario() -> None:
+            writer = SimpleNamespace(
+                get_scraper_scheduler_settings=lambda default_interval_minutes=15: {
+                    "is_active": True,
+                    "interval_minutes": default_interval_minutes,
+                    "updated_at": None,
+                },
+                save_scraper_scheduler_settings=lambda *, is_active, interval_minutes: {
+                    "is_active": is_active,
+                    "interval_minutes": interval_minutes,
+                    "updated_at": None,
+                },
+            )
+            service = ScraperSchedulerService(writer)
+            with patch.dict("os.environ", {"APP_ROLE": "web"}, clear=False):
+                status = await service.set_interval(45)
+            self.assertTrue(status["is_active"])
+            self.assertEqual(status["interval_minutes"], 45)
+
+        asyncio.run(scenario())
+
     def test_run_cycle_is_exclusive_across_scheduler_instances(self) -> None:
         coordinator = _CoordinatorStub()
         run_calls = 0

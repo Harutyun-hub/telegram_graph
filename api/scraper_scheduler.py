@@ -28,6 +28,13 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def _runtime_role_allows_background_jobs() -> bool:
+    role = str(os.getenv("APP_ROLE", "") or "").strip().lower()
+    if role not in {"web", "worker", "all"}:
+        role = "all"
+    return role in {"worker", "all"}
+
+
 class ScraperSchedulerService:
     def __init__(self, supabase_writer):
         self.db = supabase_writer
@@ -482,10 +489,16 @@ class ScraperSchedulerService:
             self._ensure_scheduler_started()
             self._upsert_interval_job()
 
+        persisted_is_active = self.desired_active
+        if not _runtime_role_allows_background_jobs():
+            current_settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=self.interval_minutes)
+            persisted_is_active = bool(current_settings.get("is_active", False))
+
         persisted = self.db.save_scraper_scheduler_settings(
-            is_active=self.desired_active,
+            is_active=persisted_is_active,
             interval_minutes=self.interval_minutes,
         )
+        self.desired_active = persisted_is_active
         return self.status(persisted)
 
     async def run_once(self) -> dict:

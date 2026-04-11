@@ -7,7 +7,7 @@ export function GraphPage() {
   const ru = lang === 'ru';
 
   return (
-    <div className="h-[calc(100dvh-56px)] md:h-[calc(100dvh-73px)]">
+    <div className="h-[calc(100dvh-56px)] md:h-[calc(100dvh-64px)]">
       <div className="md:hidden flex flex-col items-center justify-center h-full bg-gray-50 px-8 text-center">
         <div className="w-20 h-20 rounded-2xl bg-slate-100 flex items-center justify-center mb-6">
           <Monitor className="w-10 h-10 text-slate-400" />
