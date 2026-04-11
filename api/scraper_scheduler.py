@@ -36,6 +36,9 @@ def _runtime_role_allows_background_jobs() -> bool:
 
 
 class ScraperSchedulerService:
+    _SETTINGS_READ_ATTEMPTS = 3
+    _SETTINGS_READ_RETRY_SECONDS = 0.5
+
     def __init__(self, supabase_writer):
         self.db = supabase_writer
         self.scheduler = AsyncIOScheduler(timezone="UTC")
@@ -84,12 +87,29 @@ class ScraperSchedulerService:
 
     async def startup(self) -> None:
         self._ensure_scheduler_started()
-        settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=15)
+        settings = await self._load_startup_scheduler_settings()
         self.interval_minutes = int(settings.get("interval_minutes", 15))
         self.desired_active = bool(settings.get("is_active", False))
 
         if self.desired_active:
             self._upsert_interval_job()
+            job = self.scheduler.get_job(self.job_id)
+            next_run_at = _iso(job.next_run_time) if job else None
+            if job is None:
+                logger.error("Scraper scheduler failed to register interval job despite active persisted state")
+                if config.IS_LOCKED_ENV:
+                    raise RuntimeError("Scraper scheduler interval job registration failed during startup.")
+            else:
+                logger.info(
+                    "Scraper scheduler interval job registered | interval={}m next_run_at={}",
+                    self.interval_minutes,
+                    next_run_at,
+                )
+        else:
+            logger.warning(
+                "Scraper scheduler started without interval job because persisted state is inactive | interval={}m",
+                self.interval_minutes,
+            )
         if config.FEATURE_SOURCE_RESOLUTION_WORKER:
             self._upsert_resolution_job()
         if config.PIPELINE_QUEUE_ENABLED:
@@ -99,6 +119,51 @@ class ScraperSchedulerService:
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
         )
+
+    async def _load_startup_scheduler_settings(self) -> dict:
+        default = {
+            "is_active": False,
+            "interval_minutes": 15,
+            "updated_at": None,
+        }
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._SETTINGS_READ_ATTEMPTS + 1):
+            try:
+                if hasattr(self.db, "load_scraper_scheduler_settings"):
+                    settings = self.db.load_scraper_scheduler_settings(
+                        default_interval_minutes=15,
+                        raise_on_error=True,
+                    )
+                else:
+                    settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=15)
+                if attempt > 1:
+                    logger.warning(
+                        "Scraper scheduler settings read succeeded after retry | attempt={}/{}",
+                        attempt,
+                        self._SETTINGS_READ_ATTEMPTS,
+                    )
+                return settings
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Scraper scheduler settings read failed on startup | attempt={}/{} error={}",
+                    attempt,
+                    self._SETTINGS_READ_ATTEMPTS,
+                    exc,
+                )
+                if attempt < self._SETTINGS_READ_ATTEMPTS:
+                    await asyncio.sleep(self._SETTINGS_READ_RETRY_SECONDS * attempt)
+
+        if config.IS_LOCKED_ENV:
+            raise RuntimeError(
+                "Failed to load persisted scraper scheduler settings during startup."
+            ) from last_error
+
+        logger.warning(
+            "Scraper scheduler falling back to default inactive settings after startup read failures"
+        )
+        return default
 
     def _ensure_scheduler_started(self) -> None:
         if not self.scheduler.running:

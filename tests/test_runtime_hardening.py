@@ -131,6 +131,54 @@ class SchedulerDistributedLockTests(unittest.TestCase):
     def _service(self) -> ScraperSchedulerService:
         return ScraperSchedulerService(SimpleNamespace())
 
+    def test_startup_retries_scheduler_settings_and_registers_job(self) -> None:
+        async def scenario() -> None:
+            calls = {"count": 0}
+
+            def load_scraper_scheduler_settings(*, default_interval_minutes=15, raise_on_error=False):
+                del default_interval_minutes, raise_on_error
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError("transient storage read failure")
+                return {
+                    "is_active": True,
+                    "interval_minutes": 30,
+                    "updated_at": "2026-04-11T06:09:59.590617+00:00",
+                }
+
+            service = ScraperSchedulerService(
+                SimpleNamespace(load_scraper_scheduler_settings=load_scraper_scheduler_settings)
+            )
+            with patch("api.scraper_scheduler.config.IS_LOCKED_ENV", True), \
+                 patch("api.scraper_scheduler.config.FEATURE_SOURCE_RESOLUTION_WORKER", False), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", False):
+                await service.startup()
+                self.assertEqual(calls["count"], 2)
+                self.assertTrue(service.desired_active)
+                self.assertIsNotNone(service.scheduler.get_job(service.job_id))
+                await service.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_startup_raises_in_locked_env_when_settings_read_fails(self) -> None:
+        async def scenario() -> None:
+            def load_scraper_scheduler_settings(*, default_interval_minutes=15, raise_on_error=False):
+                del default_interval_minutes, raise_on_error
+                raise RuntimeError("storage unavailable")
+
+            service = ScraperSchedulerService(
+                SimpleNamespace(load_scraper_scheduler_settings=load_scraper_scheduler_settings)
+            )
+            with patch("api.scraper_scheduler.config.IS_LOCKED_ENV", True), \
+                 patch("api.scraper_scheduler.config.FEATURE_SOURCE_RESOLUTION_WORKER", False), \
+                 patch("api.scraper_scheduler.config.PIPELINE_QUEUE_ENABLED", False):
+                with self.assertRaises(RuntimeError) as ctx:
+                    await service.startup()
+                self.assertIn("Failed to load persisted scraper scheduler settings", str(ctx.exception))
+                await service.shutdown()
+
+        asyncio.run(scenario())
+
     def test_set_interval_preserves_active_state_in_web_only_runtime(self) -> None:
         async def scenario() -> None:
             writer = SimpleNamespace(

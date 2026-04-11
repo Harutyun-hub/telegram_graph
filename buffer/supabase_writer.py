@@ -221,13 +221,22 @@ class SupabaseWriter:
                 {"public": False},
             )
 
-    def get_scraper_scheduler_settings(self, default_interval_minutes: int = 15) -> dict:
-        """Read persisted scraper scheduler config from Supabase Storage."""
-        default = {
+    @staticmethod
+    def _default_scraper_scheduler_settings(default_interval_minutes: int = 15) -> dict:
+        return {
             "is_active": False,
             "interval_minutes": int(default_interval_minutes),
             "updated_at": None,
         }
+
+    def load_scraper_scheduler_settings(
+        self,
+        default_interval_minutes: int = 15,
+        *,
+        raise_on_error: bool = False,
+    ) -> dict:
+        """Read persisted scraper scheduler config from Supabase Storage."""
+        default = self._default_scraper_scheduler_settings(default_interval_minutes)
 
         try:
             self._ensure_runtime_bucket()
@@ -244,7 +253,12 @@ class SupabaseWriter:
                 "updated_at": parsed.get("updated_at"),
             }
         except Exception:
+            if raise_on_error:
+                raise
             return default
+
+    def get_scraper_scheduler_settings(self, default_interval_minutes: int = 15) -> dict:
+        return self.load_scraper_scheduler_settings(default_interval_minutes=default_interval_minutes, raise_on_error=False)
 
     def save_scraper_scheduler_settings(self, *, is_active: bool, interval_minutes: int) -> dict:
         """Persist scraper scheduler config to Supabase Storage."""
