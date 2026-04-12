@@ -77,6 +77,8 @@ type ScraperSchedulerStatus = {
     posts_pending_sync?: number;
     posts_synced?: number;
     sync_errors?: number;
+    sync_batch_chunks?: number;
+    sync_fallback_posts?: number;
     mode?: string;
   } | null;
   last_mode?: 'normal' | 'catchup' | string;
@@ -112,7 +114,8 @@ type PipelineFreshnessSnapshot = {
       age_minutes?: number | null;
     };
     sync?: {
-      status?: 'healthy' | 'warning' | 'stale' | 'unknown' | string;
+      status?: 'healthy' | 'warning' | 'stale' | 'unknown' | 'caught_up' | 'idle' | string;
+      reason?: string | null;
       last_graph_sync_at?: string | null;
       age_minutes?: number | null;
       estimated?: boolean;
@@ -154,6 +157,8 @@ type PipelineFreshnessSnapshot = {
 
 const stageStyle: Record<string, { badge: string; dot: string; text: string }> = {
   healthy: { badge: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  caught_up: { badge: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  idle: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', text: 'text-slate-600' },
   warning: { badge: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', text: 'text-amber-700' },
   paused_by_backpressure: { badge: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', text: 'text-amber-700' },
   stale: { badge: 'bg-red-50 text-red-700', dot: 'bg-red-500', text: 'text-red-700' },
@@ -826,7 +831,7 @@ export function SourcesPage() {
   const dataLooksDelayed = !scheduler?.running_now && (
     (scrapeStage?.status !== 'paused_by_backpressure' && scrapeStage?.age_minutes != null && scrapeStage.age_minutes >= 120)
     || (processStage?.age_minutes != null && processStage.age_minutes >= 360)
-    || (syncStage?.age_minutes != null && syncStage.age_minutes >= 360)
+    || ((syncStage?.status !== 'caught_up' && syncStage?.status !== 'idle') && syncStage?.age_minutes != null && syncStage.age_minutes >= 360)
   );
 
   return (
@@ -1103,6 +1108,11 @@ export function SourcesPage() {
             {scrapeStage?.status === 'paused_by_backpressure' && (
               <span className="text-amber-700" style={{ fontWeight: 500 }}>
                 {ru ? 'Скрапинг на паузе из-за backpressure' : 'Scrape paused by backpressure'}
+              </span>
+            )}
+            {(syncStage?.status === 'caught_up' || syncStage?.status === 'idle') && (
+              <span className="text-emerald-700" style={{ fontWeight: 500 }}>
+                {ru ? 'Neo4j синхронизация в актуальном состоянии' : 'Neo4j sync is caught up'}
               </span>
             )}
             {operationalStatus === 'critical' && operational?.reason && (

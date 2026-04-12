@@ -312,6 +312,66 @@ class FreshnessAIMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["pipeline"]["scrape"]["reason"], "backpressure")
         self.assertIn("backpressure", " ".join(snapshot["health"]["notes"]).lower())
 
+    def test_snapshot_marks_sync_as_caught_up_when_no_unsynced_posts(self) -> None:
+        class _Writer:
+            def get_pipeline_freshness_snapshot(self):
+                return {
+                    "active_channels": 1,
+                    "active_channels_never_scraped": 0,
+                    "last_scrape_at": datetime.now(timezone.utc).isoformat(),
+                    "last_post_at": "2026-04-10T00:00:00+00:00",
+                    "last_process_at": datetime.now(timezone.utc).isoformat(),
+                    "last_graph_sync_at": "2026-04-10T00:00:00+00:00",
+                    "unprocessed_posts": 0,
+                    "unprocessed_comments": 0,
+                    "unsynced_posts": 0,
+                    "unsynced_analysis": 0,
+                    "dead_letter_scopes": 0,
+                    "retry_blocked_scopes": 0,
+                    "runnable_posts": 0,
+                    "runnable_comment_groups": 0,
+                }
+
+            def get_source_resolution_snapshot(self, *, session_slot="primary"):
+                del session_slot
+                return {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                }
+
+            def get_recent_pipeline_snapshot(self):
+                return {
+                    "window_days": 15,
+                    "window_start_at": datetime.now(timezone.utc).isoformat(),
+                    "recent_posts": 0,
+                    "recent_comments": 0,
+                    "recent_unsynced_posts": 0,
+                    "recent_last_post_at": "2026-04-10T00:00:00+00:00",
+                    "recent_last_graph_sync_post_at": "2026-04-10T00:00:00+00:00",
+                }
+
+        with patch.object(
+            freshness,
+            "_neo4j_snapshot",
+            return_value={"recent_post_count": 0, "channel_count": 0, "topic_count": 0},
+        ):
+            snapshot = freshness.get_freshness_snapshot(
+                _Writer(),
+                scheduler_status={"is_active": True, "interval_minutes": 30, "running_now": False, "run_history": []},
+                force_refresh=True,
+            )
+
+        self.assertEqual(snapshot["pipeline"]["sync"]["status"], "caught_up")
+        self.assertEqual(snapshot["pipeline"]["sync"]["reason"], "no_pending_graph_backlog")
+        self.assertIn("caught up", " ".join(snapshot["health"]["notes"]).lower())
+
 
 if __name__ == "__main__":
     unittest.main()

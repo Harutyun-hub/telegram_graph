@@ -233,6 +233,90 @@ class Neo4jBatchSyncTests(unittest.TestCase):
         self.assertEqual(writer.bulk_analysis_ids, ["analysis-post-1", "analysis-post-2"])
         self.assertEqual(result["posts_synced"], 2)
         self.assertEqual(result["sync_errors"], 0)
+        self.assertEqual(result["sync_batch_chunks"], 1)
+        self.assertEqual(result["sync_fallback_posts"], 0)
+
+    def test_orchestrator_falls_back_to_single_post_sync_when_batch_chunk_fails(self) -> None:
+        class _Writer:
+            def __init__(self) -> None:
+                self.marked_posts: list[str] = []
+                self.marked_analyses: list[str] = []
+
+            def auto_recover_transient_failures(self):
+                return {}
+
+            def get_unprocessed_comments(self, limit=200):
+                del limit
+                return []
+
+            def get_unprocessed_posts(self, limit=100):
+                del limit
+                return []
+
+            def get_unsynced_posts(self, limit=100):
+                del limit
+                return [
+                    {"id": "post-1", "channel_id": "channel-1"},
+                    {"id": "post-2", "channel_id": "channel-1"},
+                ]
+
+            def get_post_bundles_batch(self, posts):
+                return [
+                    {
+                        "post": {"id": post["id"]},
+                        "comments": [],
+                        "analyses": {},
+                        "analysis_records": [{"id": f"analysis-{post['id']}"}],
+                    }
+                    for post in posts
+                ]
+
+            def get_post_bundle(self, post):
+                return {
+                    "post": {"id": post["id"]},
+                    "comments": [],
+                    "analyses": {"a": {"id": f"analysis-{post['id']}"}},
+                    "analysis_records": [{"id": f"analysis-{post['id']}"}],
+                }
+
+            def mark_post_neo4j_synced(self, post_id):
+                self.marked_posts.append(post_id)
+
+            def mark_analysis_synced(self, analysis_id):
+                self.marked_analyses.append(analysis_id)
+
+            def reconcile_post_analysis_sync(self, limit=300):
+                del limit
+                return 0
+
+        writer = _Writer()
+        batch_calls: list[list[str]] = []
+        fallback_calls: list[str] = []
+
+        class _Neo4jWriter:
+            def sync_post_batch(self, bundles):
+                batch_calls.append([bundle["post"]["id"] for bundle in bundles])
+                raise RuntimeError("batch failed")
+
+            def sync_bundle(self, bundle):
+                fallback_calls.append(bundle["post"]["id"])
+
+        with patch.object(scrape_orchestrator, "_get_background_writer", return_value=_Neo4jWriter()), \
+             patch.object(scrape_orchestrator.config, "NEO4J_SYNC_BATCH_CHUNK_SIZE", 20):
+            result = scrape_orchestrator._run_ai_process_and_sync_blocking(
+                writer,
+                comment_limit=10,
+                post_limit=10,
+                sync_limit=10,
+            )
+
+        self.assertEqual(batch_calls, [["post-1", "post-2"]])
+        self.assertEqual(fallback_calls, ["post-1", "post-2"])
+        self.assertEqual(writer.marked_posts, ["post-1", "post-2"])
+        self.assertEqual(writer.marked_analyses, ["analysis-post-1", "analysis-post-2"])
+        self.assertEqual(result["posts_synced"], 2)
+        self.assertEqual(result["sync_batch_chunks"], 0)
+        self.assertEqual(result["sync_fallback_posts"], 2)
 
 
 if __name__ == "__main__":

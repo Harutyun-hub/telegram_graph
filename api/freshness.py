@@ -58,6 +58,10 @@ def _worst_status(statuses: list[str]) -> str:
         return "paused_by_backpressure"
     if any(s == "warning" for s in statuses):
         return "warning"
+    if any(s == "caught_up" for s in statuses):
+        return "caught_up"
+    if any(s == "idle" for s in statuses):
+        return "idle"
     if any(s == "unknown" for s in statuses):
         return "unknown"
     return "healthy"
@@ -143,6 +147,8 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append("Scrape is intentionally paused until the AI backlog drops below backpressure thresholds.")
     if pipeline.get("scrape", {}).get("status") == "stale":
         notes.append("Scraper appears stale relative to configured interval.")
+    if pipeline.get("sync", {}).get("status") == "caught_up":
+        notes.append("Neo4j sync is caught up; there are no posts waiting for graph sync.")
     if pipeline.get("sync", {}).get("status") == "stale":
         notes.append("Graph sync signals are stale.")
     return notes
@@ -151,6 +157,8 @@ def _build_notes(snapshot: dict) -> list[str]:
 def _compute_health_score(snapshot: dict) -> int:
     status_penalty = {
         "healthy": 0,
+        "caught_up": 0,
+        "idle": 0,
         "paused_by_backpressure": 10,
         "unknown": 10,
         "warning": 20,
@@ -318,6 +326,15 @@ def get_freshness_snapshot(
     if last_result.get("scrape_skipped") and str(last_result.get("scrape_skipped_reason") or "").strip() == "backpressure":
         scrape_status = "paused_by_backpressure"
         scrape_paused_reason = "backpressure"
+    graph_queue = _to_int(supa.get("unsynced_posts"), 0)
+    sync_reason: str | None = None
+    if graph_queue <= 0:
+        if last_graph_sync_at:
+            sync_status = "caught_up"
+            sync_reason = "no_pending_graph_backlog"
+        else:
+            sync_status = "idle"
+            sync_reason = "no_graph_sync_backlog"
 
     run_history = scheduler.get("run_history") or []
     recent_history = run_history[-6:] if isinstance(run_history, list) else []
@@ -343,8 +360,6 @@ def get_freshness_snapshot(
     scrape_rate_per_hour = _avg_rate_per_hour(recent_history, "scraped_items")
 
     ai_queue = _to_int(supa.get("runnable_comment_groups"), 0) + _to_int(supa.get("runnable_posts"), 0)
-    graph_queue = _to_int(supa.get("unsynced_posts"), 0)
-
     eta_ai = _eta_minutes(ai_queue, ai_rate_per_hour)
     eta_graph = _eta_minutes(graph_queue, sync_rate_per_hour)
     eta_total: int | None
@@ -383,6 +398,7 @@ def get_freshness_snapshot(
             },
             "sync": {
                 "status": sync_status,
+                "reason": sync_reason,
                 "last_graph_sync_at": last_graph_sync_at,
                 "age_minutes": sync_age,
                 "source": sync_source,

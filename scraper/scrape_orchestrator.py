@@ -121,6 +121,8 @@ def _run_ai_process_and_sync_blocking(
         "posts_pending_sync": 0,
         "posts_synced": 0,
         "sync_errors": 0,
+        "sync_batch_chunks": 0,
+        "sync_fallback_posts": 0,
         "recovery_unlocked_posts": 0,
         "recovery_unlocked_comment_groups": 0,
         "recovery_promoted_permanent": 0,
@@ -235,6 +237,7 @@ def _run_ai_process_and_sync_blocking(
                     if analysis_ids:
                         supabase_writer.mark_analyses_synced(analysis_ids)
                     result["posts_synced"] += len(synced_post_ids)
+                    result["sync_batch_chunks"] += 1
                 except Exception as e:
                     error_text = str(e).lower()
                     if "serviceunavailable" in error_text or "connection" in error_text:
@@ -248,6 +251,7 @@ def _run_ai_process_and_sync_blocking(
                         [post.get("id") for post in post_chunk],
                         e,
                     )
+                    result["sync_fallback_posts"] += len(post_chunk)
                     for post in post_chunk:
                         if time.monotonic() >= sync_deadline:
                             result["sync_timeout"] = True
