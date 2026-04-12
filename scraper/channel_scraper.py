@@ -141,10 +141,18 @@ def _peer_ref_to_input_peer(peer_ref: dict | None) -> InputPeerChannel | None:
     return InputPeerChannel(channel_id=peer_id, access_hash=access_hash)
 
 
+def _bump_scrape_diagnostic(diagnostics: dict | None, key: str, amount: int = 1) -> None:
+    if diagnostics is None:
+        return
+    diagnostics[key] = int(diagnostics.get(key, 0) or 0) + amount
+
+
 async def prepare_source_for_scrape(
     client: TelegramClient,
     channel_record: dict,
     supabase_writer,
+    *,
+    diagnostics: dict | None = None,
 ) -> tuple[dict | None, Channel | None]:
     """
     Resolve source metadata and peer type using the shared scheduler client.
@@ -159,15 +167,23 @@ async def prepare_source_for_scrape(
         if input_peer is not None:
             entity_lookup = input_peer
             used_peer_ref = True
+            _bump_scrape_diagnostic(diagnostics, "peer_ref_channels")
         elif config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            _bump_scrape_diagnostic(diagnostics, "pending_resolution_channels")
             ensure_resolution_job(supabase_writer, channel_record, priority=20)
             logger.info(f"[{username}] Missing peer ref; queued source resolution and skipping scrape cycle")
             return supabase_writer.get_channel_by_id(channel_uuid), None
+    if not used_peer_ref and entity_lookup == username:
+        _bump_scrape_diagnostic(diagnostics, "username_fallback_channels")
 
     try:
         entity = await client.get_entity(entity_lookup)
+    except FloodWaitError:
+        _bump_scrape_diagnostic(diagnostics, "resolve_flood_wait_count")
+        raise
     except (ValueError, ChannelPrivateError) as exc:
         if used_peer_ref and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            _bump_scrape_diagnostic(diagnostics, "pending_resolution_channels")
             supabase_writer.update_channel(
                 channel_uuid,
                 build_pending_source_payload(

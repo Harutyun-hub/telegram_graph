@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import config
 from api import freshness
 from buffer.supabase_writer import (
     AI_FAILURE_CLASS_PERMANENT,
@@ -58,6 +59,32 @@ class OrchestratorRecoveryTests(unittest.TestCase):
 
         result = asyncio.run(_run())
         self.assertFalse(result.get("scrape_skipped", False))
+
+    def test_run_full_cycle_reports_backpressure_pause_explicitly(self) -> None:
+        class _Writer:
+            def get_backlog_counts(self):
+                return {
+                    "unprocessed_posts": 5,
+                    "unprocessed_comments": 200,
+                    "runnable_posts": 0,
+                    "runnable_comment_groups": config.SCRAPE_BACKPRESSURE_UNPROCESSED_COMMENTS,
+                }
+
+        async def _run() -> dict:
+            with patch.object(
+                scrape_orchestrator,
+                "run_ai_process_and_sync",
+                AsyncMock(return_value={"ai_analysis_saved": 3, "posts_synced": 0}),
+            ):
+                return await scrape_orchestrator.run_full_cycle(client=object(), supabase_writer=_Writer())
+
+        result = asyncio.run(_run())
+        self.assertTrue(result["scrape_skipped"])
+        self.assertEqual(result["scrape_skipped_reason"], "backpressure")
+        self.assertEqual(result["peer_ref_channels"], 0)
+        self.assertEqual(result["username_fallback_channels"], 0)
+        self.assertEqual(result["pending_resolution_channels"], 0)
+        self.assertEqual(result["resolve_flood_wait_count"], 0)
 
     def test_run_ai_process_and_sync_reconciles_even_without_unsynced_posts(self) -> None:
         class _Writer:
@@ -179,7 +206,6 @@ class FreshnessAIMetricsTests(unittest.TestCase):
                     "due_jobs": 0,
                     "leased_jobs": 0,
                     "dead_letter_jobs": 0,
-                    "stale_nonclaimable_jobs": 0,
                     "cooldown_slots": 0,
                     "cooldown_until": None,
                     "oldest_due_age_seconds": None,
@@ -215,6 +241,136 @@ class FreshnessAIMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["backlog"]["transient_dead_letter_scopes"], 5)
         self.assertEqual(snapshot["pulse"]["queue"]["ai_items"], 13)
         self.assertEqual(snapshot["pulse"]["queue"]["ai_raw_items"], 60)
+
+    def test_snapshot_marks_scrape_as_paused_by_backpressure(self) -> None:
+        class _Writer:
+            def get_pipeline_freshness_snapshot(self):
+                return {
+                    "active_channels": 2,
+                    "active_channels_never_scraped": 0,
+                    "last_scrape_at": "2026-04-10T00:00:00+00:00",
+                    "last_post_at": "2026-04-10T00:00:00+00:00",
+                    "last_process_at": datetime.now(timezone.utc).isoformat(),
+                    "last_graph_sync_at": datetime.now(timezone.utc).isoformat(),
+                    "unprocessed_posts": 0,
+                    "unprocessed_comments": 100,
+                    "unsynced_posts": 0,
+                    "unsynced_analysis": 0,
+                    "dead_letter_scopes": 0,
+                    "retry_blocked_scopes": 0,
+                    "runnable_posts": 0,
+                    "runnable_comment_groups": 55,
+                }
+
+            def get_source_resolution_snapshot(self, *, session_slot="primary"):
+                del session_slot
+                return {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                }
+
+            def get_recent_pipeline_snapshot(self):
+                now = datetime.now(timezone.utc).isoformat()
+                return {
+                    "window_days": 15,
+                    "window_start_at": now,
+                    "recent_posts": 0,
+                    "recent_comments": 0,
+                    "recent_unsynced_posts": 0,
+                    "recent_last_post_at": "2026-04-10T00:00:00+00:00",
+                    "recent_last_graph_sync_post_at": now,
+                }
+
+        with patch.object(
+            freshness,
+            "_neo4j_snapshot",
+            return_value={"recent_post_count": 0, "channel_count": 0, "topic_count": 0},
+        ):
+            snapshot = freshness.get_freshness_snapshot(
+                _Writer(),
+                scheduler_status={
+                    "is_active": True,
+                    "interval_minutes": 30,
+                    "running_now": False,
+                    "run_history": [],
+                    "last_result": {
+                        "scrape_skipped": True,
+                        "scrape_skipped_reason": "backpressure",
+                    },
+                },
+                force_refresh=True,
+            )
+
+        self.assertEqual(snapshot["pipeline"]["scrape"]["status"], "paused_by_backpressure")
+        self.assertEqual(snapshot["pipeline"]["scrape"]["reason"], "backpressure")
+        self.assertIn("backpressure", " ".join(snapshot["health"]["notes"]).lower())
+
+    def test_snapshot_marks_sync_as_caught_up_when_no_unsynced_posts(self) -> None:
+        class _Writer:
+            def get_pipeline_freshness_snapshot(self):
+                return {
+                    "active_channels": 1,
+                    "active_channels_never_scraped": 0,
+                    "last_scrape_at": datetime.now(timezone.utc).isoformat(),
+                    "last_post_at": "2026-04-10T00:00:00+00:00",
+                    "last_process_at": datetime.now(timezone.utc).isoformat(),
+                    "last_graph_sync_at": "2026-04-10T00:00:00+00:00",
+                    "unprocessed_posts": 0,
+                    "unprocessed_comments": 0,
+                    "unsynced_posts": 0,
+                    "unsynced_analysis": 0,
+                    "dead_letter_scopes": 0,
+                    "retry_blocked_scopes": 0,
+                    "runnable_posts": 0,
+                    "runnable_comment_groups": 0,
+                }
+
+            def get_source_resolution_snapshot(self, *, session_slot="primary"):
+                del session_slot
+                return {
+                    "slot_key": "primary",
+                    "due_jobs": 0,
+                    "leased_jobs": 0,
+                    "dead_letter_jobs": 0,
+                    "cooldown_slots": 0,
+                    "cooldown_until": None,
+                    "oldest_due_age_seconds": None,
+                    "active_pending_sources": 0,
+                    "active_missing_peer_refs": 0,
+                }
+
+            def get_recent_pipeline_snapshot(self):
+                return {
+                    "window_days": 15,
+                    "window_start_at": datetime.now(timezone.utc).isoformat(),
+                    "recent_posts": 0,
+                    "recent_comments": 0,
+                    "recent_unsynced_posts": 0,
+                    "recent_last_post_at": "2026-04-10T00:00:00+00:00",
+                    "recent_last_graph_sync_post_at": "2026-04-10T00:00:00+00:00",
+                }
+
+        with patch.object(
+            freshness,
+            "_neo4j_snapshot",
+            return_value={"recent_post_count": 0, "channel_count": 0, "topic_count": 0},
+        ):
+            snapshot = freshness.get_freshness_snapshot(
+                _Writer(),
+                scheduler_status={"is_active": True, "interval_minutes": 30, "running_now": False, "run_history": []},
+                force_refresh=True,
+            )
+
+        self.assertEqual(snapshot["pipeline"]["sync"]["status"], "caught_up")
+        self.assertEqual(snapshot["pipeline"]["sync"]["reason"], "no_pending_graph_backlog")
+        self.assertIn("caught up", " ".join(snapshot["health"]["notes"]).lower())
 
 
 if __name__ == "__main__":

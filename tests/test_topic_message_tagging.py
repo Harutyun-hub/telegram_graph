@@ -95,6 +95,29 @@ class TopicMessageTaggingTests(unittest.TestCase):
         self.assertEqual(payload["message_topics"][0]["comment_id"], "comment-1")
         self.assertEqual([item["name"].lower() for item in payload["topics"]], ["testtopic"])
 
+    def test_normalize_payload_normalizes_message_sentiment_enum_values(self) -> None:
+        payload = _normalize_payload(
+            {
+                "topics": [],
+                "sentiment_score": 0.25,
+                "message_sentiments": [
+                    {
+                        "message_ref": "MSG 1",
+                        "comment_id": "comment-1",
+                        "sentiment": "very urgent",
+                    },
+                    {
+                        "message_ref": "MSG 2",
+                        "comment_id": "comment-2",
+                        "sentiment": "unknown",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(payload["message_sentiments"][0]["sentiment"], "Very_Urgent")
+        self.assertIsNone(payload["message_sentiments"][1]["sentiment"])
+
 
 if __name__ == "__main__":
     unittest.main()

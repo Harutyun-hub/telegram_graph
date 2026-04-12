@@ -6,8 +6,7 @@ touch Supabase directly from scrapers or processors.
 """
 from __future__ import annotations
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
@@ -68,6 +67,7 @@ def _looks_like_versioned_runtime_json_name(name: str) -> bool:
 AI_FAILURE_CLASS_TRANSIENT = "transient"
 AI_FAILURE_CLASS_PERMANENT = "permanent"
 AI_FAILURE_ERROR_TRANSIENT_UNKNOWN = "transient_unknown"
+AI_FAILURE_ERROR_PERMANENT_UNKNOWN = "permanent_unknown"
 AI_FAILURE_ERROR_TRANSIENT_EXHAUSTED = "transient_recovery_exhausted"
 
 _TRANSIENT_FAILURE_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -108,11 +108,17 @@ def _classify_processing_error(error: str | Exception) -> dict[str, str]:
 
     for needle, code in _TRANSIENT_FAILURE_PATTERNS:
         if needle in lowered:
-            return {"error_code": code, "failure_class": AI_FAILURE_CLASS_TRANSIENT}
+            return {
+                "error_code": code,
+                "failure_class": AI_FAILURE_CLASS_TRANSIENT,
+            }
 
     for needle, code in _PERMANENT_FAILURE_PATTERNS:
         if needle in lowered:
-            return {"error_code": code, "failure_class": AI_FAILURE_CLASS_PERMANENT}
+            return {
+                "error_code": code,
+                "failure_class": AI_FAILURE_CLASS_PERMANENT,
+            }
 
     return {
         "error_code": AI_FAILURE_ERROR_TRANSIENT_UNKNOWN,
@@ -224,22 +230,13 @@ class SupabaseWriter:
                 {"public": False},
             )
 
-    @staticmethod
-    def _default_scraper_scheduler_settings(default_interval_minutes: int = 15) -> dict:
-        return {
+    def get_scraper_scheduler_settings(self, default_interval_minutes: int = 15) -> dict:
+        """Read persisted scraper scheduler config from Supabase Storage."""
+        default = {
             "is_active": False,
             "interval_minutes": int(default_interval_minutes),
             "updated_at": None,
         }
-
-    def load_scraper_scheduler_settings(
-        self,
-        default_interval_minutes: int = 15,
-        *,
-        raise_on_error: bool = False,
-    ) -> dict:
-        """Read persisted scraper scheduler config from Supabase Storage."""
-        default = self._default_scraper_scheduler_settings(default_interval_minutes)
 
         try:
             self._ensure_runtime_bucket()
@@ -256,12 +253,7 @@ class SupabaseWriter:
                 "updated_at": parsed.get("updated_at"),
             }
         except Exception:
-            if raise_on_error:
-                raise
             return default
-
-    def get_scraper_scheduler_settings(self, default_interval_minutes: int = 15) -> dict:
-        return self.load_scraper_scheduler_settings(default_interval_minutes=default_interval_minutes, raise_on_error=False)
 
     def save_scraper_scheduler_settings(self, *, is_active: bool, interval_minutes: int) -> dict:
         """Persist scraper scheduler config to Supabase Storage."""
@@ -1042,32 +1034,6 @@ class SupabaseWriter:
             self._warn_pipeline_queue_once(table_name, e)
             return []
 
-    def _ack_pipeline_job(self, queue_name: str, *, job_id: str, lease_token: str) -> dict | None:
-        table_name = self._pipeline_queue_table(queue_name)
-        if not job_id or not lease_token:
-            return None
-        try:
-            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    UPDATE public.{table_name}
-                    SET status = 'done',
-                        lease_owner = NULL,
-                        lease_token = NULL,
-                        lease_expires_at = NULL,
-                        last_error = NULL,
-                        updated_at = timezone('utc', now())
-                    WHERE id = %s
-                      AND lease_token = %s::uuid
-                    RETURNING *
-                    """,
-                    (job_id, lease_token),
-                )
-                return cur.fetchone()
-        except Exception as e:
-            self._warn_pipeline_queue_once(table_name, e)
-            return None
-
     def _nack_pipeline_job(
         self,
         queue_name: str,
@@ -1134,30 +1100,6 @@ class SupabaseWriter:
             self._warn_pipeline_queue_once(table_name, e)
             return None
 
-    def _reclaim_expired_pipeline_jobs(self, queue_name: str, *, worker_id: str | None = None) -> int:
-        del worker_id
-        table_name = self._pipeline_queue_table(queue_name)
-        try:
-            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    UPDATE public.{table_name}
-                    SET status = 'pending',
-                        lease_owner = NULL,
-                        lease_token = NULL,
-                        lease_expires_at = NULL,
-                        updated_at = timezone('utc', now())
-                    WHERE status = 'leased'
-                      AND lease_expires_at IS NOT NULL
-                      AND lease_expires_at <= timezone('utc', now())
-                    RETURNING id
-                    """
-                )
-                return len(cur.fetchall() or [])
-        except Exception as e:
-            self._warn_pipeline_queue_once(table_name, e)
-            return 0
-
     def claim_ai_post_jobs(
         self,
         *,
@@ -1167,20 +1109,6 @@ class SupabaseWriter:
     ) -> list[dict]:
         return self._claim_pipeline_jobs(
             "ai_post",
-            worker_id=worker_id,
-            batch_size=batch_size,
-            lease_seconds=lease_seconds,
-        )
-
-    def claim_ai_comment_group_jobs(
-        self,
-        *,
-        worker_id: str,
-        batch_size: int | None = None,
-        lease_seconds: int | None = None,
-    ) -> list[dict]:
-        return self._claim_pipeline_jobs(
-            "ai_comment_group",
             worker_id=worker_id,
             batch_size=batch_size,
             lease_seconds=lease_seconds,
@@ -1208,15 +1136,6 @@ class SupabaseWriter:
                     """,
         )
 
-    def ack_ai_post_job(self, job_id: str, lease_token: str) -> dict | None:
-        return self._ack_pipeline_job("ai_post", job_id=job_id, lease_token=lease_token)
-
-    def ack_ai_comment_group_job(self, job_id: str, lease_token: str) -> dict | None:
-        return self._ack_pipeline_job("ai_comment_group", job_id=job_id, lease_token=lease_token)
-
-    def ack_neo4j_sync_job(self, job_id: str, lease_token: str) -> dict | None:
-        return self._ack_pipeline_job("neo4j_sync", job_id=job_id, lease_token=lease_token)
-
     def nack_ai_post_job(
         self,
         job_id: str,
@@ -1232,47 +1151,6 @@ class SupabaseWriter:
             error=error,
             max_attempts=max_attempts,
         )
-
-    def nack_ai_comment_group_job(
-        self,
-        job_id: str,
-        lease_token: str,
-        error: str | Exception,
-        *,
-        max_attempts: int | None = None,
-    ) -> dict | None:
-        return self._nack_pipeline_job(
-            "ai_comment_group",
-            job_id=job_id,
-            lease_token=lease_token,
-            error=error,
-            max_attempts=max_attempts,
-        )
-
-    def nack_neo4j_sync_job(
-        self,
-        job_id: str,
-        lease_token: str,
-        error: str | Exception,
-        *,
-        max_attempts: int | None = None,
-    ) -> dict | None:
-        return self._nack_pipeline_job(
-            "neo4j_sync",
-            job_id=job_id,
-            lease_token=lease_token,
-            error=error,
-            max_attempts=max_attempts,
-        )
-
-    def reclaim_expired_ai_post_jobs(self, worker_id: str | None = None) -> int:
-        return self._reclaim_expired_pipeline_jobs("ai_post", worker_id=worker_id)
-
-    def reclaim_expired_ai_comment_group_jobs(self, worker_id: str | None = None) -> int:
-        return self._reclaim_expired_pipeline_jobs("ai_comment_group", worker_id=worker_id)
-
-    def reclaim_expired_neo4j_sync_jobs(self, worker_id: str | None = None) -> int:
-        return self._reclaim_expired_pipeline_jobs("neo4j_sync", worker_id=worker_id)
 
     def get_runtime_json(self, path: str, default: dict | None = None) -> dict:
         """Load a JSON object from runtime-config storage bucket."""
@@ -1455,6 +1333,7 @@ class SupabaseWriter:
         if not key:
             raise ValueError("Runtime JSON path is empty")
 
+        self._ensure_runtime_bucket()
         bucket = self.client.storage.from_(self._runtime_bucket_name)
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1468,78 +1347,25 @@ class SupabaseWriter:
         if not key:
             raise ValueError("Runtime JSON path is empty")
 
+        self._ensure_runtime_bucket()
         bucket = self.client.storage.from_(self._runtime_bucket_name)
         file_options = {"content-type": "application/json", "upsert": "true"}
 
         def _upload() -> None:
-            bucket.upload(key, body, file_options)
-
-        def _replace_and_upload() -> None:
-            bucket.remove([key])
-            bucket.upload(key, body, file_options)
+            try:
+                bucket.upload(key, body, file_options)
+            except Exception as exc:
+                if "duplicate" not in str(exc).lower():
+                    raise
+                bucket.remove([key])
+                bucket.upload(key, body, file_options)
 
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_upload)
                 future.result(timeout=timeout_seconds)
         except FuturesTimeoutError as exc:
-            raise TimeoutError(f"runtime JSON upload timed out after {timeout_seconds}s") from exc
-        except Exception as exc:
-            if "duplicate" not in str(exc).lower():
-                raise
-            try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(_replace_and_upload)
-                    future.result(timeout=timeout_seconds)
-            except FuturesTimeoutError as timeout_exc:
-                raise TimeoutError(f"runtime JSON upload timed out after {timeout_seconds}s") from timeout_exc
-
-    @staticmethod
-    def _classify_runtime_read_error(error: Exception) -> str:
-        status_code = getattr(error, "status_code", None)
-        if status_code == 404:
-            return "missing"
-
-        low = str(error).lower()
-        if any(marker in low for marker in ("not found", "404", "no such", "does not exist", "missing")):
-            return "missing"
-        return "unreadable"
-
-    @staticmethod
-    def _should_prefer_signed_read(path: str) -> bool:
-        name = str(path or "").rsplit("/", 1)[-1]
-        return bool(name.endswith(".json") and not _looks_like_versioned_runtime_json_name(name))
-
-    def _read_runtime_json_via_signed_url(self, path: str) -> dict:
-        key = str(path or "").strip()
-        if not key or certifi is None:
-            return {"status": "unavailable", "payload": {}, "error": "Signed URL reader unavailable"}
-
-        try:
-            signed = self.client.storage.from_(self._runtime_bucket_name).create_signed_url(key, 60)
-            signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
-            if not signed_url:
-                return {"status": "unavailable", "payload": {}, "error": "Signed URL missing from response"}
-
-            context = ssl.create_default_context(cafile=certifi.where())
-            with urlopen(signed_url, timeout=10, context=context) as response:
-                raw = response.read()
-        except Exception as exc:
-            logger.warning("Runtime JSON signed read failed | path={} error={}", key, exc)
-            return {"status": "unreadable", "payload": {}, "error": str(exc)}
-
-        if not raw:
-            return {"status": "unreadable", "payload": {}, "error": "Empty response body"}
-
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except Exception as exc:
-            return {"status": "invalid_json", "payload": {}, "error": str(exc)}
-
-        if not isinstance(parsed, dict):
-            return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
-
-        return {"status": "ok", "payload": parsed, "error": ""}
+            raise TimeoutError(f"authenticated runtime JSON upload timed out after {timeout_seconds}s") from exc
 
     def save_runtime_blob(
         self,
@@ -1599,6 +1425,53 @@ class SupabaseWriter:
             return {"status": "error", "body": b"", "error": "Empty response body", "elapsed_ms": elapsed_ms}
         return {"status": "ok", "body": raw, "error": "", "elapsed_ms": elapsed_ms}
 
+    @staticmethod
+    def _classify_runtime_read_error(error: Exception) -> str:
+        status_code = getattr(error, "status_code", None)
+        if status_code == 404:
+            return "missing"
+
+        low = str(error).lower()
+        if any(marker in low for marker in ("not found", "404", "no such", "does not exist", "missing")):
+            return "missing"
+        return "unreadable"
+
+    @staticmethod
+    def _should_prefer_signed_read(path: str) -> bool:
+        name = str(path or "").rsplit("/", 1)[-1]
+        return bool(name.endswith(".json") and not _looks_like_versioned_runtime_json_name(name))
+
+    def _read_runtime_json_via_signed_url(self, path: str) -> dict:
+        key = str(path or "").strip()
+        if not key or certifi is None:
+            return {"status": "unavailable", "payload": {}, "error": "Signed URL reader unavailable"}
+
+        try:
+            signed = self.client.storage.from_(self._runtime_bucket_name).create_signed_url(key, 60)
+            signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
+            if not signed_url:
+                return {"status": "unavailable", "payload": {}, "error": "Signed URL missing from response"}
+
+            context = ssl.create_default_context(cafile=certifi.where())
+            with urlopen(signed_url, timeout=10, context=context) as response:
+                raw = response.read()
+        except Exception as exc:
+            logger.warning("Runtime JSON signed read failed | path={} error={}", key, exc)
+            return {"status": "unreadable", "payload": {}, "error": str(exc)}
+
+        if not raw:
+            return {"status": "unreadable", "payload": {}, "error": "Empty response body"}
+
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            return {"status": "invalid_json", "payload": {}, "error": str(exc)}
+
+        if not isinstance(parsed, dict):
+            return {"status": "invalid_json", "payload": {}, "error": "Root JSON value must be an object"}
+
+        return {"status": "ok", "payload": parsed, "error": ""}
+
     def _read_runtime_blob_bytes(self, path: str, timeout_seconds: float) -> bytes:
         key = str(path or "").strip()
         if not key:
@@ -1623,17 +1496,28 @@ class SupabaseWriter:
 
         if certifi is not None:
             try:
-                signed = bucket.create_signed_url(key, 60)
+                signed = bucket.create_signed_url(
+                    key,
+                    max(60, int(timeout_seconds) + 30),
+                )
                 signed_url = signed.get("signedURL") if isinstance(signed, dict) else None
                 if signed_url:
                     context = ssl.create_default_context(cafile=certifi.where())
                     with urlopen(signed_url, timeout=timeout_seconds, context=context) as response:
                         return response.read()
+            except TimeoutError:
+                raise
             except Exception as exc:
-                logger.warning("Runtime blob signed download failed | path={} error={}", key, exc)
+                low = str(exc).lower()
+                if "timed out" in low or "timeout" in low:
+                    raise TimeoutError(str(exc)) from exc
+                logger.warning(
+                    "Runtime blob signed read failed; falling back to authenticated download | path={} error={}",
+                    key,
+                    exc,
+                )
 
-        raise RuntimeError(f"Runtime blob download failed for {key}")
-
+        return self.client.storage.from_(self._runtime_bucket_name).download(key)
     def list_runtime_files(self, folder: str) -> list[dict]:
         """List files under a runtime-config folder path."""
         path = str(folder or "").strip().strip("/")
@@ -1958,7 +1842,10 @@ class SupabaseWriter:
         scope_keys: list[str] = []
         processable_rows = 0
         if scope_type == "post":
-            for rows in self._iter_unprocessed_rows(table_name="telegram_posts", select_columns="id"):
+            for rows in self._iter_unprocessed_rows(
+                table_name="telegram_posts",
+                select_columns="id",
+            ):
                 processable_rows += len(rows)
                 scope_keys.extend(str(row.get("id") or "").strip() for row in rows if row.get("id"))
         else:
@@ -2231,7 +2118,9 @@ class SupabaseWriter:
         return int(min(max_backoff, value))
 
     def _transient_recovery_after(self, now: datetime) -> str:
-        return (now + timedelta(minutes=max(1, int(config.AI_TRANSIENT_RECOVERY_COOLDOWN_MINUTES)))).isoformat()
+        return (
+            now + timedelta(minutes=max(1, int(config.AI_TRANSIENT_RECOVERY_COOLDOWN_MINUTES)))
+        ).isoformat()
 
     def _recent_ai_success_count(self, *, minutes: int) -> int:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(minutes)))
@@ -2458,7 +2347,11 @@ class SupabaseWriter:
 
     def auto_recover_transient_failures(self) -> dict[str, int]:
         """Unlock a bounded number of transient dead-letter scopes after cooldown."""
-        result = {"post_retried": 0, "comment_group_retried": 0, "promoted_permanent": 0}
+        result = {
+            "post_retried": 0,
+            "comment_group_retried": 0,
+            "promoted_permanent": 0,
+        }
         if not bool(getattr(config, "AI_TRANSIENT_RECOVERY_ENABLED", True)):
             return result
 

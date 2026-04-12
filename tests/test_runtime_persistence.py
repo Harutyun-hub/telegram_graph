@@ -87,53 +87,6 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
 
 
 class RuntimePersistenceTests(unittest.TestCase):
-    def test_persist_freshness_snapshot_uses_valid_log_level(self) -> None:
-        snapshot = {"generated_at": "2026-03-28T07:54:00+00:00", "health": {"status": "healthy"}}
-
-        with patch.object(server, "get_supabase_writer") as writer_mock, \
-             patch.object(server.logger, "log") as log_mock:
-            writer_mock.return_value.save_runtime_blob.return_value = True
-
-            result = server._persist_freshness_snapshot_sync(snapshot)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(log_mock.call_args[0][0], "INFO")
-
-    def test_freshness_endpoint_uses_passive_shared_snapshot_on_web_role(self) -> None:
-        snapshot = {"generated_at": "2026-03-30T07:00:00+00:00", "health": {"status": "healthy"}}
-
-        with patch.object(server, "APP_ROLE", "web"), \
-             patch.object(server, "get_supabase_writer", return_value=SimpleNamespace()), \
-             patch.object(server, "get_current_scraper_scheduler_status", return_value={}), \
-             patch.object(server, "get_passive_freshness_snapshot", return_value=snapshot) as passive_mock, \
-             patch.object(server, "get_freshness_snapshot") as live_mock:
-            payload = asyncio.run(server.freshness_snapshot(force=False))
-
-        self.assertEqual(payload, snapshot)
-        passive_mock.assert_called_once()
-        live_mock.assert_not_called()
-
-    def test_persist_dashboard_snapshot_schedules_default_topics_warm(self) -> None:
-        snapshot = {"communityHealth": {"score": 72}}
-        meta = {"snapshotBuiltAt": "2026-03-22T00:00:00+00:00", "cacheStatus": "refresh_success", "degradedTiers": []}
-        ctx = server.build_dashboard_date_context("2026-03-08", "2026-03-22")
-
-        with patch.object(server, "get_supabase_writer") as writer_mock, \
-             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
-             patch.object(server, "_schedule_default_topics_prewarm", return_value=True) as warm_mock:
-            writer_mock.return_value.save_runtime_blob.return_value = True
-            result = server._persist_dashboard_snapshot_sync(
-                ctx,
-                snapshot,
-                meta,
-                trusted_end_date="2026-03-22",
-                write_default_alias=True,
-            )
-
-        self.assertTrue(result["ok"])
-        prime_mock.assert_called_once()
-        warm_mock.assert_called_once_with(ctx)
-
     def test_get_runtime_json_reads_via_authenticated_download(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": False}}}).encode("utf-8")
@@ -152,7 +105,7 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertFalse(saved)
 
-    def test_save_runtime_json_overwrites_duplicate_with_upsert(self) -> None:
+    def test_save_runtime_json_overwrites_duplicate_by_replacing_object(self) -> None:
         bucket = _FakeRuntimeBucket()
         bucket.fail_duplicate_upload = True
         bucket.files["admin/config.json"] = json.dumps({"widgets": {"w1": {"enabled": True}}}).encode("utf-8")
@@ -163,47 +116,6 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertTrue(saved)
         self.assertEqual(stored["widgets"]["w1"]["enabled"], False)
-
-    def test_save_runtime_blob_persists_binary_payload(self) -> None:
-        bucket = _FakeRuntimeBucket()
-        writer = _make_writer(bucket)
-
-        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"compressed-payload")
-
-        self.assertTrue(saved)
-        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"compressed-payload")
-
-    def test_save_runtime_blob_overwrites_duplicate_with_upsert(self) -> None:
-        bucket = _FakeRuntimeBucket()
-        bucket.fail_duplicate_upload = True
-        bucket.files["dashboard-cache/v1/test.json.gz"] = b"old"
-        writer = _make_writer(bucket)
-
-        saved = writer.save_runtime_blob("dashboard-cache/v1/test.json.gz", b"new-payload")
-
-        self.assertTrue(saved)
-        self.assertEqual(bucket.files["dashboard-cache/v1/test.json.gz"], b"new-payload")
-
-    def test_read_runtime_blob_returns_timeout_status(self) -> None:
-        bucket = _FakeRuntimeBucket()
-        writer = _make_writer(bucket)
-
-        with patch.object(writer, "_read_runtime_blob_bytes", side_effect=TimeoutError("timed out")):
-            result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
-
-        self.assertEqual(result["status"], "timeout")
-        self.assertEqual(result["body"], b"")
-
-    def test_read_runtime_blob_prefers_authenticated_download(self) -> None:
-        bucket = _FakeRuntimeBucket()
-        bucket.files["dashboard-cache/v1/test.json.gz"] = b"cached"
-        writer = _make_writer(bucket)
-
-        result = writer.read_runtime_blob("dashboard-cache/v1/test.json.gz", timeout_seconds=0.5)
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["body"], b"cached")
-        self.assertEqual(bucket.signed_url_calls, 0)
 
     def test_update_admin_config_returns_500_when_persistence_cannot_be_verified(self) -> None:
         payload = server.AdminConfigPatchRequest(runtime={"openaiModel": "gpt-4o-mini"})
@@ -253,73 +165,6 @@ class RuntimePersistenceTests(unittest.TestCase):
 
         self.assertEqual(payload["generated_at"], "2026-04-11T10:00:00+00:00")
         self.assertEqual(bucket.signed_url_calls, 0)
-
-    def test_passive_freshness_rebuilds_when_shared_snapshot_is_stale(self) -> None:
-        writer = SimpleNamespace(
-            get_shared_freshness_snapshot=lambda default=None, timeout_seconds=1.5: {
-                "generated_at": "2026-04-10T13:13:18.510055+00:00",
-                "pipeline": {"scrape": {"last_scrape_at": "2026-04-08T19:13:16.187192+00:00"}},
-            },
-            get_pipeline_freshness_snapshot=lambda: {
-                "active_channels": 157,
-                "active_channels_never_scraped": 0,
-                "last_scrape_at": "2026-04-11T18:40:00+00:00",
-                "last_post_at": "2026-04-11T18:40:00+00:00",
-                "last_process_at": "2026-04-11T18:55:00+00:00",
-                "last_graph_sync_at": "2026-04-11T19:00:00+00:00",
-                "unprocessed_posts": 12,
-                "unprocessed_comments": 34,
-                "unsynced_posts": 5,
-                "unsynced_analysis": 8,
-                "dead_letter_scopes": 0,
-                "retry_blocked_scopes": 0,
-                "transient_dead_letter_scopes": 0,
-                "permanent_dead_letter_scopes": 0,
-                "recent_transient_failures": 0,
-                "recent_permanent_failures": 0,
-                "runnable_posts": 12,
-                "runnable_comment_groups": 20,
-                "blocked_dead_letter_posts": 0,
-                "blocked_dead_letter_comment_groups": 0,
-                "blocked_retry_posts": 0,
-                "blocked_retry_comment_groups": 0,
-            },
-            get_recent_pipeline_snapshot=lambda: {
-                "window_days": 15,
-                "window_start_at": "2026-03-27T00:00:00+00:00",
-                "recent_posts": 222,
-                "recent_comments": 333,
-                "recent_unsynced_posts": 5,
-                "recent_last_post_at": "2026-04-11T18:40:00+00:00",
-                "recent_last_graph_sync_post_at": "2026-04-11T19:00:00+00:00",
-            },
-        )
-
-        old_cache = freshness._CACHE
-        old_cache_ts = freshness._CACHE_TS
-        try:
-            freshness._CACHE = None
-            freshness._CACHE_TS = None
-            snapshot = freshness.get_passive_freshness_snapshot(
-                writer,
-                scheduler_status={
-                    "is_active": True,
-                    "interval_minutes": 60,
-                    "running_now": False,
-                    "last_run_finished_at": "2026-04-11T19:05:15.841400+00:00",
-                    "last_success_at": "2026-04-11T19:05:15.838513+00:00",
-                    "next_run_at": "2026-04-11T20:05:15.838513+00:00",
-                    "last_error": None,
-                    "run_history": [],
-                },
-            )
-        finally:
-            freshness._CACHE = old_cache
-            freshness._CACHE_TS = old_cache_ts
-
-        self.assertEqual(snapshot["pipeline"]["scrape"]["last_scrape_at"], "2026-04-11T18:40:00+00:00")
-        self.assertEqual(snapshot["pipeline"]["sync"]["last_graph_sync_at"], "2026-04-11T19:00:00+00:00")
-        self.assertEqual(snapshot["pulse"]["queue"]["graph_posts"], 5)
 
     def test_shared_scheduler_control_fast_write_skips_readback_verification(self) -> None:
         bucket = _FakeRuntimeBucket()

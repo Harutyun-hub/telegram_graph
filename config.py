@@ -3,6 +3,7 @@ config.py — Centralized configuration loader.
 Reads all values from .env and exposes them as typed constants.
 """
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,11 +37,15 @@ IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
 STAGING_ENABLE_BACKGROUND_JOBS = _env_bool("STAGING_ENABLE_BACKGROUND_JOBS", False)
 
 
+def should_validate_on_import() -> bool:
+    return "pytest" not in sys.modules
+
+
 def _normalize_app_role_for_validation(value=None) -> str:
     role = str(os.getenv("APP_ROLE") if value is None else value or "").strip().lower()
     if role not in {"web", "worker", "all"}:
         role = "all"
-    if IS_STAGING and not STAGING_ENABLE_BACKGROUND_JOBS:
+    if IS_STAGING:
         return "web"
     return role
 
@@ -66,12 +71,12 @@ def needs_telegram_runtime_credentials() -> bool:
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+PIPELINE_DATABASE_URL = os.getenv("PIPELINE_DATABASE_URL", os.getenv("SUPABASE_DB_URL", "")).strip()
 SOCIAL_SUPABASE_URL = os.getenv("SOCIAL_SUPABASE_URL", SUPABASE_URL).strip()
 SOCIAL_SUPABASE_SERVICE_ROLE_KEY = os.getenv(
     "SOCIAL_SUPABASE_SERVICE_ROLE_KEY",
     SUPABASE_SERVICE_ROLE_KEY,
 ).strip()
-PIPELINE_DATABASE_URL = os.getenv("PIPELINE_DATABASE_URL", os.getenv("SUPABASE_DB_URL", "")).strip()
 SOCIAL_DATABASE_URL = os.getenv("SOCIAL_DATABASE_URL", "").strip()
 
 # ── Neo4j ─────────────────────────────────────────────────────────────────────
@@ -103,13 +108,13 @@ ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY",
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 SIMPLE_AUTH_USERNAME = os.getenv("SIMPLE_AUTH_USERNAME", "").strip()
-SIMPLE_AUTH_PASSWORD = os.getenv("SIMPLE_AUTH_PASSWORD", "")
+SIMPLE_AUTH_PASSWORD = os.getenv("SIMPLE_AUTH_PASSWORD", "").strip()
 ENABLE_DEBUG_ENDPOINTS = _env_bool("ENABLE_DEBUG_ENDPOINTS", not IS_LOCKED_ENV)
 OPENCLAW_GATEWAY_BASE_URL = os.getenv("OPENCLAW_GATEWAY_BASE_URL", "").strip().rstrip("/")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "").strip()
 OPENCLAW_GATEWAY_TRANSPORT = os.getenv(
     "OPENCLAW_GATEWAY_TRANSPORT",
-    "cli_bridge" if IS_STAGING else "auto",
+    "openai_compatible" if IS_STAGING else "auto",
 ).strip().lower()
 OPENCLAW_GATEWAY_MODEL = os.getenv("OPENCLAW_GATEWAY_MODEL", "").strip()
 OPENCLAW_ANALYTICS_AGENT_ID = os.getenv("OPENCLAW_ANALYTICS_AGENT_ID", "").strip()
@@ -118,7 +123,7 @@ OPENCLAW_BRIDGE_TOKEN = os.getenv("OPENCLAW_BRIDGE_TOKEN", "").strip()
 OPENCLAW_BRIDGE_AGENT_ID = os.getenv("OPENCLAW_BRIDGE_AGENT_ID", "web-api-assistant").strip()
 OPENCLAW_WEB_SESSION_KEY = os.getenv(
     "OPENCLAW_WEB_SESSION_KEY",
-    "" if IS_PRODUCTION else "web-api-assistant-web",
+    "" if IS_PRODUCTION else "tg-analyst-ru-web-admin",
 ).strip()
 OPENCLAW_KB_SESSION_KEY = os.getenv(
     "OPENCLAW_KB_SESSION_KEY",
@@ -208,15 +213,6 @@ AI_MAX_INFLIGHT_REQUESTS = int(os.getenv("AI_MAX_INFLIGHT_REQUESTS", "4"))
 AI_FAILURE_MAX_RETRIES = int(os.getenv("AI_FAILURE_MAX_RETRIES", "5"))
 AI_FAILURE_BACKOFF_SECONDS = int(os.getenv("AI_FAILURE_BACKOFF_SECONDS", "60"))
 AI_FAILURE_BACKOFF_MAX_SECONDS = int(os.getenv("AI_FAILURE_BACKOFF_MAX_SECONDS", "3600"))
-PIPELINE_QUEUE_REPAIR_BATCH_SIZE = max(1, int(os.getenv("PIPELINE_QUEUE_REPAIR_BATCH_SIZE", "500")))
-PIPELINE_QUEUE_CLAIM_BATCH_SIZE = max(1, int(os.getenv("PIPELINE_QUEUE_CLAIM_BATCH_SIZE", "100")))
-PIPELINE_QUEUE_LEASE_SECONDS = max(30, int(os.getenv("PIPELINE_QUEUE_LEASE_SECONDS", "900")))
-PIPELINE_QUEUE_MAX_ATTEMPTS = max(1, int(os.getenv("PIPELINE_QUEUE_MAX_ATTEMPTS", "5")))
-PIPELINE_QUEUE_BACKOFF_SECONDS = max(5, int(os.getenv("PIPELINE_QUEUE_BACKOFF_SECONDS", "60")))
-PIPELINE_QUEUE_BACKOFF_MAX_SECONDS = max(
-    PIPELINE_QUEUE_BACKOFF_SECONDS,
-    int(os.getenv("PIPELINE_QUEUE_BACKOFF_MAX_SECONDS", "3600")),
-)
 AI_TRANSIENT_RECOVERY_ENABLED = _env_bool("AI_TRANSIENT_RECOVERY_ENABLED", True)
 AI_TRANSIENT_RECOVERY_CANARY_LIMIT = int(os.getenv("AI_TRANSIENT_RECOVERY_CANARY_LIMIT", "10"))
 AI_TRANSIENT_RECOVERY_BATCH_LIMIT = int(os.getenv("AI_TRANSIENT_RECOVERY_BATCH_LIMIT", "50"))
@@ -226,11 +222,24 @@ AI_TRANSIENT_RECOVERY_MAX_ATTEMPTS = int(os.getenv("AI_TRANSIENT_RECOVERY_MAX_AT
 AI_POST_BATCH_SIZE = int(os.getenv("AI_POST_BATCH_SIZE", "5"))
 AI_POST_BATCH_MAX_TOKENS = int(os.getenv("AI_POST_BATCH_MAX_TOKENS", "2600"))
 AI_MESSAGE_CHAR_LIMIT = int(os.getenv("AI_MESSAGE_CHAR_LIMIT", "700"))
+AI_MIN_COMMENT_LENGTH = max(0, int(os.getenv("AI_MIN_COMMENT_LENGTH", "15")))
+AI_SKIP_BOT_COMMENTS = _env_bool("AI_SKIP_BOT_COMMENTS", True)
+AI_FILTER_DUPLICATE_COMMENTS = _env_bool("AI_FILTER_DUPLICATE_COMMENTS", True)
 AI_THREAD_SUMMARY_CONTEXT_MESSAGES = int(os.getenv("AI_THREAD_SUMMARY_CONTEXT_MESSAGES", "12"))
 AI_PROCESS_STAGE_MAX_SECONDS = int(os.getenv("AI_PROCESS_STAGE_MAX_SECONDS", "1200"))
 AI_SYNC_STAGE_MAX_SECONDS = int(os.getenv("AI_SYNC_STAGE_MAX_SECONDS", "900"))
+SCRAPER_CONTROL_POLL_SECONDS = max(2, int(os.getenv("SCRAPER_CONTROL_POLL_SECONDS", "5")))
 NEO4J_SYNC_BATCH_CHUNK_SIZE = max(1, int(os.getenv("NEO4J_SYNC_BATCH_CHUNK_SIZE", "20")))
 AI_POST_PROMPT_STYLE = os.getenv("AI_POST_PROMPT_STYLE", "compact").strip().lower()
+PIPELINE_QUEUE_REPAIR_BATCH_SIZE = max(1, int(os.getenv("PIPELINE_QUEUE_REPAIR_BATCH_SIZE", "500")))
+PIPELINE_QUEUE_CLAIM_BATCH_SIZE = max(1, int(os.getenv("PIPELINE_QUEUE_CLAIM_BATCH_SIZE", "100")))
+PIPELINE_QUEUE_LEASE_SECONDS = max(30, int(os.getenv("PIPELINE_QUEUE_LEASE_SECONDS", "900")))
+PIPELINE_QUEUE_MAX_ATTEMPTS = max(1, int(os.getenv("PIPELINE_QUEUE_MAX_ATTEMPTS", "5")))
+PIPELINE_QUEUE_BACKOFF_SECONDS = max(5, int(os.getenv("PIPELINE_QUEUE_BACKOFF_SECONDS", "60")))
+PIPELINE_QUEUE_BACKOFF_MAX_SECONDS = max(
+    PIPELINE_QUEUE_BACKOFF_SECONDS,
+    int(os.getenv("PIPELINE_QUEUE_BACKOFF_MAX_SECONDS", "3600")),
+)
 GRAPH_ANALYTICS_RETENTION_DAYS = int(os.getenv("GRAPH_ANALYTICS_RETENTION_DAYS", "15"))
 QUESTION_BRIEFS_MODEL = os.getenv("QUESTION_BRIEFS_MODEL", OPENAI_MODEL)
 QUESTION_BRIEFS_MAX_TOKENS = int(os.getenv("QUESTION_BRIEFS_MAX_TOKENS", "2600"))
@@ -318,11 +327,8 @@ GROUP_MAX_THREAD_ANCHORS_PER_SOURCE_PER_CYCLE = int(os.getenv("GROUP_MAX_THREAD_
 SOURCE_RESOLUTION_INTERVAL_MINUTES = max(1, int(os.getenv("SOURCE_RESOLUTION_INTERVAL_MINUTES", "1")))
 SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS = max(1, int(os.getenv("SOURCE_RESOLUTION_MIN_INTERVAL_SECONDS", "5")))
 SOURCE_RESOLUTION_MAX_JOBS_PER_RUN = max(1, int(os.getenv("SOURCE_RESOLUTION_MAX_JOBS_PER_RUN", "10")))
-SCRAPER_CONTROL_POLL_SECONDS = max(2, int(os.getenv("SCRAPER_CONTROL_POLL_SECONDS", "5")))
 SOURCE_RESOLUTION_LEASE_SECONDS = max(30, int(os.getenv("SOURCE_RESOLUTION_LEASE_SECONDS", "180")))
 SOURCE_RESOLUTION_RETRY_MAX_SECONDS = max(300, int(os.getenv("SOURCE_RESOLUTION_RETRY_MAX_SECONDS", "21600")))
-PIPELINE_QUEUE_REPAIR_INTERVAL_MINUTES = max(1, int(os.getenv("PIPELINE_QUEUE_REPAIR_INTERVAL_MINUTES", "2")))
-PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES = max(1, int(os.getenv("PIPELINE_QUEUE_RECLAIM_INTERVAL_MINUTES", "1")))
 TELEGRAM_SESSION_SLOTS = _env_csv("TELEGRAM_SESSION_SLOTS", "primary")
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

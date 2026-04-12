@@ -277,6 +277,7 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_peer_ref_mode_queues_resolution_when_peer_ref_missing(self) -> None:
         writer = _FakeWriter()
         client = _FakeClient(entity=_FakeChannel())
+        diagnostics = {}
         channel_record = {
             "id": "chan-4",
             "channel_username": "@peerrefmissing",
@@ -287,16 +288,24 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", True), patch.object(
             channel_scraper.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True
         ):
-            refreshed, entity = await channel_scraper.prepare_source_for_scrape(client, channel_record, writer)
+            refreshed, entity = await channel_scraper.prepare_source_for_scrape(
+                client,
+                channel_record,
+                writer,
+                diagnostics=diagnostics,
+            )
 
         self.assertIsNone(entity)
         self.assertEqual(client.entity_requests, [])
         self.assertEqual(refreshed["id"], "chan-4")
         self.assertEqual(len(writer.queued_resolution_jobs), 1)
         self.assertEqual(writer.queued_resolution_jobs[0]["channel_id"], "chan-4")
+        self.assertEqual(diagnostics["pending_resolution_channels"], 1)
+        self.assertNotIn("username_fallback_channels", diagnostics)
 
     async def test_peer_ref_mode_uses_cached_peer_ref_without_username_lookup(self) -> None:
         writer = _FakeWriter()
+        diagnostics = {}
         writer.peer_refs[("chan-5", "primary")] = {
             "channel_id": "chan-5",
             "session_slot": "primary",
@@ -329,12 +338,51 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(channel_scraper, "resolve_source_metadata", side_effect=_fake_resolve_source_metadata), patch.object(
             channel_scraper, "Channel", _FakeChannel
         ):
-            refreshed, entity = await channel_scraper.prepare_source_for_scrape(client, channel_record, writer)
+            refreshed, entity = await channel_scraper.prepare_source_for_scrape(
+                client,
+                channel_record,
+                writer,
+                diagnostics=diagnostics,
+            )
 
         self.assertIsNotNone(entity)
         self.assertEqual(refreshed["source_type"], "channel")
         self.assertEqual(len(client.entity_requests), 1)
         self.assertNotEqual(client.entity_requests[0], "@peerrefhit")
+        self.assertEqual(diagnostics["peer_ref_channels"], 1)
+        self.assertNotIn("username_fallback_channels", diagnostics)
+
+    async def test_prepare_source_tracks_resolve_flood_wait_diagnostics(self) -> None:
+        writer = _FakeWriter()
+        diagnostics = {}
+        channel_record = {
+            "id": "chan-7",
+            "channel_username": "@floodwait",
+            "channel_title": "Flood Wait",
+            "is_active": True,
+        }
+
+        class _FakeFloodWaitError(Exception):
+            pass
+
+        class _FloodWaitClient:
+            async def get_entity(self, lookup):
+                del lookup
+                raise _FakeFloodWaitError("wait")
+
+        with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", False), patch.object(
+            channel_scraper, "FloodWaitError", _FakeFloodWaitError
+        ):
+            with self.assertRaises(_FakeFloodWaitError):
+                await channel_scraper.prepare_source_for_scrape(
+                    _FloodWaitClient(),
+                    channel_record,
+                    writer,
+                    diagnostics=diagnostics,
+                )
+
+        self.assertEqual(diagnostics["username_fallback_channels"], 1)
+        self.assertEqual(diagnostics["resolve_flood_wait_count"], 1)
 
     async def test_peer_ref_mode_requeues_when_cached_peer_ref_is_stale(self) -> None:
         writer = _FakeWriter()

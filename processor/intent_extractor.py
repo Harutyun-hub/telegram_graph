@@ -550,6 +550,17 @@ def _clamp_score(value, default: float = 0.0) -> float:
     return max(-1.0, min(1.0, score))
 
 
+def _normalize_enum(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() in {"null", "none", "n/a", "unknown"}:
+        return None
+    normalized = normalized.replace("-", "_").replace(" ", "_")
+    parts = [part.capitalize() for part in normalized.split("_") if part]
+    return "_".join(parts) or None
+
+
 def _normalize_social_sentiment_tags(parsed: dict) -> list[str]:
     tags: list[str] = []
     seen: set[str] = set()

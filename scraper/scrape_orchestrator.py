@@ -33,6 +33,12 @@ def _get_background_writer() -> Neo4jWriter:
 async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
     """Run one complete scrape cycle for all active channel sources."""
     channels = supabase_writer.get_active_channels()
+    diagnostics = {
+        "peer_ref_channels": 0,
+        "username_fallback_channels": 0,
+        "pending_resolution_channels": 0,
+        "resolve_flood_wait_count": 0,
+    }
     if not channels:
         logger.warning("No active channels found in telegram_channels table")
         return {
@@ -40,6 +46,7 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
             "channels_processed": 0,
             "posts_found": 0,
             "comments_found": 0,
+            **diagnostics,
         }
 
     channels_processed = 0
@@ -49,7 +56,12 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
     for channel in channels:
         username = channel["channel_username"]
         try:
-            prepared_channel, entity = await prepare_source_for_scrape(client, channel, supabase_writer)
+            prepared_channel, entity = await prepare_source_for_scrape(
+                client,
+                channel,
+                supabase_writer,
+                diagnostics=diagnostics,
+            )
             if not prepared_channel or entity is None:
                 await asyncio.sleep(5)
                 continue
@@ -88,6 +100,9 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
         "channels_processed": channels_processed,
         "posts_found": total_posts,
         "comments_found": total_comments,
+        **diagnostics,
+        "scrape_skipped": False,
+        "scrape_skipped_reason": None,
     }
 
 
@@ -106,6 +121,8 @@ def _run_ai_process_and_sync_blocking(
         "posts_pending_sync": 0,
         "posts_synced": 0,
         "sync_errors": 0,
+        "sync_batch_chunks": 0,
+        "sync_fallback_posts": 0,
         "recovery_unlocked_posts": 0,
         "recovery_unlocked_comment_groups": 0,
         "recovery_promoted_permanent": 0,
@@ -123,6 +140,7 @@ def _run_ai_process_and_sync_blocking(
             result["recovery_unlocked_posts"] = int(recovery.get("post_retried", 0) or 0)
             result["recovery_unlocked_comment_groups"] = int(recovery.get("comment_group_retried", 0) or 0)
             result["recovery_promoted_permanent"] = int(recovery.get("promoted_permanent", 0) or 0)
+
         comment_metrics: dict[str, int | float] = {
             "saved": 0,
             "failed_groups": 0,
@@ -219,6 +237,7 @@ def _run_ai_process_and_sync_blocking(
                     if analysis_ids:
                         supabase_writer.mark_analyses_synced(analysis_ids)
                     result["posts_synced"] += len(synced_post_ids)
+                    result["sync_batch_chunks"] += 1
                 except Exception as e:
                     error_text = str(e).lower()
                     if "serviceunavailable" in error_text or "connection" in error_text:
@@ -232,6 +251,7 @@ def _run_ai_process_and_sync_blocking(
                         [post.get("id") for post in post_chunk],
                         e,
                     )
+                    result["sync_fallback_posts"] += len(post_chunk)
                     for post in post_chunk:
                         if time.monotonic() >= sync_deadline:
                             result["sync_timeout"] = True
@@ -310,6 +330,10 @@ async def run_full_cycle(client: TelegramClient, supabase_writer) -> dict:
             "channels_processed": 0,
             "posts_found": 0,
             "comments_found": 0,
+            "peer_ref_channels": 0,
+            "username_fallback_channels": 0,
+            "pending_resolution_channels": 0,
+            "resolve_flood_wait_count": 0,
             "scrape_skipped": True,
             "scrape_skipped_reason": "backpressure",
             "backlog_before": backlog,

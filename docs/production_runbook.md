@@ -1,85 +1,151 @@
 # Production Runbook
 
-## Release A Posture
-- Source-of-truth stabilization line: `98185fe + c717f87`
-- Current production runtime remains single-service:
-  - one backend service
-  - `APP_ROLE=all`
-  - scraper scheduler enabled
-  - recurring card materializers disabled
-- Release B and Release C changes are planned later and are not part of the current live posture.
+## Runtime Shape
+- `frontend`: existing Railway static/proxy deployment
+- `web`: `uvicorn api.server:app --host 0.0.0.0 --port $PORT`
+- `worker`: `python -m api.worker`
+- `redis`: managed Redis required in staging and production
 
-## Current Runtime Safety Rules
-- Preserve the request/background executor split from `api/runtime_executors.py`.
-- Preserve the historical dashboard fast path for uncached ranges.
-- Preserve persisted dashboard snapshot behavior across restarts.
-- Keep recurring materializers disabled until the Phase 1 soak window is clean.
-- Do not switch production to `APP_ROLE=web` until a separate worker service exists and passes staging validation.
+## Canonical Stage 1 Environment Split
+Use the split below as the source of truth for the hardened Stage 1 deployment.
 
-## GitHub Release Gates
-- Protect `main` with the `quality-gate` status check from `.github/workflows/ci.yml`.
-- Backend gate covers:
-  - dependency install from `requirements.txt` + `requirements-dev.txt`
-  - syntax/import compile checks
-  - secret hygiene
-  - focused linting
-  - backend tests with a transitional coverage floor
-- Frontend gate currently covers the production build only.
-- Use `.github/workflows/deployment-smoke.yml` for manual environment smoke checks.
-- Use `.github/workflows/post-deploy-warmup.yml` after production deploys.
+### Web service
+Required:
+- `APP_ROLE=web`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `NEO4J_URI`
+- `NEO4J_USERNAME`
+- `NEO4J_PASSWORD`
+- `NEO4J_DATABASE`
+- `REDIS_URL`
+- `ADMIN_API_KEY`
+- analytics auth and frontend-facing API keys required by the web app
 
-## Release A Verification
-- Mixed-load probe target envelope:
-  - `/api/dashboard`: p95 `<= 4.5s`, `0` non-200, `0` timeouts
-  - `/api/topics`: p95 `<= 1.5s`, `0` non-200, `0` timeouts
-  - `/api/topics/detail`: p95 `<= 1.0s`, `0` non-200, `0` timeouts
-  - `/api/topics/evidence`: p95 `<= 1.0s`, `0` non-200, at most `1` timeout in the probe window
-- Historical range validation:
-  - first uncached historical request returns `200`
-  - first response may be degraded fast path
-  - first response completes `<= 8s`
-  - full cached follow-up completes `<= 2s` within `60s`
-- Soak window: `72h`
-- Soak thresholds:
-  - dashboard `5xx` rate `< 0.5%`
-  - `/readyz` failures `= 0`
-  - scheduler success `>= 99%`
-  - no day-over-day increase in Neo4j routing, pool, or defunct-connection errors
-  - no return of the raw dashboard timeout/failure path on normal or historical user traffic
+Must not be present on `web`:
+- any `TELEGRAM_*` runtime credentials
+- worker-only scraper throughput variables
+- worker-only background feature toggles
 
-## Smoke Commands
-Manual smoke:
+Recommended web-only hardening:
+- `RUN_STARTUP_WARMERS=false`
+
+### Worker service
+Required:
+- `APP_ROLE=worker`
+- `TELEGRAM_API_ID`
+- `TELEGRAM_API_HASH`
+- `TELEGRAM_SESSION_STRING`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `NEO4J_URI`
+- `NEO4J_USERNAME`
+- `NEO4J_PASSWORD`
+- `NEO4J_DATABASE`
+- `REDIS_URL`
+
+Canonical worker flags and limits:
+- `FEATURE_SOURCE_RESOLUTION_QUEUE=true`
+- `FEATURE_SOURCE_RESOLUTION_WORKER=true`
+- `FEATURE_SOURCE_PEER_REF_LOOKUP=true`
+- `RUN_STARTUP_WARMERS=false`
+- `SCRAPE_SKIP_WHEN_BACKLOG=true`
+- `SCRAPER_CONTROL_POLL_SECONDS=5`
+- `AI_NORMAL_COMMENT_LIMIT=120`
+- `AI_NORMAL_POST_LIMIT=50`
+- `AI_NORMAL_SYNC_LIMIT=160`
+- `AI_CATCHUP_COMMENT_LIMIT=220`
+- `AI_CATCHUP_POST_LIMIT=120`
+- `AI_CATCHUP_SYNC_LIMIT=320`
+- `AI_PROCESS_STAGE_MAX_SECONDS=1800`
+- `AI_SYNC_STAGE_MAX_SECONDS=1800`
+- `OPENAI_CIRCUIT_BREAKER_ENABLED=true`
+- `NEO4J_CONNECTION_ACQUISITION_TIMEOUT_SECONDS=15`
+- `NEO4J_MAX_TRANSACTION_RETRY_TIME_SECONDS=30`
+
+Operational rule:
+- only the worker may touch Telegram
+- the web service stays Telegram-blind and passive
+
+## GitHub Environments and Required Checks
+- Create GitHub environments named `staging` and `production`.
+- Store these environment secrets in both where applicable:
+  - `DEPLOY_BASE_URL`
+  - `ANALYTICS_API_KEY_FRONTEND`
+  - `ADMIN_API_KEY`
+- Protect `main` with the `quality-gate` status check from [ci.yml](/Users/harutnahapetyan/Documents/Gemini/Telegram/.github/workflows/ci.yml).
+- Use [deployment-smoke.yml](/Users/harutnahapetyan/Documents/Gemini/Telegram/.github/workflows/deployment-smoke.yml) for manual staging or production smoke verification.
+
+## Locked Environment Rules
+- `ANALYTICS_API_REQUIRE_AUTH=true`
+- `CORS_ALLOW_ORIGINS` must not include `*`
+- `REDIS_URL` must be configured
+- `ADMIN_API_KEY` must be configured
+- AI helper admin binding must be configured before boot
+- `ENABLE_DEBUG_ENDPOINTS=false` unless an explicit incident/debug window is approved
+
+## Staging Data Policy
+- Do not connect staging to live Telegram scraping
+- Do not reuse the production Telegram session in staging
+- Seed staging from a sanitized production-derived export
+- Remove or hash user identifiers and any sensitive content before loading staging data
+- Keep the staging worker manual-only for this milestone
+
+## Release Flow
+1. Merge only after CI is green.
+2. Deploy staging.
+3. Run staging smoke checks:
+   - `/readyz`
+   - `/api/dashboard`
+   - `/api/topics`
+   - `/api/freshness`
+   - `/api/scraper/scheduler` with `ADMIN_API_KEY`
+4. Run a short worker soak in staging and confirm:
+   - no duplicate cycle execution
+   - no escalating error rate
+   - no freshness regression
+5. Approve production deployment.
+6. Deploy production.
+7. Run post-deploy smoke/warmup workflow.
+8. Tag the release and record the rollback target.
+
+Local/manual smoke command:
 
 ```bash
 DEPLOY_BASE_URL=https://your-app.example.com \
 ANALYTICS_API_KEY_FRONTEND=... \
-python scripts/run_smoke_checks.py --wait-ready --label production
+ADMIN_API_KEY=... \
+python scripts/run_smoke_checks.py --wait-ready --label staging
 ```
 
-Backend QA:
+## Migration Policy
+- `supabase/migrations/` is the executable source of truth for database changes.
+- Migration policy is fix-forward only.
+- Do not use down migrations in staging or production.
+- If staging migration fails:
+  - stop rollout immediately
+  - write a corrective forward migration
+  - restore from backup only if data integrity is at risk
+- Production is blocked until the exact migration set succeeds on staging.
 
-```bash
-make qa-backend
-```
+## Backup and Restore
+- Supabase PITR or scheduled backups must be enabled.
+- Neo4j automated backups or snapshots must be enabled.
+- Retention policy must be documented before calling the system production ready.
+- Restore drill requirement:
+  - restore Supabase to staging
+  - restore Neo4j to staging
+  - rerun smoke checks
+  - record timing, gaps, and operator notes
 
-Frontend QA:
-
-```bash
-make qa-frontend
-```
-
-## Release A Rollback
-- Before deployment, record:
-  - current live git revision as `pre-release-a-stable`
-  - Railway deploy identifiers for live services
-  - any environment changes made for the release
-- If Release A regresses:
-  1. redeploy the recorded `pre-release-a-stable` artifacts
-  2. revert any environment changes introduced by the release
-  3. run smoke checks before reopening access
-- Release A contains no schema change, so database restore is not part of Release A rollback.
-
-## Deferred Work
-- Release B will introduce staging-only `web + worker + Redis` validation and locked-environment gates.
-- Release C will introduce the production split, controlled materializer rollout, and the backup/restore exit gate.
-- Do not treat those future controls as already-live production behavior in Release A documentation or deployment instructions.
+## Rollback
+- Record for every production deploy:
+  - release git tag
+  - previous git tag
+  - Railway deploy identifier for `frontend`, `web`, and `worker`
+  - any env var changes made during the release
+- Rollback steps:
+  1. Re-deploy the previous Railway release for each service.
+  2. Revert any env var changes made in the failed release.
+  3. If a migration caused data corruption, restore from the latest safe backup and re-run smoke checks.
+  4. Validate `/readyz`, `/api/dashboard`, `/api/freshness`, and one operator route before reopening access.

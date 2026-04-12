@@ -4,7 +4,7 @@
 [![API Docs](https://img.shields.io/badge/api-docs-blue)](./docs/api/)
 [![Architecture](https://img.shields.io/badge/architecture-documented-orange)](./docs/architecture/)
 
-Production-oriented Telegram intelligence platform for community monitoring, AI enrichment, graph analytics, and dashboard delivery.
+Production-oriented intelligence platform for Telegram community monitoring, social-media evidence review, AI enrichment, graph analytics, and dashboard delivery.
 
 ## What This Repository Ships
 
@@ -14,6 +14,7 @@ Production-oriented Telegram intelligence platform for community monitoring, AI 
 - Neo4j analytics graph for strategic and network queries
 - React + Vite dashboard frontend
 - AI-powered enrichment and brief generation
+- Operator-only social dashboard and social topics surfaces
 
 ## Current Dashboard Semantics
 
@@ -22,6 +23,14 @@ Production-oriented Telegram intelligence platform for community monitoring, AI 
 - Topic Landscape and Conversation Trends operate on direct message mentions only.
 - Topic Lifecycle is currently a short-window momentum classifier inside the 15-day window, not a full multi-stage lifecycle model.
 - Service Gap Detector is AI-only. It shows AI-grounded service-gap bars when valid service cards exist, and a soft `No service gap detected.` state when they do not.
+
+## Current Social Surface Semantics
+
+- `/social` is a dashboard twin of the main Telegram dashboard, but it stays on separate social endpoints and social frontend contracts.
+- `/social/topics` mirrors the Telegram Topics UX while using only social topics, social trend series, and social evidence.
+- Social routes remain operator-only and are backed by `/api/social/*` endpoints with `require_operator_access`.
+- Social topic detail is intentionally evidence-only in v1. It does not reuse Telegram AI topic-overview cards.
+- Unmapped Telegram widgets remain visible on `/social` as explicit social placeholders rather than synthetic or backfilled data.
 
 ## Repository Layout
 
@@ -73,10 +82,6 @@ cp frontend/.env.example frontend/.env
 
 Fill `.env` with real secrets before running the stack.
 
-Current staging note:
-- the staging Railway environment is temporarily using the same Supabase/Neo4j targets as production by decision
-- do not use staging for destructive testing until isolated staging data targets are introduced
-
 ### 3. Install dependencies
 
 ```bash
@@ -92,8 +97,7 @@ cd ..
 ### 4. Run backend
 
 ```bash
-source venv/bin/activate
-python -m uvicorn api.server:app --reload --port 8001
+venv/bin/python -m uvicorn api.server:app --reload --port 8001
 ```
 
 ### 5. Run frontend
@@ -103,7 +107,7 @@ cd frontend
 npm run dev
 ```
 
-The frontend defaults to `/api`. Set `VITE_API_BASE_URL` in `frontend/.env` if you want an explicit backend URL.
+The frontend defaults to `http://127.0.0.1:5174/` and proxies `/api` to `http://127.0.0.1:8001`. Set `VITE_API_BASE_URL` in `frontend/.env` if you want an explicit backend URL.
 
 ## Important Environment Variables
 
@@ -120,6 +124,14 @@ Backend:
 - `ANALYTICS_RATE_LIMIT_ENABLED` default `true`
 - `ANALYTICS_RATE_LIMIT_WINDOW_SECONDS` default `60`
 - `ANALYTICS_RATE_LIMIT_MAX_REQUESTS` default `120`
+- `OPENCLAW_GATEWAY_BASE_URL` backend-only OpenClaw Gateway base URL for the web AI helper and KB generation
+- `OPENCLAW_GATEWAY_TOKEN` backend-only OpenClaw Gateway token for the web AI helper and KB generation
+- `OPENCLAW_ANALYTICS_AGENT_ID` OpenClaw agent id that must match the Telegram analytics bot agent
+- `OPENCLAW_WEB_SESSION_KEY` dedicated persistent OpenClaw session key for the web helper, for example `tg-analyst-ru-web-admin`
+- `OPENCLAW_KB_SESSION_KEY` dedicated persistent OpenClaw session key for KB generation, for example `tg-analyst-ru-web-kb`
+- `OPENCLAW_HELPER_TIMEOUT_SECONDS` default `30`
+- `AI_HELPER_ADMIN_SUPABASE_USER_ID` required in production; only this Supabase user can use the web AI helper
+- `AI_HELPER_ADMIN_EMAIL` optional local/dev-only fallback if you need to test admin access before user-id wiring
 - `OPENAI_MODEL` default `gpt-5.4-mini`
 - `QUESTION_BRIEFS_MODEL` default `gpt-5.4-mini`
 - `QUESTION_BRIEFS_TRIAGE_MODEL` default `gpt-5.4-mini`
@@ -132,7 +144,8 @@ Frontend:
 
 - `VITE_API_BASE_URL` default `/api`
 - `BACKEND_ANALYTICS_API_KEY_FRONTEND` runtime secret for Caddy proxy injection
-- `BACKEND_URL` runtime backend target for Caddy reverse proxy
+- `VITE_SUPABASE_URL` browser Supabase Auth URL used to read the current admin session
+- `VITE_SUPABASE_ANON_KEY` browser Supabase Auth anon key used to read the current admin session
 
 ## AI Systems
 
@@ -141,15 +154,37 @@ Frontend:
 - Behavioral briefs default to `gpt-5.4-mini`.
 - Service-gap cards are generated only from grounded service/help evidence in posts and related comments. There is no production fallback that turns generic topic dissatisfaction into service-gap bars.
 
-## Railway Compatibility
+## Recommended Deployment Shape
 
-Release A remains intentionally compatible with the current Railway single-service backend shape:
+The recommended Railway topology for the hardened release is:
 
-- no change to the frontend Caddy reverse proxy contract
-- no new Railway manifest or service split
-- no new dependency requirements beyond the existing backend/frontend stacks
-- background jobs still run in the default single-service deploy with `APP_ROLE=all`
-- recurring card materializers remain intentionally disabled in production during the stabilization window
+- `frontend`: existing static/Caddy deployment
+- `web`: `uvicorn api.server:app --host 0.0.0.0 --port $PORT`
+- `worker`: `python -m api.worker`
+- `redis`: managed Redis
+
+Testing release-candidate topology in the same Railway project:
+
+- `frontend-testing`: same frontend build, separate testing URL
+- `web-testing`: same backend code, same real credentials, but **web-only**
+- do **not** create `worker-testing` while testing still shares the real data plane
+- use the same live Telegram/social databases, graphs, Redis, and provider keys
+- route `staging` branch deployments to the testing URL and keep `main` production-only
+
+Critical safety rule for the testing URL:
+
+- testing shares the live databases with production
+- therefore testing must not run background writers automatically
+- enforce `APP_ROLE=web` and `RUN_STARTUP_WARMERS=false`
+- manual social validation is allowed only through operator endpoints such as `/api/social/runtime/run-once`
+- only one active social writer should run at a time during controlled validation windows
+
+Compatibility note:
+
+- the repo still preserves the historical `APP_ROLE=all` mode for legacy single-service deployments
+- that mode is compatibility-only and should not be treated as the target production shape for the 8.5/10 plan
+- for production hardening, use `APP_ROLE=web` on the web service and `APP_ROLE=worker` on the worker service
+- the canonical Stage 1 web/worker env split now lives in [production_runbook.md](/Users/harutnahapetyan/Documents/Gemini/Telegram/docs/production_runbook.md)
 
 Operational note:
 
@@ -158,7 +193,12 @@ Operational note:
   `OPENAI_MODEL`, `QUESTION_BRIEFS_MODEL`, `QUESTION_BRIEFS_TRIAGE_MODEL`, `QUESTION_BRIEFS_SYNTHESIS_MODEL`, `BEHAVIORAL_BRIEFS_MODEL`, `BEHAVIORAL_BRIEFS_PROMPT_VERSION`
 
 The frontend still expects `/api/*` to be reverse-proxied to the backend through `BACKEND_URL` in Railway.
-- In Railway staging/production, `BACKEND_URL` should use the internal Railway backend URL, not the public `up.railway.app` URL.
+
+Testing URL setup:
+
+- set `BACKEND_URL` on `frontend-testing` to the Railway URL of `web-testing`
+- keep the same `BACKEND_ANALYTICS_API_KEY_FRONTEND` injection model
+- use the same real secrets as production unless and until you intentionally build isolated staging data services later
 
 Analytics auth rollout:
 
@@ -172,12 +212,34 @@ Analytics auth rollout:
 Immediate rollback:
 
 - if there is an outage, set `ANALYTICS_API_REQUIRE_AUTH=false` and redeploy
-- if a Release A deployment regresses, redeploy the recorded `pre-release-a-stable` artifacts and revert any env changes introduced with that release
 
-Future architecture note:
+## OpenClaw Web AI Helper
 
-- `web + worker + Redis` is a planned Release B/C target, not the current live production posture
-- do not flip production to `APP_ROLE=web` unless a separate worker service exists and has passed staging validation
+- The dashboard floating AI helper now talks to OpenClaw through the backend only. The browser never receives OpenClaw credentials.
+- The app does not need OpenClaw Control UI for this integration. Control UI origin and device-auth settings are only relevant if humans open OpenClaw's own web UI.
+- Telegram and web must share the same `OPENCLAW_ANALYTICS_AGENT_ID`, but they must not share the same session key.
+- Telegram keeps its existing OpenClaw session/memory untouched.
+- The web helper uses only `OPENCLAW_WEB_SESSION_KEY`, so refreshes keep the same web conversation and resets affect only that web session.
+- KB generation may also use OpenClaw through the backend, but it must use `OPENCLAW_KB_SESSION_KEY` so grounded KB prompts never mix with the floating helper conversation.
+
+Production integration notes:
+
+- Keep OpenClaw Gateway on shared-secret token auth for the app backend calls.
+- Expose OpenClaw on a dedicated HTTPS API hostname if needed, but treat it as a backend dependency rather than a browser app.
+- Do not reuse `ANALYTICS_API_KEY_OPENCLAW` for `/api/ai-helper/*`; that token is only for OpenClaw skills calling the app's read-only/server-to-server APIs.
+
+Resetting the web helper:
+
+- use the Clear button in the floating helper UI, which calls `POST /api/ai-helper/reset`
+- or call `POST /api/ai-helper/reset` directly from an authenticated admin session
+
+Verification checklist:
+
+- web helper answers analytics questions using the same intelligence as Telegram
+- Telegram bot still works unchanged
+- web helper history survives page refresh
+- resetting the web helper does not affect Telegram context
+- failures return clean UI-safe messages and no OpenClaw secret reaches the browser
 
 ## Validation Commands
 
@@ -187,7 +249,7 @@ Backend QA:
 make qa-backend
 ```
 
-Frontend build QA:
+Frontend QA:
 
 ```bash
 make qa-frontend
@@ -198,13 +260,14 @@ Smoke checks against a deployed environment:
 ```bash
 DEPLOY_BASE_URL=https://your-app.example.com \
 ANALYTICS_API_KEY_FRONTEND=... \
+ADMIN_API_KEY=... \
 make smoke-check
 ```
 
-GitHub release gate recommendation:
+GitHub required check recommendation:
 
-- protect `main` with the `quality-gate` status check from `.github/workflows/ci.yml`
-- use `.github/workflows/deployment-smoke.yml` or `.github/workflows/post-deploy-warmup.yml` after deploys instead of relying on ad hoc curls
+- protect `main` with the `quality-gate` status check from [ci.yml](/Users/harutnahapetyan/Documents/Gemini/Telegram/.github/workflows/ci.yml)
+- keep [post-deploy-warmup.yml](/Users/harutnahapetyan/Documents/Gemini/Telegram/.github/workflows/post-deploy-warmup.yml) as a post-release validation step, not the only release gate
 
 ## Operational Scripts
 
@@ -213,8 +276,6 @@ Relevant maintenance scripts for the current analytics stack:
 - `scripts/reset_topic_analytics_window.py` — resets and rebuilds the clean analytics window
 - `scripts/validate_topic_mentions.py` — validates direct-message mention counts
 - `scripts/remove_redundant_general_topic_links.py` — removes redundant `General` taxonomy links when a stronger category exists
-- `scripts/probe_mixed_load.py` — runs the Phase 1 mixed-load validation probe
-- `scripts/run_smoke_checks.py` — reusable post-deploy smoke validation for readiness, dashboard, topics, and freshness
 
 ## Documentation
 

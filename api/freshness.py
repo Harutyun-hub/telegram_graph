@@ -54,8 +54,14 @@ def _status_from_age(age_minutes: Optional[int], warn_after: int, stale_after: i
 def _worst_status(statuses: list[str]) -> str:
     if any(s == "stale" for s in statuses):
         return "stale"
+    if any(s == "paused_by_backpressure" for s in statuses):
+        return "paused_by_backpressure"
     if any(s == "warning" for s in statuses):
         return "warning"
+    if any(s == "caught_up" for s in statuses):
+        return "caught_up"
+    if any(s == "idle" for s in statuses):
+        return "idle"
     if any(s == "unknown" for s in statuses):
         return "unknown"
     return "healthy"
@@ -137,8 +143,12 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append("Telegram source resolution is cooling down due to flood-wait limits.")
     if drift.get("latest_post_delta_minutes") is not None and _to_int(drift.get("latest_post_delta_minutes"), 0) > 120:
         notes.append("Latest post timestamp differs by more than 2 hours between Supabase and Neo4j.")
+    if pipeline.get("scrape", {}).get("status") == "paused_by_backpressure":
+        notes.append("Scrape is intentionally paused until the AI backlog drops below backpressure thresholds.")
     if pipeline.get("scrape", {}).get("status") == "stale":
         notes.append("Scraper appears stale relative to configured interval.")
+    if pipeline.get("sync", {}).get("status") == "caught_up":
+        notes.append("Neo4j sync is caught up; there are no posts waiting for graph sync.")
     if pipeline.get("sync", {}).get("status") == "stale":
         notes.append("Graph sync signals are stale.")
     return notes
@@ -147,6 +157,9 @@ def _build_notes(snapshot: dict) -> list[str]:
 def _compute_health_score(snapshot: dict) -> int:
     status_penalty = {
         "healthy": 0,
+        "caught_up": 0,
+        "idle": 0,
+        "paused_by_backpressure": 10,
         "unknown": 10,
         "warning": 20,
         "stale": 35,
@@ -254,199 +267,6 @@ def _eta_confidence(run_history: list[dict], running_now: bool) -> str:
     return "medium" if running_now else "low"
 
 
-def _shared_freshness_snapshot_is_current(shared: dict, scheduler: dict, now: datetime) -> bool:
-    if not isinstance(shared, dict) or not shared:
-        return False
-
-    generated_at = _parse_iso(shared.get("generated_at"))
-    if not generated_at:
-        return False
-
-    interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
-    max_age_seconds = max(_CACHE_TTL_SECONDS, interval_minutes * 180)
-    age_seconds = max(0.0, (now - generated_at).total_seconds())
-    if age_seconds > max_age_seconds:
-        return False
-
-    scheduler_finished = _parse_iso(scheduler.get("last_run_finished_at") or scheduler.get("last_success_at"))
-    if scheduler_finished and generated_at < scheduler_finished:
-        return False
-
-    return True
-
-
-def _build_supabase_only_freshness_snapshot(
-    supabase_writer,
-    *,
-    scheduler_status: Optional[dict] = None,
-    now: Optional[datetime] = None,
-    assumption: str | None = None,
-) -> dict:
-    now = now or datetime.now(timezone.utc)
-    scheduler = scheduler_status or {}
-    interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
-    supa = supabase_writer.get_pipeline_freshness_snapshot()
-    recent = supabase_writer.get_recent_pipeline_snapshot()
-    retention_days = max(1, _to_int(recent.get("window_days"), int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15))))
-    resolution = ((scheduler.get("resolution") or {}).get("snapshot") or {}) if isinstance(scheduler, dict) else {}
-
-    last_scrape_at = supa.get("last_scrape_at")
-    last_process_at = supa.get("last_process_at")
-    last_graph_sync_at = recent.get("recent_last_graph_sync_post_at") or supa.get("last_graph_sync_at")
-
-    scrape_age = _age_minutes(last_scrape_at, now)
-    process_age = _age_minutes(last_process_at, now)
-    sync_age = _age_minutes(last_graph_sync_at, now)
-
-    scrape_status = _status_from_age(scrape_age, warn_after=interval_minutes * 2, stale_after=interval_minutes * 4)
-    process_status = _status_from_age(process_age, warn_after=120, stale_after=360)
-    sync_status = _status_from_age(sync_age, warn_after=120, stale_after=360)
-
-    run_history = scheduler.get("run_history") or []
-    recent_history = run_history[-6:] if isinstance(run_history, list) else []
-
-    ai_items_last_run = 0
-    ai_failed_last_run = 0
-    ai_blocked_last_run = 0
-    ai_deferred_last_run = 0
-    neo4j_synced_last_run = 0
-    scraped_items_last_run = 0
-    if recent_history:
-        latest = recent_history[-1]
-        ai_items_last_run = _to_int(latest.get("ai_processed_items"), 0)
-        ai_failed_last_run = _to_int(latest.get("ai_failed_items"), 0)
-        ai_blocked_last_run = _to_int(latest.get("ai_blocked_items"), 0)
-        ai_deferred_last_run = _to_int(latest.get("ai_deferred_items"), 0)
-        neo4j_synced_last_run = _to_int(latest.get("neo4j_synced_posts"), 0)
-        scraped_items_last_run = _to_int(latest.get("scraped_items"), 0)
-
-    ai_rate_per_hour = _avg_rate_per_hour(recent_history, "ai_processed_items")
-    ai_failure_rate = _avg_ai_failure_rate(recent_history)
-    sync_rate_per_hour = _avg_rate_per_hour(recent_history, "neo4j_synced_posts")
-    scrape_rate_per_hour = _avg_rate_per_hour(recent_history, "scraped_items")
-
-    ai_queue = _to_int(supa.get("runnable_comment_groups"), 0) + _to_int(supa.get("runnable_posts"), 0)
-    graph_queue = _to_int(supa.get("unsynced_posts"), 0)
-    eta_ai = _eta_minutes(ai_queue, ai_rate_per_hour)
-    eta_graph = _eta_minutes(graph_queue, sync_rate_per_hour)
-
-    if ai_queue > 0 and eta_ai is None:
-        eta_total = None
-    elif graph_queue > 0 and eta_graph is None:
-        eta_total = None
-    elif eta_ai is None and eta_graph is None:
-        eta_total = None
-    else:
-        eta_total = max(eta_ai or 0, eta_graph or 0)
-
-    snapshot = {
-        "generated_at": now.isoformat(),
-        "scheduler": {
-            "is_active": bool(scheduler.get("is_active", False)),
-            "interval_minutes": interval_minutes,
-            "running_now": bool(scheduler.get("running_now", False)),
-            "last_success_at": scheduler.get("last_success_at"),
-            "next_run_at": scheduler.get("next_run_at"),
-            "last_error": scheduler.get("last_error"),
-        },
-        "pipeline": {
-            "scrape": {
-                "status": scrape_status,
-                "last_scrape_at": last_scrape_at,
-                "age_minutes": scrape_age,
-                "active_channels": _to_int(supa.get("active_channels"), 0),
-                "active_channels_never_scraped": _to_int(supa.get("active_channels_never_scraped"), 0),
-            },
-            "process": {
-                "status": process_status,
-                "last_process_at": last_process_at,
-                "age_minutes": process_age,
-            },
-            "sync": {
-                "status": sync_status,
-                "last_graph_sync_at": last_graph_sync_at,
-                "age_minutes": sync_age,
-                "source": "supabase_synced_content_timestamp",
-                "estimated": True,
-            },
-        },
-        "backlog": {
-            "unprocessed_posts": _to_int(supa.get("unprocessed_posts"), 0),
-            "unprocessed_comments": _to_int(supa.get("unprocessed_comments"), 0),
-            "unsynced_posts": _to_int(supa.get("unsynced_posts"), 0),
-            "unsynced_analysis": _to_int(supa.get("unsynced_analysis"), 0),
-            "dead_letter_scopes": _to_int(supa.get("dead_letter_scopes"), 0),
-            "retry_blocked_scopes": _to_int(supa.get("retry_blocked_scopes"), 0),
-            "transient_dead_letter_scopes": _to_int(supa.get("transient_dead_letter_scopes"), 0),
-            "permanent_dead_letter_scopes": _to_int(supa.get("permanent_dead_letter_scopes"), 0),
-            "recent_transient_failures": _to_int(supa.get("recent_transient_failures"), 0),
-            "recent_permanent_failures": _to_int(supa.get("recent_permanent_failures"), 0),
-            "runnable_posts": _to_int(supa.get("runnable_posts"), 0),
-            "runnable_comment_groups": _to_int(supa.get("runnable_comment_groups"), 0),
-            "blocked_dead_letter_posts": _to_int(supa.get("blocked_dead_letter_posts"), 0),
-            "blocked_dead_letter_comment_groups": _to_int(supa.get("blocked_dead_letter_comment_groups"), 0),
-            "blocked_retry_posts": _to_int(supa.get("blocked_retry_posts"), 0),
-            "blocked_retry_comment_groups": _to_int(supa.get("blocked_retry_comment_groups"), 0),
-            "resolution_due_jobs": _to_int(resolution.get("due_jobs"), 0),
-            "resolution_leased_jobs": _to_int(resolution.get("leased_jobs"), 0),
-            "resolution_dead_letter_jobs": _to_int(resolution.get("dead_letter_jobs"), 0),
-            "resolution_cooldown_slots": _to_int(resolution.get("cooldown_slots"), 0),
-            "resolution_oldest_due_age_seconds": _to_int(resolution.get("oldest_due_age_seconds"), 0),
-            "active_pending_sources": _to_int(resolution.get("active_pending_sources"), 0),
-        },
-        "drift": {
-            "analytics_window_days": retention_days,
-            "window_start_at": recent.get("window_start_at"),
-            "supabase_total_posts": _to_int(recent.get("recent_posts"), 0),
-            "neo4j_total_posts": 0,
-            "post_count_gap": None,
-            "supabase_last_post_at": recent.get("recent_last_post_at") or supa.get("last_post_at"),
-            "neo4j_last_post_at": None,
-            "supabase_last_post_age_minutes": _age_minutes(recent.get("recent_last_post_at") or supa.get("last_post_at"), now),
-            "neo4j_last_post_age_minutes": None,
-            "latest_post_delta_minutes": None,
-            "neo4j_channel_count": 0,
-            "neo4j_topic_count": 0,
-        },
-        "resolution": resolution,
-        "pulse": {
-            "queue": {
-                "ai_items": ai_queue,
-                "ai_raw_items": _to_int(supa.get("unprocessed_comments"), 0) + _to_int(supa.get("unprocessed_posts"), 0),
-                "graph_posts": graph_queue,
-            },
-            "processed": {
-                "scraped_items_last_run": scraped_items_last_run,
-                "ai_items_last_run": ai_items_last_run,
-                "ai_failed_last_run": ai_failed_last_run,
-                "ai_blocked_last_run": ai_blocked_last_run,
-                "ai_deferred_last_run": ai_deferred_last_run,
-                "neo4j_posts_last_run": neo4j_synced_last_run,
-                "ai_rate_per_hour": ai_rate_per_hour,
-                "ai_failure_rate_percent": ai_failure_rate,
-                "neo4j_rate_per_hour": sync_rate_per_hour,
-                "scrape_rate_per_hour": scrape_rate_per_hour,
-            },
-            "eta": {
-                "ai_queue_minutes": eta_ai,
-                "graph_queue_minutes": eta_graph,
-                "total_minutes": eta_total,
-                "confidence": _eta_confidence(recent_history, bool(scheduler.get("running_now", False))),
-                "assumption": assumption or "Derived from Supabase pipeline state while waiting for a fresh worker snapshot.",
-            },
-        },
-    }
-
-    overall_status = _worst_status([scrape_status, process_status, sync_status])
-    snapshot["health"] = {
-        "status": overall_status,
-        "score": _compute_health_score(snapshot),
-        "notes": _build_notes(snapshot),
-    }
-    snapshot["operational"] = _compute_operational_health(scheduler=scheduler)
-    return snapshot
-
-
 def get_freshness_snapshot(
     supabase_writer,
     *,
@@ -471,6 +291,7 @@ def get_freshness_snapshot(
 
     scheduler = scheduler_status or {}
     interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
+    last_result = scheduler.get("last_result") if isinstance(scheduler.get("last_result"), dict) else {}
     supa = supabase_writer.get_pipeline_freshness_snapshot()
     resolution = supabase_writer.get_source_resolution_snapshot(session_slot="primary")
     recent = supabase_writer.get_recent_pipeline_snapshot()
@@ -501,6 +322,19 @@ def get_freshness_snapshot(
     scrape_status = _status_from_age(scrape_age, warn_after=interval_minutes * 2, stale_after=interval_minutes * 4)
     process_status = _status_from_age(process_age, warn_after=120, stale_after=360)
     sync_status = _status_from_age(sync_age, warn_after=120, stale_after=360)
+    scrape_paused_reason: str | None = None
+    if last_result.get("scrape_skipped") and str(last_result.get("scrape_skipped_reason") or "").strip() == "backpressure":
+        scrape_status = "paused_by_backpressure"
+        scrape_paused_reason = "backpressure"
+    graph_queue = _to_int(supa.get("unsynced_posts"), 0)
+    sync_reason: str | None = None
+    if graph_queue <= 0:
+        if last_graph_sync_at:
+            sync_status = "caught_up"
+            sync_reason = "no_pending_graph_backlog"
+        else:
+            sync_status = "idle"
+            sync_reason = "no_graph_sync_backlog"
 
     run_history = scheduler.get("run_history") or []
     recent_history = run_history[-6:] if isinstance(run_history, list) else []
@@ -526,8 +360,6 @@ def get_freshness_snapshot(
     scrape_rate_per_hour = _avg_rate_per_hour(recent_history, "scraped_items")
 
     ai_queue = _to_int(supa.get("runnable_comment_groups"), 0) + _to_int(supa.get("runnable_posts"), 0)
-    graph_queue = _to_int(supa.get("unsynced_posts"), 0)
-
     eta_ai = _eta_minutes(ai_queue, ai_rate_per_hour)
     eta_graph = _eta_minutes(graph_queue, sync_rate_per_hour)
     eta_total: int | None
@@ -553,6 +385,7 @@ def get_freshness_snapshot(
         "pipeline": {
             "scrape": {
                 "status": scrape_status,
+                "reason": scrape_paused_reason,
                 "last_scrape_at": last_scrape_at,
                 "age_minutes": scrape_age,
                 "active_channels": _to_int(supa.get("active_channels"), 0),
@@ -565,6 +398,7 @@ def get_freshness_snapshot(
             },
             "sync": {
                 "status": sync_status,
+                "reason": sync_reason,
                 "last_graph_sync_at": last_graph_sync_at,
                 "age_minutes": sync_age,
                 "source": sync_source,
@@ -651,131 +485,4 @@ def get_freshness_snapshot(
     if persist_shared_snapshot:
         supabase_writer.save_shared_freshness_snapshot(snapshot)
     return snapshot
-
-
-def get_passive_freshness_snapshot(
-    supabase_writer,
-    *,
-    scheduler_status: Optional[dict] = None,
-) -> dict:
-    global _CACHE, _CACHE_TS
-
-    now = datetime.now(timezone.utc)
-    scheduler = scheduler_status or {}
-    try:
-        shared = supabase_writer.get_shared_freshness_snapshot(default={}, timeout_seconds=1.5)
-    except Exception:
-        shared = {}
-
-    if _shared_freshness_snapshot_is_current(shared, scheduler, now):
-        _CACHE = shared
-        _CACHE_TS = _parse_iso(shared.get("generated_at")) or now
-        return shared
-
-    try:
-        snapshot = _build_supabase_only_freshness_snapshot(
-            supabase_writer,
-            scheduler_status=scheduler,
-            now=now,
-            assumption=(
-                "Shared worker freshness is missing or stale, so this snapshot was rebuilt "
-                "from current Supabase pipeline state."
-            ),
-        )
-        _CACHE = snapshot
-        _CACHE_TS = now
-        return snapshot
-    except Exception:
-        if _CACHE and _CACHE_TS:
-            cache_age = (now - _CACHE_TS).total_seconds()
-            if cache_age < _CACHE_TTL_SECONDS:
-                return _CACHE
-        if shared:
-            _CACHE = shared
-            _CACHE_TS = _parse_iso(shared.get("generated_at")) or now
-            return shared
-
-    return {
-        "generated_at": now.isoformat(),
-        "scheduler": {
-            "is_active": bool(scheduler.get("is_active", False)),
-            "interval_minutes": max(1, _to_int(scheduler.get("interval_minutes"), 15)),
-            "running_now": bool(scheduler.get("running_now", False)),
-            "last_success_at": scheduler.get("last_success_at"),
-            "next_run_at": scheduler.get("next_run_at"),
-            "last_error": scheduler.get("last_error"),
-        },
-        "pipeline": {
-            "scrape": {"status": "unknown", "last_scrape_at": None, "age_minutes": None, "active_channels": 0, "active_channels_never_scraped": 0},
-            "process": {"status": "unknown", "last_process_at": None, "age_minutes": None},
-            "sync": {"status": "unknown", "last_graph_sync_at": None, "age_minutes": None, "source": "shared_snapshot_unavailable", "estimated": True},
-        },
-        "backlog": {
-            "unprocessed_posts": 0,
-            "unprocessed_comments": 0,
-            "unsynced_posts": 0,
-            "unsynced_analysis": 0,
-            "dead_letter_scopes": 0,
-            "retry_blocked_scopes": 0,
-            "transient_dead_letter_scopes": 0,
-            "permanent_dead_letter_scopes": 0,
-            "recent_transient_failures": 0,
-            "recent_permanent_failures": 0,
-            "runnable_posts": 0,
-            "runnable_comment_groups": 0,
-            "blocked_dead_letter_posts": 0,
-            "blocked_dead_letter_comment_groups": 0,
-            "blocked_retry_posts": 0,
-            "blocked_retry_comment_groups": 0,
-            "resolution_due_jobs": 0,
-            "resolution_leased_jobs": 0,
-            "resolution_dead_letter_jobs": 0,
-            "resolution_cooldown_slots": 0,
-            "resolution_oldest_due_age_seconds": 0,
-            "active_pending_sources": 0,
-        },
-        "drift": {
-            "analytics_window_days": max(1, int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15))),
-            "window_start_at": None,
-            "supabase_total_posts": 0,
-            "neo4j_total_posts": 0,
-            "post_count_gap": 0,
-            "supabase_last_post_at": None,
-            "neo4j_last_post_at": None,
-            "supabase_last_post_age_minutes": None,
-            "neo4j_last_post_age_minutes": None,
-            "latest_post_delta_minutes": None,
-            "neo4j_channel_count": 0,
-            "neo4j_topic_count": 0,
-        },
-        "resolution": {},
-        "pulse": {
-            "queue": {"ai_items": 0, "ai_raw_items": 0, "graph_posts": 0},
-            "processed": {
-                "scraped_items_last_run": 0,
-                "ai_items_last_run": 0,
-                "ai_failed_last_run": 0,
-                "ai_blocked_last_run": 0,
-                "ai_deferred_last_run": 0,
-                "neo4j_posts_last_run": 0,
-                "ai_rate_per_hour": 0.0,
-                "ai_failure_rate_percent": 0.0,
-                "neo4j_rate_per_hour": 0.0,
-                "scrape_rate_per_hour": 0.0,
-            },
-            "eta": {
-                "ai_queue_minutes": 0,
-                "graph_queue_minutes": 0,
-                "total_minutes": 0,
-                "confidence": "low",
-                "assumption": "Worker freshness snapshot is not available yet.",
-            },
-        },
-        "health": {
-            "status": "unknown",
-            "score": 0,
-            "notes": ["Worker freshness snapshot is not available yet."],
-        },
-        "operational": _compute_operational_health(scheduler=scheduler),
-    }
     
