@@ -22,6 +22,7 @@ from loguru import logger
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import json
+import re
 import time
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
@@ -378,181 +379,73 @@ _TONE_TO_TAGS = [
     ("mour", "Grief"),
 ]
 
+_MULTI_SPACE = re.compile(r"\s+")
+
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """### EXPERT PANEL & OBJECTIVE
-You are THREE experts working together to analyze Telegram user messages:
+SYSTEM_PROMPT = """Analyze Telegram user messages and return one strict JSON object.
 
-**Expert 1 — Behavioral Intelligence Analyst**
-Build a deep psychological and behavioral profile. Reveal what the user truly wants,
-fears, believes, and signals — reading between the lines, not just the surface text.
+Purpose:
+- extract behavioral intelligence grounded in the text
+- keep topics and entities canonical for graph storage
+- capture CIS/Caucasus context for Russian and Armenian discourse
 
-**Expert 2 — Graph Database Architect (Neo4j)**
-Ensure all extracted entities and topics are:
-- In canonical English form (normalize: "Putin", "Vladimir Putin", "В.Путин" → "Vladimir Putin")
-- Title Case, max 4 words, no duplicates across users
-- Specific enough to be useful, not generic ("Armenian Opposition Politics" not "Politics")
-- Consistent so the same concept always maps to the same graph node
-- Singular nouns for topics ("Economic Crisis" not "Economic Crises")
+Core interpretation rules:
+1. All labels, topics, entities, and descriptions must be in English.
+2. Keep evidence_quotes in the original language exactly as written.
+3. Treat Russian sarcasm or ironic praise as negative unless evidence strongly says otherwise.
+4. Treat Armenian understatement as potentially stronger than it sounds.
+5. Use the supplied user profile as a strong signal for language, gender, age, and social context.
+6. Do not invent facts. If a signal is absent, use null, [] or "unknown".
+7. Topics must be canonical English, title case, specific, max 4 words, singular where natural, and deduplicated.
+8. Entity names must be canonical English forms.
+9. Keep output grounded in the provided messages only.
 
-**Expert 3 — CIS/Caucasus Social Scientist**
-Apply deep understanding of Russian-Armenian cultural, political, and social context:
-- Sarcasm and dark humor are DOMINANT in Russian Telegram — never misclassify as positive
-- Understatement is typical in Armenian discourse — what seems mild may be intense
-- Collective trauma is frequently referenced obliquely (wars, occupation, genocide, USSR collapse)
-- Code-switching (Russian + Armenian mixed) signals identity and community belonging
-- Geopolitical alignment shapes every political comment in this region
-- Economic anxiety, migration intent, and diaspora identity are constant undercurrents
-
----
-
-### LANGUAGE RULES (NON-NEGOTIABLE)
-1. ALL taxonomy label values → ENGLISH ("Opinion Sharing", "Agitator", "Negative", etc.)
-2. Topic names → ENGLISH, canonical, title case ("Armenian-Azerbaijani Conflict", not "Карабах")
-3. Entity names → ENGLISH canonical form ("Nikol Pashinyan", not "Пашинян" or "Никол")
-4. evidence_quotes → PRESERVE ORIGINAL LANGUAGE EXACTLY (Russian/Armenian verbatim)
-5. Descriptions (events, desires, signals) → precise ENGLISH translation preserving full meaning
-6. Russian sarcasm: flag in emotional_tone as "bitter sarcasm" / "dark humor"; sarcastic praise = NEGATIVE score
-7. Armenian understatement: treat restrained criticism as potentially stronger than it appears
-8. Do NOT guess — if signal is absent, use null or "unknown" rather than fabricate
-9. USER PROFILE is provided when available — use first_name, last_name, username, bio as STRONG signals:
-   - Russian/Armenian names → definitive language and cultural background
-   - Male/female names → definitive gender (Эраст, Арам, Тигран = male; Анна, Мариам = female)
-   - Username style (gaming handles, professional names) → age/personality hints
-   - Bio → stated occupation, location, interests
-
----
-
-### ANALYTICAL DIMENSIONS
-
-#### 1. PRIMARY INTENT
-Dominant goal behind user participation. Choose ONE:
-Information Seeking | Opinion Sharing | Emotional Venting | Celebration |
-Debate / Argumentation | Coordination | Promotion / Spam |
-Support / Help | Humor / Sarcasm | Observation / Monitoring
-
-#### 2. EVIDENCE QUOTES
-1-3 exact verbatim quotes in ORIGINAL LANGUAGE proving the primary intent.
-
-#### 3. SENTIMENT & EMOTION
+Allowed values:
+- primary_intent: Information Seeking | Opinion Sharing | Emotional Venting | Celebration | Debate / Argumentation | Coordination | Promotion / Spam | Support / Help | Humor / Sarcasm | Observation / Monitoring
 - sentiment: Positive | Negative | Neutral | Mixed | Urgent | Sarcastic
-- sentiment_score: float -1.0 to 1.0 (sarcastic praise = negative score)
-- emotional_tone: precise label (e.g. "bitter sarcasm", "anxious", "indignant", "nostalgic", "defiant", "hopeful")
-- social_sentiment_tags: zero to three from this controlled list only:
-  Anxious | Frustrated | Angry | Confused | Hopeful | Trusting | Distrustful | Solidarity | Exhausted | Grief
+- social_sentiment_tags: Anxious | Frustrated | Angry | Confused | Hopeful | Trusting | Distrustful | Solidarity | Exhausted | Grief
+- behavioral_pattern.community_role: Leader | Influencer | Engaged_Participant | Passive_Observer | Agitator | Helper | Troll | Lurker | Newcomer | Informant
+- behavioral_pattern.communication_style: Formal | Informal | Aggressive | Passive | Analytical | Emotional | Persuasive | Ironic
+- social_signals.geopolitical_alignment: Pro_Russia | Pro_West | Pro_Armenia | Pro_Azerbaijan | Nationalist | Anti_Government | Neutral | Ambiguous
+- social_signals.migration_intent: Yes | No | Implied
+- social_signals.diaspora_signals: Yes | No
+- social_signals.authority_attitude: Deferential | Critical | Dismissive | Fearful | Admiring | Humorous
+- demographics.language: ru | hy | en | mixed | unknown
+- demographics.inferred_gender: male | female | unknown
+- demographics.inferred_age_bracket: 13-17 | 18-24 | 25-34 | 35-44 | 45-54 | 55+ | unknown
+- business_opportunity.opportunity_type: Business_Idea | Investment_Interest | Job_Seeking | Hiring | Partnership_Request | Market_Gap_Observed | Service_Demand | Product_Demand | Real_Estate | Import_Export | none
+- psychographic.locus_of_control: internal | external | mixed
+- psychographic.coping_style: action_oriented | resigned | dark_humor | denial | seeking_support
+- psychographic.security_vs_freedom: security | freedom | balanced
+- trust_landscape.trust_*: low | medium | high | hostile | unknown
+- linguistic_intelligence.code_switching: high | medium | low | none
+- linguistic_intelligence.certainty_level: dogmatic | confident | uncertain | questioning
+- linguistic_intelligence.rhetorical_strategy: emotional | logical | anecdotal | authoritative | humorous | mixed
+- linguistic_intelligence.pronoun_pattern: individual | collective | mixed
+- financial_signals.financial_distress_level: none | mild | moderate | severe
+- financial_signals.price_sensitivity: high | medium | low | unknown
 
-#### 4. TOPICS
-2-6 specific topics. Graph Architect rules: canonical English, title case, deduplicated.
-Examples: "Military Recruitment", "Armenian Diaspora Identity", "Inflation And Prices",
-"Nagorno-Karabakh Conflict", "Government Corruption", "Russian Propaganda", "Migration Intent",
-"Post-Soviet Identity", "Political Prisoner", "Ethnic Tension", "Orthodox Christianity",
-"Social Media Censorship", "Currency Devaluation", "Border Closure"
-
-#### 5. DESIRES & NEEDS
-- explicit: what user directly states they want
-- implicit: inferred from tone and context
-- underlying_need: security | belonging | status | knowledge | justice | autonomy | validation | safety | recognition
-
-#### 6. HIDDEN SIGNALS & SUBTEXT
-What is implied but NOT stated?
-- Coded community language or insider references specific to Russian/Armenian Telegram
-- What the user conspicuously avoids saying
-- Implicit ideological or group allegiance signals
-- Disguised anger, loyalty tests, or mobilization signals
-
-#### 7. NEGATIVE EVENTS
-Problems, complaints, fears, threats referenced by the user.
-
-#### 8. POSITIVE EVENTS
-Wins, endorsements, celebrations, hopeful references.
-
-#### 9. ENTITIES
-People, groups, organizations, places. Apply canonical English names.
-sentiment_toward options: positive | negative | neutral | ambiguous | fearful | admiring | mocking
-
-#### 10. BEHAVIORAL PATTERN
-- community_role: Leader | Influencer | Engaged_Participant | Passive_Observer | Agitator | Helper | Troll | Lurker | Newcomer | Informant
-- communication_style: Formal | Informal | Aggressive | Passive | Analytical | Emotional | Persuasive | Ironic
-- engagement_depth: Deep | Moderate | Shallow
-- urgency: boolean — does user express time-sensitive concerns?
-
-#### 11. CIS/CAUCASUS SOCIAL SIGNALS
-- geopolitical_alignment: Pro_Russia | Pro_West | Pro_Armenia | Pro_Azerbaijan | Nationalist | Anti_Government | Neutral | Ambiguous
-- collective_memory: reference to historical events (Armenian Genocide, Karabakh Wars, USSR collapse, 2022 Ukraine invasion) or null
-- in_out_group: describe who user identifies as "us" and who as "them", or null
-- migration_intent: Yes | No | Implied — is user signaling desire/plan to leave the country?
-- diaspora_signals: Yes | No — does user signal they live abroad or identify as diaspora?
-- authority_attitude: Deferential | Critical | Dismissive | Fearful | Admiring | Humorous
-
-#### 12. INFORMATION ECOSYSTEM
-- media_references: media sources mentioned or clearly implied (Russian state TV, RFE/RL, local channels, etc.)
-- conspiracy_signals: conspiracy theory adoption — describe if present, null if absent
-- information_warfare: boolean — signs of coordinated messaging, bot-like repetition, or narrative push
-
-#### 13. DEMOGRAPHICS
-- language: ISO 639-1 code (ru | hy | en | mixed)
-- inferred_gender: male | female | unknown
-- inferred_age_bracket: 13-17 | 18-24 | 25-34 | 35-44 | 45-54 | 55+ | unknown
-  IMPORTANT: Use USER PROFILE name as primary signal (Russian male/female names are definitive).
-  Then infer from: vocabulary complexity, cultural references (soviet nostalgia → 35+, gaming slang → under 30),
-  topic type (childcare/school → 28-45, retirement → 55+), writing style (emoji-heavy → younger).
-  Use "unknown" ONLY if there is ZERO evidence — always attempt an inference with appropriate confidence level.
-- confidence: high | medium | low
-
-#### 14. DAILY LIFE & COMMUNITY NEEDS
-Capture the civilian pulse — everyday life concerns that reveal social infrastructure quality and personal life stage.
-- category: Education | Healthcare | Housing | Childcare | Employment | Transportation | Food | Legal | Religion | Leisure | Family | Relationships | Personal_Finance | none
-- need_expressed: precise description of what the person is seeking or struggling with
-  Examples:
-  - "Looking for a private math tutor for a 12-year-old in Yerevan"
-  - "Asking for recommendations for a good dentist who accepts cash"
-  - "Complaining about school quality in their district"
-  - "Seeking apartment rental advice in a specific neighborhood"
-  - "Asking where to find affordable baby products"
-- urgency: high | medium | low | none
-- life_stage_signal: what life stage does this suggest? (Parent_School_Age_Child | Young_Professional | New_Parent | Elderly | Student | Job_Seeker | Homeowner | etc.)
-
-#### 15. BUSINESS & ECONOMIC OPPORTUNITY SIGNALS
-Capture signals of entrepreneurial activity, market observations, and economic opportunity awareness.
-- opportunity_type: Business_Idea | Investment_Interest | Job_Seeking | Hiring | Partnership_Request | Market_Gap_Observed | Service_Demand | Product_Demand | Real_Estate | Import_Export | none
-- description: what opportunity or economic signal is present
-  Examples:
-  - "Asking if anyone wants to partner on a small import business"
-  - "Observing that there are no good Armenian restaurants in the area"
-  - "Looking for investors for a tech startup"
-  - "Posting a job offer for a driver or cleaner"
-  - "Discussing potential in agricultural exports"
-- market_context: local | regional | international | online
-- urgency: high | medium | low | none
-
----
-
-### OUTPUT SCHEMA (STRICT JSON — no markdown, no preamble, no explanation)
+Output schema:
 {
   "primary_intent": "<intent>",
-  "intent_confidence": <0.0-1.0>,
-
   "evidence_quotes": ["<original language verbatim>", "<second quote if available>"],
-
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<precise emotion label>",
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
-
   "topics": [
-    {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or observation>"}
+    {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>"}
   ],
-
   "message_topics": [
     {
       "message_ref": "MSG 1",
       "comment_id": "<comment UUID if provided in input, otherwise null>",
       "topics": [
-        {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or observation>"}
+        {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>"}
       ]
     }
   ],
-
   "message_sentiments": [
     {
       "message_ref": "MSG 1",
@@ -561,98 +454,57 @@ Capture signals of entrepreneurial activity, market observations, and economic o
       "sentiment_score": <-1.0 to 1.0>
     }
   ],
-
-  "desires": {
-    "explicit": "<stated desire or null>",
-    "implicit": "<inferred desire>",
-    "underlying_need": "<human need>"
-  },
-
-  "hidden_signals": ["<subtext, implication, or coded signal>"],
-
-  "negative_events": [
-    {"description": "<English description>", "severity": "high|medium|low", "scope": "personal|local|national|global"}
-  ],
-
-  "positive_events": [
-    {"description": "<English description>", "scope": "personal|local|national|global"}
-  ],
-
   "entities": [
     {"name": "<Canonical English Name>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}
   ],
-
   "behavioral_pattern": {
     "community_role": "<role>",
-    "communication_style": "<style>",
-    "engagement_depth": "Deep|Moderate|Shallow",
-    "urgency": false
+    "communication_style": "<style>"
   },
-
   "social_signals": {
     "geopolitical_alignment": "<alignment>",
     "collective_memory": "<historical reference or null>",
-    "in_out_group": "<'us' vs 'them' framing or null>",
     "migration_intent": "Yes|No|Implied",
     "diaspora_signals": "Yes|No",
     "authority_attitude": "<attitude>"
   },
-
-  "information_ecosystem": {
-    "media_references": ["<source name or type>"],
-    "conspiracy_signals": "<description or null>",
-    "information_warfare": false
-  },
-
   "demographics": {
     "language": "<ISO 639-1>",
     "inferred_gender": "male|female|unknown",
-    "inferred_age_bracket": "<bracket>",
-    "confidence": "high|medium|low"
+    "inferred_age_bracket": "<bracket>"
   },
-
   "daily_life": {
-    "category": "Education|Healthcare|Housing|Childcare|Employment|Transportation|Food|Legal|Religion|Leisure|Family|Relationships|Personal_Finance|none",
-    "need_expressed": "<precise description of what they seek or struggle with, or null>",
-    "urgency": "high|medium|low|none",
-    "life_stage_signal": "<life stage inferred, e.g. Parent_School_Age_Child, Young_Professional, or null>"
+    "life_stage_signal": "<life stage inferred or null>"
   },
-
   "business_opportunity": {
     "opportunity_type": "Business_Idea|Investment_Interest|Job_Seeking|Hiring|Partnership_Request|Market_Gap_Observed|Service_Demand|Product_Demand|Real_Estate|Import_Export|none",
-    "description": "<what opportunity or economic signal is present, or null>",
-    "market_context": "local|regional|international|online|null",
-    "urgency": "high|medium|low|none"
+    "description": "<what opportunity or economic signal is present, or null>"
   },
-
   "psychographic": {
     "soviet_nostalgia": <0.0-1.0>,
     "locus_of_control": "internal|external|mixed",
     "coping_style": "action_oriented|resigned|dark_humor|denial|seeking_support",
     "security_vs_freedom": "security|freedom|balanced"
   },
-
   "trust_landscape": {
     "trust_government": "low|medium|high|hostile|unknown",
     "trust_media": "low|medium|high|hostile|unknown",
     "trust_peers": "low|medium|high|hostile|unknown",
     "trust_foreign": "low|medium|high|hostile|unknown"
   },
-
   "linguistic_intelligence": {
     "code_switching": "high|medium|low|none",
     "certainty_level": "dogmatic|confident|uncertain|questioning",
     "rhetorical_strategy": "emotional|logical|anecdotal|authoritative|humorous|mixed",
     "pronoun_pattern": "individual|collective|mixed"
   },
-
   "financial_signals": {
     "financial_distress_level": "none|mild|moderate|severe",
-    "purchase_intent": "<what user wants to acquire or null>",
-    "price_sensitivity": "high|medium|low|unknown",
-    "economic_fear_trigger": "<specific trigger or null>"
+    "price_sensitivity": "high|medium|low|unknown"
   }
-}"""
+}
+
+Return only strict JSON. No markdown. No explanation."""
 
 STRICT_TAXONOMY_PROMPT = f"""### STRICT TAXONOMY CONTRACT (VERSION {TAXONOMY_VERSION})
 You MUST prioritize canonical taxonomy topics. For each topic object:
@@ -737,6 +589,40 @@ def _trim_text(value: str | None, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def _normalize_comment_text_key(value: object) -> str:
+    text = _MULTI_SPACE.sub(" ", str(value or "").strip()).casefold()
+    return text
+
+
+def _filter_comment_group_comments(comments: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    min_length = max(0, int(getattr(config, "AI_MIN_COMMENT_LENGTH", 0)))
+    dedupe_enabled = bool(getattr(config, "AI_FILTER_DUPLICATE_COMMENTS", True))
+    kept: list[dict] = []
+    filtered_stats = {
+        "short_comments": 0,
+        "duplicate_comments": 0,
+    }
+    seen_text_keys: set[str] = set()
+
+    for comment in comments:
+        text = str(comment.get("text") or "").strip()
+        if min_length and len(text) < min_length:
+            filtered_stats["short_comments"] += 1
+            continue
+
+        if dedupe_enabled:
+            key = _normalize_comment_text_key(text)
+            if key and key in seen_text_keys:
+                filtered_stats["duplicate_comments"] += 1
+                continue
+            if key:
+                seen_text_keys.add(key)
+
+        kept.append(comment)
+
+    return kept, filtered_stats
 
 
 def _chunked(items: list[dict], size: int) -> list[list[dict]]:
@@ -1037,6 +923,10 @@ def extract_intents(
         "inflight_limit": max(1, int(getattr(config, "AI_MAX_INFLIGHT_REQUESTS", 1))),
         "attempted_groups": 0,
         "blocked_groups": 0,
+        "filtered_groups": 0,
+        "filtered_bot_groups": 0,
+        "filtered_short_comments": 0,
+        "filtered_duplicate_comments": 0,
         "deferred_groups": 0,
         "succeeded_groups": 0,
         "failed_groups": 0,
@@ -1063,8 +953,47 @@ def extract_intents(
         pid = comment.get("post_id")
         groups[(uid, cid, pid)].append(comment)
 
+    profile_cache: dict[int, dict | None] = {}
+
+    def _load_user_profile(telegram_user_id) -> dict | None:
+        if telegram_user_id == "anonymous":
+            return None
+        try:
+            user_id = int(telegram_user_id)
+        except Exception:
+            return None
+        if user_id in profile_cache:
+            return profile_cache[user_id]
+        try:
+            profile_cache[user_id] = supabase_writer.get_user_by_telegram_id(user_id)
+        except Exception:
+            profile_cache[user_id] = None
+        return profile_cache[user_id]
+
     group_payloads: list[dict] = []
     for (telegram_user_id, channel_id, post_id), user_comments in groups.items():
+        profile = _load_user_profile(telegram_user_id)
+        if bool(getattr(config, "AI_SKIP_BOT_COMMENTS", True)) and profile and bool(profile.get("is_bot")):
+            for comment in user_comments:
+                supabase_writer.mark_comment_processed(comment["id"])
+            stats["filtered_groups"] = int(stats["filtered_groups"]) + 1
+            stats["filtered_bot_groups"] = int(stats["filtered_bot_groups"]) + 1
+            continue
+
+        filtered_comments, filtered_stats = _filter_comment_group_comments(user_comments)
+        stats["filtered_short_comments"] = int(stats["filtered_short_comments"]) + int(filtered_stats["short_comments"])
+        stats["filtered_duplicate_comments"] = int(stats["filtered_duplicate_comments"]) + int(filtered_stats["duplicate_comments"])
+        filtered_comment_ids = {str(comment.get("id")) for comment in filtered_comments if comment.get("id")}
+        for comment in user_comments:
+            if str(comment.get("id")) not in filtered_comment_ids:
+                supabase_writer.mark_comment_processed(comment["id"])
+
+        if not filtered_comments:
+            stats["filtered_groups"] = int(stats["filtered_groups"]) + 1
+            continue
+
+        analysis_comments = filtered_comments[:config.AI_BATCH_SIZE]
+
         # Build numbered temporal message block
         message_char_limit = max(120, int(config.AI_MESSAGE_CHAR_LIMIT))
         messages_text = "\n\n".join([
@@ -1072,7 +1001,7 @@ def extract_intents(
                 f"[MSG {i+1} | COMMENT_ID {c.get('id')} | {c.get('posted_at', '')[:16]}]\n"
                 f"{_trim_text(c.get('text', ''), message_char_limit)}"
             )
-            for i, c in enumerate(user_comments[:config.AI_BATCH_SIZE])
+            for i, c in enumerate(analysis_comments)
         ])
 
         post_context_section = ""
@@ -1100,23 +1029,18 @@ def extract_intents(
 
         # Fetch user profile to enrich AI context
         profile_section = ""
-        if telegram_user_id != "anonymous":
-            try:
-                profile = supabase_writer.get_user_by_telegram_id(int(telegram_user_id))
-                if profile:
-                    name_parts = [p for p in [profile.get("first_name"), profile.get("last_name")] if p]
-                    full_name = " ".join(name_parts) or "Unknown"
-                    username = profile.get("username") or "no username"
-                    bio = profile.get("bio") or "none"
-                    profile_section = (
-                        f"\nUSER PROFILE (use for precise demographic inference):\n"
-                        f"  Full Name : {full_name}\n"
-                        f"  Username  : @{username}\n"
-                        f"  Bio       : {bio}\n"
-                        f"  Is Bot    : {profile.get('is_bot', False)}\n"
-                    )
-            except Exception:
-                pass
+        if profile:
+            name_parts = [p for p in [profile.get("first_name"), profile.get("last_name")] if p]
+            full_name = " ".join(name_parts) or "Unknown"
+            username = profile.get("username") or "no username"
+            bio = profile.get("bio") or "none"
+            profile_section = (
+                f"\nUSER PROFILE (use for precise demographic inference):\n"
+                f"  Full Name : {full_name}\n"
+                f"  Username  : @{username}\n"
+                f"  Bio       : {bio}\n"
+                f"  Is Bot    : {profile.get('is_bot', False)}\n"
+            )
 
         scope_key = _comment_scope_key(telegram_user_id, channel_id, post_id)
         source_label = (
@@ -1127,7 +1051,7 @@ def extract_intents(
         user_context = (
             f"Channel: {source_label}\n"
             f"Post ID: {post_id or 'unknown'}\n"
-            f"Messages analyzed: {min(len(user_comments), config.AI_BATCH_SIZE)}\n"
+            f"Messages analyzed: {len(analysis_comments)}\n"
             f"User ID: {telegram_user_id}\n"
             f"IMPORTANT: Return message_topics with one entry per message using the COMMENT_ID from each [MSG ...] header. "
             f"Only assign a topic to a message when that specific message clearly mentions it. "
@@ -1143,6 +1067,7 @@ def extract_intents(
                 "channel_id": channel_id,
                 "post_id": post_id,
                 "user_comments": user_comments,
+                "analysis_comments": analysis_comments,
                 "scope_key": scope_key,
                 "user_context": user_context,
             }
@@ -1330,36 +1255,24 @@ Return ONLY the JSON schema below, no preamble.
 
 {
   "primary_intent": "<intent>",
-  "intent_confidence": <0.0-1.0>,
   "evidence_quotes": ["<original language>"],
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<emotion>",
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
   "topics": [{"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<>"}],
-  "desires": {"explicit": "<>", "implicit": "<>", "underlying_need": "<>"},
-  "hidden_signals": ["<>"],
-  "negative_events": [{"description": "<>", "severity": "high|medium|low", "scope": "personal|local|national|global"}],
-  "positive_events": [{"description": "<>", "scope": "personal|local|national|global"}],
   "entities": [{"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}],
   "social_signals": {
     "geopolitical_alignment": "<>",
     "collective_memory": "<or null>",
-    "in_out_group": "<or null>",
     "migration_intent": "Yes|No|Implied",
     "diaspora_signals": "Yes|No",
     "authority_attitude": "<>"
   },
-  "information_ecosystem": {
-    "media_references": [],
-    "conspiracy_signals": "<or null>",
-    "information_warfare": false
-  },
   "demographics": {
     "language": "<ISO 639-1>",
     "inferred_gender": "male|female|unknown",
-    "inferred_age_bracket": "<bracket>",
-    "confidence": "high|medium|low"
+    "inferred_age_bracket": "<bracket>"
   }
 }"""
 
@@ -1370,7 +1283,6 @@ Return STRICT JSON only (no markdown).
 Schema:
 {
   "primary_intent": "<intent>",
-  "intent_confidence": <0.0-1.0>,
   "evidence_quotes": ["<original language>"],
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
@@ -1385,7 +1297,6 @@ Schema:
   "social_signals": {
     "geopolitical_alignment": "Pro_Russia|Pro_West|Pro_Armenia|Pro_Azerbaijan|Nationalist|Anti_Government|Neutral|Ambiguous|unknown",
     "collective_memory": "<or null>",
-    "in_out_group": "<or null>",
     "migration_intent": "Yes|No|Implied",
     "diaspora_signals": "Yes|No",
     "authority_attitude": "Deferential|Critical|Dismissive|Fearful|Admiring|Humorous|unknown"
@@ -1393,8 +1304,7 @@ Schema:
   "demographics": {
     "language": "<ISO 639-1>",
     "inferred_gender": "male|female|unknown",
-    "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown",
-    "confidence": "high|medium|low"
+    "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown"
   }
 }
 """
@@ -1407,7 +1317,6 @@ Return STRICT JSON only (no markdown).
 Schema:
 {
   "primary_intent": "<thread-level dominant intent>",
-  "intent_confidence": <0.0-1.0>,
   "evidence_quotes": ["<original language>"],
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
@@ -1422,7 +1331,6 @@ Schema:
   "social_signals": {
     "geopolitical_alignment": "Pro_Russia|Pro_West|Pro_Armenia|Pro_Azerbaijan|Nationalist|Anti_Government|Neutral|Ambiguous|unknown",
     "collective_memory": "<or null>",
-    "in_out_group": "<or null>",
     "migration_intent": "Yes|No|Implied",
     "diaspora_signals": "Yes|No",
     "authority_attitude": "Deferential|Critical|Dismissive|Fearful|Admiring|Humorous|unknown"
@@ -1430,8 +1338,7 @@ Schema:
   "demographics": {
     "language": "<ISO 639-1>",
     "inferred_gender": "male|female|unknown",
-    "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown",
-    "confidence": "high|medium|low"
+    "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown"
   }
 }
 """
@@ -1447,7 +1354,6 @@ Return STRICT JSON only with this schema:
     {
       "post_id": "<post UUID from input>",
       "primary_intent": "<intent>",
-      "intent_confidence": <0.0-1.0>,
       "evidence_quotes": ["<original language>"],
       "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
       "sentiment_score": <-1.0 to 1.0>,
@@ -1462,7 +1368,6 @@ Return STRICT JSON only with this schema:
       "social_signals": {
         "geopolitical_alignment": "Pro_Russia|Pro_West|Pro_Armenia|Pro_Azerbaijan|Nationalist|Anti_Government|Neutral|Ambiguous|unknown",
         "collective_memory": "<or null>",
-        "in_out_group": "<or null>",
         "migration_intent": "Yes|No|Implied",
         "diaspora_signals": "Yes|No",
         "authority_attitude": "Deferential|Critical|Dismissive|Fearful|Admiring|Humorous|unknown"
@@ -1470,8 +1375,7 @@ Return STRICT JSON only with this schema:
       "demographics": {
         "language": "<ISO 639-1>",
         "inferred_gender": "male|female|unknown",
-        "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown",
-        "confidence": "high|medium|low"
+        "inferred_age_bracket": "13-17|18-24|25-34|35-44|45-54|55+|unknown"
       }
     }
   ]

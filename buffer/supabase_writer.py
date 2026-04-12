@@ -764,7 +764,7 @@ class SupabaseWriter:
                 if oldest_due_age_seconds is None or age_seconds > oldest_due_age_seconds:
                     oldest_due_age_seconds = age_seconds
                 continue
-            if next_attempt_at <= now:
+            if status in {"pending", "leased"} and next_attempt_at <= now:
                 stale_nonclaimable_jobs += 1
 
         slots = self.list_source_resolution_slots(active_only=True)
