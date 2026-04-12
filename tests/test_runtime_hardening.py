@@ -297,6 +297,73 @@ class SchedulerDistributedLockTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_worker_control_cycle_marks_failed_only_after_completion_writeback_retries_exhausted(self) -> None:
+        async def scenario() -> None:
+            command_store = {
+                "request_id": "cmd-2",
+                "action": "run_once",
+                "status": "pending",
+                "requested_at": "2026-04-11T10:00:00+00:00",
+            }
+
+            def save_control(payload: dict) -> bool:
+                status = str(payload.get("status") or "")
+                if status == "processing":
+                    command_store.update(payload)
+                    return True
+                if status == "completed":
+                    return False
+                if status == "failed":
+                    command_store.update(payload)
+                    return True
+                command_store.update(payload)
+                return True
+
+            writer = SimpleNamespace(
+                get_shared_scraper_control_command=lambda default=None, timeout_seconds=1.5: dict(command_store),
+                save_shared_scraper_control_command=save_control,
+            )
+
+            service = ScraperSchedulerService(writer)
+            service.desired_active = True
+
+            with patch("api.scraper_scheduler._runtime_role_allows_background_jobs", return_value=True), \
+                 patch.object(service, "_run_cycle", AsyncMock()), \
+                 patch.object(service, "status", return_value={"status": "active", "running_now": False}):
+                await service._run_control_cycle()
+
+            self.assertEqual(command_store["status"], "failed")
+            self.assertEqual(
+                command_store["error"],
+                "shared control completion writeback failed after retries",
+            )
+
+        asyncio.run(scenario())
+
+    def test_run_cycle_persists_terminal_running_false_snapshot(self) -> None:
+        coordinator = _CoordinatorStub()
+        shared_status_writes: list[dict] = []
+
+        async def scenario() -> None:
+            writer = SimpleNamespace(
+                save_shared_scraper_runtime_snapshot=lambda payload: shared_status_writes.append(dict(payload)) or True,
+                save_shared_freshness_snapshot=lambda payload: True,
+            )
+            service = ScraperSchedulerService(writer)
+
+            with patch("api.scraper_scheduler.get_runtime_coordinator", return_value=coordinator), \
+                 patch("api.scraper_scheduler.run_full_cycle", AsyncMock(return_value={"ok": True})), \
+                 patch.object(service, "_get_or_create_client", AsyncMock(return_value=object())), \
+                 patch("api.scraper_scheduler.get_freshness_snapshot", return_value={"generated_at": "now"}):
+                await service._run_cycle()
+
+        asyncio.run(scenario())
+
+        self.assertGreaterEqual(len(shared_status_writes), 2)
+        self.assertTrue(shared_status_writes[0]["running_now"])
+        self.assertFalse(shared_status_writes[-1]["running_now"])
+        self.assertIsNotNone(shared_status_writes[-1]["last_run_finished_at"])
+
     def test_run_cycle_is_exclusive_across_scheduler_instances(self) -> None:
         coordinator = _CoordinatorStub()
         run_calls = 0

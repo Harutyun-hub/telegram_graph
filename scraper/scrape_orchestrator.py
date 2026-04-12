@@ -81,7 +81,7 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
             ):
                 posts_with_comments = supabase_writer.get_posts_with_comments_pending_for_channel(
                     prepared_channel["id"],
-                    limit=20,
+                    limit=max(1, int(config.SCRAPE_MAX_COMMENT_POSTS_PER_SOURCE_PER_CYCLE)),
                 )
                 if posts_with_comments:
                     for post in posts_with_comments:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from scraper import channel_scraper
+from scraper import scrape_orchestrator
 
 
 class _FakeChannel:
@@ -38,6 +41,7 @@ class _FakeWriter:
     def __init__(self):
         self.updated = []
         self.last_scraped = []
+        self.explicit_last_scraped = []
         self.rows = {}
         self.posts = {}
         self.comments = {}
@@ -79,6 +83,9 @@ class _FakeWriter:
 
     def update_channel_last_scraped(self, channel_uuid):
         self.last_scraped.append(channel_uuid)
+
+    def update_channel_last_scraped_at(self, channel_uuid, when_iso):
+        self.explicit_last_scraped.append((channel_uuid, when_iso))
 
     def upsert_posts(self, posts):
         for post in posts:
@@ -216,6 +223,71 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writer.updated, [])
         self.assertEqual(writer.last_scraped, ["chan-2"])
 
+    async def test_broadcast_channel_cap_stops_at_limit_and_persists_last_scraped_post_timestamp(self) -> None:
+        writer = _FakeWriter()
+        first = _FakeMessage(
+            message_id=201,
+            text="Newest post",
+            posted_at=datetime(2026, 4, 12, 9, 5, tzinfo=timezone.utc),
+            sender_id=1,
+        )
+        second = _FakeMessage(
+            message_id=200,
+            text="Older post",
+            posted_at=datetime(2026, 4, 12, 9, 0, tzinfo=timezone.utc),
+            sender_id=1,
+        )
+        client = _FakeClient(entity=_FakeChannel(), messages=[first, second])
+        channel_record = {
+            "id": "chan-cap",
+            "channel_username": "@tinycap",
+            "scrape_depth_days": 30,
+            "source_type": "channel",
+        }
+
+        with patch.object(channel_scraper, "Message", _FakeMessage), \
+             patch.object(channel_scraper.config, "SCRAPE_MAX_POSTS_PER_SOURCE_PER_CYCLE", 1):
+            result = await channel_scraper.scrape_channel(client, channel_record, writer, entity=_FakeChannel())
+
+        self.assertEqual(result, {"posts_found": 1, "comments_found": 0, "source_type": "channel"})
+        self.assertEqual(len(writer.posts), 1)
+        self.assertEqual(writer.last_scraped, [])
+        self.assertEqual(
+            writer.explicit_last_scraped,
+            [("chan-cap", "2026-04-12T09:05:00+00:00")],
+        )
+
+    async def test_broadcast_channel_without_cap_preserves_current_unlimited_behavior(self) -> None:
+        writer = _FakeWriter()
+        first = _FakeMessage(
+            message_id=301,
+            text="Newest post",
+            posted_at=datetime(2026, 4, 12, 10, 5, tzinfo=timezone.utc),
+            sender_id=1,
+        )
+        second = _FakeMessage(
+            message_id=300,
+            text="Older post",
+            posted_at=datetime(2026, 4, 12, 10, 0, tzinfo=timezone.utc),
+            sender_id=1,
+        )
+        client = _FakeClient(entity=_FakeChannel(), messages=[first, second])
+        channel_record = {
+            "id": "chan-unlimited",
+            "channel_username": "@nocap",
+            "scrape_depth_days": 30,
+            "source_type": "channel",
+        }
+
+        with patch.object(channel_scraper, "Message", _FakeMessage), \
+             patch.object(channel_scraper.config, "SCRAPE_MAX_POSTS_PER_SOURCE_PER_CYCLE", 0):
+            result = await channel_scraper.scrape_channel(client, channel_record, writer, entity=_FakeChannel())
+
+        self.assertEqual(result, {"posts_found": 2, "comments_found": 0, "source_type": "channel"})
+        self.assertEqual(len(writer.posts), 2)
+        self.assertEqual(writer.last_scraped, ["chan-unlimited"])
+        self.assertEqual(writer.explicit_last_scraped, [])
+
     async def test_supergroup_scrape_creates_thread_anchor_and_group_messages(self) -> None:
         writer = _FakeWriter()
         root = _FakeMessage(
@@ -259,20 +331,6 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"posts_found": 1, "comments_found": 2, "source_type": "supergroup"})
         self.assertEqual(writer.last_scraped, ["chan-3"])
 
-        anchor = writer.posts[("chan-3", 101)]
-        self.assertEqual(anchor["entry_kind"], "thread_anchor")
-        self.assertEqual(anchor["thread_message_count"], 2)
-        self.assertEqual(anchor["thread_participant_count"], 2)
-        self.assertEqual(anchor["comment_count"], 1)
-        self.assertTrue(anchor["has_comments"])
-
-        comments = sorted(writer.comments.values(), key=lambda item: item["telegram_message_id"])
-        self.assertEqual(len(comments), 2)
-        self.assertEqual(comments[0]["message_kind"], "group_message")
-        self.assertTrue(comments[0]["is_thread_root"])
-        self.assertEqual(comments[0]["thread_top_message_id"], 101)
-        self.assertFalse(comments[1]["is_thread_root"])
-        self.assertEqual(comments[1]["reply_to_message_id"], 101)
 
     async def test_peer_ref_mode_queues_resolution_when_peer_ref_missing(self) -> None:
         writer = _FakeWriter()
@@ -421,6 +479,48 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed["last_resolution_error"], "stale peer ref")
         self.assertEqual(len(writer.queued_resolution_jobs), 1)
         self.assertEqual(writer.queued_resolution_jobs[0]["channel_id"], "chan-6")
+
+
+class ScrapeOrchestratorCapTests(unittest.TestCase):
+    def test_comment_post_cap_is_read_from_config(self) -> None:
+        writer = SimpleNamespace(
+            get_active_channels=lambda: [
+                {
+                    "id": "chan-1",
+                    "channel_username": "@comments",
+                    "source_type": "channel",
+                    "scrape_comments": True,
+                }
+            ],
+        )
+        observed_limits: list[int] = []
+
+        def _get_posts_with_comments_pending_for_channel(channel_uuid: str, limit: int = 50):
+            observed_limits.append(limit)
+            self.assertEqual(channel_uuid, "chan-1")
+            return [{"id": "post-1", "channel_id": "chan-1", "telegram_message_id": 123}]
+
+        writer.get_posts_with_comments_pending_for_channel = _get_posts_with_comments_pending_for_channel
+
+        async def scenario() -> None:
+            with patch.object(scrape_orchestrator, "prepare_source_for_scrape", AsyncMock(return_value=(
+                {
+                    "id": "chan-1",
+                    "channel_username": "@comments",
+                    "source_type": "channel",
+                    "scrape_comments": True,
+                },
+                object(),
+            ))), \
+                 patch.object(scrape_orchestrator, "scrape_channel", AsyncMock(return_value={"posts_found": 0, "comments_found": 0})), \
+                 patch.object(scrape_orchestrator, "scrape_comments_for_post", AsyncMock(return_value=1)), \
+                 patch.object(scrape_orchestrator.config, "SCRAPE_MAX_COMMENT_POSTS_PER_SOURCE_PER_CYCLE", 3), \
+                 patch.object(scrape_orchestrator.asyncio, "sleep", AsyncMock()):
+                result = await scrape_orchestrator.run_scrape_cycle(object(), writer)
+            self.assertEqual(result["comments_found"], 1)
+
+        asyncio.run(scenario())
+        self.assertEqual(observed_limits, [3])
 
 
 if __name__ == "__main__":

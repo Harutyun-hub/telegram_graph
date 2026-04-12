@@ -285,7 +285,7 @@ class SupabaseWriter:
 
     def save_shared_scraper_runtime_snapshot(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest worker-side scraper runtime snapshot."""
-        return self.save_runtime_json_fast(
+        return self._save_shared_runtime_json_with_retries(
             self._scheduler_runtime_path,
             payload,
             timeout_seconds=timeout_seconds,
@@ -306,7 +306,7 @@ class SupabaseWriter:
 
     def save_shared_scraper_control_command(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest shared scraper control command for the worker."""
-        return self.save_runtime_json_fast(
+        return self._save_shared_runtime_json_with_retries(
             self._scheduler_control_path,
             payload,
             timeout_seconds=timeout_seconds,
@@ -327,7 +327,7 @@ class SupabaseWriter:
 
     def save_shared_freshness_snapshot(self, payload: dict, *, timeout_seconds: float = 2.0) -> bool:
         """Persist the latest worker-side freshness snapshot."""
-        return self.save_runtime_json_fast(
+        return self._save_shared_runtime_json_with_retries(
             self._freshness_snapshot_path,
             payload,
             timeout_seconds=timeout_seconds,
@@ -1252,6 +1252,48 @@ class SupabaseWriter:
             logger.error("Runtime JSON fast write failed | path={} error={}", key, exc)
             return False
 
+    def _save_shared_runtime_json_with_retries(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> bool:
+        key = str(path or "").strip()
+        if not key:
+            return False
+
+        data = payload if isinstance(payload, dict) else {}
+        body = json.dumps(data, ensure_ascii=True).encode("utf-8")
+        delays = (0.0, 2.0, 5.0)
+        last_error: Exception | None = None
+
+        for attempt, delay_seconds in enumerate(delays, start=1):
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+            try:
+                self._write_runtime_json_bytes_fast(
+                    key,
+                    body,
+                    timeout_seconds=max(0.1, float(timeout_seconds)),
+                )
+                return True
+            except Exception as exc:
+                last_error = exc
+                if not self._is_retryable_shared_runtime_write_error(exc):
+                    logger.error("Runtime JSON shared write failed | path={} error={}", key, exc)
+                    return False
+                logger.warning(
+                    "Runtime JSON shared write retryable failure | path={} attempt={} error={}",
+                    key,
+                    attempt,
+                    exc,
+                )
+
+        if last_error is not None:
+            logger.error("Runtime JSON shared write failed after retries | path={} error={}", key, last_error)
+        return False
+
     def read_runtime_json(
         self,
         path: str,
@@ -1366,6 +1408,56 @@ class SupabaseWriter:
                 future.result(timeout=timeout_seconds)
         except FuturesTimeoutError as exc:
             raise TimeoutError(f"authenticated runtime JSON upload timed out after {timeout_seconds}s") from exc
+
+    @staticmethod
+    def _is_retryable_shared_runtime_write_error(error: Exception) -> bool:
+        if isinstance(error, TimeoutError):
+            return True
+
+        message = " ".join(
+            [
+                error.__class__.__name__,
+                str(error or ""),
+            ]
+        ).lower()
+
+        permanent_markers = (
+            "401",
+            "403",
+            "404",
+            "authentication",
+            "authorization",
+            "unauthorized",
+            "forbidden",
+            "permission",
+            "invalid path",
+            "path is empty",
+            "invalid json",
+            "malformed",
+            "bad request",
+        )
+        if any(marker in message for marker in permanent_markers):
+            return False
+
+        retryable_markers = (
+            "502",
+            "503",
+            "504",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+            "connection terminated",
+            "connection error",
+            "temporary failure",
+            "remote disconnected",
+            "network",
+            "transport",
+        )
+        return any(marker in message for marker in retryable_markers)
 
     def save_runtime_blob(
         self,
@@ -1633,6 +1725,13 @@ class SupabaseWriter:
         """Set last_scraped_at to now."""
         self.client.table("telegram_channels") \
             .update({"last_scraped_at": datetime.now(timezone.utc).isoformat()}) \
+            .eq("id", channel_uuid) \
+            .execute()
+
+    def update_channel_last_scraped_at(self, channel_uuid: str, when_iso: str):
+        """Set last_scraped_at to an explicit ISO timestamp."""
+        self.client.table("telegram_channels") \
+            .update({"last_scraped_at": str(when_iso)}) \
             .eq("id", channel_uuid) \
             .execute()
 

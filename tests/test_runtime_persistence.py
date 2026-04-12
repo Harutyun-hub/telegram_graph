@@ -203,6 +203,58 @@ class RuntimePersistenceTests(unittest.TestCase):
         self.assertEqual(stored["request_id"], "new")
         self.assertEqual(stored["action"], "catchup_once")
 
+    def test_shared_scheduler_control_write_retries_timeout_and_succeeds(self) -> None:
+        writer = _make_writer(_FakeRuntimeBucket())
+        calls = {"count": 0}
+
+        def flaky_write(path: str, body: bytes, *, timeout_seconds: float) -> None:
+            del body, timeout_seconds
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise TimeoutError("timed out")
+            self.assertEqual(path, "scraper/scheduler_control.json")
+
+        with patch.object(writer, "_write_runtime_json_bytes_fast", side_effect=flaky_write), \
+             patch("buffer.supabase_writer.time.sleep") as sleep_mock:
+            saved = writer.save_shared_scraper_control_command({"request_id": "cmd-2", "action": "run_once"})
+
+        self.assertTrue(saved)
+        self.assertEqual(calls["count"], 2)
+        sleep_mock.assert_called_once_with(2.0)
+
+    def test_shared_freshness_write_retries_bad_gateway_and_succeeds(self) -> None:
+        writer = _make_writer(_FakeRuntimeBucket())
+        calls = {"count": 0}
+
+        def flaky_write(path: str, body: bytes, *, timeout_seconds: float) -> None:
+            del body, timeout_seconds
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("502 Bad Gateway")
+            self.assertEqual(path, "pipeline/freshness_snapshot.json")
+
+        with patch.object(writer, "_write_runtime_json_bytes_fast", side_effect=flaky_write), \
+             patch("buffer.supabase_writer.time.sleep") as sleep_mock:
+            saved = writer.save_shared_freshness_snapshot({"generated_at": "2026-04-12T10:00:00+00:00"})
+
+        self.assertTrue(saved)
+        self.assertEqual(calls["count"], 2)
+        sleep_mock.assert_called_once_with(2.0)
+
+    def test_shared_runtime_write_returns_false_after_permanent_failure(self) -> None:
+        writer = _make_writer(_FakeRuntimeBucket())
+
+        with patch.object(
+            writer,
+            "_write_runtime_json_bytes_fast",
+            side_effect=RuntimeError("403 Forbidden"),
+        ) as write_mock, patch("buffer.supabase_writer.time.sleep") as sleep_mock:
+            saved = writer.save_shared_scraper_runtime_snapshot({"status": "active"})
+
+        self.assertFalse(saved)
+        self.assertEqual(write_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
