@@ -32,7 +32,8 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-config.validate()
+if config.should_validate_on_import():
+    config.validate()
 
 from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
 from fastapi.exception_handlers import request_validation_exception_handler

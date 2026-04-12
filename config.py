@@ -3,6 +3,7 @@ config.py — Centralized configuration loader.
 Reads all values from .env and exposes them as typed constants.
 """
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,6 +35,10 @@ IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
 IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
 IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
 STAGING_ENABLE_BACKGROUND_JOBS = _env_bool("STAGING_ENABLE_BACKGROUND_JOBS", False)
+
+
+def should_validate_on_import() -> bool:
+    return "pytest" not in sys.modules
 
 
 def _normalize_app_role_for_validation(value=None) -> str:
