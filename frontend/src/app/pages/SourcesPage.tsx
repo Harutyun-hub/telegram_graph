@@ -654,11 +654,14 @@ export function SourcesPage() {
     setSchedulerError(null);
     try {
       const response = await requestJson<ScraperSchedulerStatus>('/api/scraper/scheduler/run-once', { method: 'POST' });
-      setScheduler(response);
+      setScheduler({
+        ...response,
+        running_now: true,
+      });
       setTimeout(() => {
         void loadSchedulerStatus(true);
         void loadFreshnessStatus(true);
-      }, 1200);
+      }, 500);
     } catch (err: any) {
       setSchedulerError(String(err?.message || 'Failed to run scraper now'));
     } finally {
