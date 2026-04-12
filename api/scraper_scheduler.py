@@ -37,11 +37,15 @@ def _runtime_role_allows_background_jobs() -> bool:
 
 
 class ScraperSchedulerService:
+    _SETTINGS_READ_ATTEMPTS = 3
+    _SETTINGS_READ_RETRY_SECONDS = 0.5
+
     def __init__(self, supabase_writer):
         self.db = supabase_writer
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "scraper_runtime_job"
         self.resolution_job_id = "source_resolution_runtime_job"
+        self.control_job_id = "scraper_control_runtime_job"
 
         self.interval_minutes = 15
         self.desired_active = False
@@ -64,12 +68,14 @@ class ScraperSchedulerService:
 
         self._run_lock = asyncio.Lock()
         self._resolution_run_lock = asyncio.Lock()
+        self._control_run_lock = asyncio.Lock()
         self._client: Optional[TelegramClient] = None
         self._background_tasks: set[asyncio.Task] = set()
+        self._last_control_request_id: Optional[str] = None
 
     async def startup(self) -> None:
         self._ensure_scheduler_started()
-        settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=15)
+        settings = await self._load_startup_scheduler_settings()
         self.interval_minutes = int(settings.get("interval_minutes", 15))
         self.desired_active = bool(settings.get("is_active", False))
 
@@ -77,12 +83,59 @@ class ScraperSchedulerService:
             self._upsert_interval_job()
         if config.FEATURE_SOURCE_RESOLUTION_WORKER:
             self._upsert_resolution_job()
+        if _runtime_role_allows_background_jobs():
+            self._upsert_control_job()
 
         logger.info(
             f"Scraper scheduler ready | active={self.desired_active} interval={self.interval_minutes}m"
         )
         self._persist_shared_status()
         self._persist_shared_freshness()
+
+    async def _load_startup_scheduler_settings(self) -> dict:
+        default = {
+            "is_active": False,
+            "interval_minutes": 15,
+            "updated_at": None,
+        }
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._SETTINGS_READ_ATTEMPTS + 1):
+            try:
+                if hasattr(self.db, "load_scraper_scheduler_settings"):
+                    settings = self.db.load_scraper_scheduler_settings(
+                        default_interval_minutes=15,
+                        raise_on_error=True,
+                    )
+                else:
+                    settings = self.db.get_scraper_scheduler_settings(default_interval_minutes=15)
+                if attempt > 1:
+                    logger.warning(
+                        "Scraper scheduler settings read succeeded after retry | attempt={}/{}",
+                        attempt,
+                        self._SETTINGS_READ_ATTEMPTS,
+                    )
+                return settings
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Scraper scheduler settings read failed on startup | attempt={}/{} error={}",
+                    attempt,
+                    self._SETTINGS_READ_ATTEMPTS,
+                    exc,
+                )
+                if attempt < self._SETTINGS_READ_ATTEMPTS:
+                    await asyncio.sleep(self._SETTINGS_READ_RETRY_SECONDS * attempt)
+
+        if config.IS_LOCKED_ENV:
+            raise RuntimeError(
+                "Failed to load persisted scraper scheduler settings during startup."
+            ) from last_error
+
+        logger.warning(
+            "Scraper scheduler falling back to default inactive settings after startup read failures"
+        )
+        return default
 
     def _ensure_scheduler_started(self) -> None:
         if not self.scheduler.running:
@@ -147,6 +200,22 @@ class ScraperSchedulerService:
             misfire_grace_time=120,
         )
 
+    def _upsert_control_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.control_job_id)
+        except Exception:
+            pass
+
+        self.scheduler.add_job(
+            self._run_control_cycle,
+            "interval",
+            seconds=max(2, int(config.SCRAPER_CONTROL_POLL_SECONDS)),
+            id=self.control_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=10,
+        )
+
     def _next_resolution_run_iso(self) -> Optional[str]:
         if not config.FEATURE_SOURCE_RESOLUTION_WORKER:
             return None
@@ -194,20 +263,24 @@ class ScraperSchedulerService:
         self._client = client
         return client
 
-    async def _run_cycle(self) -> None:
+    async def _run_cycle(self, *, use_runtime_lock: bool = True) -> None:
         if self._run_lock.locked():
             logger.warning("Scraper cycle skipped: previous run still active")
             return
 
         async with self._run_lock:
             coordinator = get_runtime_coordinator()
-            lock_token = coordinator.acquire_lock(
-                "worker:scrape-cycle",
-                ttl_seconds=max(300, int(self.interval_minutes) * 60, config.AI_PROCESS_STAGE_MAX_SECONDS),
-            )
-            if not lock_token:
-                logger.warning("Scraper cycle skipped: runtime coordinator lock is already held")
-                return
+            lock_token = None
+            if use_runtime_lock:
+                lock_token = coordinator.acquire_lock(
+                    "worker:scrape-cycle",
+                    ttl_seconds=max(300, int(self.interval_minutes) * 60, config.AI_PROCESS_STAGE_MAX_SECONDS),
+                )
+                if not lock_token:
+                    logger.warning("Scraper cycle skipped: runtime coordinator lock is already held")
+                    return
+            else:
+                logger.info("Running manual scraper cycle without runtime coordinator lock")
             self.running_now = True
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
@@ -226,29 +299,34 @@ class ScraperSchedulerService:
                 self.last_error = str(e)
                 logger.error(f"Pipeline cycle failed: {e}")
             finally:
-                coordinator.release_lock("worker:scrape-cycle", lock_token)
+                if lock_token:
+                    coordinator.release_lock("worker:scrape-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
                 self._persist_shared_status()
                 self._persist_shared_freshness()
 
-    async def _run_catchup_cycle(self) -> None:
+    async def _run_catchup_cycle(self, *, use_runtime_lock: bool = True) -> None:
         if self._run_lock.locked():
             logger.warning("Catch-up cycle skipped: previous run still active")
             return
 
         async with self._run_lock:
             coordinator = get_runtime_coordinator()
-            lock_token = coordinator.acquire_lock(
-                "worker:catchup-cycle",
-                ttl_seconds=max(
-                    300,
-                    config.AI_PROCESS_STAGE_MAX_SECONDS + config.AI_SYNC_STAGE_MAX_SECONDS,
-                ),
-            )
-            if not lock_token:
-                logger.warning("Catch-up cycle skipped: runtime coordinator lock is already held")
-                return
+            lock_token = None
+            if use_runtime_lock:
+                lock_token = coordinator.acquire_lock(
+                    "worker:catchup-cycle",
+                    ttl_seconds=max(
+                        300,
+                        config.AI_PROCESS_STAGE_MAX_SECONDS + config.AI_SYNC_STAGE_MAX_SECONDS,
+                    ),
+                )
+                if not lock_token:
+                    logger.warning("Catch-up cycle skipped: runtime coordinator lock is already held")
+                    return
+            else:
+                logger.info("Running manual catch-up cycle without runtime coordinator lock")
             self.running_now = True
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
@@ -267,7 +345,8 @@ class ScraperSchedulerService:
                 self.last_error = str(e)
                 logger.error(f"Catch-up cycle failed: {e}")
             finally:
-                coordinator.release_lock("worker:catchup-cycle", lock_token)
+                if lock_token:
+                    coordinator.release_lock("worker:catchup-cycle", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
                 self._persist_shared_status()
@@ -422,6 +501,77 @@ class ScraperSchedulerService:
 
         task.add_done_callback(_on_done)
         return self.status()
+
+    async def _run_control_cycle(self) -> None:
+        if not _runtime_role_allows_background_jobs():
+            return
+        if self._control_run_lock.locked():
+            return
+
+        async with self._control_run_lock:
+            try:
+                load_fn = getattr(self.db, "get_shared_scraper_control_command", None)
+                save_fn = getattr(self.db, "save_shared_scraper_control_command", None)
+                if not callable(load_fn) or not callable(save_fn):
+                    return
+
+                command = load_fn(default={}) or {}
+                if not isinstance(command, dict):
+                    return
+                request_id = str(command.get("request_id") or "").strip()
+                if not request_id or request_id == self._last_control_request_id:
+                    return
+                if str(command.get("status") or "").strip().lower() != "pending":
+                    return
+
+                action = str(command.get("action") or "").strip().lower()
+                in_progress = {
+                    **command,
+                    "status": "processing",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "processed_by_role": "worker",
+                }
+                save_fn(in_progress)
+
+                try:
+                    if action == "start":
+                        status = await self.start()
+                    elif action == "stop":
+                        status = await self.stop()
+                    elif action == "set_interval":
+                        interval = int(command.get("interval_minutes") or self.interval_minutes or 15)
+                        status = await self.set_interval(interval)
+                    elif action == "run_once":
+                        await self._run_cycle(use_runtime_lock=False)
+                        status = self.status()
+                    elif action == "catchup_once":
+                        await self._run_catchup_cycle(use_runtime_lock=False)
+                        status = self.status()
+                    else:
+                        raise ValueError(f"Unsupported scheduler control action: {action}")
+
+                    save_fn(
+                        {
+                            **in_progress,
+                            "status": "completed",
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "scheduler_status": status,
+                        }
+                    )
+                except Exception as exc:
+                    save_fn(
+                        {
+                            **in_progress,
+                            "status": "failed",
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "error": str(exc),
+                        }
+                    )
+                    raise
+                finally:
+                    self._last_control_request_id = request_id
+            except Exception as exc:
+                logger.warning(f"Scheduler control cycle failed: {exc}")
 
     def status(self, persisted: Optional[dict] = None) -> dict:
         resolution_snapshot = (

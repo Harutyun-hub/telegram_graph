@@ -18,6 +18,7 @@ class _FakeRuntimeBucket:
         self.files: dict[str, bytes] = {}
         self.download_overrides: dict[str, bytes | Exception] = {}
         self.fail_duplicate_upload = False
+        self.signed_url_calls = 0
 
     def download(self, path: str) -> bytes:
         override = self.download_overrides.get(path)
@@ -32,8 +33,13 @@ class _FakeRuntimeBucket:
     def update(self, path: str, body: bytes, _options: dict) -> None:
         self.files[path] = body
 
-    def upload(self, path: str, body: bytes, _options: dict) -> None:
-        if self.fail_duplicate_upload and path in self.files:
+    def create_signed_url(self, _path: str, _expires_in: int) -> dict:
+        self.signed_url_calls += 1
+        raise RuntimeError("signed-url-should-not-be-used")
+
+    def upload(self, path: str, body: bytes, options: dict) -> None:
+        upsert = str(options.get("upsert", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if self.fail_duplicate_upload and path in self.files and not upsert:
             raise RuntimeError("Duplicate")
         self.files[path] = body
 
@@ -72,6 +78,7 @@ def _make_writer(bucket: _FakeRuntimeBucket) -> SupabaseWriter:
     writer._runtime_bucket_name = "runtime-config"
     writer._scheduler_settings_path = "scraper/scheduler_settings.json"
     writer._scheduler_runtime_path = "scraper/scheduler_runtime.json"
+    writer._scheduler_control_path = "scraper/scheduler_control.json"
     writer._freshness_snapshot_path = "pipeline/freshness_snapshot.json"
     writer._failure_table_warning_emitted = False
     writer._topic_review_warning_emitted = False
@@ -124,7 +131,7 @@ class RuntimePersistenceTests(unittest.TestCase):
 
     def test_freshness_prefers_shared_snapshot_when_requested(self) -> None:
         writer = SimpleNamespace(
-            get_shared_freshness_snapshot=lambda default=None: {
+            get_shared_freshness_snapshot=lambda default=None, timeout_seconds=1.5: {
                 "generated_at": "2026-04-11T14:15:15.876280+00:00",
                 "pipeline": {"scrape": {"last_scrape_at": "2026-04-11T14:08:06.134560+00:00"}},
             },
@@ -146,6 +153,55 @@ class RuntimePersistenceTests(unittest.TestCase):
         finally:
             freshness._CACHE = old_cache
             freshness._CACHE_TS = old_cache_ts
+
+    def test_shared_freshness_snapshot_fast_read_skips_signed_url(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["pipeline/freshness_snapshot.json"] = json.dumps(
+            {"generated_at": "2026-04-11T10:00:00+00:00", "health": {"status": "healthy"}}
+        ).encode("utf-8")
+        writer = _make_writer(bucket)
+
+        payload = writer.get_shared_freshness_snapshot(default={})
+
+        self.assertEqual(payload["generated_at"], "2026-04-11T10:00:00+00:00")
+        self.assertEqual(bucket.signed_url_calls, 0)
+
+    def test_shared_scheduler_control_fast_write_skips_readback_verification(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.download_overrides["scraper/scheduler_control.json"] = RuntimeError("readback would fail")
+        writer = _make_writer(bucket)
+
+        saved = writer.save_shared_scraper_control_command({"request_id": "cmd-1", "action": "run_once"})
+
+        self.assertTrue(saved)
+        stored = json.loads(bucket.files["scraper/scheduler_control.json"].decode("utf-8"))
+        self.assertEqual(stored["action"], "run_once")
+
+    def test_shared_scheduler_control_fast_write_replaces_duplicate_object(self) -> None:
+        bucket = _FakeRuntimeBucket()
+        bucket.files["scraper/scheduler_control.json"] = json.dumps(
+            {"request_id": "old", "action": "run_once"}
+        ).encode("utf-8")
+        writer = _make_writer(bucket)
+
+        upload_calls = {"count": 0}
+        original_upload = bucket.upload
+
+        def flaky_upload(path: str, body: bytes, options: dict) -> None:
+            if path == "scraper/scheduler_control.json" and upload_calls["count"] == 0:
+                upload_calls["count"] += 1
+                raise RuntimeError("Duplicate")
+            upload_calls["count"] += 1
+            original_upload(path, body, options)
+
+        bucket.upload = flaky_upload  # type: ignore[assignment]
+
+        saved = writer.save_shared_scraper_control_command({"request_id": "new", "action": "catchup_once"})
+
+        self.assertTrue(saved)
+        stored = json.loads(bucket.files["scraper/scheduler_control.json"].decode("utf-8"))
+        self.assertEqual(stored["request_id"], "new")
+        self.assertEqual(stored["action"], "catchup_once")
 
 
 if __name__ == "__main__":

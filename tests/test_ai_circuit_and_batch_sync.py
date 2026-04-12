@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -51,6 +52,13 @@ class _QuotaError(Exception):
         self.status_code = 429
 
 
+class _ProviderError(Exception):
+    def __init__(self) -> None:
+        super().__init__("provider unavailable")
+        self.body = {"error": {"code": "server_error", "message": "service unavailable"}}
+        self.response = type("Response", (), {"status_code": 503})()
+
+
 class OpenAICircuitBreakerTests(unittest.TestCase):
     def test_request_json_opens_quota_circuit_and_subsequent_call_is_blocked(self) -> None:
         coordinator = _CoordinatorStub()
@@ -86,6 +94,71 @@ class OpenAICircuitBreakerTests(unittest.TestCase):
 
             self.assertEqual(second_ctx.exception.reason, "insufficient_quota")
             self.assertEqual(create_mock.call_count, 1)
+
+    def test_half_open_probe_success_closes_circuit(self) -> None:
+        coordinator = _CoordinatorStub()
+        coordinator.json_values[intent_extractor._OPENAI_CIRCUIT_STATE_KEY] = json.dumps(
+            {
+                "state": "open",
+                "reason": "rate_limit",
+                "open_until": "2026-04-10T00:00:00Z",
+                "open_seconds": 60,
+                "failure_count": 3,
+            }
+        )
+
+        fake_response = Mock()
+        fake_response.id = "resp-1"
+        fake_response.choices = [Mock(message=Mock(content="{}"))]
+        fake_client = Mock()
+        fake_client.chat.completions.create = Mock(return_value=fake_response)
+
+        with patch.object(intent_extractor, "client", fake_client), \
+             patch.object(intent_extractor, "get_runtime_coordinator", return_value=coordinator), \
+             patch.object(intent_extractor, "log_openai_usage"), \
+             patch.object(intent_extractor.config, "OPENAI_CIRCUIT_BREAKER_ENABLED", True), \
+             patch.object(intent_extractor.config, "AI_REQUEST_MAX_RETRIES", 0):
+            parsed = intent_extractor._request_json(
+                system_prompt="system",
+                user_context="user",
+                max_tokens=100,
+                request_label="half-open-success",
+            )
+
+        self.assertEqual(parsed, {})
+        self.assertNotIn(intent_extractor._OPENAI_CIRCUIT_STATE_KEY, coordinator.json_values)
+        self.assertEqual(coordinator.locks, {})
+
+    def test_half_open_probe_failure_reopens_circuit(self) -> None:
+        coordinator = _CoordinatorStub()
+        coordinator.json_values[intent_extractor._OPENAI_CIRCUIT_STATE_KEY] = json.dumps(
+            {
+                "state": "open",
+                "reason": "provider_error",
+                "open_until": "2026-04-10T00:00:00Z",
+                "open_seconds": 60,
+                "failure_count": 2,
+            }
+        )
+
+        fake_client = Mock()
+        fake_client.chat.completions.create = Mock(side_effect=_ProviderError())
+
+        with patch.object(intent_extractor, "client", fake_client), \
+             patch.object(intent_extractor, "get_runtime_coordinator", return_value=coordinator), \
+             patch.object(intent_extractor.config, "OPENAI_CIRCUIT_BREAKER_ENABLED", True), \
+             patch.object(intent_extractor.config, "AI_REQUEST_MAX_RETRIES", 0):
+            with self.assertRaises(intent_extractor.OpenAICircuitOpenError) as ctx:
+                intent_extractor._request_json(
+                    system_prompt="system",
+                    user_context="user",
+                    max_tokens=100,
+                    request_label="half-open-failure",
+                )
+
+        self.assertEqual(ctx.exception.reason, "provider_error")
+        self.assertIn(intent_extractor._OPENAI_CIRCUIT_STATE_KEY, coordinator.json_values)
+        self.assertEqual(coordinator.locks, {})
 
 
 class Neo4jBatchSyncTests(unittest.TestCase):

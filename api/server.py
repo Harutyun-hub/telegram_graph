@@ -112,6 +112,47 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
 
 
+def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | None = None) -> dict[str, Any]:
+    writer = get_supabase_writer()
+    save_fn = getattr(writer, "save_shared_scraper_control_command", None)
+    if not callable(save_fn):
+        raise HTTPException(
+            status_code=503,
+            detail="Worker scheduler control is unavailable. Shared control storage is not configured.",
+        )
+
+    command = {
+        "request_id": str(uuid.uuid4()),
+        "action": str(action or "").strip().lower(),
+        "status": "pending",
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "requested_by_role": _normalize_app_role(APP_ROLE),
+    }
+    if interval_minutes is not None:
+        command["interval_minutes"] = max(1, int(interval_minutes))
+
+    if not save_fn(command):
+        raise HTTPException(
+            status_code=503,
+            detail="Worker scheduler control is unavailable. Failed to persist control command.",
+        )
+
+    try:
+        status = dict(get_current_scraper_scheduler_status() or {})
+    except Exception as exc:
+        logger.warning(f"Falling back to default scraper status after control enqueue error: {exc}")
+        status = _default_scraper_scheduler_status()
+    status["worker_control"] = {
+        "request_id": command["request_id"],
+        "action": command["action"],
+        "status": "pending",
+        "requested_at": command["requested_at"],
+    }
+    if interval_minutes is not None:
+        status["interval_minutes"] = max(1, int(interval_minutes))
+    return status
+
+
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
     if config.IS_STAGING:
         if role != "web":
@@ -677,60 +718,83 @@ def get_current_social_runtime_status() -> dict[str, Any]:
     return social_runtime_service.status()
 
 
-def get_current_scraper_scheduler_status() -> dict[str, Any]:
-    if not _should_run_background_jobs():
-        shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={})
-        if shared:
-            return shared
-    if scraper_scheduler is None:
-        return {
-            "status": "stopped",
-            "is_active": False,
-            "interval_minutes": 15,
+_last_shared_scraper_status: dict[str, Any] | None = None
+_last_shared_scraper_status_ts: datetime | None = None
+
+
+def _default_scraper_scheduler_status() -> dict[str, Any]:
+    return {
+        "status": "stopped",
+        "is_active": False,
+        "interval_minutes": 15,
+        "running_now": False,
+        "last_run_started_at": None,
+        "last_run_finished_at": None,
+        "last_success_at": None,
+        "next_run_at": None,
+        "last_error": None,
+        "last_result": None,
+        "last_mode": "normal",
+        "catchup_limits": {
+            "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
+            "post_limit": config.AI_CATCHUP_POST_LIMIT,
+            "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
+        },
+        "normal_limits": {
+            "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
+            "post_limit": config.AI_NORMAL_POST_LIMIT,
+            "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
+        },
+        "run_history": [],
+        "resolution": {
+            "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
             "running_now": False,
+            "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
             "last_run_started_at": None,
             "last_run_finished_at": None,
             "last_success_at": None,
             "next_run_at": None,
             "last_error": None,
             "last_result": None,
-            "last_mode": "normal",
-            "catchup_limits": {
-                "comment_limit": config.AI_CATCHUP_COMMENT_LIMIT,
-                "post_limit": config.AI_CATCHUP_POST_LIMIT,
-                "sync_limit": config.AI_CATCHUP_SYNC_LIMIT,
-            },
-            "normal_limits": {
-                "comment_limit": config.AI_NORMAL_COMMENT_LIMIT,
-                "post_limit": config.AI_NORMAL_POST_LIMIT,
-                "sync_limit": config.AI_NORMAL_SYNC_LIMIT,
-            },
             "run_history": [],
-            "resolution": {
-                "enabled": bool(config.FEATURE_SOURCE_RESOLUTION_WORKER),
-                "running_now": False,
-                "interval_minutes": max(1, int(config.SOURCE_RESOLUTION_INTERVAL_MINUTES)),
-                "last_run_started_at": None,
-                "last_run_finished_at": None,
-                "last_success_at": None,
-                "next_run_at": None,
-                "last_error": None,
-                "last_result": None,
-                "run_history": [],
-                "snapshot": {
-                    "slot_key": "primary",
-                    "due_jobs": 0,
-                    "leased_jobs": 0,
-                    "dead_letter_jobs": 0,
-                    "cooldown_slots": 0,
-                    "cooldown_until": None,
-                    "oldest_due_age_seconds": None,
-                    "active_pending_sources": 0,
-                    "active_missing_peer_refs": 0,
-                },
+            "snapshot": {
+                "slot_key": "primary",
+                "due_jobs": 0,
+                "leased_jobs": 0,
+                "dead_letter_jobs": 0,
+                "cooldown_slots": 0,
+                "cooldown_until": None,
+                "oldest_due_age_seconds": None,
+                "active_pending_sources": 0,
+                "active_missing_peer_refs": 0,
             },
-            "persisted": None,
-        }
+        },
+        "persisted": None,
+    }
+
+
+def get_current_scraper_scheduler_status() -> dict[str, Any]:
+    global _last_shared_scraper_status, _last_shared_scraper_status_ts
+    if not _should_run_background_jobs():
+        now = datetime.now(timezone.utc)
+        try:
+            shared = get_supabase_writer().get_shared_scraper_runtime_snapshot(default={}, timeout_seconds=2.5)
+        except Exception as exc:
+            logger.warning(f"Shared scraper runtime snapshot read failed on passive web: {exc}")
+            shared = {}
+        if shared:
+            _last_shared_scraper_status = dict(shared)
+            _last_shared_scraper_status_ts = now
+            return dict(shared)
+        if (
+            _last_shared_scraper_status
+            and _last_shared_scraper_status_ts
+            and (now - _last_shared_scraper_status_ts).total_seconds() <= 10
+        ):
+            return dict(_last_shared_scraper_status)
+        return _default_scraper_scheduler_status()
+    if scraper_scheduler is None:
+        return _default_scraper_scheduler_status()
     return scraper_scheduler.status()
 
 
@@ -3101,7 +3165,12 @@ async def trending_widget_quality_snapshot(
 async def start_scraper_scheduler():
     """Start recurring scraper schedule using persisted interval."""
     try:
+        if not _should_run_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("start"))
         return await get_scraper_scheduler().start()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Start scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3111,7 +3180,12 @@ async def start_scraper_scheduler():
 async def stop_scraper_scheduler():
     """Stop recurring scraper schedule."""
     try:
+        if not _should_run_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("stop"))
         return await get_scraper_scheduler().stop()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Stop scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3121,7 +3195,18 @@ async def stop_scraper_scheduler():
 async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
     """Update scraper scheduler interval in minutes."""
     try:
+        if not _should_run_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: _enqueue_worker_scheduler_control(
+                    "set_interval",
+                    interval_minutes=payload.interval_minutes,
+                ),
+            )
         return await get_scraper_scheduler().set_interval(payload.interval_minutes)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Update scraper scheduler error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3131,7 +3216,12 @@ async def update_scraper_scheduler(payload: ScraperSchedulerUpdateRequest):
 async def run_scraper_once():
     """Trigger one immediate scrape cycle."""
     try:
+        if not _should_run_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("run_once"))
         return await get_scraper_scheduler().run_once()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Run-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3141,7 +3231,12 @@ async def run_scraper_once():
 async def run_scraper_catchup_once():
     """Trigger one immediate processing/sync-heavy catch-up cycle (no scraping)."""
     try:
+        if not _should_run_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_worker_scheduler_control("catchup_once"))
         return await get_scraper_scheduler().run_catchup_once()
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Catchup-once scraper error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3655,7 +3750,7 @@ async def kb_list_documents(collection_name: str):
         for doc in docs:
             doc["chunk_count"] = chunk_counts.get(doc["doc_id"], 0)
         return {"documents": docs}
-    except Exception as exc:
+    except Exception:
         raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name}")
 
 

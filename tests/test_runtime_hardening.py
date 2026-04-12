@@ -107,7 +107,9 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
             "last_result": {"mode": "normal"},
             "last_mode": "normal",
         }
-        writer = SimpleNamespace(get_shared_scraper_runtime_snapshot=lambda default=None: shared)
+        writer = SimpleNamespace(
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: shared
+        )
 
         with patch.object(server, "APP_ROLE", "web"), \
              patch.object(server, "scraper_scheduler", None), \
@@ -117,6 +119,94 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertEqual(payload["status"], "active")
         self.assertEqual(payload["next_run_at"], "2026-04-11T10:15:00+00:00")
         self.assertTrue(payload["running_now"])
+
+    def test_web_role_scheduler_status_falls_back_to_default_when_shared_read_fails(self) -> None:
+        writer = SimpleNamespace(
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: (_ for _ in ()).throw(
+                RuntimeError("storage timed out")
+            )
+        )
+        old_cached = server._last_shared_scraper_status
+
+        try:
+            server._last_shared_scraper_status = None
+            with patch.object(server, "APP_ROLE", "web"), \
+                 patch.object(server, "scraper_scheduler", None), \
+                 patch.object(server, "get_supabase_writer", return_value=writer):
+                payload = server.get_current_scraper_scheduler_status()
+        finally:
+            server._last_shared_scraper_status = old_cached
+
+        self.assertEqual(payload["status"], "stopped")
+        self.assertFalse(payload["is_active"])
+        self.assertIsNone(payload["next_run_at"])
+
+    def test_web_run_now_enqueues_worker_control_command(self) -> None:
+        saved: dict[str, object] = {}
+
+        def save_control(payload: dict) -> bool:
+            saved.update(payload)
+            return True
+
+        writer = SimpleNamespace(
+            save_shared_scraper_control_command=save_control,
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: {
+                "status": "active",
+                "is_active": True,
+                "interval_minutes": 15,
+                "running_now": False,
+                "last_run_started_at": None,
+                "last_run_finished_at": None,
+                "last_success_at": None,
+                "next_run_at": "2026-04-11T10:15:00+00:00",
+                "last_error": None,
+                "last_result": None,
+                "last_mode": "normal",
+            },
+        )
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_supabase_writer", return_value=writer):
+            payload = asyncio.run(server.run_scraper_once())
+
+        self.assertEqual(saved["action"], "run_once")
+        self.assertEqual(saved["status"], "pending")
+        self.assertEqual(payload["worker_control"]["action"], "run_once")
+        self.assertEqual(payload["worker_control"]["status"], "pending")
+
+    def test_web_set_interval_enqueues_worker_control_command(self) -> None:
+        saved: dict[str, object] = {}
+
+        def save_control(payload: dict) -> bool:
+            saved.update(payload)
+            return True
+
+        writer = SimpleNamespace(
+            save_shared_scraper_control_command=save_control,
+            get_shared_scraper_runtime_snapshot=lambda default=None, timeout_seconds=1.5: {
+                "status": "active",
+                "is_active": True,
+                "interval_minutes": 15,
+                "running_now": False,
+                "last_run_started_at": None,
+                "last_run_finished_at": None,
+                "last_success_at": None,
+                "next_run_at": "2026-04-11T10:15:00+00:00",
+                "last_error": None,
+                "last_result": None,
+                "last_mode": "normal",
+            },
+        )
+
+        payload_model = server.ScraperSchedulerUpdateRequest(interval_minutes=30)
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_supabase_writer", return_value=writer):
+            payload = asyncio.run(server.update_scraper_scheduler(payload_model))
+
+        self.assertEqual(saved["action"], "set_interval")
+        self.assertEqual(saved["interval_minutes"], 30)
+        self.assertEqual(payload["interval_minutes"], 30)
 
     def test_app_lifespan_requires_healthy_redis_in_locked_env(self) -> None:
         async def enter_lifespan() -> None:
@@ -170,6 +260,40 @@ class SchedulerDistributedLockTests(unittest.TestCase):
                 status = await service.set_interval(45)
             self.assertTrue(status["is_active"])
             self.assertEqual(status["interval_minutes"], 45)
+
+        asyncio.run(scenario())
+
+    def test_worker_control_cycle_processes_pending_run_once_command(self) -> None:
+        async def scenario() -> None:
+            command_store = {
+                "request_id": "cmd-1",
+                "action": "run_once",
+                "status": "pending",
+                "requested_at": "2026-04-11T10:00:00+00:00",
+            }
+
+            writer = SimpleNamespace(
+                get_shared_scraper_control_command=lambda default=None, timeout_seconds=1.5: dict(command_store),
+                save_shared_scraper_control_command=lambda payload: command_store.update(payload) or True,
+            )
+
+            service = ScraperSchedulerService(writer)
+            service.desired_active = True
+
+            async def fake_run_cycle(*, use_runtime_lock: bool = True) -> None:
+                self.assertFalse(use_runtime_lock)
+                service.last_success_at = service.last_run_started_at
+
+            run_cycle_mock = AsyncMock(side_effect=fake_run_cycle)
+
+            with patch("api.scraper_scheduler._runtime_role_allows_background_jobs", return_value=True), \
+                 patch.object(service, "_run_cycle", run_cycle_mock), \
+                 patch.object(service, "status", return_value={"status": "active", "running_now": False}):
+                await service._run_control_cycle()
+
+            self.assertEqual(command_store["status"], "completed")
+            self.assertEqual(command_store["scheduler_status"]["status"], "active")
+            run_cycle_mock.assert_awaited_once_with(use_runtime_lock=False)
 
         asyncio.run(scenario())
 
