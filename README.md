@@ -4,7 +4,7 @@
 [![API Docs](https://img.shields.io/badge/api-docs-blue)](./docs/api/)
 [![Architecture](https://img.shields.io/badge/architecture-documented-orange)](./docs/architecture/)
 
-Production-oriented Telegram intelligence platform for community monitoring, AI enrichment, graph analytics, and dashboard delivery.
+Production-oriented intelligence platform for Telegram community monitoring, social-media evidence review, AI enrichment, graph analytics, and dashboard delivery.
 
 ## What This Repository Ships
 
@@ -14,6 +14,7 @@ Production-oriented Telegram intelligence platform for community monitoring, AI 
 - Neo4j analytics graph for strategic and network queries
 - React + Vite dashboard frontend
 - AI-powered enrichment and brief generation
+- Operator-only social dashboard and social topics surfaces
 
 ## Current Dashboard Semantics
 
@@ -22,6 +23,14 @@ Production-oriented Telegram intelligence platform for community monitoring, AI 
 - Topic Landscape and Conversation Trends operate on direct message mentions only.
 - Topic Lifecycle is currently a short-window momentum classifier inside the 15-day window, not a full multi-stage lifecycle model.
 - Service Gap Detector is AI-only. It shows AI-grounded service-gap bars when valid service cards exist, and a soft `No service gap detected.` state when they do not.
+
+## Current Social Surface Semantics
+
+- `/social` is a dashboard twin of the main Telegram dashboard, but it stays on separate social endpoints and social frontend contracts.
+- `/social/topics` mirrors the Telegram Topics UX while using only social topics, social trend series, and social evidence.
+- Social routes remain operator-only and are backed by `/api/social/*` endpoints with `require_operator_access`.
+- Social topic detail is intentionally evidence-only in v1. It does not reuse Telegram AI topic-overview cards.
+- Unmapped Telegram widgets remain visible on `/social` as explicit social placeholders rather than synthetic or backfilled data.
 
 ## Repository Layout
 
@@ -88,8 +97,7 @@ cd ..
 ### 4. Run backend
 
 ```bash
-source venv/bin/activate
-python -m uvicorn api.server:app --reload --port 8001
+venv/bin/python -m uvicorn api.server:app --reload --port 8001
 ```
 
 ### 5. Run frontend
@@ -99,7 +107,7 @@ cd frontend
 npm run dev
 ```
 
-The frontend defaults to `/api`. Set `VITE_API_BASE_URL` in `frontend/.env` if you want an explicit backend URL.
+The frontend defaults to `http://127.0.0.1:5174/` and proxies `/api` to `http://127.0.0.1:8001`. Set `VITE_API_BASE_URL` in `frontend/.env` if you want an explicit backend URL.
 
 ## Important Environment Variables
 
@@ -116,10 +124,11 @@ Backend:
 - `ANALYTICS_RATE_LIMIT_ENABLED` default `true`
 - `ANALYTICS_RATE_LIMIT_WINDOW_SECONDS` default `60`
 - `ANALYTICS_RATE_LIMIT_MAX_REQUESTS` default `120`
-- `OPENCLAW_GATEWAY_BASE_URL` direct OpenClaw Gateway base URL for the web AI helper
-- `OPENCLAW_GATEWAY_TOKEN` backend-only OpenClaw Gateway token for the web AI helper
+- `OPENCLAW_GATEWAY_BASE_URL` backend-only OpenClaw Gateway base URL for the web AI helper and KB generation
+- `OPENCLAW_GATEWAY_TOKEN` backend-only OpenClaw Gateway token for the web AI helper and KB generation
 - `OPENCLAW_ANALYTICS_AGENT_ID` OpenClaw agent id that must match the Telegram analytics bot agent
 - `OPENCLAW_WEB_SESSION_KEY` dedicated persistent OpenClaw session key for the web helper, for example `tg-analyst-ru-web-admin`
+- `OPENCLAW_KB_SESSION_KEY` dedicated persistent OpenClaw session key for KB generation, for example `tg-analyst-ru-web-kb`
 - `OPENCLAW_HELPER_TIMEOUT_SECONDS` default `30`
 - `AI_HELPER_ADMIN_SUPABASE_USER_ID` required in production; only this Supabase user can use the web AI helper
 - `AI_HELPER_ADMIN_EMAIL` optional local/dev-only fallback if you need to test admin access before user-id wiring
@@ -175,6 +184,7 @@ Compatibility note:
 - the repo still preserves the historical `APP_ROLE=all` mode for legacy single-service deployments
 - that mode is compatibility-only and should not be treated as the target production shape for the 8.5/10 plan
 - for production hardening, use `APP_ROLE=web` on the web service and `APP_ROLE=worker` on the worker service
+- the canonical Stage 1 web/worker env split now lives in [production_runbook.md](/Users/harutnahapetyan/Documents/Gemini/Telegram/docs/production_runbook.md)
 
 Operational note:
 
@@ -206,9 +216,17 @@ Immediate rollback:
 ## OpenClaw Web AI Helper
 
 - The dashboard floating AI helper now talks to OpenClaw through the backend only. The browser never receives OpenClaw credentials.
+- The app does not need OpenClaw Control UI for this integration. Control UI origin and device-auth settings are only relevant if humans open OpenClaw's own web UI.
 - Telegram and web must share the same `OPENCLAW_ANALYTICS_AGENT_ID`, but they must not share the same session key.
 - Telegram keeps its existing OpenClaw session/memory untouched.
 - The web helper uses only `OPENCLAW_WEB_SESSION_KEY`, so refreshes keep the same web conversation and resets affect only that web session.
+- KB generation may also use OpenClaw through the backend, but it must use `OPENCLAW_KB_SESSION_KEY` so grounded KB prompts never mix with the floating helper conversation.
+
+Production integration notes:
+
+- Keep OpenClaw Gateway on shared-secret token auth for the app backend calls.
+- Expose OpenClaw on a dedicated HTTPS API hostname if needed, but treat it as a backend dependency rather than a browser app.
+- Do not reuse `ANALYTICS_API_KEY_OPENCLAW` for `/api/ai-helper/*`; that token is only for OpenClaw skills calling the app's read-only/server-to-server APIs.
 
 Resetting the web helper:
 
