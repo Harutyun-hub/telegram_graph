@@ -7,6 +7,7 @@ touch Supabase directly from scrapers or processors.
 from __future__ import annotations
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from contextlib import contextmanager
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
@@ -22,6 +23,13 @@ try:
     import certifi
 except Exception:  # pragma: no cover
     certifi = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional until pipeline queue workers use direct Postgres
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover
+    psycopg = None  # type: ignore[assignment]
+    dict_row = None  # type: ignore[assignment]
 
 
 def _parse_iso_datetime(value):
@@ -136,6 +144,7 @@ class SupabaseWriter:
         self._resolution_jobs_warning_emitted = False
         self._resolution_slots_warning_emitted = False
         self._peer_refs_warning_emitted = False
+        self._pipeline_queue_warning_emitted: set[str] = set()
         self._runtime_bucket_name = "runtime-config"
         self._scheduler_settings_path = "scraper/scheduler_settings.json"
         self._scheduler_runtime_path = "scraper/scheduler_runtime.json"
@@ -196,6 +205,13 @@ class SupabaseWriter:
             "telegram_channel_peer_refs table unavailable; peer-ref lookup is disabled until migration is applied "
             f"({error})"
         )
+
+    def _warn_pipeline_queue_once(self, queue_name: str, error: Exception | str):
+        key = str(queue_name or "pipeline_queue")
+        if key in self._pipeline_queue_warning_emitted:
+            return
+        self._pipeline_queue_warning_emitted.add(key)
+        logger.warning(f"{key} unavailable; pipeline queue helpers disabled until runtime config is ready ({error})")
 
     def _ensure_runtime_bucket(self):
         """Ensure runtime config bucket exists in Supabase Storage."""
@@ -791,6 +807,350 @@ class SupabaseWriter:
             "active_pending_sources": active_pending_sources,
             "active_missing_peer_refs": active_missing_peer_refs,
         }
+
+    # ── Pipeline Stage Queues ────────────────────────────────────────────────
+
+    @staticmethod
+    def _pipeline_queue_table(queue_name: str) -> str:
+        tables = {
+            "ai_post": "ai_post_jobs",
+            "ai_comment_group": "ai_comment_group_jobs",
+            "neo4j_sync": "neo4j_sync_jobs",
+        }
+        key = str(queue_name or "").strip().lower()
+        if key not in tables:
+            raise ValueError(f"Unsupported pipeline queue: {queue_name}")
+        return tables[key]
+
+    @contextmanager
+    def _pipeline_connection(self):
+        database_url = str(getattr(config, "PIPELINE_DATABASE_URL", "") or "").strip()
+        if not database_url:
+            raise RuntimeError("PIPELINE_DATABASE_URL (or SUPABASE_DB_URL) is required for atomic pipeline queue helpers.")
+        if psycopg is None or dict_row is None:
+            raise RuntimeError("psycopg is required for atomic pipeline queue helpers.")
+        conn = psycopg.connect(database_url, row_factory=dict_row)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _pipeline_queue_backoff_seconds(self, attempt_count: int) -> int:
+        base = max(5, int(config.PIPELINE_QUEUE_BACKOFF_SECONDS))
+        max_backoff = max(base, int(config.PIPELINE_QUEUE_BACKOFF_MAX_SECONDS))
+        value = base * (2 ** max(0, int(attempt_count) - 1))
+        return int(min(max_backoff, value))
+
+    def enqueue_ai_post_jobs(self, *, limit: int | None = None) -> int:
+        row_limit = max(1, int(limit or config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE))
+        try:
+            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.ai_post_jobs (
+                      post_id,
+                      status,
+                      next_attempt_at,
+                      created_at,
+                      updated_at
+                    )
+                    SELECT
+                      tp.id,
+                      'pending',
+                      timezone('utc', now()),
+                      timezone('utc', now()),
+                      timezone('utc', now())
+                    FROM public.telegram_posts AS tp
+                    WHERE tp.is_processed = FALSE
+                      AND tp.text IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM public.ai_post_jobs AS job
+                        WHERE job.post_id = tp.id
+                      )
+                    ORDER BY tp.posted_at ASC
+                    LIMIT %s
+                    ON CONFLICT (post_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (row_limit,),
+                )
+                return len(cur.fetchall() or [])
+        except Exception as e:
+            self._warn_pipeline_queue_once("ai_post_jobs", e)
+            return 0
+
+    def enqueue_ai_comment_group_jobs(self, *, limit: int | None = None) -> int:
+        row_limit = max(1, int(limit or config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE))
+        try:
+            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.ai_comment_group_jobs (
+                      scope_key,
+                      telegram_user_id,
+                      channel_id,
+                      post_id,
+                      status,
+                      next_attempt_at,
+                      created_at,
+                      updated_at
+                    )
+                    SELECT
+                      grouped.scope_key,
+                      grouped.telegram_user_id,
+                      grouped.channel_id,
+                      grouped.post_id,
+                      'pending',
+                      timezone('utc', now()),
+                      timezone('utc', now()),
+                      timezone('utc', now())
+                    FROM (
+                      SELECT
+                        CONCAT(
+                          COALESCE(tc.telegram_user_id::text, 'anonymous'),
+                          ':',
+                          COALESCE(tc.channel_id::text, 'unknown'),
+                          ':',
+                          COALESCE(tc.post_id::text, 'unknown')
+                        ) AS scope_key,
+                        tc.telegram_user_id,
+                        tc.channel_id,
+                        tc.post_id,
+                        MIN(tc.posted_at) AS first_posted_at
+                      FROM public.telegram_comments AS tc
+                      WHERE tc.is_processed = FALSE
+                        AND tc.text IS NOT NULL
+                        AND tc.channel_id IS NOT NULL
+                        AND tc.post_id IS NOT NULL
+                      GROUP BY tc.telegram_user_id, tc.channel_id, tc.post_id
+                    ) AS grouped
+                    WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM public.ai_comment_group_jobs AS job
+                      WHERE job.scope_key = grouped.scope_key
+                    )
+                    ORDER BY grouped.first_posted_at ASC
+                    LIMIT %s
+                    ON CONFLICT (scope_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (row_limit,),
+                )
+                return len(cur.fetchall() or [])
+        except Exception as e:
+            self._warn_pipeline_queue_once("ai_comment_group_jobs", e)
+            return 0
+
+    def enqueue_neo4j_sync_jobs(self, *, limit: int | None = None) -> int:
+        row_limit = max(1, int(limit or config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE))
+        try:
+            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.neo4j_sync_jobs (
+                      post_id,
+                      status,
+                      next_attempt_at,
+                      created_at,
+                      updated_at
+                    )
+                    SELECT
+                      tp.id,
+                      'pending',
+                      timezone('utc', now()),
+                      timezone('utc', now()),
+                      timezone('utc', now())
+                    FROM public.telegram_posts AS tp
+                    WHERE tp.is_processed = TRUE
+                      AND tp.neo4j_synced = FALSE
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM public.neo4j_sync_jobs AS job
+                        WHERE job.post_id = tp.id
+                      )
+                    ORDER BY tp.posted_at ASC
+                    LIMIT %s
+                    ON CONFLICT (post_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (row_limit,),
+                )
+                return len(cur.fetchall() or [])
+        except Exception as e:
+            self._warn_pipeline_queue_once("neo4j_sync_jobs", e)
+            return 0
+
+    def repair_pipeline_stage_queues(self, *, limit: int | None = None) -> dict[str, int]:
+        row_limit = max(1, int(limit or config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE))
+        return {
+            "ai_post_jobs_enqueued": self.enqueue_ai_post_jobs(limit=row_limit),
+            "ai_comment_group_jobs_enqueued": self.enqueue_ai_comment_group_jobs(limit=row_limit),
+            "neo4j_sync_jobs_enqueued": self.enqueue_neo4j_sync_jobs(limit=row_limit),
+        }
+
+    def _claim_pipeline_jobs(
+        self,
+        queue_name: str,
+        *,
+        worker_id: str,
+        batch_size: int | None = None,
+        lease_seconds: int | None = None,
+        eligibility_join_sql: str = "",
+        eligibility_where_sql: str = "",
+    ) -> list[dict]:
+        table_name = self._pipeline_queue_table(queue_name)
+        requested_batch = max(1, int(batch_size or config.PIPELINE_QUEUE_CLAIM_BATCH_SIZE))
+        ttl_seconds = max(30, int(lease_seconds or config.PIPELINE_QUEUE_LEASE_SECONDS))
+        try:
+            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH candidates AS (
+                      SELECT job.id
+                      FROM public.{table_name} AS job
+                      {eligibility_join_sql}
+                      WHERE job.status IN ('pending', 'failed')
+                        AND job.next_attempt_at <= timezone('utc', now())
+                        {eligibility_where_sql}
+                      ORDER BY job.next_attempt_at ASC, job.created_at ASC
+                      LIMIT %s
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE public.{table_name} AS job
+                    SET status = 'leased',
+                        lease_owner = %s,
+                        lease_token = gen_random_uuid(),
+                        lease_expires_at = timezone('utc', now()) + (%s * INTERVAL '1 second'),
+                        updated_at = timezone('utc', now())
+                    FROM candidates
+                    WHERE job.id = candidates.id
+                    RETURNING job.*
+                    """,
+                    (requested_batch, str(worker_id or "").strip(), ttl_seconds),
+                )
+                return list(cur.fetchall() or [])
+        except Exception as e:
+            self._warn_pipeline_queue_once(table_name, e)
+            return []
+
+    def _nack_pipeline_job(
+        self,
+        queue_name: str,
+        *,
+        job_id: str,
+        lease_token: str,
+        error: str | Exception,
+        max_attempts: int | None = None,
+    ) -> dict | None:
+        table_name = self._pipeline_queue_table(queue_name)
+        if not job_id or not lease_token:
+            return None
+        try:
+            with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, attempt_count
+                    FROM public.{table_name}
+                    WHERE id = %s
+                      AND lease_token = %s::uuid
+                    FOR UPDATE
+                    """,
+                    (job_id, lease_token),
+                )
+                current = cur.fetchone()
+                if not current:
+                    return None
+
+                next_attempt = int(current.get("attempt_count") or 0) + 1
+                max_allowed_attempts = max(1, int(max_attempts or config.PIPELINE_QUEUE_MAX_ATTEMPTS))
+                is_dead_letter = next_attempt >= max_allowed_attempts
+                now = datetime.now(timezone.utc)
+                next_retry_at = now if is_dead_letter else now + timedelta(
+                    seconds=self._pipeline_queue_backoff_seconds(next_attempt)
+                )
+
+                cur.execute(
+                    f"""
+                    UPDATE public.{table_name}
+                    SET status = %s,
+                        attempt_count = %s,
+                        next_attempt_at = %s,
+                        last_error = %s,
+                        lease_owner = NULL,
+                        lease_token = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = %s
+                    WHERE id = %s
+                      AND lease_token = %s::uuid
+                    RETURNING *
+                    """,
+                    (
+                        "dead_lettered" if is_dead_letter else "failed",
+                        next_attempt,
+                        next_retry_at.isoformat(),
+                        str(error or "")[:4000],
+                        now.isoformat(),
+                        job_id,
+                        lease_token,
+                    ),
+                )
+                return cur.fetchone()
+        except Exception as e:
+            self._warn_pipeline_queue_once(table_name, e)
+            return None
+
+    def claim_ai_post_jobs(
+        self,
+        *,
+        worker_id: str,
+        batch_size: int | None = None,
+        lease_seconds: int | None = None,
+    ) -> list[dict]:
+        return self._claim_pipeline_jobs(
+            "ai_post",
+            worker_id=worker_id,
+            batch_size=batch_size,
+            lease_seconds=lease_seconds,
+        )
+
+    def claim_neo4j_sync_jobs(
+        self,
+        *,
+        worker_id: str,
+        batch_size: int | None = None,
+        lease_seconds: int | None = None,
+    ) -> list[dict]:
+        return self._claim_pipeline_jobs(
+            "neo4j_sync",
+            worker_id=worker_id,
+            batch_size=batch_size,
+            lease_seconds=lease_seconds,
+            eligibility_join_sql="""
+                      JOIN public.telegram_posts AS post
+                        ON post.id = job.post_id
+                    """,
+            eligibility_where_sql="""
+                        AND post.is_processed = TRUE
+                        AND post.neo4j_synced = FALSE
+                    """,
+        )
+
+    def nack_ai_post_job(
+        self,
+        job_id: str,
+        lease_token: str,
+        error: str | Exception,
+        *,
+        max_attempts: int | None = None,
+    ) -> dict | None:
+        return self._nack_pipeline_job(
+            "ai_post",
+            job_id=job_id,
+            lease_token=lease_token,
+            error=error,
+            max_attempts=max_attempts,
+        )
 
     def get_runtime_json(self, path: str, default: dict | None = None) -> dict:
         """Load a JSON object from runtime-config storage bucket."""
