@@ -281,6 +281,9 @@ async def _scrape_broadcast_channel(
 
     posts_found = 0
     new_posts: list[dict] = []
+    max_posts = max(0, int(getattr(config, "SCRAPE_MAX_POSTS_PER_SOURCE_PER_CYCLE", 0) or 0))
+    cap_hit = False
+    last_scraped_post_at: datetime | None = None
 
     try:
         async for message in client.iter_messages(
@@ -300,6 +303,7 @@ async def _scrape_broadcast_channel(
             if not text:
                 continue
 
+            last_scraped_post_at = msg_date
             post = {
                 "channel_id": channel_uuid,
                 "telegram_message_id": int(message.id),
@@ -323,6 +327,11 @@ async def _scrape_broadcast_channel(
                 logger.info(f"[{username}] Written {posts_found} broadcast posts so far...")
                 new_posts = []
 
+            if max_posts > 0 and posts_found >= max_posts:
+                cap_hit = True
+                logger.info(f"[{username}] Reached per-cycle broadcast post cap ({max_posts})")
+                break
+
     except FloodWaitError as exc:
         logger.warning(f"[{username}] FloodWait — sleeping {exc.seconds}s")
         await asyncio.sleep(exc.seconds + 5)
@@ -332,7 +341,10 @@ async def _scrape_broadcast_channel(
     if new_posts:
         supabase_writer.upsert_posts(new_posts)
 
-    supabase_writer.update_channel_last_scraped(channel_uuid)
+    if cap_hit and last_scraped_post_at is not None:
+        supabase_writer.update_channel_last_scraped_at(channel_uuid, last_scraped_post_at.isoformat())
+    else:
+        supabase_writer.update_channel_last_scraped(channel_uuid)
     logger.success(f"[{username}] Done — {posts_found} broadcast posts collected")
     return {"posts_found": posts_found, "comments_found": 0, "source_type": "channel"}
 

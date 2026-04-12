@@ -550,23 +550,30 @@ class ScraperSchedulerService:
                     else:
                         raise ValueError(f"Unsupported scheduler control action: {action}")
 
-                    save_fn(
-                        {
-                            **in_progress,
-                            "status": "completed",
-                            "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "scheduler_status": status,
-                        }
-                    )
-                except Exception as exc:
-                    save_fn(
-                        {
+                    completed_payload = {
+                        **in_progress,
+                        "status": "completed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "scheduler_status": status,
+                    }
+                    if not save_fn(completed_payload):
+                        failed_payload = {
                             **in_progress,
                             "status": "failed",
                             "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "error": str(exc),
+                            "error": "shared control completion writeback failed after retries",
                         }
-                    )
+                        if not save_fn(failed_payload):
+                            logger.warning("Failed to persist terminal shared scraper control failure payload")
+                except Exception as exc:
+                    failed_payload = {
+                        **in_progress,
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "error": str(exc),
+                    }
+                    if not save_fn(failed_payload):
+                        logger.warning("Failed to persist shared scraper control error payload")
                     raise
                 finally:
                     self._last_control_request_id = request_id
