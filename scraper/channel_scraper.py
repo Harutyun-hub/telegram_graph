@@ -14,10 +14,13 @@ from uuid import uuid4
 from loguru import logger
 from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, FloodWaitError
+from telethon.tl.types import InputPeerChannel
 from telethon.tl.types import Channel, Message
 
 import config
+from api.source_resolution import build_pending_source_payload, ensure_resolution_job
 from scraper.channel_metadata import (
+    channel_peer_ref_from_entity,
     minimal_source_metadata_from_entity,
     resolve_source_metadata,
     source_type_from_entity,
@@ -127,20 +130,71 @@ def _thread_top_message_id(message: Message) -> int:
     return int(message.id)
 
 
+def _peer_ref_to_input_peer(peer_ref: dict | None) -> InputPeerChannel | None:
+    if not peer_ref:
+        return None
+    try:
+        peer_id = int(peer_ref.get("peer_id"))
+        access_hash = int(peer_ref.get("access_hash"))
+    except Exception:
+        return None
+    return InputPeerChannel(channel_id=peer_id, access_hash=access_hash)
+
+
+def _bump_scrape_diagnostic(diagnostics: dict | None, key: str, amount: int = 1) -> None:
+    if diagnostics is None:
+        return
+    diagnostics[key] = int(diagnostics.get(key, 0) or 0) + amount
+
+
 async def prepare_source_for_scrape(
     client: TelegramClient,
     channel_record: dict,
     supabase_writer,
+    *,
+    diagnostics: dict | None = None,
 ) -> tuple[dict | None, Channel | None]:
     """
     Resolve source metadata and peer type using the shared scheduler client.
     """
     username = channel_record["channel_username"]
     channel_uuid = channel_record["id"]
+    entity_lookup = username
+    used_peer_ref = False
+    if config.FEATURE_SOURCE_PEER_REF_LOOKUP:
+        peer_ref = supabase_writer.get_channel_peer_ref(channel_uuid, "primary")
+        input_peer = _peer_ref_to_input_peer(peer_ref)
+        if input_peer is not None:
+            entity_lookup = input_peer
+            used_peer_ref = True
+            _bump_scrape_diagnostic(diagnostics, "peer_ref_channels")
+        elif config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            _bump_scrape_diagnostic(diagnostics, "pending_resolution_channels")
+            ensure_resolution_job(supabase_writer, channel_record, priority=20)
+            logger.info(f"[{username}] Missing peer ref; queued source resolution and skipping scrape cycle")
+            return supabase_writer.get_channel_by_id(channel_uuid), None
+    if not used_peer_ref and entity_lookup == username:
+        _bump_scrape_diagnostic(diagnostics, "username_fallback_channels")
 
     try:
-        entity = await client.get_entity(username)
+        entity = await client.get_entity(entity_lookup)
+    except FloodWaitError:
+        _bump_scrape_diagnostic(diagnostics, "resolve_flood_wait_count")
+        raise
     except (ValueError, ChannelPrivateError) as exc:
+        if used_peer_ref and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            _bump_scrape_diagnostic(diagnostics, "pending_resolution_channels")
+            supabase_writer.update_channel(
+                channel_uuid,
+                build_pending_source_payload(
+                    channel_title=(channel_record.get("channel_title") or username or "").strip() or username,
+                    error_message=str(exc)[:500],
+                ),
+            )
+            refreshed = supabase_writer.get_channel_by_id(channel_uuid) or channel_record
+            ensure_resolution_job(supabase_writer, refreshed, priority=10 if refreshed.get("is_active") else 30)
+            logger.warning(f"[{username}] Peer ref is stale or inaccessible; queued source re-resolution")
+            return refreshed, None
         supabase_writer.update_channel(
             channel_uuid,
             {
@@ -161,6 +215,12 @@ async def prepare_source_for_scrape(
 
     try:
         metadata, resolved_entity = await resolve_source_metadata(client, username=username, entity=entity)
+        if config.FEATURE_SOURCE_RESOLUTION_QUEUE or config.FEATURE_SOURCE_PEER_REF_LOOKUP:
+            supabase_writer.upsert_channel_peer_ref(
+                channel_uuid,
+                "primary",
+                channel_peer_ref_from_entity(resolved_entity, username=username),
+            )
         supabase_writer.update_channel(channel_uuid, metadata)
         refreshed = supabase_writer.get_channel_by_id(channel_uuid) or {**channel_record, **metadata}
         return refreshed, resolved_entity

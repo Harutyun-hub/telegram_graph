@@ -66,6 +66,12 @@ type ScraperSchedulerStatus = {
     channels_processed: number;
     posts_found: number;
     comments_found: number;
+    scrape_skipped?: boolean;
+    scrape_skipped_reason?: string | null;
+    peer_ref_channels?: number;
+    username_fallback_channels?: number;
+    pending_resolution_channels?: number;
+    resolve_flood_wait_count?: number;
     ai_analysis_saved?: number;
     posts_processed?: number;
     posts_pending_sync?: number;
@@ -95,7 +101,8 @@ type PipelineFreshnessSnapshot = {
   };
   pipeline?: {
     scrape?: {
-      status?: 'healthy' | 'warning' | 'stale' | 'unknown' | string;
+      status?: 'healthy' | 'warning' | 'stale' | 'unknown' | 'paused_by_backpressure' | string;
+      reason?: string | null;
       last_scrape_at?: string | null;
       age_minutes?: number | null;
     };
@@ -148,6 +155,7 @@ type PipelineFreshnessSnapshot = {
 const stageStyle: Record<string, { badge: string; dot: string; text: string }> = {
   healthy: { badge: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', text: 'text-emerald-700' },
   warning: { badge: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', text: 'text-amber-700' },
+  paused_by_backpressure: { badge: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', text: 'text-amber-700' },
   stale: { badge: 'bg-red-50 text-red-700', dot: 'bg-red-500', text: 'text-red-700' },
   unknown: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', text: 'text-slate-600' },
 };
@@ -171,6 +179,19 @@ function operationalLabel(status: string | undefined, ru: boolean) {
   if (normalized === 'healthy') return ru ? 'Система работает' : 'System operational';
   if (normalized === 'critical') return ru ? 'Проблема системы' : 'System issue';
   return ru ? 'Статус системы неизвестен' : 'System status unknown';
+}
+
+function lastResultLabel(lastResult: ScraperSchedulerStatus['last_result'], scheduler: ScraperSchedulerStatus | null, ru: boolean) {
+  if (lastResult?.scrape_skipped && lastResult.scrape_skipped_reason === 'backpressure') {
+    return ru ? 'Пауза из-за backpressure' : 'Paused by backpressure';
+  }
+  if (lastResult) {
+    return `${lastResult.posts_found} ${ru ? 'постов' : 'posts'}, ${lastResult.comments_found} ${ru ? 'комментариев' : 'comments'}`;
+  }
+  if (scheduler?.last_run_started_at || scheduler?.is_active) {
+    return ru ? 'Ожидаем завершённый цикл' : 'Awaiting completed cycle';
+  }
+  return ru ? 'Нет данных' : 'No data';
 }
 
 function TelegramIcon({ className }: { className?: string }) {
@@ -803,7 +824,7 @@ export function SourcesPage() {
   const etaTotal = pulse?.eta?.total_minutes;
   const etaConfidence = (pulse?.eta?.confidence || 'low').toUpperCase();
   const dataLooksDelayed = !scheduler?.running_now && (
-    (scrapeStage?.age_minutes != null && scrapeStage.age_minutes >= 120)
+    (scrapeStage?.status !== 'paused_by_backpressure' && scrapeStage?.age_minutes != null && scrapeStage.age_minutes >= 120)
     || (processStage?.age_minutes != null && processStage.age_minutes >= 360)
     || (syncStage?.age_minutes != null && syncStage.age_minutes >= 360)
   );
@@ -979,9 +1000,7 @@ export function SourcesPage() {
           <div className="border border-gray-100 rounded-lg px-3 py-2 bg-white">
             <span className="text-gray-400">{ru ? 'Последний результат:' : 'Last result:'}</span>
             <div className="text-gray-700 mt-0.5" style={{ fontWeight: 500 }}>
-              {scheduler?.last_result
-                ? `${scheduler.last_result.posts_found} ${ru ? 'постов' : 'posts'}, ${scheduler.last_result.comments_found} ${ru ? 'комментариев' : 'comments'}`
-                : (ru ? 'Нет данных' : 'No data')}
+              {lastResultLabel(scheduler?.last_result, scheduler, ru)}
             </div>
           </div>
         </div>
@@ -1079,6 +1098,11 @@ export function SourcesPage() {
             {dataLooksDelayed && (operational?.status || 'healthy') !== 'critical' && (
               <span className="text-gray-500">
                 {ru ? 'Данные могут быть не самыми свежими' : 'Data may be delayed'}
+              </span>
+            )}
+            {scrapeStage?.status === 'paused_by_backpressure' && (
+              <span className="text-amber-700" style={{ fontWeight: 500 }}>
+                {ru ? 'Скрапинг на паузе из-за backpressure' : 'Scrape paused by backpressure'}
               </span>
             )}
             {operationalStatus === 'critical' && operational?.reason && (

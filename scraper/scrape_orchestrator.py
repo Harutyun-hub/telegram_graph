@@ -33,6 +33,12 @@ def _get_background_writer() -> Neo4jWriter:
 async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
     """Run one complete scrape cycle for all active channel sources."""
     channels = supabase_writer.get_active_channels()
+    diagnostics = {
+        "peer_ref_channels": 0,
+        "username_fallback_channels": 0,
+        "pending_resolution_channels": 0,
+        "resolve_flood_wait_count": 0,
+    }
     if not channels:
         logger.warning("No active channels found in telegram_channels table")
         return {
@@ -40,6 +46,7 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
             "channels_processed": 0,
             "posts_found": 0,
             "comments_found": 0,
+            **diagnostics,
         }
 
     channels_processed = 0
@@ -49,7 +56,12 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
     for channel in channels:
         username = channel["channel_username"]
         try:
-            prepared_channel, entity = await prepare_source_for_scrape(client, channel, supabase_writer)
+            prepared_channel, entity = await prepare_source_for_scrape(
+                client,
+                channel,
+                supabase_writer,
+                diagnostics=diagnostics,
+            )
             if not prepared_channel or entity is None:
                 await asyncio.sleep(5)
                 continue
@@ -88,6 +100,9 @@ async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
         "channels_processed": channels_processed,
         "posts_found": total_posts,
         "comments_found": total_comments,
+        **diagnostics,
+        "scrape_skipped": False,
+        "scrape_skipped_reason": None,
     }
 
 
@@ -311,6 +326,10 @@ async def run_full_cycle(client: TelegramClient, supabase_writer) -> dict:
             "channels_processed": 0,
             "posts_found": 0,
             "comments_found": 0,
+            "peer_ref_channels": 0,
+            "username_fallback_channels": 0,
+            "pending_resolution_channels": 0,
+            "resolve_flood_wait_count": 0,
             "scrape_skipped": True,
             "scrape_skipped_reason": "backpressure",
             "backlog_before": backlog,

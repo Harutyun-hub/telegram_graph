@@ -15,8 +15,10 @@ class _FakeClient:
     def __init__(self, entity, messages=None):
         self._entity = entity
         self._messages = list(messages or [])
+        self.entity_requests = []
 
     async def get_entity(self, username):
+        self.entity_requests.append(username)
         return self._entity
 
     async def iter_messages(self, entity, wait_time=0, reverse=False):
@@ -39,6 +41,9 @@ class _FakeWriter:
         self.rows = {}
         self.posts = {}
         self.comments = {}
+        self.peer_refs = {}
+        self.queued_resolution_jobs = []
+        self.slots = {}
 
     def update_channel(self, channel_uuid, payload):
         existing = self.rows.get(channel_uuid, {"id": channel_uuid})
@@ -49,6 +54,28 @@ class _FakeWriter:
 
     def get_channel_by_id(self, channel_uuid):
         return self.rows.get(channel_uuid, {"id": channel_uuid})
+
+    def get_channel_peer_ref(self, channel_uuid, session_slot="primary"):
+        return self.peer_refs.get((str(channel_uuid), str(session_slot)))
+
+    def upsert_channel_peer_ref(self, channel_uuid, session_slot, payload):
+        row = {
+            "channel_id": str(channel_uuid),
+            "session_slot": str(session_slot),
+            **dict(payload),
+        }
+        self.peer_refs[(str(channel_uuid), str(session_slot))] = row
+        return row
+
+    def ensure_source_resolution_slot(self, slot_key="primary", **payload):
+        row = {"slot_key": slot_key, **payload}
+        self.slots[str(slot_key)] = row
+        return row
+
+    def enqueue_source_resolution_job(self, channel_uuid, **payload):
+        job = {"channel_id": str(channel_uuid), **payload}
+        self.queued_resolution_jobs.append(job)
+        return job
 
     def update_channel_last_scraped(self, channel_uuid):
         self.last_scraped.append(channel_uuid)
@@ -246,6 +273,154 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(comments[0]["thread_top_message_id"], 101)
         self.assertFalse(comments[1]["is_thread_root"])
         self.assertEqual(comments[1]["reply_to_message_id"], 101)
+
+    async def test_peer_ref_mode_queues_resolution_when_peer_ref_missing(self) -> None:
+        writer = _FakeWriter()
+        client = _FakeClient(entity=_FakeChannel())
+        diagnostics = {}
+        channel_record = {
+            "id": "chan-4",
+            "channel_username": "@peerrefmissing",
+            "channel_title": "Peer Ref Missing",
+            "is_active": True,
+        }
+
+        with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", True), patch.object(
+            channel_scraper.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True
+        ):
+            refreshed, entity = await channel_scraper.prepare_source_for_scrape(
+                client,
+                channel_record,
+                writer,
+                diagnostics=diagnostics,
+            )
+
+        self.assertIsNone(entity)
+        self.assertEqual(client.entity_requests, [])
+        self.assertEqual(refreshed["id"], "chan-4")
+        self.assertEqual(len(writer.queued_resolution_jobs), 1)
+        self.assertEqual(writer.queued_resolution_jobs[0]["channel_id"], "chan-4")
+        self.assertEqual(diagnostics["pending_resolution_channels"], 1)
+        self.assertNotIn("username_fallback_channels", diagnostics)
+
+    async def test_peer_ref_mode_uses_cached_peer_ref_without_username_lookup(self) -> None:
+        writer = _FakeWriter()
+        diagnostics = {}
+        writer.peer_refs[("chan-5", "primary")] = {
+            "channel_id": "chan-5",
+            "session_slot": "primary",
+            "peer_id": 123,
+            "access_hash": 456,
+            "resolved_username": "@peerrefhit",
+        }
+        client = _FakeClient(entity=_FakeChannel())
+        channel_record = {
+            "id": "chan-5",
+            "channel_username": "@peerrefhit",
+            "channel_title": "Peer Ref Hit",
+            "is_active": True,
+        }
+
+        async def _fake_resolve_source_metadata(_client, *, username=None, entity=None):
+            return (
+                {
+                    "channel_username": username,
+                    "channel_title": "Peer Ref Hit",
+                    "source_type": "channel",
+                    "resolution_status": "resolved",
+                    "last_resolution_error": None,
+                },
+                entity,
+            )
+
+        with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", True), patch.object(
+            channel_scraper.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True
+        ), patch.object(channel_scraper, "resolve_source_metadata", side_effect=_fake_resolve_source_metadata), patch.object(
+            channel_scraper, "Channel", _FakeChannel
+        ):
+            refreshed, entity = await channel_scraper.prepare_source_for_scrape(
+                client,
+                channel_record,
+                writer,
+                diagnostics=diagnostics,
+            )
+
+        self.assertIsNotNone(entity)
+        self.assertEqual(refreshed["source_type"], "channel")
+        self.assertEqual(len(client.entity_requests), 1)
+        self.assertNotEqual(client.entity_requests[0], "@peerrefhit")
+        self.assertEqual(diagnostics["peer_ref_channels"], 1)
+        self.assertNotIn("username_fallback_channels", diagnostics)
+
+    async def test_prepare_source_tracks_resolve_flood_wait_diagnostics(self) -> None:
+        writer = _FakeWriter()
+        diagnostics = {}
+        channel_record = {
+            "id": "chan-7",
+            "channel_username": "@floodwait",
+            "channel_title": "Flood Wait",
+            "is_active": True,
+        }
+
+        class _FakeFloodWaitError(Exception):
+            pass
+
+        class _FloodWaitClient:
+            async def get_entity(self, lookup):
+                del lookup
+                raise _FakeFloodWaitError("wait")
+
+        with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", False), patch.object(
+            channel_scraper, "FloodWaitError", _FakeFloodWaitError
+        ):
+            with self.assertRaises(_FakeFloodWaitError):
+                await channel_scraper.prepare_source_for_scrape(
+                    _FloodWaitClient(),
+                    channel_record,
+                    writer,
+                    diagnostics=diagnostics,
+                )
+
+        self.assertEqual(diagnostics["username_fallback_channels"], 1)
+        self.assertEqual(diagnostics["resolve_flood_wait_count"], 1)
+
+    async def test_peer_ref_mode_requeues_when_cached_peer_ref_is_stale(self) -> None:
+        writer = _FakeWriter()
+        writer.peer_refs[("chan-6", "primary")] = {
+            "channel_id": "chan-6",
+            "session_slot": "primary",
+            "peer_id": 123,
+            "access_hash": 456,
+            "resolved_username": "@stalepeer",
+        }
+        channel_record = {
+            "id": "chan-6",
+            "channel_username": "@stalepeer",
+            "channel_title": "Stale Peer",
+            "is_active": True,
+        }
+
+        class _StalePeerClient:
+            def __init__(self):
+                self.entity_requests = []
+
+            async def get_entity(self, lookup):
+                self.entity_requests.append(lookup)
+                raise ValueError("stale peer ref")
+
+        client = _StalePeerClient()
+
+        with patch.object(channel_scraper.config, "FEATURE_SOURCE_PEER_REF_LOOKUP", True), patch.object(
+            channel_scraper.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True
+        ):
+            refreshed, entity = await channel_scraper.prepare_source_for_scrape(client, channel_record, writer)
+
+        self.assertIsNone(entity)
+        self.assertEqual(len(client.entity_requests), 1)
+        self.assertEqual(refreshed["resolution_status"], "pending")
+        self.assertEqual(refreshed["last_resolution_error"], "stale peer ref")
+        self.assertEqual(len(writer.queued_resolution_jobs), 1)
+        self.assertEqual(writer.queued_resolution_jobs[0]["channel_id"], "chan-6")
 
 
 if __name__ == "__main__":

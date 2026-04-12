@@ -54,6 +54,8 @@ def _status_from_age(age_minutes: Optional[int], warn_after: int, stale_after: i
 def _worst_status(statuses: list[str]) -> str:
     if any(s == "stale" for s in statuses):
         return "stale"
+    if any(s == "paused_by_backpressure" for s in statuses):
+        return "paused_by_backpressure"
     if any(s == "warning" for s in statuses):
         return "warning"
     if any(s == "unknown" for s in statuses):
@@ -137,6 +139,8 @@ def _build_notes(snapshot: dict) -> list[str]:
         notes.append("Telegram source resolution is cooling down due to flood-wait limits.")
     if drift.get("latest_post_delta_minutes") is not None and _to_int(drift.get("latest_post_delta_minutes"), 0) > 120:
         notes.append("Latest post timestamp differs by more than 2 hours between Supabase and Neo4j.")
+    if pipeline.get("scrape", {}).get("status") == "paused_by_backpressure":
+        notes.append("Scrape is intentionally paused until the AI backlog drops below backpressure thresholds.")
     if pipeline.get("scrape", {}).get("status") == "stale":
         notes.append("Scraper appears stale relative to configured interval.")
     if pipeline.get("sync", {}).get("status") == "stale":
@@ -147,6 +151,7 @@ def _build_notes(snapshot: dict) -> list[str]:
 def _compute_health_score(snapshot: dict) -> int:
     status_penalty = {
         "healthy": 0,
+        "paused_by_backpressure": 10,
         "unknown": 10,
         "warning": 20,
         "stale": 35,
@@ -278,6 +283,7 @@ def get_freshness_snapshot(
 
     scheduler = scheduler_status or {}
     interval_minutes = max(1, _to_int(scheduler.get("interval_minutes"), 15))
+    last_result = scheduler.get("last_result") if isinstance(scheduler.get("last_result"), dict) else {}
     supa = supabase_writer.get_pipeline_freshness_snapshot()
     resolution = supabase_writer.get_source_resolution_snapshot(session_slot="primary")
     recent = supabase_writer.get_recent_pipeline_snapshot()
@@ -308,6 +314,10 @@ def get_freshness_snapshot(
     scrape_status = _status_from_age(scrape_age, warn_after=interval_minutes * 2, stale_after=interval_minutes * 4)
     process_status = _status_from_age(process_age, warn_after=120, stale_after=360)
     sync_status = _status_from_age(sync_age, warn_after=120, stale_after=360)
+    scrape_paused_reason: str | None = None
+    if last_result.get("scrape_skipped") and str(last_result.get("scrape_skipped_reason") or "").strip() == "backpressure":
+        scrape_status = "paused_by_backpressure"
+        scrape_paused_reason = "backpressure"
 
     run_history = scheduler.get("run_history") or []
     recent_history = run_history[-6:] if isinstance(run_history, list) else []
@@ -360,6 +370,7 @@ def get_freshness_snapshot(
         "pipeline": {
             "scrape": {
                 "status": scrape_status,
+                "reason": scrape_paused_reason,
                 "last_scrape_at": last_scrape_at,
                 "age_minutes": scrape_age,
                 "active_channels": _to_int(supa.get("active_channels"), 0),
