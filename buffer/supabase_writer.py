@@ -5,6 +5,7 @@ Central data access layer. All other modules call this — never
 touch Supabase directly from scrapers or processors.
 """
 from __future__ import annotations
+from collections import defaultdict
 from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import json
@@ -2306,11 +2307,31 @@ class SupabaseWriter:
             .eq("id", analysis_uuid) \
             .execute()
 
+    def mark_analyses_synced(self, analysis_ids: list[str]) -> int:
+        ids = [str(item).strip() for item in (analysis_ids or []) if str(item).strip()]
+        if not ids:
+            return 0
+        self.client.table("ai_analysis") \
+            .update({"neo4j_synced": True}) \
+            .in_("id", ids) \
+            .execute()
+        return len(ids)
+
     def mark_post_neo4j_synced(self, post_uuid: str):
         self.client.table("telegram_posts") \
             .update({"neo4j_synced": True}) \
             .eq("id", post_uuid) \
             .execute()
+
+    def mark_posts_neo4j_synced(self, post_ids: list[str]) -> int:
+        ids = [str(item).strip() for item in (post_ids or []) if str(item).strip()]
+        if not ids:
+            return 0
+        self.client.table("telegram_posts") \
+            .update({"neo4j_synced": True}) \
+            .in_("id", ids) \
+            .execute()
+        return len(ids)
 
     def reconcile_post_analysis_sync(self, limit: int = 300) -> int:
         """
@@ -2730,6 +2751,14 @@ class SupabaseWriter:
 
     # ── Neo4j Bundle Assembly ────────────────────────────────────────────────
 
+    @staticmethod
+    def _analysis_is_newer(candidate: dict | None, existing: dict | None) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        if not isinstance(existing, dict):
+            return True
+        return str(candidate.get("created_at") or "") > str(existing.get("created_at") or "")
+
     def get_unsynced_posts(self, limit: int = 100) -> list[dict]:
         """Fetch posts not yet fully synced to Neo4j graph."""
         res = self.client.table("telegram_posts") \
@@ -2739,6 +2768,135 @@ class SupabaseWriter:
             .limit(limit) \
             .execute()
         return res.data or []
+
+    def get_post_bundles_batch(self, posts: list[dict]) -> list[dict]:
+        """Assemble Neo4j bundles for many posts using set-based Supabase queries."""
+        ordered_posts = [dict(post) for post in (posts or []) if isinstance(post, dict) and post.get("id")]
+        if not ordered_posts:
+            return []
+
+        post_ids = [str(post["id"]) for post in ordered_posts]
+        channel_ids = sorted({
+            str(post.get("channel_id"))
+            for post in ordered_posts
+            if post.get("channel_id")
+        })
+
+        channels_by_id: dict[str, dict] = {}
+        if channel_ids:
+            ch_res = self.client.table("telegram_channels") \
+                .select("*") \
+                .in_("id", channel_ids) \
+                .execute()
+            channels_by_id = {
+                str(item.get("id")): item
+                for item in (ch_res.data or [])
+                if item.get("id")
+            }
+
+        comments_by_post: dict[str, list[dict]] = defaultdict(list)
+        cmt_res = self.client.table("telegram_comments") \
+            .select("*") \
+            .in_("post_id", post_ids) \
+            .execute()
+        for comment in (cmt_res.data or []):
+            post_id = str(comment.get("post_id") or "").strip()
+            if post_id:
+                comments_by_post[post_id].append(comment)
+
+        all_user_ids = sorted({
+            int(comment["telegram_user_id"])
+            for comments in comments_by_post.values()
+            for comment in comments
+            if comment.get("telegram_user_id") is not None
+        })
+
+        scoped_analyses: dict[tuple[str, str], dict] = {}
+        fallback_analyses: dict[tuple[str, str], dict] = {}
+        if all_user_ids and channel_ids:
+            scoped_res = self.client.table("ai_analysis") \
+                .select("*") \
+                .eq("content_type", "batch") \
+                .in_("channel_id", channel_ids) \
+                .in_("content_id", post_ids) \
+                .in_("telegram_user_id", all_user_ids) \
+                .execute()
+            for analysis in (scoped_res.data or []):
+                post_id = str(analysis.get("content_id") or "").strip()
+                uid = str(analysis.get("telegram_user_id") or "").strip()
+                if not post_id or not uid:
+                    continue
+                key = (post_id, uid)
+                if self._analysis_is_newer(analysis, scoped_analyses.get(key)):
+                    scoped_analyses[key] = analysis
+
+            fallback_res = self.client.table("ai_analysis") \
+                .select("*") \
+                .eq("content_type", "batch") \
+                .in_("channel_id", channel_ids) \
+                .is_("content_id", "null") \
+                .in_("telegram_user_id", all_user_ids) \
+                .execute()
+            for analysis in (fallback_res.data or []):
+                channel_id = str(analysis.get("channel_id") or "").strip()
+                uid = str(analysis.get("telegram_user_id") or "").strip()
+                if not channel_id or not uid:
+                    continue
+                key = (channel_id, uid)
+                if self._analysis_is_newer(analysis, fallback_analyses.get(key)):
+                    fallback_analyses[key] = analysis
+
+        post_analyses: dict[str, dict] = {}
+        post_analysis_res = self.client.table("ai_analysis") \
+            .select("*") \
+            .eq("content_type", "post") \
+            .in_("content_id", post_ids) \
+            .order("created_at", desc=True) \
+            .execute()
+        for analysis in (post_analysis_res.data or []):
+            post_id = str(analysis.get("content_id") or "").strip()
+            if post_id and post_id not in post_analyses:
+                post_analyses[post_id] = analysis
+
+        bundles: list[dict] = []
+        for post in ordered_posts:
+            post_id = str(post.get("id") or "").strip()
+            channel_id = str(post.get("channel_id") or "").strip()
+            comments = list(comments_by_post.get(post_id, []))
+            analyses: dict[str, dict] = {}
+            for comment in comments:
+                uid_value = comment.get("telegram_user_id")
+                if uid_value is None:
+                    continue
+                uid = str(uid_value)
+                analysis = scoped_analyses.get((post_id, uid)) or fallback_analyses.get((channel_id, uid))
+                if analysis is not None:
+                    analyses[uid] = analysis
+
+            post_analysis = post_analyses.get(post_id)
+            analysis_records: list[dict] = list(analyses.values())
+            if post_analysis and post_analysis.get("id"):
+                included_ids = {row.get("id") for row in analysis_records if row.get("id")}
+                if post_analysis.get("id") not in included_ids:
+                    analysis_records.append(post_analysis)
+
+            bundles.append(
+                {
+                    "post": post,
+                    "channel": channels_by_id.get(channel_id, {}),
+                    "comments": comments,
+                    "analyses": analyses,
+                    "post_analysis": post_analysis,
+                    "analysis_records": analysis_records,
+                    "reply_user_map": {
+                        int(comment["telegram_message_id"]): int(comment["telegram_user_id"])
+                        for comment in comments
+                        if comment.get("telegram_message_id") and comment.get("telegram_user_id") is not None
+                    },
+                }
+            )
+
+        return bundles
 
     def get_post_bundle(self, post: dict) -> dict:
         """

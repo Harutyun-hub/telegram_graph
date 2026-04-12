@@ -5,16 +5,29 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+import threading
 import time
 
 from loguru import logger
 from telethon import TelegramClient
 
 import config
+from api.runtime_executors import run_background
 from scraper.channel_scraper import prepare_source_for_scrape, scrape_channel
 from scraper.comment_scraper import scrape_comments_for_post
 from processor.intent_extractor import extract_intents, extract_post_intents
 from ingester.neo4j_writer import Neo4jWriter
+
+_writer_lock = threading.Lock()
+_shared_background_writer: Neo4jWriter | None = None
+
+
+def _get_background_writer() -> Neo4jWriter:
+    global _shared_background_writer
+    with _writer_lock:
+        if _shared_background_writer is None:
+            _shared_background_writer = Neo4jWriter()
+        return _shared_background_writer
 
 
 async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
@@ -86,12 +99,16 @@ def _run_ai_process_and_sync_blocking(
     sync_limit: int,
 ) -> dict:
     """Blocking AI + Neo4j sync stage (intended for background thread)."""
+    stage_started_at = time.monotonic()
     result: dict = {
         "ai_analysis_saved": 0,
         "posts_processed": 0,
         "posts_pending_sync": 0,
         "posts_synced": 0,
         "sync_errors": 0,
+        "recovery_unlocked_posts": 0,
+        "recovery_unlocked_comment_groups": 0,
+        "recovery_promoted_permanent": 0,
     }
     started_at = time.monotonic()
     process_budget = max(60, int(config.AI_PROCESS_STAGE_MAX_SECONDS))
@@ -101,6 +118,12 @@ def _run_ai_process_and_sync_blocking(
     # AI processing stage
     try:
         process_started = time.monotonic()
+        if hasattr(supabase_writer, "auto_recover_transient_failures"):
+            recovery = supabase_writer.auto_recover_transient_failures() or {}
+            result["recovery_unlocked_posts"] = int(recovery.get("post_retried", 0) or 0)
+            result["recovery_unlocked_comment_groups"] = int(recovery.get("comment_group_retried", 0) or 0)
+            result["recovery_promoted_permanent"] = int(recovery.get("promoted_permanent", 0) or 0)
+
         comment_metrics: dict[str, int | float] = {
             "saved": 0,
             "failed_groups": 0,
@@ -165,42 +188,77 @@ def _run_ai_process_and_sync_blocking(
     sync_deadline = time.monotonic() + sync_budget
     posts_to_sync = supabase_writer.get_unsynced_posts(limit=sync_limit)
     result["posts_pending_sync"] = len(posts_to_sync)
-    if not posts_to_sync:
-        return result
-
-    writer: Neo4jWriter | None = None
-    try:
-        writer = Neo4jWriter()
-        for post in posts_to_sync:
-            if time.monotonic() >= sync_deadline:
-                result["sync_timeout"] = True
-                logger.warning("Neo4j sync stage budget reached; deferring remaining posts to next cycle")
-                break
-            try:
-                bundle = supabase_writer.get_post_bundle(post)
-                writer.sync_bundle(bundle)
-                supabase_writer.mark_post_neo4j_synced(post["id"])
-                analysis_records = bundle.get("analysis_records") or list(bundle["analyses"].values())
-                for analysis in analysis_records:
-                    analysis_id = analysis.get("id")
-                    if analysis_id:
-                        supabase_writer.mark_analysis_synced(analysis_id)
-                result["posts_synced"] += 1
-            except Exception as e:
-                result["sync_errors"] += 1
-                logger.error(f"Neo4j sync failed for post {post.get('id')}: {e}")
-                if "serviceunavailable" in str(e).lower() or "connection" in str(e).lower():
-                    result["sync_error"] = str(e)
+    if posts_to_sync:
+        try:
+            writer = _get_background_writer()
+            batch_size = max(1, int(getattr(config, "NEO4J_SYNC_BATCH_CHUNK_SIZE", 20)))
+            for start in range(0, len(posts_to_sync), batch_size):
+                if time.monotonic() >= sync_deadline:
+                    result["sync_timeout"] = True
+                    logger.warning("Neo4j sync stage budget reached; deferring remaining posts to next cycle")
                     break
-    except Exception as e:
-        logger.error(f"Neo4j writer init failed: {e}")
-        result["sync_error"] = str(e)
-    finally:
-        if writer:
-            try:
-                writer.close()
-            except Exception:
-                pass
+                post_chunk = posts_to_sync[start:start + batch_size]
+                try:
+                    bundles = supabase_writer.get_post_bundles_batch(post_chunk)
+                    if not bundles:
+                        continue
+                    writer.sync_post_batch(bundles)
+
+                    synced_post_ids = [
+                        str(post_payload["id"])
+                        for bundle in bundles
+                        for post_payload in [bundle.get("post") or {}]
+                        if post_payload.get("id")
+                    ]
+                    analysis_ids = sorted({
+                        str(analysis.get("id"))
+                        for bundle in bundles
+                        for analysis in (bundle.get("analysis_records") or list((bundle.get("analyses") or {}).values()))
+                        if analysis.get("id")
+                    })
+                    supabase_writer.mark_posts_neo4j_synced(synced_post_ids)
+                    if analysis_ids:
+                        supabase_writer.mark_analyses_synced(analysis_ids)
+                    result["posts_synced"] += len(synced_post_ids)
+                except Exception as e:
+                    error_text = str(e).lower()
+                    if "serviceunavailable" in error_text or "connection" in error_text:
+                        result["sync_errors"] += 1
+                        result["sync_error"] = str(e)
+                        logger.error(f"Neo4j batch sync failed for posts {[post.get('id') for post in post_chunk]}: {e}")
+                        break
+
+                    logger.warning(
+                        "Neo4j batch sync failed for posts {}. Falling back to single-post sync: {}",
+                        [post.get("id") for post in post_chunk],
+                        e,
+                    )
+                    for post in post_chunk:
+                        if time.monotonic() >= sync_deadline:
+                            result["sync_timeout"] = True
+                            logger.warning("Neo4j sync stage budget reached during fallback; deferring remaining posts")
+                            break
+                        try:
+                            bundle = supabase_writer.get_post_bundle(post)
+                            writer.sync_bundle(bundle)
+                            supabase_writer.mark_post_neo4j_synced(post["id"])
+                            analysis_records = bundle.get("analysis_records") or list(bundle["analyses"].values())
+                            for analysis in analysis_records:
+                                analysis_id = analysis.get("id")
+                                if analysis_id:
+                                    supabase_writer.mark_analysis_synced(analysis_id)
+                            result["posts_synced"] += 1
+                        except Exception as inner:
+                            result["sync_errors"] += 1
+                            logger.error(f"Neo4j sync failed for post {post.get('id')}: {inner}")
+                            if "serviceunavailable" in str(inner).lower() or "connection" in str(inner).lower():
+                                result["sync_error"] = str(inner)
+                                break
+                    if result.get("sync_error"):
+                        break
+        except Exception as e:
+            logger.error(f"Neo4j writer init failed: {e}")
+            result["sync_error"] = str(e)
 
     # One-pass reconciliation for historic post-analysis sync mismatches.
     try:
@@ -210,6 +268,7 @@ def _run_ai_process_and_sync_blocking(
         logger.warning(f"Post-analysis reconciliation failed: {e}")
         result["post_analysis_reconciled"] = 0
 
+    result["sync_duration_seconds"] = round(max(0.0, time.monotonic() - stage_started_at), 2)
     return result
 
 
@@ -229,21 +288,20 @@ async def run_ai_process_and_sync(
         sync_limit=max(1, int(sync_limit)),
     )
 
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, task)
+    return await run_background(task)
 
 
 async def run_full_cycle(client: TelegramClient, supabase_writer) -> dict:
     """Run scrape + AI process + Neo4j sync as one runtime cycle."""
     backlog = supabase_writer.get_backlog_counts()
-    unprocessed_posts = int(backlog.get("unprocessed_posts") or 0)
-    unprocessed_comments = int(backlog.get("unprocessed_comments") or 0)
+    runnable_posts = int(backlog.get("runnable_posts") or 0)
+    runnable_comment_groups = int(backlog.get("runnable_comment_groups") or 0)
 
     should_skip_scrape = bool(
         config.SCRAPE_SKIP_WHEN_BACKLOG
         and (
-            unprocessed_posts >= max(1, int(config.SCRAPE_BACKPRESSURE_UNPROCESSED_POSTS))
-            or unprocessed_comments >= max(1, int(config.SCRAPE_BACKPRESSURE_UNPROCESSED_COMMENTS))
+            runnable_posts >= max(1, int(config.SCRAPE_BACKPRESSURE_UNPROCESSED_POSTS))
+            or runnable_comment_groups >= max(1, int(config.SCRAPE_BACKPRESSURE_UNPROCESSED_COMMENTS))
         )
     )
 
@@ -259,7 +317,7 @@ async def run_full_cycle(client: TelegramClient, supabase_writer) -> dict:
         }
         logger.warning(
             "Skipping scrape stage due to backlog pressure "
-            f"(posts={unprocessed_posts}, comments={unprocessed_comments})"
+            f"(runnable_posts={runnable_posts}, runnable_comment_groups={runnable_comment_groups})"
         )
     else:
         scrape_result = await run_scrape_cycle(client, supabase_writer)
