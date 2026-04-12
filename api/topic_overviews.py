@@ -19,6 +19,7 @@ from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.dashboard_dates import DashboardDateContext
 from api.queries import comparative
 from buffer.supabase_writer import SupabaseWriter
+from utils.ai_usage import log_openai_usage
 
 try:
     from openai import OpenAI
@@ -633,6 +634,7 @@ def _normalize_ai_item(parsed: dict, candidate: dict, ctx: DashboardDateContext)
 def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload: dict) -> dict:
     if not _client:
         return {}
+    request_started_at = time.perf_counter()
     response = _client.chat.completions.create(
         model=model,
         messages=[
@@ -642,6 +644,13 @@ def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload:
         response_format={"type": "json_object"},
         max_completion_tokens=max_tokens,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+    )
+    log_openai_usage(
+        feature="topic_overviews",
+        model=model,
+        response=response,
+        started_at=request_started_at,
+        extra={"max_completion_tokens": max_tokens},
     )
     raw = _as_str(response.choices[0].message.content)
     return json.loads(raw) if raw else {}
@@ -956,9 +965,21 @@ def get_category_overview(category_name: str, topics: list[dict[str, Any]] | Non
     if not matched_overviews:
         return None
 
-    lead_topics = [topic_name for topic_name in [_as_str(row.get("name"), "").strip() for row in topic_rows[:3]] if topic_name]
-    lead_topic_phrase_en = ", ".join(lead_topics[:-1]) + (f", and {lead_topics[-1]}" if len(lead_topics) > 2 else (f" and {lead_topics[-1]}" if len(lead_topics) == 2 else (lead_topics[0] if lead_topics else "its main topics")))
-    lead_topic_phrase_ru = ", ".join(lead_topics[:-1]) + (f" и {lead_topics[-1]}" if len(lead_topics) >= 2 else (lead_topics[0] if lead_topics else "ключевые темы"))
+    lead_topics = [
+        topic_name
+        for topic_name in [_as_str(row.get("name"), "").strip() for row in topic_rows[:3]]
+        if topic_name
+    ]
+    lead_topic_phrase_en = ", ".join(lead_topics[:-1]) + (
+        f", and {lead_topics[-1]}"
+        if len(lead_topics) > 2
+        else (f" and {lead_topics[-1]}" if len(lead_topics) == 2 else (lead_topics[0] if lead_topics else "its main topics"))
+    )
+    lead_topic_phrase_ru = ", ".join(lead_topics[:-1]) + (
+        f" и {lead_topics[-1]}"
+        if len(lead_topics) >= 2
+        else (lead_topics[0] if lead_topics else "ключевые темы")
+    )
 
     def _unique_signals(key: str) -> list[str]:
         seen: set[str] = set()

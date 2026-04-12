@@ -2533,6 +2533,12 @@ async def dashboard(
         )
         request.state.dashboard_meta = response["meta"]
         return _dashboard_response(response)
+    except TimeoutError as e:
+        logger.warning(f"Dashboard endpoint warming timeout: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="We’re still warming this date range. Please try again shortly.",
+        )
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

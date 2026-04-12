@@ -43,6 +43,40 @@ class _RetryClient:
         return self.query
 
 
+class _FallbackFailureQuery:
+    def __init__(self) -> None:
+        self.select_calls: list[str] = []
+
+    def select(self, columns: str):
+        self.select_calls.append(columns)
+        if "failure_class" in columns:
+            raise Exception("column ai_processing_failures.failure_class does not exist")
+        return self
+
+    def eq(self, _field: str, _value):
+        return self
+
+    def in_(self, _field: str, _values):
+        return self
+
+    def execute(self):
+        return type(
+            "Resp",
+            (),
+            {"data": [{"scope_key": "blocked-1", "is_dead_letter": True, "next_retry_at": None}]},
+        )()
+
+
+class _FallbackFailureClient:
+    def __init__(self) -> None:
+        self.query = _FallbackFailureQuery()
+
+    def table(self, name: str):
+        if name != "ai_processing_failures":
+            raise AssertionError(f"Unexpected table: {name}")
+        return self.query
+
+
 class SelectionHelpersTests(unittest.TestCase):
     def test_filter_out_blocked_rows_skips_dead_letter_items(self) -> None:
         writer = object.__new__(SupabaseWriter)
@@ -76,6 +110,17 @@ class SelectionHelpersTests(unittest.TestCase):
         self.assertIsNotNone(writer.client.query.updated_payload)
         self.assertEqual(writer.client.query.updated_payload.get("attempt_count"), 0)
         self.assertEqual(writer.client.query.updated_payload.get("is_dead_letter"), False)
+
+    def test_get_blocked_scopes_falls_back_when_new_columns_are_missing(self) -> None:
+        writer = object.__new__(SupabaseWriter)
+        writer.client = _FallbackFailureClient()
+        writer._failure_table_warning_emitted = False
+        writer._warn_failure_table_once = lambda error: (_ for _ in ()).throw(error)
+
+        blocked = writer.get_blocked_scopes("post", ["blocked-1", "ok-1"])
+
+        self.assertEqual(blocked, {"blocked-1"})
+        self.assertEqual(len(writer.client.query.select_calls), 2)
 
     def test_extract_message_topic_items_maps_category_keys_for_neo4j(self) -> None:
         raw_response = {

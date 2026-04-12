@@ -1,0 +1,33 @@
+name: Post-Deploy Warmup
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  warmup:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DEPLOY_BASE_URL: ${{ secrets.DEPLOY_BASE_URL || secrets.PRODUCTION_BASE_URL }}
+      ANALYTICS_API_KEY_FRONTEND: ${{ secrets.ANALYTICS_API_KEY_FRONTEND }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Skip when warmup secrets are not configured
+        if: ${{ env.DEPLOY_BASE_URL == '' || env.ANALYTICS_API_KEY_FRONTEND == '' }}
+        run: echo "Skipping warmup because DEPLOY_BASE_URL or ANALYTICS_API_KEY_FRONTEND is not configured."
+
+      - name: Run production smoke checks
+        if: ${{ env.DEPLOY_BASE_URL != '' && env.ANALYTICS_API_KEY_FRONTEND != '' }}
+        run: |
+          python scripts/run_smoke_checks.py \
+            --label production \
+            --wait-ready

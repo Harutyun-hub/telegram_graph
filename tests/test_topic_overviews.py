@@ -308,13 +308,35 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(server, "_default_dashboard_context", return_value=self._ctx()), \
              patch.object(server, "get_topic_detail", return_value=payload), \
-             patch.object(server.topic_overviews, "get_topic_overview", return_value=overview):
+             patch.object(server.topic_overviews, "get_topic_overview", return_value=overview) as get_overview_mock:
             response = self.client.get("/api/topics/detail", params={"topic": "Topic One"})
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIn("overview", body)
         self.assertEqual(body["overview"]["summaryEn"], "Overview text")
+        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
+
+    def test_topic_detail_handles_missing_materialized_overview(self) -> None:
+        payload = {
+            "name": "Topic One",
+            "sourceTopic": "Topic One",
+            "category": "Government & Leadership",
+            "mentions": 12,
+        }
+
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "_default_dashboard_context", return_value=self._ctx()), \
+             patch.object(server, "get_topic_detail", return_value=payload), \
+             patch.object(server.topic_overviews, "get_topic_overview", return_value=None) as get_overview_mock:
+            response = self.client.get("/api/topics/detail", params={"topic": "Topic One"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("overview", body)
+        self.assertIsNone(body["overview"])
+        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
 
 
 if __name__ == "__main__":

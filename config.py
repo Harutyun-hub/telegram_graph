@@ -33,6 +33,7 @@ ENVIRONMENT_NAME = _environment_name()
 IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
 IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
 IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
+STAGING_ENABLE_BACKGROUND_JOBS = _env_bool("STAGING_ENABLE_BACKGROUND_JOBS", False)
 
 
 def _normalize_app_role_for_validation(value=None) -> str:

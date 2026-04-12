@@ -261,7 +261,8 @@ def _get_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
 def _get_work_signal_evidence(ctx: DashboardDateContext) -> dict[str, list[dict]]:
     rows = run_query("""
         UNWIND $signal_types AS signalType
-        CALL (signalType) {
+        CALL {
+            WITH signalType
             MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: signalType})
             WHERE EXISTS {
                 MATCH (u)-[i:INTERESTED_IN]->(:Topic)
@@ -298,7 +299,8 @@ def _get_work_signal_evidence(ctx: DashboardDateContext) -> dict[str, list[dict]
                 }
             END)[..3] AS commentEvidence
         }
-        CALL (signalType) {
+        CALL {
+            WITH signalType
             MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(pch:Channel)
             WHERE p.posted_at >= datetime($start)
@@ -406,7 +408,8 @@ def get_business_opportunity_brief_candidates(
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND NOT cat.name IN $excluded_categories
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at > datetime() - duration({days: $days})
               AND p.text IS NOT NULL
@@ -605,7 +608,8 @@ def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
                 AND cur.last_seen < datetime($end)
           }
         WITH b.type AS topic, count(DISTINCT u) AS currentUsers
-        CALL (topic) {
+        CALL {
+            WITH topic
             MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity {type: topic})
             WHERE EXISTS {
                 MATCH (u)-[prev:INTERESTED_IN]->(:Topic)

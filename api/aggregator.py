@@ -25,6 +25,7 @@ from api.dashboard_dates import DashboardDateContext, build_dashboard_date_conte
 from api import opportunity_briefs
 from api import question_briefs
 from api.queries import actionable, behavioral, comparative, network, predictive, psychographic, pulse, strategic
+from api.runtime_executors import submit_background
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -42,13 +43,43 @@ PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4"
 TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "10.0")))
 REFRESH_TIMEOUT_SECONDS = max(5.0, float(os.getenv("DASH_REFRESH_TIMEOUT_SECONDS", "30.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
+WAIT_FOR_EMPTY_REFRESH_SECONDS = max(
+    WAIT_FOR_REFRESH_SECONDS,
+    float(os.getenv("DASH_WAIT_FOR_EMPTY_REFRESH_SECONDS", str(REFRESH_TIMEOUT_SECONDS + 2.0))),
+)
 MAX_STALE_SECONDS = max(CACHE_TTL_SECONDS, int(os.getenv("DASH_MAX_STALE_SECONDS", "1800")))
+CRITICAL_DEGRADED_STALE_SECONDS = max(
+    WAIT_FOR_REFRESH_SECONDS,
+    int(os.getenv("DASH_CRITICAL_DEGRADED_STALE_SECONDS", "300")),
+)
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
+TOPICS_PAGE_CACHE_TTL_SECONDS = max(
+    DETAIL_CACHE_TTL_SECONDS,
+    int(os.getenv("TOPICS_PAGE_CACHE_TTL_SECONDS", "300")),
+)
+DETAIL_MAX_STALE_SECONDS = max(
+    DETAIL_CACHE_TTL_SECONDS,
+    int(os.getenv("DETAIL_MAX_STALE_SECONDS", "1800")),
+)
+DETAIL_REFRESH_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("DETAIL_REFRESH_TIMEOUT_SECONDS", "8.0")),
+)
 
 # If one of these tiers falls back during refresh, prefer preserving an
 # existing healthy cache instead of replacing it with an empty/degraded view.
 CRITICAL_TIERS = {"pulse", "strategic"}
+ALL_TIER_NAMES = (
+    "pulse",
+    "strategic",
+    "behavioral",
+    "network",
+    "psychographic",
+    "predictive",
+    "actionable",
+    "comparative",
+)
 
 
 DashboardCacheMeta = Dict[str, object]
@@ -61,6 +92,7 @@ _cache_lock = threading.Lock()
 
 _detail_cache_lock = threading.Lock()
 _detail_cache: Dict[str, Tuple[float, Any]] = {}
+_detail_refresh_state_lock = threading.Lock()
 _tier_executor_lock = threading.Lock()
 _refresh_state_lock = threading.Lock()
 
@@ -74,6 +106,11 @@ class DashboardRefreshState:
 
 
 _refresh_states: Dict[str, DashboardRefreshState] = {}
+_detail_refresh_states: Dict[str, DashboardRefreshState] = {}
+
+
+class DetailRefreshUnavailableError(RuntimeError):
+    """Raised when a detail cache cannot be refreshed and has no serveable stale value."""
 
 
 def _new_tier_executor() -> ThreadPoolExecutor:
@@ -151,6 +188,13 @@ def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
     return has_brief_volume and has_health_shape and len(trending) > 0
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _should_bypass_cached_snapshot(snapshot: Optional[dict], meta: Optional[DashboardCacheMeta]) -> bool:
     if not isinstance(meta, dict):
         return False
@@ -197,6 +241,8 @@ def invalidate_cache() -> None:
         _cache_entries.clear()
     with _detail_cache_lock:
         _detail_cache.clear()
+    with _detail_refresh_state_lock:
+        _detail_refresh_states.clear()
 
 
 def _get_refresh_state(cache_key: str) -> DashboardRefreshState:
@@ -279,11 +325,24 @@ def _cache_entry_age_seconds(entry: DashboardCacheEntry | None, now: float) -> f
     return max(0.0, now - entry[0])
 
 
+def _entry_max_stale_seconds(entry: DashboardCacheEntry | None) -> float:
+    if entry is None:
+        return float(MAX_STALE_SECONDS)
+    try:
+        raw_value = entry[2].get("maxServeAgeSeconds")
+        if raw_value is None:
+            return float(MAX_STALE_SECONDS)
+        value = float(raw_value)
+    except Exception:
+        return float(MAX_STALE_SECONDS)
+    return max(1.0, value)
+
+
 def _can_serve_stale(entry: DashboardCacheEntry | None, now: float) -> bool:
     if entry is None:
         return False
     ts, snapshot, _meta = entry
-    return bool(snapshot) and (now - ts) < MAX_STALE_SECONDS
+    return bool(snapshot) and (now - ts) < _entry_max_stale_seconds(entry)
 
 
 def _with_refresh_state(cache_key: str, meta: DashboardCacheMeta, *, stale_age_seconds: float | None = None) -> DashboardCacheMeta:
@@ -522,10 +581,23 @@ def _run_tier_builder(fn: Callable[[], dict]) -> Tuple[dict, float]:
 
 
 def _build_snapshot_sequential(ctx: DashboardDateContext) -> Tuple[dict, Dict[str, Optional[float]]]:
+    return _build_snapshot_sequential_with_skips(ctx, skipped_tiers=None)
+
+
+def _build_snapshot_sequential_with_skips(
+    ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None,
+) -> Tuple[dict, Dict[str, Optional[float]]]:
     data: dict = {}
     tier_times: Dict[str, Optional[float]] = {}
+    skip_set = skipped_tiers or set()
 
     for name, builder in _ordered_tiers(ctx):
+        if name in skip_set:
+            tier_times[name] = None
+            data.update(_fallback_for_tier(name))
+            continue
         t0 = time.time()
         payload = builder()
         tier_times[name] = round(time.time() - t0, 3)
@@ -537,11 +609,23 @@ def _build_snapshot_sequential(ctx: DashboardDateContext) -> Tuple[dict, Dict[st
     return data, tier_times
 
 
-def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]]]:
+def _build_snapshot_parallel(
+    ctx: DashboardDateContext,
+    use_timeouts: bool = True,
+    *,
+    skipped_tiers: set[str] | None = None,
+) -> Tuple[dict, Dict[str, Optional[float]]]:
     ordered = _ordered_tiers(ctx)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
-    executor, futures = _submit_tier_futures(ordered)
+    skip_set = skipped_tiers or set()
+    runnable = [(name, builder) for name, builder in ordered if name not in skip_set]
+    executor, futures = _submit_tier_futures(runnable)
+
+    for name in skip_set:
+        tier_payloads[name] = _fallback_for_tier(name)
+        tier_times[name] = None
+
     for name, future in futures.items():
         try:
             if use_timeouts:
@@ -571,14 +655,26 @@ def _build_snapshot_parallel(ctx: DashboardDateContext, use_timeouts: bool = Tru
     return data, tier_times
 
 
-def _build_snapshot(ctx: DashboardDateContext, use_timeouts: bool = True) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
+def _build_snapshot(
+    ctx: DashboardDateContext,
+    use_timeouts: bool = True,
+    *,
+    skipped_tiers: set[str] | None = None,
+) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
     mode = "parallel" if PARALLEL_ENABLED else "sequential"
     t0 = time.time()
 
     if PARALLEL_ENABLED:
-        data, tier_times = _build_snapshot_parallel(ctx, use_timeouts=use_timeouts)
+        data, tier_times = _build_snapshot_parallel(
+            ctx,
+            use_timeouts=use_timeouts,
+            skipped_tiers=skipped_tiers,
+        )
     else:
-        data, tier_times = _build_snapshot_sequential(ctx)
+        data, tier_times = _build_snapshot_sequential_with_skips(
+            ctx,
+            skipped_tiers=skipped_tiers,
+        )
 
     elapsed = round(time.time() - t0, 3)
     return data, tier_times, elapsed, mode
@@ -605,6 +701,30 @@ def _snapshot_meta(
     }
 
 
+def _emergency_degraded_snapshot(
+    cache_key: str,
+    reason: str,
+) -> tuple[dict, DashboardCacheMeta]:
+    """Return an all-fallback snapshot when no fresh or stale cache is available."""
+    data: dict = {}
+    tier_times: Dict[str, Optional[float]] = {}
+    for name in ALL_TIER_NAMES:
+        data.update(_fallback_for_tier(name))
+        tier_times[name] = None
+    data.update(_tier_derived(data))
+    tier_times["derived"] = 0.0
+    failure_count = _record_refresh_failure(cache_key, reason)
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=0.0,
+        mode="emergency_fallback",
+        cache_status="emergency_degraded",
+        is_stale=True,
+        refresh_failure_count=failure_count,
+    )
+    return data, _with_refresh_state(cache_key, meta)
+
+
 # ── Main aggregation API ─────────────────────────────────────────────────────
 
 def _default_dashboard_context() -> DashboardDateContext:
@@ -616,9 +736,11 @@ def _default_dashboard_context() -> DashboardDateContext:
 
 def _build_snapshot_with_timeout(
     ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
-    future = executor.submit(_build_snapshot, ctx, True)
+    future = executor.submit(_build_snapshot, ctx, True, skipped_tiers=skipped_tiers)
     try:
         return future.result(timeout=REFRESH_TIMEOUT_SECONDS)
     except FuturesTimeout as exc:
@@ -692,7 +814,10 @@ def _refresh_dashboard_snapshot(
                     f"| key={cache_key} degraded={critical_degraded} elapsed={elapsed}s mode={mode}"
                 )
                 build_meta["cacheStatus"] = "refresh_success_uncached_degraded"
+                build_meta["isStale"] = True
+                build_meta["maxServeAgeSeconds"] = CRITICAL_DEGRADED_STALE_SECONDS
                 build_meta["refreshFailureCount"] = failure_count
+                _cache_entries[cache_key] = (time.time(), data, dict(build_meta))
             else:
                 _record_refresh_success(cache_key)
                 build_meta["refreshFailureCount"] = 0
@@ -717,7 +842,7 @@ def _refresh_dashboard_snapshot(
                 stale_age_seconds=max(0.0, time.time() - stale_ts),
             )
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
-        raise
+        return _emergency_degraded_snapshot(cache_key, str(exc))
 
 
 def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateContext) -> None:
@@ -783,7 +908,8 @@ def get_dashboard_snapshot(
 
     state, leader = _acquire_refresh_slot(cache_key)
     if not leader:
-        if state.event.wait(timeout=WAIT_FOR_REFRESH_SECONDS):
+        wait_timeout = WAIT_FOR_REFRESH_SECONDS if stale_entry is not None else WAIT_FOR_EMPTY_REFRESH_SECONDS
+        if state.event.wait(timeout=wait_timeout):
             with _cache_lock:
                 refreshed_entry = _cache_entries.get(cache_key)
             if refreshed_entry is not None:
@@ -808,9 +934,11 @@ def get_dashboard_snapshot(
                 stale_meta,
                 stale_age_seconds=stale_age_seconds,
             )
-        raise TimeoutError(
-            f"Dashboard refresh did not complete within {WAIT_FOR_REFRESH_SECONDS:.1f}s and no stale snapshot is available"
+        reason = (
+            f"Dashboard refresh did not complete within {wait_timeout:.1f}s and no stale snapshot is available"
         )
+        logger.warning(reason)
+        return _emergency_degraded_snapshot(cache_key, reason)
 
     try:
         return _refresh_dashboard_snapshot(cache_key, resolved_ctx, stale_entry=stale_entry)
@@ -826,6 +954,85 @@ def get_dashboard_data(
     return snapshot
 
 
+def build_dashboard_snapshot_once(
+    ctx: DashboardDateContext,
+    *,
+    skipped_tiers: set[str] | None = None,
+    cache_status: str = "refresh_success_uncached",
+) -> tuple[dict, DashboardCacheMeta]:
+    """Build a one-off dashboard snapshot without mutating the shared cache."""
+    data, tier_times, elapsed, mode = _build_snapshot_with_timeout(
+        ctx,
+        skipped_tiers=skipped_tiers,
+    )
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=elapsed,
+        mode=mode,
+        cache_status=cache_status,
+        is_stale=False,
+        refresh_failure_count=0,
+    )
+    if skipped_tiers:
+        meta["skippedTiers"] = sorted(skipped_tiers)
+    logger.info(
+        "Dashboard one-off snapshot built | key={} elapsed={}s mode={} skipped_tiers={}",
+        ctx.cache_key,
+        elapsed,
+        mode,
+        sorted(skipped_tiers or []),
+    )
+    return data, meta
+
+
+def peek_dashboard_snapshot(ctx: Optional[DashboardDateContext] = None) -> tuple[dict | None, DashboardCacheMeta | None, str]:
+    """Inspect the in-memory dashboard cache without triggering a rebuild."""
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+
+    if entry is None:
+        return None, None, "missing"
+
+    snapshot = entry[1]
+    meta = dict(entry[2])
+    if _is_cache_valid(cache_key, now) and not _should_bypass_cached_snapshot(snapshot, meta):
+        return snapshot, _with_refresh_state(cache_key, meta), "fresh"
+
+    if _can_serve_stale(entry, now):
+        stale_meta = dict(meta)
+        stale_meta["isStale"] = True
+        stale_meta.setdefault("cacheStatus", "memory_stale")
+        return snapshot, _with_refresh_state(
+            cache_key,
+            stale_meta,
+            stale_age_seconds=_cache_entry_age_seconds(entry, now),
+        ), "stale"
+
+    return None, _with_refresh_state(cache_key, meta), "expired"
+
+
+def prime_dashboard_snapshot(
+    ctx: DashboardDateContext,
+    snapshot: dict,
+    meta: DashboardCacheMeta,
+    *,
+    cached_at_ts: float | None = None,
+) -> None:
+    """Seed the in-memory dashboard cache from a trusted external snapshot."""
+    timestamp = float(cached_at_ts) if cached_at_ts is not None else time.time()
+    with _cache_lock:
+        _cache_entries[ctx.cache_key] = (timestamp, dict(snapshot), dict(meta))
+
+
+def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
+    """Trigger a single-flight background refresh for a dashboard cache key."""
+    return _ensure_background_refresh(ctx.cache_key, ctx)
+
+
 # ── Detail page queries (independent cache) ──────────────────────────────────
 
 def _get_cached_detail_value(
@@ -834,32 +1041,128 @@ def _get_cached_detail_value(
     ttl_seconds: int = DETAIL_CACHE_TTL_SECONDS,
 ) -> Any:
     now = time.time()
-    stale: Any = None
+    entry: Tuple[float, Any] | None = None
 
     with _detail_cache_lock:
         entry = _detail_cache.get(cache_key)
-        if entry is not None:
-            ts, data = entry
-            stale = data
-            if (now - ts) < ttl_seconds:
-                return data
+
+    stale = entry[1] if entry is not None else None
+    stale_age = max(0.0, now - entry[0]) if entry is not None else None
+
+    if entry is not None and stale_age is not None and stale_age < ttl_seconds:
+        logger.debug("Detail cache hit | key={} cacheState=fresh age_s={}", cache_key, round(stale_age, 3))
+        return stale
+
+    if entry is not None and stale_age is not None and stale_age < DETAIL_MAX_STALE_SECONDS:
+        logger.warning("Detail cache serving stale | key={} cacheState=stale age_s={}", cache_key, round(stale_age, 3))
+        _refresh_detail_cache_async(cache_key, builder)
+        return stale
 
     try:
-        fresh = builder()
-        if isinstance(stale, list) and len(stale) > 0 and isinstance(fresh, list) and len(fresh) == 0:
-            logger.warning(f"Detail query {cache_key} returned empty payload; serving stale cache")
-            return stale
-        if stale is not None and fresh is None:
-            logger.warning(f"Detail query {cache_key} returned empty detail payload; serving stale cache")
-            return stale
-        with _detail_cache_lock:
-            _detail_cache[cache_key] = (time.time(), fresh)
+        fresh = _build_detail_with_timeout(cache_key, builder, DETAIL_REFRESH_TIMEOUT_SECONDS)
+        if _should_keep_existing_detail_cache(stale, fresh):
+            logger.warning("Detail refresh produced empty payload; preserving previous cache | key={}", cache_key)
+            if stale is not None:
+                return stale
+            raise DetailRefreshUnavailableError(f"No usable detail payload for {cache_key}")
+        _store_detail_cache_value(cache_key, fresh)
+        logger.info("Detail cache refreshed synchronously | key={} cacheState={}", cache_key, "miss" if entry is None else "expired")
         return fresh
-    except Exception as e:
-        if stale is not None:
-            logger.warning(f"Detail query {cache_key} failed; serving stale cache instead: {e}")
+    except Exception as exc:
+        if entry is not None and stale_age is not None and stale_age < DETAIL_MAX_STALE_SECONDS:
+            logger.warning("Detail refresh failed; serving stale cache | key={} error={}", cache_key, exc)
+            _refresh_detail_cache_async(cache_key, builder)
             return stale
-        raise
+        raise DetailRefreshUnavailableError(f"Detail payload unavailable for {cache_key}: {exc}") from exc
+
+
+def _get_detail_refresh_state(cache_key: str) -> DashboardRefreshState:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _detail_refresh_states[cache_key] = state
+        return state
+
+
+def _acquire_detail_refresh_slot(cache_key: str) -> tuple[DashboardRefreshState, bool]:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _detail_refresh_states[cache_key] = state
+        if state.inflight:
+            return state, False
+        state.inflight = True
+        state.event.clear()
+        return state, True
+
+
+def _release_detail_refresh_slot(cache_key: str) -> None:
+    with _detail_refresh_state_lock:
+        state = _detail_refresh_states.get(cache_key)
+        if state is None:
+            return
+        state.inflight = False
+        state.event.set()
+
+
+def _should_keep_existing_detail_cache(stale: Any, fresh: Any) -> bool:
+    if isinstance(stale, list) and stale and isinstance(fresh, list) and not fresh:
+        return True
+    if stale is not None and fresh is None:
+        return True
+    return False
+
+
+def _store_detail_cache_value(cache_key: str, value: Any) -> None:
+    with _detail_cache_lock:
+        _detail_cache[cache_key] = (time.time(), value)
+
+
+def _build_detail_with_timeout(cache_key: str, builder: Callable[[], Any], timeout_seconds: float) -> Any:
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detail-refresh")
+    future = executor.submit(builder)
+    try:
+        return future.result(timeout=max(0.1, float(timeout_seconds)))
+    except FuturesTimeout as exc:
+        future.cancel()
+        logger.warning("Detail refresh timed out | key={} timeout_s={}", cache_key, timeout_seconds)
+        raise TimeoutError(f"refresh timed out after {timeout_seconds}s") from exc
+    finally:
+        _shutdown_executor(executor, wait=False)
+
+
+def _refresh_detail_cache_async(cache_key: str, builder: Callable[[], Any]) -> bool:
+    _state, acquired = _acquire_detail_refresh_slot(cache_key)
+    if not acquired:
+        return False
+
+    def _worker() -> None:
+        try:
+            fresh = builder()
+            with _detail_cache_lock:
+                existing = _detail_cache.get(cache_key)
+                stale = existing[1] if existing is not None else None
+            if _should_keep_existing_detail_cache(stale, fresh):
+                logger.warning("Detail background refresh skipped empty payload | key={}", cache_key)
+                return
+            _store_detail_cache_value(cache_key, fresh)
+            logger.info("Detail cache refreshed in background | key={}", cache_key)
+        except Exception as exc:
+            logger.warning("Detail background refresh failed | key={} error={}", cache_key, exc)
+        finally:
+            _release_detail_refresh_slot(cache_key)
+
+    try:
+        submit_background(_worker)
+        return True
+    except Exception as exc:
+        logger.warning("Detail background refresh could not be scheduled | key={} error={}", cache_key, exc)
+        _release_detail_refresh_slot(cache_key)
+        return False
 
 
 def get_topics_page(
@@ -869,7 +1172,70 @@ def get_topics_page(
 ) -> list[dict]:
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"topics:{resolved_ctx.cache_key}:{page}:{size}"
-    return _get_cached_detail_value(cache_key, lambda: comparative.get_all_topics(page, size, resolved_ctx))
+    return _get_cached_detail_value(
+        cache_key,
+        lambda: comparative.get_all_topics(page, size, resolved_ctx),
+        ttl_seconds=TOPICS_PAGE_CACHE_TTL_SECONDS,
+    )
+
+
+def _build_topic_overview_fallback(topic_row: dict, ctx: DashboardDateContext) -> dict:
+    topic = str(topic_row.get("name") or topic_row.get("sourceTopic") or "Topic").strip() or "Topic"
+    category = str(topic_row.get("category") or "General").strip() or "General"
+    mentions = max(0, _to_int(topic_row.get("mentionCount") or topic_row.get("postCount") or 0))
+    current_mentions = max(0, _to_int(topic_row.get("currentMentions"), mentions))
+    previous_mentions = max(0, _to_int(topic_row.get("previousMentions") or topic_row.get("prev7Mentions") or 0))
+    growth = _to_int(topic_row.get("growth7dPct") or 0)
+    positive = max(0, _to_int(topic_row.get("sentimentPositive") or 0))
+    negative = max(0, _to_int(topic_row.get("sentimentNegative") or 0))
+    distinct_users = max(0, _to_int(topic_row.get("distinctUsers") or topic_row.get("userCount") or 0))
+    distinct_channels = max(0, _to_int(topic_row.get("distinctChannels") or 0))
+    top_channels = [str(ch).strip() for ch in (topic_row.get("topChannels") or []) if str(ch).strip()]
+    channel_label = ", ".join(top_channels[:2]) if top_channels else "multiple channels"
+    channel_label_ru = ", ".join(top_channels[:2]) if top_channels else "нескольких каналах"
+    latest_at = str(topic_row.get("sampleEvidence", {}).get("timestamp") or "")[:10]
+    evidence_ids = [
+        str(item.get("id")).strip()
+        for item in ((topic_row.get("questionEvidence") or []) + (topic_row.get("evidence") or []))
+        if str(item.get("id") or "").strip()
+    ]
+
+    sentiment_label = "negative" if negative >= positive else "mixed-to-positive"
+    sentiment_label_ru = "скорее негативную" if negative >= positive else "смешанную или скорее позитивную"
+    summary_en = (
+        f'"{topic}" is active in the current selected window with {mentions} mentions '
+        f'({growth:+d}% versus the previous comparison window). '
+        f'The discussion is concentrated in {channel_label} and currently leans {sentiment_label}.'
+    )
+    summary_ru = (
+        f'Тема "{topic}" заметна в текущем выбранном окне: {mentions} упоминаний '
+        f'({growth:+d}% к предыдущему окну сравнения). '
+        f'Обсуждение сосредоточено в {channel_label_ru} и сейчас имеет {sentiment_label_ru} тональность.'
+    )
+    signals_en = [
+        f"Volume: {current_mentions} mentions in the selected window versus {previous_mentions} in the previous comparison window.",
+        f"Sentiment: {negative}% negative and {positive}% positive across {distinct_users} distinct participants.",
+        f"Spread: activity spans {distinct_channels or len(top_channels)} channels; latest evidence date {latest_at or 'recent'}.",
+    ]
+    signals_ru = [
+        f"Объём: {current_mentions} упоминаний в выбранном окне против {previous_mentions} в предыдущем окне сравнения.",
+        f"Тональность: {negative}% негатива и {positive}% позитива при {distinct_users} уникальных участниках.",
+        f"Ширина сигнала: активность идёт в {distinct_channels or len(top_channels)} каналах; последняя дата доказательства {latest_at or 'недавняя'}.",
+    ]
+    return {
+        "topic": topic,
+        "category": category,
+        "status": "fallback",
+        "summaryEn": summary_en,
+        "summaryRu": summary_ru,
+        "signalsEn": signals_en,
+        "signalsRu": signals_ru,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "windowStart": ctx.from_date.isoformat(),
+        "windowEnd": ctx.to_date.isoformat(),
+        "windowDays": int(ctx.days),
+        "evidenceIds": evidence_ids[:12],
+    }
 
 
 def get_channels_page(ctx: Optional[DashboardDateContext] = None) -> list[dict]:
@@ -895,7 +1261,12 @@ def get_topic_detail(
 ) -> Optional[dict]:
     resolved_ctx = ctx or _default_dashboard_context()
     cache_key = f"topic-detail:{resolved_ctx.cache_key}:{topic_name}:{category or ''}"
-    return _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
+    payload = _get_cached_detail_value(cache_key, lambda: comparative.get_topic_detail(topic_name, category, resolved_ctx))
+    if payload is None:
+        return None
+    normalized = dict(payload)
+    normalized.setdefault("overview", _build_topic_overview_fallback(normalized, resolved_ctx))
+    return normalized
 
 
 def get_topic_evidence_page(

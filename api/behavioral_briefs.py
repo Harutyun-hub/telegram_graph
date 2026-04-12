@@ -18,6 +18,7 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import behavioral
 from buffer.supabase_writer import SupabaseWriter
+from utils.ai_usage import log_openai_usage
 
 try:
     from openai import OpenAI
@@ -915,34 +916,24 @@ def _normalize_candidates(rows: list[dict], kind: str) -> list[dict]:
         if len(evidence_rows) < 2:
             continue
 
+        parsed_timestamps = [_parse_ts(s.get("timestamp")) for s in evidence_rows if _as_str(s.get("timestamp"), "").strip()]
+        row_latest_ts = _parse_ts(row.get("latestAt"))
+        reference_now = max(
+            [dt for dt in parsed_timestamps if dt is not None] + ([row_latest_ts] if row_latest_ts is not None else []),
+            default=datetime.now(timezone.utc),
+        )
         user_keys = {
             (_as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}")
             for s in evidence_rows
         }
         user_keys = {u for u in user_keys if u}
         channels = {_as_str(s.get("channel"), "unknown").strip().lower() for s in evidence_rows if _as_str(s.get("channel"), "").strip()}
-        latest_candidates = [
-            _parse_ts(_as_str(s.get("timestamp"), ""))
-            for s in evidence_rows
-            if _as_str(s.get("timestamp"), "").strip()
-        ]
-        row_latest = _as_str(row.get("latestAt"), "").strip()
-        if row_latest:
-            latest_candidates.append(_parse_ts(row_latest))
-        reference_ts = max(latest_candidates, default=datetime.now(timezone.utc))
-        latest_ts = reference_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        signals7d = sum(1 for s in evidence_rows if (reference_now - _parse_ts(s.get("timestamp"))).days < 7)
+        signals_prev7d = sum(1 for s in evidence_rows if 7 <= (reference_now - _parse_ts(s.get("timestamp"))).days < 14)
 
-        signals7d = 0
-        signals_prev7d = 0
-        for signal in evidence_rows:
-            signal_ts = _parse_ts(signal.get("timestamp"))
-            age_days = (reference_ts - signal_ts).total_seconds() / 86400
-            if age_days < 0:
-                age_days = 0
-            if age_days < 7:
-                signals7d += 1
-            elif age_days < 14:
-                signals_prev7d += 1
+        latest_ts = ""
+        if evidence_rows:
+            latest_ts = max((_as_str(s.get("timestamp"), "") for s in evidence_rows), default="")
 
         base = {
             "clusterId": ("pb-" if kind == "problem" else "sg-") + _slugify(topic),
@@ -1000,6 +991,7 @@ def _support_gate(cluster: dict, kind: str) -> bool:
 def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload: dict) -> dict:
     if not _client:
         return {}
+    request_started_at = time.perf_counter()
     response = _client.chat.completions.create(
         model=model,
         messages=[
@@ -1009,6 +1001,13 @@ def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload:
         response_format={"type": "json_object"},
         max_completion_tokens=max_tokens,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
+    )
+    log_openai_usage(
+        feature="behavioral_briefs",
+        model=model,
+        response=response,
+        started_at=request_started_at,
+        extra={"max_completion_tokens": max_tokens},
     )
     raw = _as_str(response.choices[0].message.content)
     return json.loads(raw) if raw else {}

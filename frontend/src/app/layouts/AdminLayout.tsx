@@ -35,6 +35,28 @@ function useIsMobile(bp = 768) {
   return mobile;
 }
 
+type NavLeafItem = {
+  type: 'item';
+  label: string;
+  path: string;
+  icon: React.ElementType;
+};
+
+type NavGroupItem = {
+  type: 'group';
+  label: string;
+  path: string;
+  icon: React.ElementType;
+  children: NavLeafItem[];
+};
+
+type NavDividerItem = {
+  type: 'divider';
+  id: string;
+};
+
+type SidebarNavItem = NavLeafItem | NavGroupItem | NavDividerItem;
+
 // ─── Notification data ───────────────────────────────────────────
 type NotifType = 'alert' | 'briefing' | 'trend' | 'system';
 interface Notification {
@@ -198,6 +220,7 @@ export function AdminLayout() {
   const ru = lang === 'ru';
   const isMobile = useIsMobile();
   const isGraphRoute = location.pathname.startsWith('/graph');
+  const isSocialRoute = location.pathname.startsWith('/social');
   // UI state
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showMobileDatePicker, setShowMobileDatePicker] = useState(false);
@@ -232,19 +255,41 @@ export function AdminLayout() {
     setDraftTo(range.to);
   }, [range.from, range.to]);
 
-  // All nav items (for drawer + desktop sidebar)
-  const navItems = [
-    { label: ru ? 'Дашборд' : 'Dashboard', path: '/', icon: LayoutDashboard },
-    { label: ru ? 'Темы' : 'Topics', path: '/topics', icon: Hash },
-    { label: ru ? 'Каналы' : 'Channels', path: '/channels', icon: Radio },
-    { label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
-    { label: ru ? 'Граф связей' : 'Graph', path: '/graph', icon: Share2 },
-    { label: ru ? 'Источники' : 'Sources', path: '/sources', icon: PlusCircle },
-    { label: ru ? 'ИИ Агент' : 'AI Agent', path: '/agent', icon: Sparkles },
-    { label: ru ? 'Social Media' : 'Social Media', path: '/social', icon: Megaphone },
-    { label: ru ? 'Админ' : 'Admin', path: '/admin', icon: Shield },
-    { label: ru ? 'Настройки' : 'Settings', path: '/settings', icon: Settings },
+  // All sidebar nav items (for drawer + desktop sidebar)
+  const navItems: SidebarNavItem[] = [
+    {
+      type: 'group',
+      label: ru ? 'Дашборд' : 'Dashboard',
+      path: '/',
+      icon: LayoutDashboard,
+      children: [
+        { type: 'item', label: ru ? 'Темы' : 'Topics', path: '/topics', icon: Hash },
+      ],
+    },
+    {
+      type: 'group',
+      label: ru ? 'Social Media' : 'Social Media',
+      path: '/social',
+      icon: Megaphone,
+      children: [
+        { type: 'item', label: ru ? 'Темы Social' : 'Social Topics', path: '/social/topics', icon: Hash },
+      ],
+    },
+    { type: 'item', label: ru ? 'Каналы' : 'Channels', path: '/channels', icon: Radio },
+    { type: 'item', label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
+    { type: 'item', label: ru ? 'Граф связей' : 'Graph', path: '/graph', icon: Share2 },
+    { type: 'divider', id: 'primary-secondary-divider' },
+    { type: 'item', label: ru ? 'ИИ Агент' : 'AI Agent', path: '/agent', icon: Sparkles },
+    { type: 'item', label: ru ? 'Источники' : 'Sources', path: '/sources', icon: PlusCircle },
+    { type: 'item', label: ru ? 'Админ' : 'Admin', path: '/admin', icon: Shield },
+    { type: 'item', label: ru ? 'Настройки' : 'Settings', path: '/settings', icon: Settings },
   ];
+
+  const flatNavItems = navItems.flatMap((item) => {
+    if (item.type === 'divider') return [];
+    if (item.type === 'group') return [item, ...item.children];
+    return [item];
+  });
 
   // Mobile bottom nav: Home, Topics, [AI center], Channels, Audience
   const mobileNavItems = [
@@ -256,9 +301,17 @@ export function AdminLayout() {
     { label: ru ? 'Аудитория' : 'Audience', path: '/audience', icon: Users },
   ];
 
-  const currentPage = navItems.find(item =>
-    item.path === '/' ? location.pathname === '/' : location.pathname.startsWith(item.path)
-  );
+  const isNavItemActive = useCallback((path: string) => {
+    if (path === '/') {
+      return location.pathname === '/';
+    }
+    if (path === '/social') {
+      return location.pathname === '/social' || location.pathname.startsWith('/social/ops');
+    }
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
+  }, [location.pathname]);
+
+  const currentPage = flatNavItems.find((item) => isNavItemActive(item.path));
 
   // Close desktop dropdowns on outside click
   useEffect(() => {
@@ -313,6 +366,11 @@ export function AdminLayout() {
     setShowDatePicker(false);
     setShowMobileDatePicker(false);
   }, [draftFrom, draftTo, setCustomRange]);
+  const dateHelperText = isSocialRoute
+    ? (ru
+      ? 'Диапазон общий для Telegram и Social. Актуальность Social показана на самой странице.'
+      : 'This date range is shared across Telegram and Social. Social freshness is shown on the page itself.')
+    : (freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`));
 
   // Date picker content (shared between desktop dropdown and mobile sheet)
   const DatePickerContent = () => (
@@ -351,11 +409,7 @@ export function AdminLayout() {
             {ru ? 'Применить' : 'Apply'}
           </button>
         </div>
-        <p className="text-[11px] text-gray-400">
-          {ru
-            ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}`
-            : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`}
-        </p>
+        <p className="text-[11px] text-gray-400">{dateHelperText}</p>
       </div>
     </div>
   );
@@ -385,7 +439,50 @@ export function AdminLayout() {
             </div>
           )}
           {navItems.map(item => {
-            const isActive = item.path === '/' ? location.pathname === '/' : location.pathname.startsWith(item.path);
+            if (item.type === 'divider') {
+              return <div key={item.id} className={`my-3 border-t border-slate-700/80 ${isGraphRoute ? 'mx-1' : 'mx-3'}`} />;
+            }
+
+            if (item.type === 'group') {
+              const isParentActive = isNavItemActive(item.path) || item.children.some((child) => isNavItemActive(child.path));
+              const ParentIcon = item.icon;
+
+              return (
+                <div key={item.path} className={isGraphRoute ? 'space-y-2' : 'space-y-1'}>
+                  <Link
+                    to={item.path}
+                    title={item.label}
+                    className={`flex rounded-lg transition-colors ${isGraphRoute ? 'justify-center px-0 py-3' : 'items-center gap-3 px-3 py-2.5'} ${isParentActive ? 'bg-slate-700 text-white' : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'}`}
+                  >
+                    <ParentIcon className="w-5 h-5 flex-shrink-0" />
+                    {!isGraphRoute && (
+                      <span className="text-sm" style={{ fontWeight: 500 }}>{item.label}</span>
+                    )}
+                  </Link>
+                  {!isGraphRoute && (
+                    <div className="space-y-1">
+                      {item.children.map((child) => {
+                        const isChildActive = isNavItemActive(child.path);
+                        const ChildIcon = child.icon;
+                        return (
+                          <Link
+                            key={child.path}
+                            to={child.path}
+                            title={child.label}
+                            className={`ml-4 flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors ${isChildActive ? 'bg-slate-700 text-white' : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'}`}
+                          >
+                            <ChildIcon className="w-5 h-5 flex-shrink-0" />
+                            <span className="text-sm" style={{ fontWeight: 500 }}>{child.label}</span>
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            const isActive = isNavItemActive(item.path);
             const Icon = item.icon;
             return (
               <Link key={item.path} to={item.path}
@@ -451,7 +548,7 @@ export function AdminLayout() {
               </div>
             )}
             <p className={`mt-1 text-gray-400 text-right ${isGraphRoute ? 'text-[10px]' : 'text-[11px]'}`}>
-              {freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`)}
+              {dateHelperText}
             </p>
           </div>
 
@@ -741,7 +838,50 @@ export function AdminLayout() {
                   {ru ? 'Меню' : 'Navigation'}
                 </div>
                 {navItems.map(item => {
-                  const isActive = item.path === '/' ? location.pathname === '/' : location.pathname.startsWith(item.path);
+                  if (item.type === 'divider') {
+                    return <div key={item.id} className="my-3 mx-3 border-t border-slate-700/80" />;
+                  }
+
+                  if (item.type === 'group') {
+                    const isParentActive = isNavItemActive(item.path) || item.children.some((child) => isNavItemActive(child.path));
+                    const ParentIcon = item.icon;
+
+                    return (
+                      <div key={item.path} className="space-y-1">
+                        <Link
+                          to={item.path}
+                          onClick={() => setDrawerOpen(false)}
+                          className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${isParentActive ? 'text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'}`}
+                          style={isParentActive ? { background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' } : {}}
+                        >
+                          <ParentIcon className="w-5 h-5 flex-shrink-0" />
+                          <span className="text-sm" style={{ fontWeight: 500 }}>{item.label}</span>
+                          {isParentActive && <motion.div layoutId={`drawerActive-${item.path}`} className="ml-auto w-1.5 h-1.5 rounded-full bg-white/70" />}
+                        </Link>
+                        <div className="space-y-1">
+                          {item.children.map((child) => {
+                            const isChildActive = isNavItemActive(child.path);
+                            const ChildIcon = child.icon;
+                            return (
+                              <Link
+                                key={child.path}
+                                to={child.path}
+                                onClick={() => setDrawerOpen(false)}
+                                className={`ml-4 flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${isChildActive ? 'text-white' : 'text-slate-300 hover:bg-slate-700/60 hover:text-white'}`}
+                                style={isChildActive ? { background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' } : {}}
+                              >
+                                <ChildIcon className="w-5 h-5 flex-shrink-0" />
+                                <span className="text-sm" style={{ fontWeight: 500 }}>{child.label}</span>
+                                {isChildActive && <motion.div layoutId={`drawerActive-${child.path}`} className="ml-auto w-1.5 h-1.5 rounded-full bg-white/70" />}
+                              </Link>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const isActive = isNavItemActive(item.path);
                   const Icon = item.icon;
                   return (
                     <Link key={item.path} to={item.path} onClick={() => setDrawerOpen(false)}
@@ -749,7 +889,7 @@ export function AdminLayout() {
                       style={isActive ? { background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' } : {}}>
                       <Icon className="w-5 h-5 flex-shrink-0" />
                       <span className="text-sm" style={{ fontWeight: 500 }}>{item.label}</span>
-                      {isActive && <motion.div layoutId="drawerActive" className="ml-auto w-1.5 h-1.5 rounded-full bg-white/70" />}
+                      {isActive && <motion.div layoutId={`drawerActive-${item.path}`} className="ml-auto w-1.5 h-1.5 rounded-full bg-white/70" />}
                     </Link>
                   );
                 })}

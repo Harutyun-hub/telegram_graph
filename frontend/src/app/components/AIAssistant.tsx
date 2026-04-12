@@ -26,6 +26,33 @@ const SUGGESTED_PROMPTS_RU = [
   'Сводка настроений по жилью',
 ];
 const MAX_MESSAGE_CHARS = 2000;
+const AI_CHAT_SESSION_STORAGE_KEY = 'radar.ai-chat.session.v1';
+
+function generateAiChatSessionId() {
+  const randomPart = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `web_${randomPart.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
+function getOrCreateAiChatSessionId() {
+  if (typeof window === 'undefined') {
+    return generateAiChatSessionId();
+  }
+  const existing = window.localStorage.getItem(AI_CHAT_SESSION_STORAGE_KEY);
+  if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) {
+    return existing;
+  }
+  const next = generateAiChatSessionId();
+  window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, next);
+  return next;
+}
+
+function persistAiChatSessionId(value: string) {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(AI_CHAT_SESSION_STORAGE_KEY, value);
+  }
+}
 
 function parseTimestamp(value: string | Date | undefined) {
   if (value instanceof Date) {
@@ -204,6 +231,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
   const [typing, setTyping] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [sessionId, setSessionId] = useState(() => getOrCreateAiChatSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const historyRequestedRef = useRef(false);
@@ -234,7 +262,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
       historyRequestedRef.current = true;
       void (async () => {
         try {
-          const history = await getAiHelperHistory();
+          const history = await getAiHelperHistory(sessionId);
           if (cancelled) {
             return;
           }
@@ -277,7 +305,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     }
     const timer = window.setTimeout(() => inputRef.current?.focus(), 150);
     return () => window.clearTimeout(timer);
-  }, [desktopOpen, mobileOpen, historyLoaded, messages.length, ru]);
+  }, [desktopOpen, mobileOpen, historyLoaded, messages.length, ru, sessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -290,7 +318,7 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     setInput('');
     setTyping(true);
     try {
-      const response = await aiHelperChat(trimmed);
+      const response = await aiHelperChat(trimmed, sessionId);
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -318,9 +346,13 @@ export function AIAssistant({ mobileOpen, onMobileClose }: AIAssistantProps = {}
     }
     setResetting(true);
     try {
-      await resetAiHelper();
+      await resetAiHelper(sessionId);
+      const nextSessionId = generateAiChatSessionId();
+      persistAiChatSessionId(nextSessionId);
+      historyRequestedRef.current = false;
+      setSessionId(nextSessionId);
       setMessages(initMessages('welcome-reset'));
-      setHistoryLoaded(true);
+      setHistoryLoaded(false);
     } catch (error: any) {
       setMessages(prev => [
         ...prev,

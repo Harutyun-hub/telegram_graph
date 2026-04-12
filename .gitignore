@@ -12,7 +12,6 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-.coverage
 
 # Virtual environment
 venv/
@@ -47,6 +46,7 @@ snapshot_output.json
 
 # macOS / local artifacts
 .DS_Store
+.npm-cache/
 telegram_qr.png
 telegram_login_qr.png
 railway_session_string.txt
@@ -54,3 +54,8 @@ telegram_session_*_string.txt
 
 # Backup directory
 backups/
+
+# Documentation
+docs/*
+!docs/
+!docs/staging_runbook.md

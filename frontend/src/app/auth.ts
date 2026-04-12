@@ -1,4 +1,6 @@
 export const SIMPLE_AUTH_STORAGE_KEY = 'radar.simple-auth.v1';
+export const SIMPLE_AUTH_USERNAME = import.meta.env.VITE_SIMPLE_AUTH_USERNAME ?? 'Admin';
+export const SIMPLE_AUTH_PASSWORD = import.meta.env.VITE_SIMPLE_AUTH_PASSWORD ?? 'A457!dsdhfi850';
 
 export interface SimpleAuthSession {
   authenticated: true;
@@ -33,8 +35,8 @@ function normalizeSimpleUsername(value: string): string {
 }
 
 function getSimpleAuthCredentials(): { username: string; password: string } | null {
-  const username = envString('VITE_SIMPLE_AUTH_USERNAME');
-  const password = envString('VITE_SIMPLE_AUTH_PASSWORD');
+  const username = SIMPLE_AUTH_USERNAME.trim();
+  const password = SIMPLE_AUTH_PASSWORD;
   if (!username || !password) {
     return null;
   }
@@ -42,7 +44,7 @@ function getSimpleAuthCredentials(): { username: string; password: string } | nu
 }
 
 export function isSimpleAuthEnabled(): boolean {
-  return envBool('VITE_ENABLE_SIMPLE_AUTH', false) && Boolean(getSimpleAuthCredentials());
+  return envBool('VITE_ENABLE_SIMPLE_AUTH', true) && Boolean(getSimpleAuthCredentials());
 }
 
 export function validateSimpleCredentials(username: string, password: string): boolean {

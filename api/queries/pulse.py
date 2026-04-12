@@ -294,12 +294,14 @@ def _topic_diversity_score(*, start: datetime, end: datetime) -> dict:
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed,false) = false
           AND NOT toLower(trim(coalesce(t.name,''))) IN $noise
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
             RETURN count(p) AS postMentions
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
             RETURN count(c) AS commentMentions
@@ -449,8 +451,9 @@ def _query_topic_widget_rows(
           AND t.name IN $canonical_topics
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
@@ -504,8 +507,9 @@ def _query_topic_widget_rows(
                 max(ts) AS latestTs
         }
 
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($previous_start)

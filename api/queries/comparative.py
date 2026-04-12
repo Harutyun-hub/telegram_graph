@@ -81,14 +81,6 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
-def _safe_str(value: Any, fallback: str = "") -> str:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return fallback
-    return str(value)
-
-
 def _normalize_sentiment_label(value: Any) -> str | None:
     if value is None:
         return None
@@ -258,8 +250,6 @@ def _message_sentiment_map(raw: dict) -> dict[str, tuple[str, float]]:
 
 def _exclude_thread_anchors(query):
     return query.neq("entry_kind", "thread_anchor")
-
-
 def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
     return _paginate(
         lambda from_idx, to_idx: _exclude_thread_anchors(
@@ -372,6 +362,14 @@ def _safe_int(value, fallback: int = 0) -> int:
         return int(value)
     except Exception:
         return fallback
+
+
+def _safe_str(value: Any, fallback: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return fallback
+    return str(value)
 
 
 def _safe_pct(numerator: int, denominator: int) -> int:
@@ -805,7 +803,6 @@ def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)-[:IN_CHANNEL]->(ch:Channel)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         OPTIONAL MATCH (p)-[:TAGGED]->(t:Topic)
         WITH p, ch, collect(t.name)[..3] AS topics
         RETURN p.uuid AS uuid,
@@ -825,7 +822,6 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     return run_query("""
         MATCH (p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         WITH coalesce(p.media_type, 'text') AS mediaType,
              count(p) AS count,
              avg(p.views) AS avgViews,
@@ -844,21 +840,9 @@ def get_vitality_indicators() -> dict:
         MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
         RETURN count(u) AS n
     """) or {}).get("n", 0)
-    total_topics = (run_single("""
-        MATCH (p:Post)-[:TAGGED]->(t:Topic)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(DISTINCT t) AS n
-    """) or {}).get("n", 0)
-    total_posts = (run_single("""
-        MATCH (p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(p) AS n
-    """) or {}).get("n", 0)
-    total_comments = (run_single("""
-        MATCH (c:Comment)-[:REPLIES_TO]->(p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(c) AS n
-    """) or {}).get("n", 0)
+    total_topics = (run_single("MATCH (t:Topic) RETURN count(t) AS n") or {}).get("n", 0)
+    total_posts = (run_single("MATCH (p:Post) RETURN count(p) AS n") or {}).get("n", 0)
+    total_comments = (run_single("MATCH (c:Comment) RETURN count(c) AS n") or {}).get("n", 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {
@@ -881,37 +865,43 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
             RETURN count(p) AS postCount
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
             RETURN count(c) AS commentCount
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
             RETURN count(DISTINCT u) AS userCount,
                    coalesce(sum(i.count), 0) AS totalInteractions
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($previous_end)
             RETURN count(p) AS postsPrev
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($previous_end)
             RETURN count(c) AS commentsPrev
         }
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
@@ -933,7 +923,8 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                 sum(CASE WHEN label = 'neutral' THEN score ELSE 0 END) AS neutralScore,
                 sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
         }
-        CALL (t) {
+        CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -986,7 +977,8 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                    size([actor IN actorKeys WHERE actor IS NOT NULL]) AS distinctUsers,
                    size([channel IN channels WHERE channel IS NOT NULL]) AS distinctChannels
         }
-        CALL (t) {
+        CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1058,9 +1050,9 @@ def _topic_overview_quality_tier(
     distinct_users: int,
     distinct_channels: int,
 ) -> str:
-    if mentions >= 8 and evidence_count >= 8 and distinct_users >= 3 and distinct_channels >= 2:
+    if mentions >= 40 and evidence_count >= 12 and distinct_users >= 8 and distinct_channels >= 3:
         return "high"
-    if mentions >= 4 and evidence_count >= 4 and distinct_channels >= 2:
+    if mentions >= 18 and evidence_count >= 8 and distinct_users >= 4 and distinct_channels >= 2:
         return "medium"
     return "low"
 
@@ -1070,18 +1062,17 @@ def _map_topic_overview_evidence(rows: Any, *, limit: int) -> list[dict]:
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        text = str(row.get("text") or "").strip()
-        evidence_id = str(row.get("id") or "").strip()
-        if not text or not evidence_id:
+        text = _safe_str(row.get("text"), "").strip()
+        if not text:
             continue
         output.append(
             {
-                "id": evidence_id,
-                "type": str(row.get("type") or "message").strip() or "message",
-                "author": str(row.get("author") or "unknown").strip() or "unknown",
-                "channel": str(row.get("channel") or "unknown").strip() or "unknown",
-                "text": text[:1200],
-                "timestamp": str(row.get("timestamp") or "").strip(),
+                "id": _safe_str(row.get("id"), ""),
+                "type": _safe_str(row.get("type"), "message"),
+                "author": _safe_str(row.get("author"), "unknown"),
+                "channel": _safe_str(row.get("channel"), "unknown"),
+                "text": text,
+                "timestamp": _safe_str(row.get("timestamp"), ""),
                 "reactions": _safe_int(row.get("reactions")),
                 "replies": _safe_int(row.get("replies")),
             }
@@ -1108,7 +1099,7 @@ def get_topic_overview_candidates(
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1162,7 +1153,7 @@ def get_topic_overview_candidates(
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1318,31 +1309,35 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
             RETURN count(p) AS postCount
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
             RETURN count(c) AS commentCount
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($previous_end)
             RETURN count(p) AS postsPrev
         }
-        CALL (t) {
+        CALL {
+            WITH t
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($previous_end)
             RETURN count(c) AS commentsPrev
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1361,7 +1356,7 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY day
             RETURN collect({day: day, count: count}) AS dailyRows
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1380,8 +1375,9 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY year, week
             RETURN collect({year: year, week: week, count: count}) AS weeklyRows
         }
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
@@ -1403,7 +1399,7 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
                 sum(CASE WHEN label = 'neutral' THEN score ELSE 0 END) AS neutralScore,
                 sum(CASE WHEN label IN ['negative', 'urgent', 'sarcastic'] THEN score ELSE 0 END) AS negativeScore
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1424,7 +1420,7 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY mentions DESC, channel ASC
             RETURN collect(channel)[..3] AS topChannels
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1478,7 +1474,7 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
                    size([actor IN actorKeys WHERE actor IS NOT NULL]) AS distinctUsers,
                    size([channel IN channels WHERE channel IS NOT NULL]) AS distinctChannels
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1607,7 +1603,7 @@ def get_topic_evidence_page_v1(
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1644,7 +1640,7 @@ def get_topic_evidence_page_v1(
             WHERE text <> ''
             RETURN count(*) AS total
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1692,7 +1688,7 @@ def get_topic_evidence_page_v1(
                 replies: replies
             }) AS items
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1775,7 +1771,7 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1828,7 +1824,7 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1976,7 +1972,7 @@ def get_topic_evidence_page_v2(
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -2129,13 +2125,15 @@ def get_all_channels(ctx: DashboardDateContext | None = None) -> list[dict]:
              count(pAll) AS postCount,
              avg(coalesce(pAll.views, 0)) AS avgViews,
              max(pAll.posted_at) AS lastPost
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($previous_end)
             RETURN count(p) AS postsPrev
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2181,13 +2179,15 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
              count(pAll) AS postCount,
              avg(coalesce(pAll.views, 0)) AS avgViews,
              max(pAll.posted_at) AS lastPost
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($previous_end)
             RETURN count(p) AS postsPrev
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2195,7 +2195,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
             WHERE dow IS NOT NULL
             RETURN collect({dow: dow, count: c}) AS weeklyRows
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2203,7 +2204,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
             WHERE hour IS NOT NULL
             RETURN collect({hour: hour, count: c}) AS hourlyRows
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2218,7 +2220,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
                 pct: CASE WHEN totalMentions > 0 THEN toInteger(round(100.0 * tt.mentions / totalMentions)) ELSE 0 END
             }] AS topTopics
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2227,7 +2230,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
             ORDER BY count DESC
             RETURN collect({type: mediaType, count: count})[..6] AS messageTypes
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (u:User)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2240,7 +2244,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
                 helpScore: toInteger(CASE WHEN posts * 5 > 100 THEN 100 ELSE posts * 5 END)
             })[..4] AS topVoices
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2255,7 +2260,8 @@ def get_channel_detail(channel_key: str, ctx: DashboardDateContext | None = None
                 replies: coalesce(p.comment_count, 0)
             })[..6] AS recentPosts
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             CALL {
                 WITH ch
                 OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)-[:HAS_SENTIMENT]->(s:Sentiment)
@@ -2331,13 +2337,15 @@ def get_channel_posts_page(
         MATCH (ch:Channel)
         WHERE coalesce(ch.username, '') = $channel_key
            OR coalesce(ch.title, '') = $channel_key
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
             RETURN count(p) AS total
         }
-        CALL (ch) {
+        CALL {
+            WITH ch
             OPTIONAL MATCH (ch)<-[:IN_CHANNEL]-(p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -2380,14 +2388,16 @@ def get_all_audience(page: int = 0, size: int = 50, ctx: DashboardDateContext | 
     resolved_ctx = ctx or _default_detail_context()
     return run_query("""
         MATCH (u:User)
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
             RETURN count(c) AS commentCount,
                    max(c.posted_at) AS lastSeenWindow
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:TAGGED]->(t:Topic)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2399,7 +2409,8 @@ def get_all_audience(page: int = 0, size: int = 50, ctx: DashboardDateContext | 
                  collect({name: topic, count: mentionCount})[..5] AS topTopics
             RETURN topics, topTopics
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2413,7 +2424,8 @@ def get_all_audience(page: int = 0, size: int = 50, ctx: DashboardDateContext | 
                 messageCount: messageCount
             })[..3] AS channels
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2459,14 +2471,16 @@ def get_audience_detail(user_id: str, ctx: DashboardDateContext | None = None) -
     rows = run_query("""
         MATCH (u:User)
         WHERE toString(u.telegram_user_id) = $user_id
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
             RETURN count(c) AS commentCount,
                    max(c.posted_at) AS lastSeenWindow
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:TAGGED]->(t:Topic)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2478,7 +2492,8 @@ def get_audience_detail(user_id: str, ctx: DashboardDateContext | None = None) -
                  collect({name: topic, count: mentionCount})[..5] AS topTopics
             RETURN topics, topTopics
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2492,7 +2507,8 @@ def get_audience_detail(user_id: str, ctx: DashboardDateContext | None = None) -
                 messageCount: messageCount
             })[..3] AS channels
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2506,7 +2522,8 @@ def get_audience_detail(user_id: str, ctx: DashboardDateContext | None = None) -
                 replies: 0
             })[..4] AS recentMessages
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2515,7 +2532,8 @@ def get_audience_detail(user_id: str, ctx: DashboardDateContext | None = None) -
             ORDER BY day ASC
             RETURN collect({week: toString(day), msgs: msgs})[..6] AS activityData
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
@@ -2574,13 +2592,15 @@ def get_audience_messages_page(
     rows = run_query("""
         MATCH (u:User)
         WHERE toString(u.telegram_user_id) = $user_id
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
             RETURN count(c) AS total
         }
-        CALL (u) {
+        CALL {
+            WITH u
             OPTIONAL MATCH (u)-[:WROTE]->(c:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)

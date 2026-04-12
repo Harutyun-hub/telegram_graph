@@ -7,8 +7,8 @@
 // live in that separate app. See integration.md Section 7 for details.
 // ================================================================
 
-import { getSupabaseBrowserClient } from './supabaseClient';
 import { buildSimpleAuthApiAuthorization } from '../auth';
+import { getSupabaseBrowserClient } from './supabaseClient';
 
 // ── Configuration ──────────────────────────────────────────────
 // Prefer VITE_API_BASE_URL for local/prod environments.
