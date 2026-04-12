@@ -616,6 +616,31 @@ class ConfigValidationTests(unittest.TestCase):
 
         self.assertIn("TELEGRAM_API_ID", str(ctx.exception))
 
+    def test_locked_worker_runtime_does_not_require_web_analytics_env(self) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"APP_ROLE": "worker"}, clear=False))
+            stack.enter_context(patch.object(config, "IS_STAGING", False))
+            stack.enter_context(patch.object(config, "IS_PRODUCTION", True))
+            stack.enter_context(patch.object(config, "IS_LOCKED_ENV", True))
+            stack.enter_context(patch.object(config, "TELEGRAM_API_ID", 1))
+            stack.enter_context(patch.object(config, "TELEGRAM_API_HASH", "hash"))
+            stack.enter_context(patch.object(config, "TELEGRAM_PHONE", "phone"))
+            stack.enter_context(patch.object(config, "SUPABASE_URL", "https://example.supabase.co"))
+            stack.enter_context(patch.object(config, "SUPABASE_SERVICE_ROLE_KEY", "service-role"))
+            stack.enter_context(patch.object(config, "NEO4J_URI", "bolt://localhost:7687"))
+            stack.enter_context(patch.object(config, "NEO4J_PASSWORD", "password"))
+            stack.enter_context(patch.object(config, "OPENAI_API_KEY", "openai"))
+            stack.enter_context(patch.object(config, "ANALYTICS_API_REQUIRE_AUTH", False))
+            stack.enter_context(patch.object(config, "CORS_ALLOW_ORIGINS", ["*"]))
+            stack.enter_context(patch.object(config, "REDIS_URL", "redis://localhost:6379/0"))
+            stack.enter_context(patch.object(config, "ADMIN_API_KEY", ""))
+            stack.enter_context(patch.object(config, "ANALYTICS_API_KEY_FRONTEND", ""))
+            stack.enter_context(patch.object(config, "ANALYTICS_API_KEY_OPENCLAW", ""))
+            stack.enter_context(patch.object(config, "OPENCLAW_WEB_SESSION_KEY", ""))
+            stack.enter_context(patch.object(config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", ""))
+
+            config.validate()
+
     def test_locked_environment_requires_openai_compatible_model(self) -> None:
         with ExitStack() as stack:
             stack.enter_context(patch.object(config, "IS_LOCKED_ENV", True))

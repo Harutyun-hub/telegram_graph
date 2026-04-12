@@ -378,6 +378,8 @@ SOCIAL_RETRY_MAX_SECONDS = max(
 
 # ── Safety Checks ─────────────────────────────────────────────────────────────
 def validate():
+    runtime_role = _normalize_app_role_for_validation()
+    web_runtime = runtime_role in {"web", "all"}
     missing = []
     if needs_telegram_runtime_credentials():
         if not TELEGRAM_API_ID:
@@ -394,25 +396,26 @@ def validate():
 
     if IS_LOCKED_ENV:
         locked_env_errors: list[str] = []
-        if not ANALYTICS_API_REQUIRE_AUTH:
-            locked_env_errors.append("ANALYTICS_API_REQUIRE_AUTH must be true")
-        if not CORS_ALLOW_ORIGINS or "*" in CORS_ALLOW_ORIGINS:
-            locked_env_errors.append("CORS_ALLOW_ORIGINS must not contain '*'")
         if not REDIS_URL:
             locked_env_errors.append("REDIS_URL")
-        if not ADMIN_API_KEY:
-            locked_env_errors.append("ADMIN_API_KEY")
-        if not ANALYTICS_API_KEY_FRONTEND:
-            locked_env_errors.append("ANALYTICS_API_KEY_FRONTEND")
-        if not ANALYTICS_API_KEY_OPENCLAW:
-            locked_env_errors.append("ANALYTICS_API_KEY_OPENCLAW")
+        if web_runtime:
+            if not ANALYTICS_API_REQUIRE_AUTH:
+                locked_env_errors.append("ANALYTICS_API_REQUIRE_AUTH must be true")
+            if not CORS_ALLOW_ORIGINS or "*" in CORS_ALLOW_ORIGINS:
+                locked_env_errors.append("CORS_ALLOW_ORIGINS must not contain '*'")
+            if not ADMIN_API_KEY:
+                locked_env_errors.append("ADMIN_API_KEY")
+            if not ANALYTICS_API_KEY_FRONTEND:
+                locked_env_errors.append("ANALYTICS_API_KEY_FRONTEND")
+            if not ANALYTICS_API_KEY_OPENCLAW:
+                locked_env_errors.append("ANALYTICS_API_KEY_OPENCLAW")
         if locked_env_errors:
             raise EnvironmentError(
                 "Missing or unsafe locked-environment configuration: "
                 + ", ".join(locked_env_errors)
             )
 
-    if IS_LOCKED_ENV:
+    if IS_LOCKED_ENV and web_runtime:
         ai_helper_missing = []
         if not OPENCLAW_WEB_SESSION_KEY:
             ai_helper_missing.append("OPENCLAW_WEB_SESSION_KEY")
