@@ -1462,6 +1462,39 @@ def freshness_cache_ttl_seconds() -> int:
     return int(getattr(freshness_runtime, "_CACHE_TTL_SECONDS", 300))
 
 
+def _freshness_memory_snapshot() -> dict | None:
+    cached_snapshot, cached_at = get_cached_freshness_snapshot()
+    if not isinstance(cached_snapshot, dict):
+        return None
+    snapshot_built_at = cached_at or _parse_snapshot_date(cached_snapshot.get("generated_at"))
+    age_seconds = _snapshot_age_seconds(snapshot_built_at)
+    if age_seconds is None or age_seconds >= float(freshness_cache_ttl_seconds()):
+        return None
+    return cached_snapshot
+
+
+def _load_current_freshness_snapshot(*, force_refresh: bool) -> dict:
+    return get_freshness_snapshot(
+        get_supabase_writer(),
+        scheduler_status=get_current_scraper_scheduler_status(),
+        force_refresh=force_refresh,
+        prefer_shared_snapshot=not force_refresh,
+    )
+
+
+async def _resolve_freshness_snapshot(*, force_refresh: bool) -> dict:
+    if not force_refresh:
+        cached_snapshot = _freshness_memory_snapshot()
+        if cached_snapshot is not None:
+            return cached_snapshot
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _load_current_freshness_snapshot(force_refresh=force_refresh),
+    )
+
+
 def prime_dashboard_snapshot(ctx, snapshot: dict, meta: dict[str, Any], *, cached_at_ts: float | None = None) -> None:
     cached_at = cached_at_ts if cached_at_ts is not None else time.time()
     with dashboard_aggregator._cache_lock:
@@ -3443,12 +3476,7 @@ async def get_scraper_scheduler_status():
 async def freshness_snapshot(force: bool = Query(False)):
     """Pipeline freshness/truth snapshot with backlog and Supabase↔Neo4j drift."""
     try:
-        return get_freshness_snapshot(
-            get_supabase_writer(),
-            scheduler_status=get_current_scraper_scheduler_status(),
-            force_refresh=force,
-            prefer_shared_snapshot=not _should_run_background_jobs(),
-        )
+        return await _resolve_freshness_snapshot(force_refresh=force)
     except Exception as e:
         logger.error(f"Freshness endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
