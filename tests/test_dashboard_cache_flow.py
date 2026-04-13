@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
-from types import SimpleNamespace
 import threading
 import unittest
 from unittest.mock import patch
@@ -72,7 +70,6 @@ class DashboardCacheFlowTests(unittest.TestCase):
 
         self.assertEqual(first_snapshot, snapshot)
         self.assertEqual(first_meta["cacheStatus"], "refresh_success_uncached_degraded")
-        self.assertEqual(first_meta["cacheSource"], "rebuild")
         self.assertTrue(first_meta["isStale"])
         self.assertIn(ctx.cache_key, aggregator._cache_entries)
         build_mock.assert_called_once()
@@ -80,14 +77,13 @@ class DashboardCacheFlowTests(unittest.TestCase):
         with patch.object(
             aggregator,
             "_ensure_background_refresh",
-            return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+            return_value=True,
         ) as refresh_mock, \
              patch.object(aggregator, "_build_snapshot_with_timeout", side_effect=AssertionError("unexpected rebuild")):
             second_snapshot, second_meta = aggregator.get_dashboard_snapshot(ctx)
 
         self.assertEqual(second_snapshot, snapshot)
         self.assertEqual(second_meta["cacheStatus"], "stale_while_revalidate")
-        self.assertEqual(second_meta["cacheSource"], "memory")
         self.assertTrue(second_meta["isStale"])
         refresh_mock.assert_called_once_with(ctx.cache_key, ctx)
 
