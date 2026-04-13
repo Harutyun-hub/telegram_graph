@@ -53,6 +53,8 @@ CRITICAL_DEGRADED_STALE_SECONDS = max(
     int(os.getenv("DASH_CRITICAL_DEGRADED_STALE_SECONDS", "300")),
 )
 REFRESH_FAILURE_ALERT_THRESHOLD = max(1, int(os.getenv("DASH_REFRESH_FAILURE_ALERT_THRESHOLD", "3")))
+REFRESH_BACKOFF_FAILURE_THRESHOLD = 2
+REFRESH_BACKOFF_COOLDOWN_SECONDS = 300.0
 DETAIL_CACHE_TTL_SECONDS = max(30, int(os.getenv("DETAIL_CACHE_TTL_SECONDS", "180")))
 TOPICS_PAGE_CACHE_TTL_SECONDS = max(
     DETAIL_CACHE_TTL_SECONDS,
@@ -103,6 +105,7 @@ class DashboardRefreshState:
     event: threading.Event = field(default_factory=threading.Event)
     failure_count: int = 0
     last_error: str | None = None
+    suppressed_until: float = 0.0
 
 
 _refresh_states: Dict[str, DashboardRefreshState] = {}
@@ -282,11 +285,13 @@ def _refresh_state_snapshot(cache_key: str) -> dict[str, Any]:
     with _refresh_state_lock:
         state = _refresh_states.get(cache_key)
         if state is None:
-            return {"refreshFailureCount": 0, "refreshInFlight": False}
+            return {"refreshFailureCount": 0, "refreshInFlight": False, "refreshSuppressed": False}
+        suppressed = state.suppressed_until > time.time()
         return {
             "refreshFailureCount": int(state.failure_count),
             "refreshInFlight": bool(state.inflight),
             "refreshLastError": state.last_error,
+            "refreshSuppressed": suppressed,
         }
 
 
@@ -297,25 +302,59 @@ def _record_refresh_success(cache_key: str) -> None:
             return
         state.failure_count = 0
         state.last_error = None
+        state.suppressed_until = 0.0
+
+
+def _error_triggers_refresh_backoff(error: Exception | str) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "memorypooloutofmemoryerror",
+            "dbms.memory.transaction.total.max",
+            "neo.transienterror.general.memorypooloutofmemoryerror",
+            "out of memory",
+        )
+    )
 
 
 def _record_refresh_failure(cache_key: str, error: Exception | str) -> int:
     message = str(error)
+    relevant_failure = _error_triggers_refresh_backoff(error)
+    now = time.time()
     with _refresh_state_lock:
         state = _refresh_states.get(cache_key)
         if state is None:
             state = DashboardRefreshState()
             state.event.set()
             _refresh_states[cache_key] = state
-        state.failure_count += 1
+        if relevant_failure:
+            state.failure_count += 1
+            if state.failure_count >= REFRESH_BACKOFF_FAILURE_THRESHOLD:
+                state.suppressed_until = max(
+                    state.suppressed_until,
+                    now + REFRESH_BACKOFF_COOLDOWN_SECONDS,
+                )
+        else:
+            state.failure_count = 0
         state.last_error = message
         failure_count = state.failure_count
+        refresh_suppressed = state.suppressed_until > now
     if failure_count >= REFRESH_FAILURE_ALERT_THRESHOLD:
         logger.error(
             f"Dashboard refresh threshold exceeded | key={cache_key} failures={failure_count} error={message}"
         )
     else:
         logger.warning(f"Dashboard refresh failed | key={cache_key} failures={failure_count} error={message}")
+    if refresh_suppressed:
+        logger.warning(
+            "Dashboard refresh suppressed after repeated failures "
+            f"| key={cache_key} cooldown_s={int(REFRESH_BACKOFF_COOLDOWN_SECONDS)}"
+        )
     return failure_count
 
 
@@ -857,6 +896,11 @@ def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateCon
 
 
 def _ensure_background_refresh(cache_key: str, ctx: DashboardDateContext) -> bool:
+    now = time.time()
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is not None and state.suppressed_until > now:
+            return False
     _state, leader = _acquire_refresh_slot(cache_key)
     if not leader:
         return False
@@ -1031,6 +1075,39 @@ def prime_dashboard_snapshot(
 def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
     """Trigger a single-flight background refresh for a dashboard cache key."""
     return _ensure_background_refresh(ctx.cache_key, ctx)
+
+
+def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, Any]:
+    cache_key = ctx.cache_key
+    now = time.time()
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _refresh_states[cache_key] = state
+        if state.suppressed_until > now:
+            return {
+                "started": False,
+                "inflight": bool(state.inflight),
+                "suppressed": True,
+                "failureCount": int(state.failure_count),
+            }
+        if state.inflight:
+            return {
+                "started": False,
+                "inflight": True,
+                "suppressed": False,
+                "failureCount": int(state.failure_count),
+            }
+
+    started = _ensure_background_refresh(cache_key, ctx)
+    return {
+        "started": bool(started),
+        "inflight": False if started else True,
+        "suppressed": False,
+        "failureCount": int(_refresh_state_snapshot(cache_key).get("refreshFailureCount", 0)),
+    }
 
 
 # ── Detail page queries (independent cache) ──────────────────────────────────
