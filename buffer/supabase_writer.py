@@ -2117,6 +2117,12 @@ class SupabaseWriter:
         content_id = payload.get("content_id")
         channel_id = payload.get("channel_id")
         telegram_user_id = payload.get("telegram_user_id")
+        replay_post_id = str(content_id).strip() if content_id and content_type in {"post", "batch"} else None
+
+        # Replay-relevant analyses must remain graph-unsynced until the parent
+        # post bundle is written back successfully.
+        if replay_post_id:
+            payload["neo4j_synced"] = False
 
         idempotency_query = None
         idempotency_label = None
@@ -2179,6 +2185,13 @@ class SupabaseWriter:
                         content_id=str(content_id) if content_id else None,
                         telegram_user_id=int(telegram_user_id) if telegram_user_id is not None else None,
                     )
+                    if replay_post_id:
+                        self.mark_post_graph_dirty(
+                            replay_post_id,
+                            content_type=content_type,
+                            content_id=str(content_id) if content_id is not None else None,
+                            operation_path="update",
+                        )
                     if updated_res.data:
                         return updated_res.data[0]
                     return {"id": existing["id"], **update_payload}
@@ -2199,6 +2212,13 @@ class SupabaseWriter:
             content_id=str(content_id) if content_id else None,
             telegram_user_id=int(telegram_user_id) if telegram_user_id is not None else None,
         )
+        if replay_post_id:
+            self.mark_post_graph_dirty(
+                replay_post_id,
+                content_type=content_type,
+                content_id=str(content_id) if content_id is not None else None,
+                operation_path="insert",
+            )
         return inserted
 
     def get_unsynced_analysis(self, limit: int = 100) -> list[dict]:
@@ -3063,17 +3083,94 @@ class SupabaseWriter:
             .execute()
         return len(ids)
 
+    def _warn_parent_graph_dirty(self, *, content_type: str, content_id: str | None, operation_path: str, reason: str, error: Exception | None = None):
+        error_text = f" error={error}" if error is not None else ""
+        logger.warning(
+            "Parent graph-dirty skipped | "
+            f"operation={operation_path} content_type={content_type or 'unknown'} "
+            f"content_id={content_id or 'unknown'} reason={reason}{error_text}"
+        )
+
+    def mark_post_graph_dirty(
+        self,
+        post_uuid: str,
+        *,
+        content_type: str,
+        content_id: str | None = None,
+        operation_path: str,
+    ) -> int:
+        post_id = str(post_uuid or "").strip()
+        if not post_id:
+            self._warn_parent_graph_dirty(
+                content_type=content_type,
+                content_id=content_id,
+                operation_path=operation_path,
+                reason="missing_parent_id",
+            )
+            return 0
+
+        try:
+            existing_res = self.client.table("telegram_posts") \
+                .select("id") \
+                .eq("id", post_id) \
+                .limit(1) \
+                .execute()
+            existing = existing_res.data or []
+            if not existing:
+                self._warn_parent_graph_dirty(
+                    content_type=content_type,
+                    content_id=content_id or post_id,
+                    operation_path=operation_path,
+                    reason="parent_missing",
+                )
+                return 0
+
+            self.client.table("telegram_posts") \
+                .update({"neo4j_synced": False}) \
+                .eq("id", post_id) \
+                .execute()
+            return 1
+        except Exception as e:
+            self._warn_parent_graph_dirty(
+                content_type=content_type,
+                content_id=content_id or post_id,
+                operation_path=operation_path,
+                reason="update_failed",
+                error=e,
+            )
+            return 0
+
+    def mark_posts_graph_dirty(
+        self,
+        post_ids: list[str],
+        *,
+        content_type: str,
+        content_id: str | None = None,
+        operation_path: str,
+    ) -> int:
+        return sum(
+            self.mark_post_graph_dirty(
+                post_id,
+                content_type=content_type,
+                content_id=content_id,
+                operation_path=operation_path,
+            )
+            for post_id in (post_ids or [])
+        )
+
     def reconcile_post_analysis_sync(self, limit: int = 300) -> int:
         """
-        Reconcile historic post analyses left unsynced while their posts are synced.
+        Legacy name retained: requeue replay-relevant analyses left unsynced while
+        their parent posts still appear graph-synced.
 
-        Returns number of analysis rows marked as synced.
+        Returns number of analysis rows that successfully triggered a parent-post
+        requeue.
         """
         res = self.client.table("ai_analysis") \
-            .select("id, content_id") \
-            .eq("content_type", "post") \
+            .select("id, content_id, content_type") \
             .eq("neo4j_synced", False) \
             .not_.is_("content_id", "null") \
+            .in_("content_type", ["post", "batch"]) \
             .order("created_at", desc=False) \
             .limit(max(1, int(limit))) \
             .execute()
@@ -3094,13 +3191,24 @@ class SupabaseWriter:
         if not synced_posts:
             return 0
 
+        requeued_posts: set[str] = set()
         reconciled = 0
         for row in candidates:
-            analysis_id = row.get("id")
-            content_id = row.get("content_id")
-            if analysis_id and content_id and str(content_id) in synced_posts:
-                self.mark_analysis_synced(str(analysis_id))
-                reconciled += 1
+            content_id = str(row.get("content_id") or "").strip()
+            content_type = str(row.get("content_type") or "").strip()
+            if not content_id or content_id not in synced_posts:
+                continue
+            if content_id not in requeued_posts:
+                updated = self.mark_post_graph_dirty(
+                    content_id,
+                    content_type=content_type,
+                    content_id=content_id,
+                    operation_path="reconcile",
+                )
+                if not updated:
+                    continue
+                requeued_posts.add(content_id)
+            reconciled += 1
         return reconciled
 
     def _count_rows(self, table_name: str, filters: dict | None = None) -> int | None:
