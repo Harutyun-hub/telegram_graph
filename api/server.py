@@ -1862,7 +1862,6 @@ def _build_dashboard_response_payload(
             cache_status_override="memory_fresh",
         )
 
-    memory_stale_choice: tuple[str, dict, dict[str, Any], datetime | None] | None = None
     if memory_state == "stale" and memory_snapshot is not None and memory_meta is not None:
         if default_request:
             _persist_dashboard_snapshot_async(
@@ -1872,11 +1871,33 @@ def _build_dashboard_response_payload(
                 trusted_end_date=trusted_end_iso,
                 write_default_alias=True,
             )
-        memory_stale_choice = (
-            "memory",
-            memory_snapshot,
-            dict(memory_meta),
-            _parse_snapshot_date(memory_meta.get("snapshotBuiltAt")),
+        refresh_status = schedule_dashboard_snapshot_refresh(ctx)
+        stale_meta = dict(memory_meta)
+        stale_meta["isStale"] = True
+        stale_meta["refreshSuppressed"] = bool(refresh_status.get("suppressed"))
+        cache_status = "memory_stale_while_revalidate"
+        fallback_reason = "exact_stale_snapshot"
+        if refresh_status.get("suppressed"):
+            cache_status = "memory_stale_refresh_suppressed"
+            fallback_reason = "exact_stale_snapshot_refresh_suppressed"
+        elif not refresh_status.get("started"):
+            cache_status = "memory_stale_refresh_inflight"
+            fallback_reason = "exact_stale_snapshot_refresh_inflight"
+        return _build_dashboard_api_payload(
+            ctx=ctx,
+            trusted_end_date=trusted_end_iso,
+            dashboard_data=memory_snapshot,
+            dashboard_runtime_meta=stale_meta,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            cache_source="memory",
+            freshness_snapshot=freshness_snapshot or {},
+            freshness_source=freshness_source,
+            persisted_read_status=persisted_read_status,
+            persisted_read_ms=persisted_read_ms,
+            cache_status_override=cache_status,
+            fallback_reason=fallback_reason,
+            refresh_suppressed=bool(refresh_status.get("suppressed")),
         )
 
     persisted_snapshot = _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))
@@ -1931,10 +1952,9 @@ def _build_dashboard_response_payload(
         if _is_persisted_snapshot_usable(persisted_built_at):
             persisted_stale_choice = ("persisted", persisted_snapshot["snapshot"], persisted_meta, persisted_built_at)
 
-    stale_choice = _newer_snapshot_choice(memory_stale_choice, persisted_stale_choice)
-    if stale_choice is not None:
-        cache_source, stale_snapshot, stale_meta, persisted_built_at = stale_choice
-        if cache_source == "persisted" and persisted_built_at is not None:
+    if persisted_stale_choice is not None:
+        cache_source, stale_snapshot, stale_meta, persisted_built_at = persisted_stale_choice
+        if persisted_built_at is not None:
             prime_dashboard_snapshot(
                 ctx,
                 stale_snapshot,
@@ -1942,8 +1962,6 @@ def _build_dashboard_response_payload(
                 cached_at_ts=persisted_built_at.timestamp(),
             )
         refresh_status = schedule_dashboard_snapshot_refresh(ctx)
-        if default_request and freshness_snapshot is None:
-            _ensure_background_freshness_refresh()
         stale_meta["isStale"] = True
         stale_meta["refreshSuppressed"] = bool(refresh_status.get("suppressed"))
         cache_status = f"{cache_source}_stale_while_revalidate"
