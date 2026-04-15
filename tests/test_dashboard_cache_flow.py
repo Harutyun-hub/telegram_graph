@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import unittest
@@ -109,6 +110,61 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertTrue(all(not result["suppressed"] for result in results))
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
+
+    def test_enqueue_default_dashboard_refresh_if_needed_uses_background_refresh_for_missing_snapshot(self) -> None:
+        freshness_snapshot = {"generated_at": "2026-04-13T10:00:00+00:00", "health": {"status": "healthy"}}
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-14")
+
+        with patch.object(server, "_default_dashboard_context", return_value=ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")) as peek_mock, \
+             patch.object(
+                 server,
+                 "schedule_dashboard_snapshot_refresh",
+                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+             ) as schedule_mock:
+            result = server._enqueue_default_dashboard_refresh_if_needed(freshness_snapshot, reason="freshness_resolved")
+
+        self.assertTrue(result["enqueued"])
+        self.assertEqual(result["cacheState"], "missing")
+        peek_mock.assert_called_once_with(ctx)
+        schedule_mock.assert_called_once_with(ctx)
+
+    def test_enqueue_default_dashboard_refresh_if_needed_skips_when_snapshot_is_fresh(self) -> None:
+        freshness_snapshot = {"generated_at": "2026-04-13T10:00:00+00:00", "health": {"status": "healthy"}}
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-14")
+
+        with patch.object(server, "_default_dashboard_context", return_value=ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=({"communityHealth": {"score": 52}}, {}, "fresh")) as peek_mock, \
+             patch.object(server, "schedule_dashboard_snapshot_refresh") as schedule_mock:
+            result = server._enqueue_default_dashboard_refresh_if_needed(freshness_snapshot, reason="freshness_resolved")
+
+        self.assertFalse(result["enqueued"])
+        self.assertEqual(result["cacheState"], "fresh")
+        peek_mock.assert_called_once_with(ctx)
+        schedule_mock.assert_not_called()
+
+    def test_warm_dashboard_cache_enqueues_background_refresh_without_waiting_for_build(self) -> None:
+        freshness_snapshot = {"generated_at": "2026-04-13T10:00:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "_dashboard_freshness_snapshot", return_value=freshness_snapshot), \
+             patch.object(server, "_enqueue_default_dashboard_refresh_if_needed", return_value={"enqueued": True}) as enqueue_mock, \
+             patch.object(server, "get_dashboard_data", side_effect=AssertionError("unexpected foreground build")):
+            asyncio.run(server._warm_dashboard_cache())
+
+        enqueue_mock.assert_called_once_with(freshness_snapshot, reason="startup")
+
+    def test_warm_dashboard_cache_does_nothing_when_default_snapshot_is_fresh(self) -> None:
+        freshness_snapshot = {"generated_at": "2026-04-13T10:00:00+00:00", "health": {"status": "healthy"}}
+
+        with patch.object(server, "_dashboard_freshness_snapshot", return_value=freshness_snapshot), \
+             patch.object(
+                 server,
+                 "_enqueue_default_dashboard_refresh_if_needed",
+                 return_value={"enqueued": False, "cacheState": "fresh"},
+             ) as enqueue_mock:
+            asyncio.run(server._warm_dashboard_cache())
+
+        enqueue_mock.assert_called_once_with(freshness_snapshot, reason="startup")
 
 
 class DashboardApiAvailabilityTests(unittest.TestCase):

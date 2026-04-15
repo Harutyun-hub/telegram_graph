@@ -25,6 +25,7 @@ import type { AppData } from '../types/data';
 import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
+import { getDefaultDashboardWarmRetryDelay, shouldRetryDefaultDashboardWarm } from './dashboardRetryPolicy';
 
 interface DashboardRangeRef {
   from: string;
@@ -39,17 +40,18 @@ interface DashboardMeta {
   requestedTo?: string;
   degradedTiers?: string[];
   suppressedDegradedTiers?: string[];
+  skippedTiers?: string[];
   tierTimes?: Record<string, number | null>;
   snapshotBuiltAt?: string;
   cacheStatus?: string;
+  cacheSource?: string;
   isStale?: boolean;
+  refreshFailureCount?: number;
   responseBytes?: number;
   responseSerializeMs?: number;
 }
 
-// Keep the browser timeout above the backend cold-start budget so the client
-// does not abort a request that the server is still about to satisfy.
-const DASHBOARD_TIMEOUT_MS = 45_000;
+const DASHBOARD_TIMEOUT_MS = 30_000;
 
 interface DataContextValue {
   data: AppData;
@@ -140,10 +142,15 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
       requestedTo: payload?.meta?.requestedTo,
       degradedTiers: Array.isArray(payload?.meta?.degradedTiers) ? payload.meta.degradedTiers : [],
       suppressedDegradedTiers: Array.isArray(payload?.meta?.suppressedDegradedTiers) ? payload.meta.suppressedDegradedTiers : [],
+      skippedTiers: Array.isArray(payload?.meta?.skippedTiers) ? payload.meta.skippedTiers : [],
       tierTimes: payload?.meta?.tierTimes && typeof payload.meta.tierTimes === 'object' ? payload.meta.tierTimes : {},
       snapshotBuiltAt: payload?.meta?.snapshotBuiltAt,
       cacheStatus: payload?.meta?.cacheStatus,
+      cacheSource: payload?.meta?.cacheSource,
       isStale: Boolean(payload?.meta?.isStale),
+      refreshFailureCount: Number.isFinite(Number(payload?.meta?.refreshFailureCount))
+        ? Number(payload.meta.refreshFailureCount)
+        : undefined,
       responseBytes: Number.isFinite(Number(payload?.meta?.responseBytes)) ? Number(payload.meta.responseBytes) : undefined,
       responseSerializeMs: Number.isFinite(Number(payload?.meta?.responseSerializeMs)) ? Number(payload.meta.responseSerializeMs) : undefined,
     },
@@ -151,7 +158,7 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
 }
 
 export function DataProvider({ children }: { children: ReactNode }) {
-  const { range, ready } = useDashboardDateRange();
+  const { range, ready, trustedEndDate } = useDashboardDateRange();
   const initialSnapshot = loadSnapshot(range.from, range.to);
   const [appData, setAppData] = useState<AppData>(initialSnapshot?.data ?? createEmptyAppData());
   const [hasLiveData, setHasLiveData] = useState(Boolean(initialSnapshot));
@@ -161,21 +168,33 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [visibleRange, setVisibleRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
   const [lastSuccessfulRange, setLastSuccessfulRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
   const abortRef = useRef<AbortController | null>(null);
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fetchGenerationRef = useRef(0);
+
+  const clearPendingRetry = useCallback(() => {
+    if (retryTimeoutRef.current !== null) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
+    }
+  }, []);
 
   const doFetch = useCallback(async () => {
     if (!ready) return;
-    // Cancel any in-flight request
+    clearPendingRetry();
     abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
+    const fetchGeneration = ++fetchGenerationRef.current;
     setLoading(true);
     setError(null);
 
-    try {
-      const payload = await fetchData(range.from, range.to, controller.signal);
-      // Only update if this request wasn't aborted
-      if (!controller.signal.aborted) {
+    const runAttempt = async (attemptIndex: number): Promise<void> => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        const payload = await fetchData(range.from, range.to, controller.signal);
+        if (controller.signal.aborted || fetchGenerationRef.current !== fetchGeneration) return;
+
+        clearPendingRetry();
         setAppData(payload.data);
         setDashboardMeta(payload.meta);
         setVisibleRange({ from: range.from, to: range.to });
@@ -183,17 +202,37 @@ export function DataProvider({ children }: { children: ReactNode }) {
         setHasLiveData(true);
         saveSnapshot(range.from, range.to, payload.data, payload.meta);
         setLoading(false);
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') return; // Cancelled — ignore
-      console.error('[DataContext] fetch failed:', err);
-      if (!controller.signal.aborted) {
-        setError(err?.message ?? 'Failed to load data');
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+        console.error('[DataContext] fetch failed:', err);
+        if (controller.signal.aborted || fetchGenerationRef.current !== fetchGeneration) return;
+
+        const errorMessage = err?.message ?? 'Failed to load data';
+        const nextDelay = getDefaultDashboardWarmRetryDelay(attemptIndex);
+        const shouldRetry = nextDelay !== null && shouldRetryDefaultDashboardWarm({
+          range,
+          trustedEndDate,
+          hasLiveData,
+          lastSuccessfulRange,
+          errorMessage,
+        });
+
+        if (shouldRetry) {
+          retryTimeoutRef.current = setTimeout(() => {
+            if (fetchGenerationRef.current !== fetchGeneration) return;
+            void runAttempt(attemptIndex + 1);
+          }, nextDelay);
+          return;
+        }
+
+        setError(errorMessage);
         setLoading(false);
         // Keep stale data visible — don't clear appData
       }
-    }
-  }, [range.from, range.to, ready]);
+    };
+
+    await runAttempt(0);
+  }, [clearPendingRetry, hasLiveData, lastSuccessfulRange, range, ready, trustedEndDate]);
 
   useEffect(() => {
     const snapshot = loadSnapshot(range.from, range.to);
@@ -211,8 +250,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready) return undefined;
     doFetch();
-    return () => { abortRef.current?.abort(); };
-  }, [doFetch, ready]);
+    return () => {
+      clearPendingRetry();
+      abortRef.current?.abort();
+    };
+  }, [clearPendingRetry, doFetch, ready]);
 
   const selectedRange: DashboardRangeRef = { from: range.from, to: range.to };
   const isStaleForSelection = hasLiveData && (
