@@ -183,8 +183,9 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
             request_id="req-default-2",
         )
 
-        def _fake_build(_ctx, *, skipped_tiers=None):
+        def _fake_build(_ctx, *, skipped_tiers=None, build_context=None):
             self.assertIsNone(skipped_tiers)
+            self.assertIsNotNone(build_context)
             dashboard_obs.observe_query_family(
                 "pulse.community_brief.analysis_rows",
                 "supabase",
@@ -254,9 +255,9 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
         )
         seen: dict[str, Any] = {}
 
-        def _fake_build(_ctx, _use_timeouts, *, skipped_tiers=None):
+        def _fake_build(_ctx, _use_timeouts, *, skipped_tiers=None, build_context=None):
             self.assertIsNone(skipped_tiers)
-            current = dashboard_obs.current_build_context()
+            current = build_context or dashboard_obs.current_build_context()
             seen["build_id"] = current.build_id if current is not None else None
             seen["cache_key"] = current.cache_key if current is not None else None
             return {}, {"derived": 0.0}, 0.01, "parallel"

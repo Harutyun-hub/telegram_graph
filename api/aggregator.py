@@ -665,11 +665,13 @@ def _build_snapshot_sequential_with_skips(
     ctx: DashboardDateContext,
     *,
     skipped_tiers: set[str] | None,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> Tuple[dict, Dict[str, Optional[float]]]:
     data: dict = {}
     tier_times: Dict[str, Optional[float]] = {}
     skip_set = skipped_tiers or set()
-    build_context = dashboard_obs.current_build_context()
+    if build_context is None:
+        build_context = dashboard_obs.current_build_context()
 
     for name, builder in _ordered_tiers(ctx):
         if name in skip_set:
@@ -693,13 +695,15 @@ def _build_snapshot_parallel(
     use_timeouts: bool = True,
     *,
     skipped_tiers: set[str] | None = None,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> Tuple[dict, Dict[str, Optional[float]]]:
     ordered = _ordered_tiers(ctx)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
     skip_set = skipped_tiers or set()
     runnable = [(name, builder) for name, builder in ordered if name not in skip_set]
-    build_context = dashboard_obs.current_build_context()
+    if build_context is None:
+        build_context = dashboard_obs.current_build_context()
     executor, futures = _submit_tier_futures(runnable, build_context=build_context)
 
     for name in skip_set:
@@ -763,20 +767,25 @@ def _build_snapshot(
     use_timeouts: bool = True,
     *,
     skipped_tiers: set[str] | None = None,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
     mode = "parallel" if PARALLEL_ENABLED else "sequential"
     t0 = time.time()
+    if build_context is None:
+        build_context = dashboard_obs.current_build_context()
 
     if PARALLEL_ENABLED:
         data, tier_times = _build_snapshot_parallel(
             ctx,
             use_timeouts=use_timeouts,
             skipped_tiers=skipped_tiers,
+            build_context=build_context,
         )
     else:
         data, tier_times = _build_snapshot_sequential_with_skips(
             ctx,
             skipped_tiers=skipped_tiers,
+            build_context=build_context,
         )
 
     elapsed = round(time.time() - t0, 3)
@@ -841,13 +850,20 @@ def _build_snapshot_with_timeout(
     ctx: DashboardDateContext,
     *,
     skipped_tiers: set[str] | None = None,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
-    build_context = dashboard_obs.current_build_context()
+    if build_context is None:
+        build_context = dashboard_obs.current_build_context()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
 
     def _run_build() -> tuple[dict, Dict[str, Optional[float]], float, str]:
         with dashboard_obs.bind_build_context(build_context):
-            return _build_snapshot(ctx, True, skipped_tiers=skipped_tiers)
+            return _build_snapshot(
+                ctx,
+                True,
+                skipped_tiers=skipped_tiers,
+                build_context=build_context,
+            )
 
     future = executor.submit(_run_build)
     try:
@@ -938,7 +954,10 @@ def _refresh_dashboard_snapshot(
         )
 
     try:
-        data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx)
+        data, tier_times, elapsed, mode = _build_snapshot_with_timeout(
+            ctx,
+            build_context=build_context,
+        )
         build_meta = _snapshot_meta(
             tier_times=tier_times,
             elapsed=elapsed,
@@ -1169,6 +1188,7 @@ def build_dashboard_snapshot_once(
     data, tier_times, elapsed, mode = _build_snapshot_with_timeout(
         ctx,
         skipped_tiers=skipped_tiers,
+        build_context=dashboard_obs.current_build_context(),
     )
     meta = _snapshot_meta(
         tier_times=tier_times,

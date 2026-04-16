@@ -42,7 +42,11 @@ class DashboardCacheFlowTests(unittest.TestCase):
                 cache_status="historical_fastpath_uncached",
             )
 
-        build_mock.assert_called_once_with(ctx, skipped_tiers={"network", "predictive"})
+        build_mock.assert_called_once_with(
+            ctx,
+            skipped_tiers={"network", "predictive"},
+            build_context=None,
+        )
         self.assertEqual(meta["cacheStatus"], "historical_fastpath_uncached")
         self.assertEqual(meta["skippedTiers"], ["network", "predictive"])
 
