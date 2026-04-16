@@ -110,6 +110,52 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
 
+    def test_seed_dashboard_snapshot_respects_refresh_suppression_by_default(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        state = aggregator._get_refresh_state(ctx.cache_key)
+        state.suppressed_until = aggregator.time.time() + 60.0
+        state.failure_count = 2
+
+        result = aggregator.seed_dashboard_snapshot(ctx)
+
+        self.assertFalse(result["started"])
+        self.assertTrue(result["suppressed"])
+        self.assertEqual(result["failureCount"], 2)
+
+    def test_seed_dashboard_snapshot_uses_timeout_override_without_emitting_refresh_callback(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        snapshot = {"communityHealth": {"score": 55}}
+        meta = {
+            "cacheStatus": "refresh_success",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 1.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 4.0,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
+
+        with patch.object(
+            aggregator,
+            "_refresh_dashboard_snapshot",
+            return_value=(snapshot, meta),
+        ) as refresh_mock:
+            result = aggregator.seed_dashboard_snapshot(
+                ctx,
+                timeout_seconds=45.0,
+                force=True,
+            )
+
+        self.assertTrue(result["started"])
+        self.assertEqual(result["snapshot"], snapshot)
+        self.assertEqual(result["meta"], meta)
+        refresh_mock.assert_called_once()
+        _args, kwargs = refresh_mock.call_args
+        self.assertEqual(kwargs["timeout_seconds"], 45.0)
+        self.assertFalse(kwargs["emit_refresh_complete"])
+
 
 class DashboardApiAvailabilityTests(unittest.TestCase):
     @classmethod

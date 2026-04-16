@@ -22,6 +22,7 @@ async def _shutdown_background_services() -> None:
         "behavioral_cards_scheduler",
         "opportunity_cards_scheduler",
         "topic_overviews_scheduler",
+        "default_dashboard_artifact_scheduler",
     ):
         scheduler = getattr(server, scheduler_name, None)
         if scheduler is None:
@@ -53,8 +54,13 @@ async def run_worker() -> None:
     server._start_behavioral_cards_scheduler()
     server._start_opportunity_cards_scheduler()
     server._start_topic_overviews_scheduler()
+    server._start_default_dashboard_artifact_scheduler()
 
     startup_tasks: list[asyncio.Task] = []
+    if config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED and config.DASH_DEFAULT_ARTIFACT_SEED_ON_STARTUP:
+        startup_tasks.append(
+            asyncio.create_task(server._seed_canonical_default_artifact_once(force=False, reason="startup"))
+        )
     if server.RUN_STARTUP_WARMERS:
         if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
             startup_tasks.append(asyncio.create_task(server._materialize_question_cards_once(force=False)))

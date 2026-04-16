@@ -800,15 +800,17 @@ def _build_snapshot_with_timeout(
     ctx: DashboardDateContext,
     *,
     skipped_tiers: set[str] | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
+    effective_timeout = REFRESH_TIMEOUT_SECONDS if timeout_seconds is None else max(5.0, float(timeout_seconds))
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
     future = executor.submit(_build_snapshot, ctx, True, skipped_tiers=skipped_tiers)
     try:
-        return future.result(timeout=REFRESH_TIMEOUT_SECONDS)
+        return future.result(timeout=effective_timeout)
     except FuturesTimeout as exc:
         future.cancel()
         raise TimeoutError(
-            f"Dashboard rebuild exceeded {REFRESH_TIMEOUT_SECONDS:.1f}s timeout"
+            f"Dashboard rebuild exceeded {effective_timeout:.1f}s timeout"
         ) from exc
     finally:
         _shutdown_executor(executor, wait=False)
@@ -819,13 +821,18 @@ def _refresh_dashboard_snapshot(
     ctx: DashboardDateContext,
     *,
     stale_entry: DashboardCacheEntry | None = None,
+    timeout_seconds: float | None = None,
+    emit_refresh_complete: bool = True,
 ) -> tuple[dict, DashboardCacheMeta]:
     stale_snapshot = stale_entry[1] if stale_entry is not None else None
     stale_meta = dict(stale_entry[2]) if stale_entry is not None else None
     stale_ts = stale_entry[0] if stale_entry is not None else None
 
     try:
-        data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx)
+        build_kwargs: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            build_kwargs["timeout_seconds"] = timeout_seconds
+        data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx, **build_kwargs)
         build_meta = _snapshot_meta(
             tier_times=tier_times,
             elapsed=elapsed,
@@ -885,7 +892,8 @@ def _refresh_dashboard_snapshot(
                 build_meta["refreshFailureCount"] = 0
                 _cache_entries[cache_key] = (time.time(), data, build_meta)
 
-        _emit_refresh_complete(cache_key, ctx, data, build_meta)
+        if emit_refresh_complete:
+            _emit_refresh_complete(cache_key, ctx, data, build_meta)
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
         return data, _with_refresh_state(cache_key, build_meta)
     except Exception as exc:
@@ -1027,12 +1035,13 @@ def build_dashboard_snapshot_once(
     *,
     skipped_tiers: set[str] | None = None,
     cache_status: str = "refresh_success_uncached",
+    timeout_seconds: float | None = None,
 ) -> tuple[dict, DashboardCacheMeta]:
     """Build a one-off dashboard snapshot without mutating the shared cache."""
-    data, tier_times, elapsed, mode = _build_snapshot_with_timeout(
-        ctx,
-        skipped_tiers=skipped_tiers,
-    )
+    build_kwargs: dict[str, Any] = {"skipped_tiers": skipped_tiers}
+    if timeout_seconds is not None:
+        build_kwargs["timeout_seconds"] = timeout_seconds
+    data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx, **build_kwargs)
     meta = _snapshot_meta(
         tier_times=tier_times,
         elapsed=elapsed,
@@ -1051,6 +1060,63 @@ def build_dashboard_snapshot_once(
         sorted(skipped_tiers or []),
     )
     return data, meta
+
+
+def seed_dashboard_snapshot(
+    ctx: DashboardDateContext,
+    *,
+    timeout_seconds: float | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    cache_key = ctx.cache_key
+    now = time.time()
+
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None:
+            state = DashboardRefreshState()
+            state.event.set()
+            _refresh_states[cache_key] = state
+        suppressed = state.suppressed_until > now
+        failure_count = int(state.failure_count)
+        if suppressed and not force:
+            return {
+                "started": False,
+                "inflight": bool(state.inflight),
+                "suppressed": True,
+                "failureCount": failure_count,
+            }
+
+    state, leader = _acquire_refresh_slot(cache_key)
+    if not leader:
+        return {
+            "started": False,
+            "inflight": True,
+            "suppressed": False,
+            "failureCount": int(state.failure_count),
+        }
+
+    with _cache_lock:
+        stale_entry = _cache_entries.get(cache_key)
+
+    try:
+        refresh_kwargs: dict[str, Any] = {
+            "stale_entry": stale_entry,
+            "emit_refresh_complete": False,
+        }
+        if timeout_seconds is not None:
+            refresh_kwargs["timeout_seconds"] = timeout_seconds
+        snapshot, meta = _refresh_dashboard_snapshot(cache_key, ctx, **refresh_kwargs)
+        return {
+            "started": True,
+            "inflight": False,
+            "suppressed": False,
+            "failureCount": int(meta.get("refreshFailureCount") or 0),
+            "snapshot": snapshot,
+            "meta": meta,
+        }
+    finally:
+        _release_refresh_slot(cache_key)
 
 
 def peek_dashboard_snapshot(ctx: Optional[DashboardDateContext] = None) -> tuple[dict | None, DashboardCacheMeta | None, str]:

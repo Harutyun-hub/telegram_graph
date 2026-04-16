@@ -69,7 +69,7 @@ from api.aggregator import (
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
     invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async,
-    schedule_dashboard_snapshot_refresh,
+    schedule_dashboard_snapshot_refresh, seed_dashboard_snapshot,
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
@@ -193,6 +193,8 @@ _DEFAULT_DASHBOARD_LOOKBACK_DAYS = 14
 _DEFAULT_ALIAS_FALLBACK_LOOKBACK_DAYS = max(1, int(os.getenv("DASH_DEFAULT_ALIAS_FALLBACK_DAYS", "3")))
 _DASHBOARD_PERSISTED_PREFIX = "dashboard/snapshots"
 _DASHBOARD_DEFAULT_ALIAS_PATH = f"{_DASHBOARD_PERSISTED_PREFIX}/default.json"
+_DASHBOARD_DEFAULT_SEED_LOCK_PREFIX = "dashboard-default-artifact-seed"
+_DASHBOARD_DEFAULT_SEED_LOCK_FLOOR_SECONDS = 300
 _DASHBOARD_PERSISTED_SCHEMA_VERSION = 1
 _DASHBOARD_PERSISTED_ARTIFACT_TYPE = "canonical_default_dashboard"
 _DASHBOARD_PERSISTED_READ_TIMEOUT_SECONDS = max(
@@ -291,6 +293,7 @@ async def app_lifespan(_app: FastAPI):
         _start_opportunity_cards_scheduler()
         if _should_run_topic_overviews_materializer():
             _start_topic_overviews_scheduler()
+        _start_default_dashboard_artifact_scheduler()
         startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
         if RUN_STARTUP_WARMERS:
             warmers_started_at = time.perf_counter()
@@ -304,6 +307,10 @@ async def app_lifespan(_app: FastAPI):
             if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_topic_overviews_once(force=False))
             startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
+        if config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED and config.DASH_DEFAULT_ARTIFACT_SEED_ON_STARTUP:
+            seed_started_at = time.perf_counter()
+            asyncio.create_task(_seed_canonical_default_artifact_once(force=False, reason="startup"))
+            startup_phases["defaultArtifactSeedEnqueuedMs"] = round((time.perf_counter() - seed_started_at) * 1000, 2)
     else:
         logger.info("Web-only runtime ready | background jobs disabled")
 
@@ -327,6 +334,7 @@ async def app_lifespan(_app: FastAPI):
         yield
     finally:
         global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler, topic_overviews_scheduler
+        global default_dashboard_artifact_scheduler
         global scraper_scheduler, supabase_writer, social_runtime_service, social_store_writer
         if question_cards_scheduler is not None:
             try:
@@ -352,6 +360,12 @@ async def app_lifespan(_app: FastAPI):
             except Exception:
                 pass
             topic_overviews_scheduler = None
+        if default_dashboard_artifact_scheduler is not None:
+            try:
+                default_dashboard_artifact_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            default_dashboard_artifact_scheduler = None
         if scraper_scheduler is not None:
             await scraper_scheduler.shutdown()
             scraper_scheduler = None
@@ -626,6 +640,7 @@ question_cards_scheduler: AsyncIOScheduler | None = None
 behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
 topic_overviews_scheduler: AsyncIOScheduler | None = None
+default_dashboard_artifact_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 _analytics_rate_limit_lock = threading.Lock()
 _analytics_rate_limit_buckets: dict[tuple[str, str], list[float]] = {}
@@ -1776,6 +1791,233 @@ def _handle_dashboard_refresh_complete(
 dashboard_aggregator.set_dashboard_refresh_complete_callback(_handle_dashboard_refresh_complete)
 
 
+def _canonical_default_seed_timeout_seconds() -> float:
+    return max(
+        float(dashboard_aggregator.REFRESH_TIMEOUT_SECONDS),
+        float(config.DASH_DEFAULT_ARTIFACT_SEED_TIMEOUT_SECONDS),
+    )
+
+
+def _canonical_default_seed_lock_name(cache_key: str) -> str:
+    return f"{_DASHBOARD_DEFAULT_SEED_LOCK_PREFIX}:{str(cache_key or '').strip()}"
+
+
+def _canonical_default_seed_lock_ttl_seconds() -> int:
+    return max(
+        _DASHBOARD_DEFAULT_SEED_LOCK_FLOOR_SECONDS,
+        int(_canonical_default_seed_timeout_seconds()) + 60,
+        int(config.DASH_DEFAULT_ARTIFACT_REFRESH_MINUTES) * 60,
+    )
+
+
+def _seed_canonical_default_artifact_sync(
+    *,
+    force: bool = False,
+    reason: str = "scheduled",
+) -> dict[str, Any]:
+    if not config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED:
+        return {
+            "status": "disabled",
+            "started": False,
+            "reason": reason,
+        }
+
+    freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
+    ctx = _default_dashboard_context(freshness_snapshot)
+    trusted_end_date = ctx.to_date.isoformat()
+    cache_key = ctx.cache_key
+    timeout_seconds = _canonical_default_seed_timeout_seconds()
+    exact_path = _dashboard_snapshot_storage_path(cache_key)
+
+    existing_exact = _load_persisted_dashboard_snapshot(exact_path)
+    if (
+        not force
+        and _persisted_snapshot_matches_context(existing_exact, ctx, trusted_end_date=trusted_end_date)
+        and _is_persisted_snapshot_fresh(existing_exact.get("snapshotBuiltAt"))
+    ):
+        logger.info(
+            "Canonical default artifact seed skipped | reason={} key={} status=already_fresh",
+            reason,
+            cache_key,
+        )
+        return {
+            "status": "already_fresh",
+            "started": False,
+            "reason": reason,
+            "cacheKey": cache_key,
+            "trustedEndDate": trusted_end_date,
+        }
+
+    coordinator = get_runtime_coordinator()
+    lock_name = _canonical_default_seed_lock_name(cache_key)
+    lock_token = coordinator.acquire_lock(lock_name, ttl_seconds=_canonical_default_seed_lock_ttl_seconds())
+    if not lock_token:
+        logger.warning(
+            "Canonical default artifact seed skipped | reason={} key={} status=lock_held",
+            reason,
+            cache_key,
+        )
+        return {
+            "status": "lock_held",
+            "started": False,
+            "reason": reason,
+            "cacheKey": cache_key,
+            "trustedEndDate": trusted_end_date,
+        }
+
+    try:
+        existing_exact = _load_persisted_dashboard_snapshot(exact_path)
+        if (
+            not force
+            and _persisted_snapshot_matches_context(existing_exact, ctx, trusted_end_date=trusted_end_date)
+            and _is_persisted_snapshot_fresh(existing_exact.get("snapshotBuiltAt"))
+        ):
+            logger.info(
+                "Canonical default artifact seed skipped after lock | reason={} key={} status=already_fresh",
+                reason,
+                cache_key,
+            )
+            return {
+                "status": "already_fresh",
+                "started": False,
+                "reason": reason,
+                "cacheKey": cache_key,
+                "trustedEndDate": trusted_end_date,
+            }
+
+        memory_snapshot, memory_meta, memory_state = peek_dashboard_snapshot(ctx)
+        if (
+            memory_state == "fresh"
+            and isinstance(memory_snapshot, dict)
+            and isinstance(memory_meta, dict)
+            and _should_persist_dashboard_snapshot(memory_meta)
+        ):
+            persist_result = _persist_dashboard_snapshot_sync(
+                ctx,
+                memory_snapshot,
+                memory_meta,
+                trusted_end_date=trusted_end_date,
+                write_default_alias=True,
+            )
+            status = (
+                "persisted_from_memory"
+                if persist_result.get("exactSaved") and persist_result.get("aliasSaved")
+                else "memory_not_persisted"
+            )
+            logger.info(
+                "Canonical default artifact seed completed from memory | reason={} key={} status={}",
+                reason,
+                cache_key,
+                status,
+            )
+            return {
+                "status": status,
+                "started": False,
+                "reason": reason,
+                "cacheKey": cache_key,
+                "trustedEndDate": trusted_end_date,
+                "buildTimeoutSeconds": timeout_seconds,
+                "persistResult": persist_result,
+                "source": "memory",
+            }
+
+        logger.info(
+            "Canonical default artifact seed started | reason={} key={} timeout={} force={}",
+            reason,
+            cache_key,
+            timeout_seconds,
+            force,
+        )
+        seed_result = seed_dashboard_snapshot(
+            ctx,
+            timeout_seconds=timeout_seconds,
+            force=force,
+        )
+        if not seed_result.get("started"):
+            status = "suppressed" if seed_result.get("suppressed") else "inflight"
+            logger.info(
+                "Canonical default artifact seed skipped after local single-flight | reason={} key={} status={}",
+                reason,
+                cache_key,
+                status,
+            )
+            return {
+                "status": status,
+                "started": False,
+                "reason": reason,
+                "cacheKey": cache_key,
+                "trustedEndDate": trusted_end_date,
+                "buildTimeoutSeconds": timeout_seconds,
+                "refreshFailureCount": int(seed_result.get("failureCount") or 0),
+            }
+
+        snapshot = seed_result.get("snapshot") or {}
+        meta = seed_result.get("meta") or {}
+        persist_result = _persist_dashboard_snapshot_sync(
+            ctx,
+            snapshot,
+            meta,
+            trusted_end_date=trusted_end_date,
+            write_default_alias=True,
+        )
+        status = (
+            "persisted"
+            if persist_result.get("exactSaved") and persist_result.get("aliasSaved")
+            else "not_persisted"
+        )
+        logger.info(
+            "Canonical default artifact seed finished | reason={} key={} status={} elapsed={} degraded={}",
+            reason,
+            cache_key,
+            status,
+            meta.get("buildElapsedSeconds"),
+            meta.get("degradedTiers", []),
+        )
+        return {
+            "status": status,
+            "started": True,
+            "reason": reason,
+            "cacheKey": cache_key,
+            "trustedEndDate": trusted_end_date,
+            "buildTimeoutSeconds": timeout_seconds,
+            "buildElapsedSeconds": meta.get("buildElapsedSeconds"),
+            "degradedTiers": meta.get("degradedTiers", []),
+            "refreshFailureCount": int(meta.get("refreshFailureCount") or 0),
+            "persistResult": persist_result,
+            "source": "build",
+        }
+    except Exception as exc:
+        logger.error(
+            "Canonical default artifact seed failed | reason={} key={} error={}",
+            reason,
+            cache_key,
+            exc,
+        )
+        return {
+            "status": "failed",
+            "started": False,
+            "reason": reason,
+            "cacheKey": cache_key,
+            "trustedEndDate": trusted_end_date,
+            "buildTimeoutSeconds": timeout_seconds,
+            "error": str(exc),
+        }
+    finally:
+        coordinator.release_lock(lock_name, lock_token)
+
+
+async def _seed_canonical_default_artifact_once(
+    *,
+    force: bool = False,
+    reason: str = "scheduled",
+) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: _seed_canonical_default_artifact_sync(force=force, reason=reason),
+    )
+
+
 def _newer_snapshot_choice(
     left: tuple[str, dict, dict[str, Any], datetime | None] | None,
     right: tuple[str, dict, dict[str, Any], datetime | None] | None,
@@ -2181,6 +2423,31 @@ def _start_topic_overviews_scheduler() -> None:
     scheduler.start()
     topic_overviews_scheduler = scheduler
     logger.info(f"Topic overviews scheduler ready | interval={interval}m")
+
+
+def _start_default_dashboard_artifact_scheduler() -> None:
+    """Start recurring canonical default dashboard artifact seeder."""
+    global default_dashboard_artifact_scheduler
+
+    if not config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED:
+        logger.info("Canonical default dashboard artifact seeder disabled")
+        return
+
+    interval = max(5, int(config.DASH_DEFAULT_ARTIFACT_REFRESH_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _seed_canonical_default_artifact_once,
+        "interval",
+        minutes=interval,
+        id="default-dashboard-artifact-seeder",
+        kwargs={"force": False, "reason": "scheduled"},
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    default_dashboard_artifact_scheduler = scheduler
+    logger.info(f"Canonical default dashboard artifact seeder ready | interval={interval}m")
 
 
 def _normalize_channel_username(raw: str) -> str:
@@ -3998,6 +4265,21 @@ async def audience_messages(
         raise
     except Exception as e:
         logger.error(f"Audience messages endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/dashboard/default-artifact/seed", dependencies=[Depends(require_operator_access)])
+async def seed_default_dashboard_artifact():
+    """Run the canonical default dashboard artifact seeder once."""
+    try:
+        result = await _seed_canonical_default_artifact_once(force=True, reason="operator_run_once")
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"persisted", "persisted_from_memory", "already_fresh"}:
+            return result
+        if status in {"lock_held", "suppressed", "inflight"}:
+            return JSONResponse(status_code=202, content=result)
+        return JSONResponse(status_code=503, content=result)
+    except Exception as e:
+        logger.error(f"Canonical default artifact seeder endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
