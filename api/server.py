@@ -62,13 +62,14 @@ else:  # pragma: no cover - exercised when orjson isn't installed locally
     ORJSONResponse = None
 
 from api import aggregator as dashboard_aggregator
+from api import dashboard_observability as dashboard_obs
 from api.aggregator import (
     CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
     build_dashboard_snapshot_once,
     get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
-    invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async,
+    invalidate_cache, peek_dashboard_snapshot,
     schedule_dashboard_snapshot_refresh,
 )
 from api.dashboard_dates import build_dashboard_date_context
@@ -422,6 +423,32 @@ def _record_query_timing(request: Request, started_at: float, *, cache_status: O
     request.state.query_ms = round(elapsed_ms, 2)
     if cache_status:
         request.state.cache_status = cache_status
+
+
+def _emit_default_dashboard_request_event(
+    request: Request,
+    *,
+    status_code: int,
+    observability: dict[str, Any] | None,
+    dashboard_meta: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(observability, dict) or not observability.get("enabled"):
+        return
+    dashboard_meta = dashboard_meta or {}
+    dashboard_obs.emit_dashboard_event(
+        "dashboard_default_request",
+        request_id=str(getattr(request.state, "request_id", "") or ""),
+        path=request.url.path,
+        default_cache_key=observability.get("default_cache_key"),
+        request_status=int(status_code),
+        request_elapsed_ms=getattr(request.state, "query_ms", None),
+        cache_state_at_read=observability.get("cache_state_at_read"),
+        cache_status=dashboard_meta.get("cacheStatus") or observability.get("cache_status"),
+        cache_source=dashboard_meta.get("cacheSource") or observability.get("cache_source"),
+        build_elapsed_seconds=dashboard_meta.get("buildElapsedSeconds"),
+        refresh_failure_count=dashboard_meta.get("refreshFailureCount"),
+        trigger_reason=observability.get("trigger_reason"),
+    )
 
 
 def _is_ai_chat_path(path: str) -> bool:
@@ -1571,9 +1598,30 @@ def _ensure_background_dashboard_refresh(
     *,
     trusted_end_date: str,
     write_default_alias: bool,
+    reason: str | None = None,
+    request_id: str | None = None,
 ) -> bool:
     del trusted_end_date, write_default_alias
-    return bool(refresh_dashboard_snapshot_async(ctx))
+    refresh_status = schedule_dashboard_snapshot_refresh(
+        ctx,
+        reason=reason,
+        request_id=request_id,
+    )
+    if reason:
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_refresh_scheduled",
+            request_id=request_id,
+            build_id=refresh_status.get("buildId"),
+            cache_key=ctx.cache_key,
+            reason=reason,
+            started=bool(refresh_status.get("started")),
+            inflight=bool(refresh_status.get("inflight")),
+            suppressed=bool(refresh_status.get("suppressed")),
+            failure_count=int(refresh_status.get("failureCount") or 0),
+            global_inflight_refreshes=int(refresh_status.get("globalInflightRefreshes") or 0),
+            refresh_suppressed_until=refresh_status.get("refreshSuppressedUntil"),
+        )
+    return bool(refresh_status.get("started"))
 
 
 def _newer_snapshot_choice(
@@ -1674,6 +1722,9 @@ def _build_dashboard_api_payload(
 def _build_dashboard_response_payload(
     from_date: Optional[str],
     to_date: Optional[str],
+    *,
+    request_id: str | None = None,
+    observability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     default_request = not from_date or not to_date
     recent_default_fallback: dict[str, Any] | None = None
@@ -1692,6 +1743,9 @@ def _build_dashboard_response_payload(
             trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
             ctx = _dashboard_context_from_trusted_end(trusted_end)
             trusted_end_iso = trusted_end.isoformat()
+            if isinstance(observability, dict):
+                observability["enabled"] = True
+                observability["default_cache_key"] = ctx.cache_key
         else:
             default_snapshot = _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)
             persisted_read_status = default_snapshot.get("status")
@@ -1699,6 +1753,10 @@ def _build_dashboard_response_payload(
             if default_snapshot.get("status") == "hit" and _is_persisted_snapshot_usable(default_snapshot.get("snapshotBuiltAt")):
                 ctx = default_snapshot["ctx"]
                 trusted_end_iso = str(default_snapshot.get("trustedEndDate") or ctx.to_date.isoformat())
+                if isinstance(observability, dict):
+                    observability["enabled"] = True
+                    observability["default_cache_key"] = ctx.cache_key
+                    observability["cache_state_at_read"] = "missing"
                 dashboard_meta = dict(default_snapshot.get("meta") or {})
                 dashboard_meta["isStale"] = not _is_persisted_snapshot_fresh(default_snapshot.get("snapshotBuiltAt"))
                 prime_dashboard_snapshot(
@@ -1713,7 +1771,11 @@ def _build_dashboard_response_payload(
                         ctx,
                         trusted_end_date=trusted_end_iso,
                         write_default_alias=True,
+                        reason="dashboard_request",
+                        request_id=request_id,
                     )
+                    if isinstance(observability, dict):
+                        observability["trigger_reason"] = "dashboard_request"
                 _ensure_background_freshness_refresh()
                 return _build_dashboard_api_payload(
                     ctx=ctx,
@@ -1741,6 +1803,9 @@ def _build_dashboard_response_payload(
             trusted_end = _trusted_end_date_from_freshness(freshness_snapshot or {})
             ctx = _dashboard_context_from_trusted_end(trusted_end)
             trusted_end_iso = trusted_end.isoformat()
+            if isinstance(observability, dict):
+                observability["enabled"] = True
+                observability["default_cache_key"] = ctx.cache_key
             recent_default_fallback = _load_recent_default_dashboard_snapshot(ctx.to_date)
             recent_default_fallback_checked = True
             if recent_default_fallback.get("status") == "hit":
@@ -1758,7 +1823,12 @@ def _build_dashboard_response_payload(
                     fallback_ctx,
                     trusted_end_date=fallback_trusted_end,
                     write_default_alias=True,
+                    reason="dashboard_request",
+                    request_id=request_id,
                 )
+                if isinstance(observability, dict):
+                    observability["trigger_reason"] = "dashboard_request"
+                    observability["cache_state_at_read"] = "missing"
                 return _build_dashboard_api_payload(
                     ctx=fallback_ctx,
                     trusted_end_date=fallback_trusted_end,
@@ -1785,6 +1855,10 @@ def _build_dashboard_response_payload(
     requested_to = to_date or ctx.to_date.isoformat()
 
     memory_snapshot, memory_meta, memory_state = peek_dashboard_snapshot(ctx)
+    if isinstance(observability, dict) and default_request:
+        observability["enabled"] = True
+        observability["default_cache_key"] = ctx.cache_key
+        observability["cache_state_at_read"] = memory_state
     if memory_state == "fresh" and memory_snapshot is not None and memory_meta is not None:
         return _build_dashboard_api_payload(
             ctx=ctx,
@@ -1857,7 +1931,29 @@ def _build_dashboard_response_payload(
                 stale_meta,
                 cached_at_ts=persisted_built_at.timestamp(),
             )
-        refresh_status = schedule_dashboard_snapshot_refresh(ctx)
+        if default_request:
+            refresh_status = schedule_dashboard_snapshot_refresh(
+                ctx,
+                reason="dashboard_request",
+                request_id=request_id,
+            )
+            dashboard_obs.emit_dashboard_event(
+                "dashboard_default_refresh_scheduled",
+                request_id=request_id,
+                build_id=refresh_status.get("buildId"),
+                cache_key=ctx.cache_key,
+                reason="dashboard_request",
+                started=bool(refresh_status.get("started")),
+                inflight=bool(refresh_status.get("inflight")),
+                suppressed=bool(refresh_status.get("suppressed")),
+                failure_count=int(refresh_status.get("failureCount") or 0),
+                global_inflight_refreshes=int(refresh_status.get("globalInflightRefreshes") or 0),
+                refresh_suppressed_until=refresh_status.get("refreshSuppressedUntil"),
+            )
+            if isinstance(observability, dict):
+                observability["trigger_reason"] = "dashboard_request"
+        else:
+            refresh_status = schedule_dashboard_snapshot_refresh(ctx)
         if default_request and freshness_snapshot is None:
             _ensure_background_freshness_refresh()
         stale_meta["isStale"] = True
@@ -1886,7 +1982,29 @@ def _build_dashboard_response_payload(
             fallback_reason=fallback_reason,
             refresh_suppressed=bool(refresh_status.get("suppressed")),
         )
-    schedule_dashboard_snapshot_refresh(ctx)
+    if default_request:
+        refresh_status = schedule_dashboard_snapshot_refresh(
+            ctx,
+            reason="dashboard_request",
+            request_id=request_id,
+        )
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_refresh_scheduled",
+            request_id=request_id,
+            build_id=refresh_status.get("buildId"),
+            cache_key=ctx.cache_key,
+            reason="dashboard_request",
+            started=bool(refresh_status.get("started")),
+            inflight=bool(refresh_status.get("inflight")),
+            suppressed=bool(refresh_status.get("suppressed")),
+            failure_count=int(refresh_status.get("failureCount") or 0),
+            global_inflight_refreshes=int(refresh_status.get("globalInflightRefreshes") or 0),
+            refresh_suppressed_until=refresh_status.get("refreshSuppressedUntil"),
+        )
+        if isinstance(observability, dict):
+            observability["trigger_reason"] = "dashboard_request"
+    else:
+        refresh_status = schedule_dashboard_snapshot_refresh(ctx)
     raise DashboardWarmingError("We’re still warming this date range. Please try again shortly.")
 
 
@@ -1896,7 +2014,30 @@ async def _warm_dashboard_cache() -> None:
         loop = asyncio.get_running_loop()
         freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
         ctx = _default_dashboard_context(freshness_snapshot)
-        await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
+        _snapshot, _meta, cache_state = peek_dashboard_snapshot(ctx)
+        if cache_state == "fresh":
+            logger.info("Dashboard cache warm-up skipped | key={} cache_state=fresh", ctx.cache_key)
+            return
+        build_context = dashboard_obs.DefaultProducerBuildContext(
+            build_id=dashboard_obs.new_build_id(),
+            cache_key=ctx.cache_key,
+            reason="startup",
+            trigger_request_id=None,
+            scheduled_at=time.time(),
+        )
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_build_started",
+            build_id=build_context.build_id,
+            trigger_request_id=None,
+            cache_key=build_context.cache_key,
+            reason=build_context.reason,
+            scheduled_at=round(float(build_context.scheduled_at or time.time()), 3),
+        )
+        def _warm_default() -> None:
+            with dashboard_obs.bind_build_context(build_context):
+                get_dashboard_data(ctx)
+
+        await loop.run_in_executor(None, _warm_default)
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")
@@ -2464,11 +2605,18 @@ async def dashboard(
     Cached for 15 minutes by default. Call POST /api/cache/clear to refresh.
     """
     query_started_at = time.perf_counter()
+    default_request_observability: dict[str, Any] = {}
+    request_id = str(getattr(request.state, "request_id", "") or "")
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: _build_dashboard_response_payload(from_date, to_date),
+            lambda: _build_dashboard_response_payload(
+                from_date,
+                to_date,
+                request_id=request_id,
+                observability=default_request_observability,
+            ),
         )
         _record_query_timing(
             request,
@@ -2476,18 +2624,52 @@ async def dashboard(
             cache_status=str(response.get("meta", {}).get("cacheStatus") or ""),
         )
         request.state.dashboard_meta = response["meta"]
+        _emit_default_dashboard_request_event(
+            request,
+            status_code=200,
+            observability=default_request_observability,
+            dashboard_meta=response.get("meta"),
+        )
         return _dashboard_response(response)
     except DashboardWarmingError as e:
         _record_query_timing(request, query_started_at, cache_status="warming")
+        _emit_default_dashboard_request_event(
+            request,
+            status_code=503,
+            observability=default_request_observability,
+            dashboard_meta={
+                "cacheStatus": "warming",
+                "cacheSource": None,
+                "refreshFailureCount": 0,
+            },
+        )
         logger.warning(f"Dashboard endpoint warming response: {e}")
         raise HTTPException(status_code=503, detail=str(e))
     except TimeoutError as e:
+        _record_query_timing(request, query_started_at, cache_status="warming")
+        _emit_default_dashboard_request_event(
+            request,
+            status_code=503,
+            observability=default_request_observability,
+            dashboard_meta={
+                "cacheStatus": "warming_timeout",
+                "cacheSource": None,
+                "refreshFailureCount": 0,
+            },
+        )
         logger.warning(f"Dashboard endpoint warming timeout: {e}")
         raise HTTPException(
             status_code=503,
             detail="We’re still warming this date range. Please try again shortly.",
         )
     except Exception as e:
+        _record_query_timing(request, query_started_at, cache_status="error")
+        _emit_default_dashboard_request_event(
+            request,
+            status_code=500,
+            observability=default_request_observability,
+            dashboard_meta={"cacheStatus": "error", "cacheSource": None},
+        )
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

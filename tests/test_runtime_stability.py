@@ -2,11 +2,29 @@ from __future__ import annotations
 
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
+from loguru import logger
 from neo4j.exceptions import ServiceUnavailable
 
-from api import aggregator, db
+from api import aggregator, dashboard_observability as dashboard_obs, db
+
+
+@contextmanager
+def _capture_log_messages():
+    messages: list[str] = []
+
+    def _sink(message) -> None:
+        raw = message.record.get("message")
+        if isinstance(raw, str):
+            messages.append(raw)
+
+    sink_id = logger.add(_sink, format="{message}")
+    try:
+        yield messages
+    finally:
+        logger.remove(sink_id)
 
 
 class DetailCacheBehaviorTests(unittest.TestCase):
@@ -161,6 +179,37 @@ class Neo4jDriverManagerTests(unittest.TestCase):
 
         self.assertFalse(did_reset)
         create_mock.assert_not_called()
+
+    def test_execute_read_logs_default_producer_context_on_failure_and_reset(self) -> None:
+        manager = db.Neo4jDriverManager()
+        manager._drivers[db.REQUEST_DRIVER_KEY] = _DummyDriver(error=ServiceUnavailable("defunct connection"))
+        manager._reset_cooldowns[db.REQUEST_DRIVER_KEY] = (
+            time.monotonic() - db.NEO4J_DRIVER_RESET_COOLDOWN_SECONDS - 1
+        )
+
+        with patch.object(manager, "_create_driver", return_value=_DummyDriver(value="ok")):
+            build = dashboard_obs.DefaultProducerBuildContext(
+                build_id="build-neo4j-1",
+                cache_key="2026-04-01:2026-04-15",
+                reason="dashboard_request",
+                trigger_request_id="req-neo4j-1",
+            )
+            with _capture_log_messages() as messages, \
+                 dashboard_obs.bind_build_context(build), \
+                 dashboard_obs.bind_tier_context("network"), \
+                 dashboard_obs.bind_query_family_context("network.key_voices.neo4j"):
+                result = manager.execute_read(lambda _tx: "ok", op_name="network.key_voices.neo4j")
+
+        self.assertEqual(result, "ok")
+        joined = "\n".join(messages)
+        self.assertIn("Neo4j read failed", joined)
+        self.assertIn("Neo4j driver reset completed", joined)
+        self.assertIn("buildId=build-neo4j-1", joined)
+        self.assertIn("tier=network", joined)
+        self.assertIn("queryFamily=network.key_voices.neo4j", joined)
+        self.assertIn("cacheKey=2026-04-01:2026-04-15", joined)
+        self.assertIn("triggerRequestId=req-neo4j-1", joined)
+        self.assertIn("reason=dashboard_request", joined)
 
 
 if __name__ == "__main__":

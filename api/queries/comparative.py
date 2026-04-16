@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from typing import Any, Iterable
 
+from api import dashboard_observability as dashboard_obs
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api.db import run_query, run_single
 from api.queries import predictive, pulse
@@ -399,7 +400,10 @@ def _weekly_metric_row(
 
 def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
     """Exact week-over-week metric rows for the comparative widget."""
-    stats = run_single("""
+    stats = dashboard_obs.observe_query_family(
+        "comparative.weekly_shifts",
+        "neo4j",
+        lambda: run_single("""
         CALL {
             OPTIONAL MATCH (p:Post)
             WHERE p.posted_at >= datetime($previous_start)
@@ -562,7 +566,8 @@ def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
         "current_end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    }) or {}
+    }, op_name="comparative.weekly_shifts"),
+    ) or {}
 
     health = pulse.get_community_health(ctx)
     previous_ctx = _build_window_context(ctx.previous_start_at, ctx.previous_end_at, ctx.days)
@@ -714,7 +719,10 @@ def get_sentiment_by_topic_legacy(ctx: DashboardDateContext) -> list[dict]:
 
 def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
     """Range-filtered topic sentiment counts using graph-native topic and sentiment edges."""
-    rows = run_query("""
+    rows = dashboard_obs.observe_query_family(
+        "comparative.sentiment_by_topic",
+        "neo4j",
+        lambda: run_query("""
         CALL () {
             MATCH (p:Post)-[:TAGGED]->(t:Topic)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
@@ -750,7 +758,8 @@ def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
     """, {
         **_range_params(ctx),
         "noise": sorted(_NOISY_TOPIC_KEYS),
-    })
+    }, op_name="comparative.sentiment_by_topic"),
+    )
     return [
         {
             "topic": str(row.get("topic") or "").strip(),
@@ -800,7 +809,10 @@ def compare_sentiment_by_topic(ctx: DashboardDateContext) -> dict[str, object]:
 
 def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
     """Highest-engagement posts."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "comparative.top_posts",
+        "neo4j",
+        lambda: run_query("""
         MATCH (p:Post)-[:IN_CHANNEL]->(ch:Channel)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         OPTIONAL MATCH (p)-[:TAGGED]->(t:Topic)
@@ -814,12 +826,16 @@ def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
                topics
         ORDER BY p.views DESC
         LIMIT 20
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="comparative.top_posts"),
+    )
 
 
 def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     """Average engagement by content/media type."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "comparative.content_type_performance",
+        "neo4j",
+        lambda: run_query("""
         MATCH (p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
         WITH coalesce(p.media_type, 'text') AS mediaType,
@@ -830,19 +846,58 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
                round(avgViews) AS avgViews,
                round(avgForwards) AS avgForwards
         ORDER BY avgViews DESC
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="comparative.content_type_performance"),
+    )
 
 
 def get_vitality_indicators() -> dict:
     """Composite community health indicators."""
-    total_users = (run_single("MATCH (u:User) RETURN count(u) AS n") or {}).get("n", 0)
-    active_users = (run_single("""
-        MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
-        RETURN count(u) AS n
-    """) or {}).get("n", 0)
-    total_topics = (run_single("MATCH (t:Topic) RETURN count(t) AS n") or {}).get("n", 0)
-    total_posts = (run_single("MATCH (p:Post) RETURN count(p) AS n") or {}).get("n", 0)
-    total_comments = (run_single("MATCH (c:Comment) RETURN count(c) AS n") or {}).get("n", 0)
+    total_users = (
+        dashboard_obs.observe_query_family(
+            "comparative.vitality_indicators",
+            "neo4j",
+            lambda: run_single("MATCH (u:User) RETURN count(u) AS n", op_name="comparative.vitality_indicators"),
+        )
+        or {}
+    ).get("n", 0)
+    active_users = (
+        dashboard_obs.observe_query_family(
+            "comparative.vitality_indicators",
+            "neo4j",
+            lambda: run_single(
+                """
+                MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
+                RETURN count(u) AS n
+                """,
+                op_name="comparative.vitality_indicators",
+            ),
+        )
+        or {}
+    ).get("n", 0)
+    total_topics = (
+        dashboard_obs.observe_query_family(
+            "comparative.vitality_indicators",
+            "neo4j",
+            lambda: run_single("MATCH (t:Topic) RETURN count(t) AS n", op_name="comparative.vitality_indicators"),
+        )
+        or {}
+    ).get("n", 0)
+    total_posts = (
+        dashboard_obs.observe_query_family(
+            "comparative.vitality_indicators",
+            "neo4j",
+            lambda: run_single("MATCH (p:Post) RETURN count(p) AS n", op_name="comparative.vitality_indicators"),
+        )
+        or {}
+    ).get("n", 0)
+    total_comments = (
+        dashboard_obs.observe_query_family(
+            "comparative.vitality_indicators",
+            "neo4j",
+            lambda: run_single("MATCH (c:Comment) RETURN count(c) AS n", op_name="comparative.vitality_indicators"),
+        )
+        or {}
+    ).get("n", 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {

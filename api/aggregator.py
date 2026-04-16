@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from loguru import logger
 
 from api import behavioral_briefs
+from api import dashboard_observability as dashboard_obs
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api import opportunity_briefs
 from api import question_briefs
@@ -106,6 +107,10 @@ class DashboardRefreshState:
     failure_count: int = 0
     last_error: str | None = None
     suppressed_until: float = 0.0
+    build_id: str | None = None
+    trigger_request_id: str | None = None
+    reason: str | None = None
+    scheduled_at: float | None = None
 
 
 _refresh_states: Dict[str, DashboardRefreshState] = {}
@@ -137,10 +142,15 @@ _tier_executor = _new_tier_executor()
 
 def _submit_tier_futures(
     ordered: List[Tuple[str, Callable[[], dict]]],
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> tuple[ThreadPoolExecutor, Dict[str, Any]]:
     with _tier_executor_lock:
         executor = _tier_executor
-        futures = {name: executor.submit(_run_tier_builder, builder) for name, builder in ordered}
+        futures = {
+            name: executor.submit(_run_tier_builder, name, builder, build_context)
+            for name, builder in ordered
+        }
     return executor, futures
 
 
@@ -279,6 +289,29 @@ def _release_refresh_slot(cache_key: str) -> None:
             return
         state.inflight = False
         state.event.set()
+        state.build_id = None
+        state.trigger_request_id = None
+        state.reason = None
+        state.scheduled_at = None
+
+
+def _inflight_refresh_count() -> int:
+    with _refresh_state_lock:
+        return sum(1 for state in _refresh_states.values() if state.inflight)
+
+
+def _default_build_context_from_state(cache_key: str) -> dashboard_obs.DefaultProducerBuildContext | None:
+    with _refresh_state_lock:
+        state = _refresh_states.get(cache_key)
+        if state is None or not state.build_id or not state.reason:
+            return None
+        return dashboard_obs.DefaultProducerBuildContext(
+            build_id=state.build_id,
+            cache_key=cache_key,
+            reason=state.reason,
+            trigger_request_id=state.trigger_request_id,
+            scheduled_at=state.scheduled_at,
+        )
 
 
 def _refresh_state_snapshot(cache_key: str) -> dict[str, Any]:
@@ -613,9 +646,14 @@ def _ordered_tiers(ctx: DashboardDateContext) -> List[Tuple[str, Callable[[], di
     ]
 
 
-def _run_tier_builder(fn: Callable[[], dict]) -> Tuple[dict, float]:
+def _run_tier_builder(
+    tier_name: str,
+    fn: Callable[[], dict],
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> Tuple[dict, float]:
     t0 = time.time()
-    payload = fn()
+    with dashboard_obs.bind_build_context(build_context), dashboard_obs.bind_tier_context(tier_name):
+        payload = fn()
     return payload, round(time.time() - t0, 3)
 
 
@@ -631,6 +669,7 @@ def _build_snapshot_sequential_with_skips(
     data: dict = {}
     tier_times: Dict[str, Optional[float]] = {}
     skip_set = skipped_tiers or set()
+    build_context = dashboard_obs.current_build_context()
 
     for name, builder in _ordered_tiers(ctx):
         if name in skip_set:
@@ -638,7 +677,8 @@ def _build_snapshot_sequential_with_skips(
             data.update(_fallback_for_tier(name))
             continue
         t0 = time.time()
-        payload = builder()
+        with dashboard_obs.bind_build_context(build_context), dashboard_obs.bind_tier_context(name):
+            payload = builder()
         tier_times[name] = round(time.time() - t0, 3)
         data.update(payload)
 
@@ -659,7 +699,8 @@ def _build_snapshot_parallel(
     tier_times: Dict[str, Optional[float]] = {}
     skip_set = skipped_tiers or set()
     runnable = [(name, builder) for name, builder in ordered if name not in skip_set]
-    executor, futures = _submit_tier_futures(runnable)
+    build_context = dashboard_obs.current_build_context()
+    executor, futures = _submit_tier_futures(runnable, build_context=build_context)
 
     for name in skip_set:
         tier_payloads[name] = _fallback_for_tier(name)
@@ -675,12 +716,35 @@ def _build_snapshot_parallel(
             tier_times[name] = duration
         except FuturesTimeout:
             logger.warning(f"Tier {name} timed out after {TIER_TIMEOUT_SECONDS}s — using fallback")
+            if build_context is not None:
+                dashboard_obs.emit_dashboard_event(
+                    "dashboard_default_tier_timeout",
+                    level="warning",
+                    build_id=build_context.build_id,
+                    trigger_request_id=build_context.trigger_request_id,
+                    cache_key=build_context.cache_key,
+                    reason=build_context.reason,
+                    tier=name,
+                    timeout_seconds=TIER_TIMEOUT_SECONDS,
+                )
             tier_payloads[name] = _fallback_for_tier(name)
             tier_times[name] = None
             if not future.cancel():
                 _replace_tier_executor(executor)
         except Exception as e:
             logger.error(f"Tier {name} crashed — using fallback: {e}")
+            if build_context is not None:
+                dashboard_obs.emit_dashboard_event(
+                    "dashboard_default_tier_failed",
+                    level="warning",
+                    build_id=build_context.build_id,
+                    trigger_request_id=build_context.trigger_request_id,
+                    cache_key=build_context.cache_key,
+                    reason=build_context.reason,
+                    tier=name,
+                    error_class=e.__class__.__name__,
+                    error_message=str(e),
+                )
             tier_payloads[name] = _fallback_for_tier(name)
             tier_times[name] = None
 
@@ -800,6 +864,72 @@ def _refresh_dashboard_snapshot(
     stale_snapshot = stale_entry[1] if stale_entry is not None else None
     stale_meta = dict(stale_entry[2]) if stale_entry is not None else None
     stale_ts = stale_entry[0] if stale_entry is not None else None
+    build_context = dashboard_obs.current_build_context()
+
+    def _emit_build_completed(
+        build_meta: DashboardCacheMeta,
+        *,
+        cache_written: bool,
+        cache_preserved: bool,
+        used_stale_fallback: bool,
+    ) -> None:
+        if build_context is None:
+            return
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_build_completed",
+            build_id=build_context.build_id,
+            trigger_request_id=build_context.trigger_request_id,
+            cache_key=build_context.cache_key,
+            reason=build_context.reason,
+            build_mode=build_meta.get("buildMode"),
+            build_elapsed_seconds=build_meta.get("buildElapsedSeconds"),
+            tier_times=build_meta.get("tierTimes"),
+            degraded_tiers=build_meta.get("degradedTiers"),
+            suppressed_degraded_tiers=build_meta.get("suppressedDegradedTiers"),
+            skipped_tiers=build_meta.get("skippedTiers"),
+            refresh_failure_count=build_meta.get("refreshFailureCount"),
+            used_stale_fallback=used_stale_fallback,
+            cache_written=cache_written,
+            cache_preserved=cache_preserved,
+            query_families=build_context.query_summary(),
+        )
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_query_family_summary",
+            build_id=build_context.build_id,
+            trigger_request_id=build_context.trigger_request_id,
+            cache_key=build_context.cache_key,
+            reason=build_context.reason,
+            query_families=build_context.query_summary(),
+        )
+
+    def _emit_build_failed(
+        error: Exception | str,
+        *,
+        used_stale_fallback: bool,
+    ) -> None:
+        if build_context is None:
+            return
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_build_failed",
+            level="warning",
+            build_id=build_context.build_id,
+            trigger_request_id=build_context.trigger_request_id,
+            cache_key=build_context.cache_key,
+            reason=build_context.reason,
+            used_stale_fallback=used_stale_fallback,
+            refresh_failure_count=_refresh_state_snapshot(cache_key).get("refreshFailureCount"),
+            error_class=error.__class__.__name__ if isinstance(error, Exception) else "RuntimeError",
+            error_message=str(error),
+            query_families=build_context.query_summary(),
+        )
+        dashboard_obs.emit_dashboard_event(
+            "dashboard_default_query_family_summary",
+            build_id=build_context.build_id,
+            trigger_request_id=build_context.trigger_request_id,
+            cache_key=build_context.cache_key,
+            reason=build_context.reason,
+            query_families=build_context.query_summary(),
+        )
 
     try:
         data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx)
@@ -837,6 +967,12 @@ def _refresh_dashboard_snapshot(
                 preserved_meta["suppressedDegradedTiers"] = fallback_tiers
                 preserved_meta["refreshFailureCount"] = failure_count
                 _cache_entries[cache_key] = (stale_ts, stale_snapshot, preserved_meta)
+                _emit_build_completed(
+                    preserved_meta,
+                    cache_written=False,
+                    cache_preserved=True,
+                    used_stale_fallback=True,
+                )
                 return stale_snapshot, _with_refresh_state(
                     cache_key,
                     preserved_meta,
@@ -863,6 +999,12 @@ def _refresh_dashboard_snapshot(
                 _cache_entries[cache_key] = (time.time(), data, build_meta)
 
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
+        _emit_build_completed(
+            build_meta,
+            cache_written=True,
+            cache_preserved=False,
+            used_stale_fallback=False,
+        )
         return data, _with_refresh_state(cache_key, build_meta)
     except Exception as exc:
         failure_count = _record_refresh_failure(cache_key, exc)
@@ -875,12 +1017,14 @@ def _refresh_dashboard_snapshot(
             failure_meta["refreshFailureCount"] = failure_count
             with _cache_lock:
                 _cache_entries[cache_key] = (stale_ts, stale_snapshot, failure_meta)
+            _emit_build_failed(exc, used_stale_fallback=True)
             return stale_snapshot, _with_refresh_state(
                 cache_key,
                 failure_meta,
                 stale_age_seconds=max(0.0, time.time() - stale_ts),
             )
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
+        _emit_build_failed(exc, used_stale_fallback=False)
         return _emergency_degraded_snapshot(cache_key, str(exc))
 
 
@@ -888,7 +1032,18 @@ def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateCon
     with _cache_lock:
         stale_entry = _cache_entries.get(cache_key)
     try:
-        _refresh_dashboard_snapshot(cache_key, ctx, stale_entry=stale_entry)
+        build_context = _default_build_context_from_state(cache_key)
+        if build_context is not None:
+            dashboard_obs.emit_dashboard_event(
+                "dashboard_default_build_started",
+                build_id=build_context.build_id,
+                trigger_request_id=build_context.trigger_request_id,
+                cache_key=build_context.cache_key,
+                reason=build_context.reason,
+                scheduled_at=round(float(build_context.scheduled_at or time.time()), 3),
+            )
+        with dashboard_obs.bind_build_context(build_context):
+            _refresh_dashboard_snapshot(cache_key, ctx, stale_entry=stale_entry)
     except Exception as exc:
         logger.error(f"Background dashboard refresh failed | key={cache_key} error={exc}")
     finally:
@@ -1077,7 +1232,12 @@ def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
     return _ensure_background_refresh(ctx.cache_key, ctx)
 
 
-def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, Any]:
+def schedule_dashboard_snapshot_refresh(
+    ctx: DashboardDateContext,
+    *,
+    reason: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     cache_key = ctx.cache_key
     now = time.time()
     with _refresh_state_lock:
@@ -1086,12 +1246,16 @@ def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, 
             state = DashboardRefreshState()
             state.event.set()
             _refresh_states[cache_key] = state
+        global_inflight = sum(1 for refresh_state in _refresh_states.values() if refresh_state.inflight)
         if state.suppressed_until > now:
             return {
                 "started": False,
                 "inflight": bool(state.inflight),
                 "suppressed": True,
                 "failureCount": int(state.failure_count),
+                "buildId": state.build_id,
+                "globalInflightRefreshes": global_inflight,
+                "refreshSuppressedUntil": round(state.suppressed_until, 3) if state.suppressed_until else None,
             }
         if state.inflight:
             return {
@@ -1099,14 +1263,31 @@ def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, 
                 "inflight": True,
                 "suppressed": False,
                 "failureCount": int(state.failure_count),
+                "buildId": state.build_id,
+                "globalInflightRefreshes": global_inflight,
+                "refreshSuppressedUntil": None,
             }
+        if reason:
+            state.build_id = dashboard_obs.new_build_id()
+            state.trigger_request_id = str(request_id or "").strip() or None
+            state.reason = str(reason)
+            state.scheduled_at = time.time()
+        else:
+            state.build_id = None
+            state.trigger_request_id = None
+            state.reason = None
+            state.scheduled_at = None
 
     started = _ensure_background_refresh(cache_key, ctx)
+    current_state = _refresh_state_snapshot(cache_key)
     return {
         "started": bool(started),
         "inflight": False if started else True,
         "suppressed": False,
-        "failureCount": int(_refresh_state_snapshot(cache_key).get("refreshFailureCount", 0)),
+        "failureCount": int(current_state.get("refreshFailureCount", 0)),
+        "buildId": state.build_id,
+        "globalInflightRefreshes": _inflight_refresh_count(),
+        "refreshSuppressedUntil": None,
     }
 
 

@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import json
 from statistics import median
+from api import dashboard_observability as dashboard_obs
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
@@ -164,7 +165,10 @@ def _dominant_widget_type(rows: list[dict]) -> tuple[str, str]:
 
 def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     """Active channels ranked by median recent post engagement with sample controls."""
-    post_rows = run_query("""
+    post_rows = dashboard_obs.observe_query_family(
+        "network.community_channels.posts",
+        "neo4j",
+        lambda: run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
           AND coalesce(ch.source_type, 'channel') = 'channel'
@@ -180,9 +184,13 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
                coalesce(p.forwards, 0) AS forwards,
                coalesce(p.comment_count, 0) AS comments,
                coalesce(p.reactions, '') AS reactions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.posts"),
+    )
 
-    category_rows = run_query("""
+    category_rows = dashboard_obs.observe_query_family(
+        "network.community_channels.categories",
+        "neo4j",
+        lambda: run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
         WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
           AND coalesce(ch.source_type, 'channel') = 'channel'
@@ -190,15 +198,20 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
         OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
         RETURN ch.uuid AS channelId, category, mentions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.categories"),
+    )
 
-    comment_rows = run_query("""
+    comment_rows = dashboard_obs.observe_query_family(
+        "network.community_channels.comments",
+        "neo4j",
+        lambda: run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)<-[:REPLIES_TO]-(c:Comment)
         WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
           AND coalesce(ch.source_type, 'channel') = 'channel'
           AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         RETURN ch.uuid AS channelId, count(c) AS comments7d
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.comments"),
+    )
 
     activity_cutoff = ctx.start_at.timestamp()
     channels: dict[str, dict] = {}
@@ -330,7 +343,10 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
 def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
     """Most active recent commenters with real usernames, channels, and topics."""
     # First get data from Neo4j
-    neo4j_results = run_query("""
+    neo4j_results = dashboard_obs.observe_query_family(
+        "network.key_voices.neo4j",
+        "neo4j",
+        lambda: run_query("""
         MATCH (u:User)-[:WROTE]->(c:Comment)
         WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
         WITH u,
@@ -382,7 +398,8 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
                topChannels, topics, postsPerWeek, replyRate
         ORDER BY activityScore DESC, commentCount DESC, activeDays DESC
         LIMIT 20
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.key_voices.neo4j"),
+    )
 
     # Fetch usernames from Supabase
     try:
@@ -394,10 +411,14 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
 
         if user_ids:
             # Fetch usernames from Supabase
-            supabase_users = writer.client.table('telegram_users') \
-                .select('telegram_user_id, username, first_name, last_name') \
-                .in_('telegram_user_id', user_ids) \
-                .execute()
+            supabase_users = dashboard_obs.observe_query_family(
+                "network.key_voices.supabase_users",
+                "supabase",
+                lambda: writer.client.table('telegram_users')
+                .select('telegram_user_id, username, first_name, last_name')
+                .in_('telegram_user_id', user_ids)
+                .execute(),
+            )
 
             # Create a lookup dictionary
             user_lookup = {}
@@ -442,28 +463,39 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
 
 def get_hourly_activity() -> list[dict]:
     """Comment distribution by hour of day."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "network.hourly_activity",
+        "neo4j",
+        lambda: run_query("""
         MATCH (c:Comment)
         WHERE c.posting_hour IS NOT NULL
         WITH c.posting_hour AS hour, count(c) AS count
         RETURN hour, count
         ORDER BY hour
-    """)
+    """, op_name="network.hourly_activity"),
+    )
 
 
 def get_weekly_activity() -> list[dict]:
     """Post count by day of week."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "network.weekly_activity",
+        "neo4j",
+        lambda: run_query("""
         MATCH (p:Post)
         WITH date(p.posted_at).dayOfWeek AS dow, count(p) AS count
         RETURN dow, count
         ORDER BY dow
-    """)
+    """, op_name="network.weekly_activity"),
+    )
 
 
 def get_recommendations() -> list[dict]:
     """Users with Support/Help intent — recommenders."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "network.recommendations",
+        "neo4j",
+        lambda: run_query("""
         MATCH (u:User)-[e:EXHIBITS]->(i:Intent {name: 'Support / Help'})
         MATCH (u)-[:INTERESTED_IN]->(t:Topic)
         WITH u.telegram_user_id AS userId, e.count AS helpCount,
@@ -471,7 +503,8 @@ def get_recommendations() -> list[dict]:
         RETURN userId, helpCount, topics
         ORDER BY helpCount DESC
         LIMIT 15
-    """)
+    """, op_name="network.recommendations"),
+    )
 
 
 def get_viral_topics() -> list[dict]:
@@ -488,7 +521,10 @@ def get_viral_topics() -> list[dict]:
 
 def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:
     """Track how topics spread across channels with real timestamps."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "network.information_velocity",
+        "neo4j",
+        lambda: run_query("""
         // Find topics that appear in multiple channels
         MATCH (p:Post)-[:TAGGED]->(t:Topic)
         MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
@@ -546,4 +582,5 @@ def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:
                velocity
         ORDER BY totalReach DESC
         LIMIT 15
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.information_velocity"),
+    )

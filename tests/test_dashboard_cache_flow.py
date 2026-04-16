@@ -102,11 +102,20 @@ class DashboardCacheFlowTests(unittest.TestCase):
                 thread_starts.append(self.name)
 
         with patch.object(aggregator.threading, "Thread", DummyThread):
-            results = [aggregator.schedule_dashboard_snapshot_refresh(ctx) for _ in range(8)]
+            results = [
+                aggregator.schedule_dashboard_snapshot_refresh(
+                    ctx,
+                    reason="dashboard_request",
+                    request_id="req-1",
+                )
+                for _ in range(8)
+            ]
 
         self.assertEqual(sum(1 for result in results if result["started"]), 1)
         self.assertEqual(sum(1 for result in results if result["inflight"]), 7)
         self.assertTrue(all(not result["suppressed"] for result in results))
+        self.assertTrue(results[0]["buildId"])
+        self.assertTrue(all(result["buildId"] == results[0]["buildId"] for result in results[1:]))
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
 

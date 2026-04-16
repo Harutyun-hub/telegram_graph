@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any
 
+from api import dashboard_observability as dashboard_obs
 from api.db import run_query, run_single
 from api.dashboard_dates import DashboardDateContext
 from buffer.supabase_writer import SupabaseWriter
@@ -317,6 +318,7 @@ def _topic_diversity_score(*, start: datetime, end: datetime) -> dict:
             "end": end.isoformat(),
             "noise": list(_NOISY_TOPIC_NAMES),
         },
+        op_name="pulse.community_health.topic_diversity",
     )
 
     counts = [int(r.get("mentions") or 0) for r in rows if int(r.get("mentions") or 0) > 0]
@@ -550,6 +552,7 @@ def _query_topic_widget_rows(
             "previous_end": ctx.previous_end_at.isoformat(),
             "evidence_limit": max(1, min(int(evidence_limit), 6)),
         },
+        op_name="pulse.trending_topics.snapshot",
     )
     output: list[dict[str, Any]] = []
     for row in rows:
@@ -736,8 +739,16 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     - discussion diversity,
     - conversation depth.
     """
-    current_rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
-    previous_rows = _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
+    current_rows = dashboard_obs.observe_query_family(
+        "pulse.community_health.analysis_current",
+        "supabase",
+        lambda: _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at),
+    )
+    previous_rows = dashboard_obs.observe_query_family(
+        "pulse.community_health.analysis_previous",
+        "supabase",
+        lambda: _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at),
+    )
 
     current_intent = _window_intent_stats(current_rows)
     previous_intent = _window_intent_stats(previous_rows)
@@ -745,8 +756,16 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     current_volume = _analysis_volume(current_rows)
     previous_volume = _analysis_volume(previous_rows)
 
-    current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
-    previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
+    current_diversity = dashboard_obs.observe_query_family(
+        "pulse.community_health.topic_diversity_current",
+        "neo4j",
+        lambda: _topic_diversity_score(start=ctx.start_at, end=ctx.end_at),
+    )
+    previous_diversity = dashboard_obs.observe_query_family(
+        "pulse.community_health.topic_diversity_previous",
+        "neo4j",
+        lambda: _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at),
+    )
 
     current_constructive = int(round(current_intent["positive_share"] * 100.0))
     previous_constructive = int(round(previous_intent["positive_share"] * 100.0))
@@ -832,13 +851,21 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
 
 def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
     """Evidence-backed top canonical topics for the selected window."""
-    snapshot = _build_topic_widget_snapshot(ctx)
+    snapshot = dashboard_obs.observe_query_family(
+        "pulse.trending_topics.snapshot",
+        "neo4j",
+        lambda: _build_topic_widget_snapshot(ctx),
+    )
     return list(snapshot.get("trendingTopics") or [])[: max(1, int(limit))]
 
 
 def get_trending_new_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
     """Evidence-backed newly emerging canonical topics for the selected window."""
-    snapshot = _build_topic_widget_snapshot(ctx)
+    snapshot = dashboard_obs.observe_query_family(
+        "pulse.trending_new_topics.snapshot",
+        "neo4j",
+        lambda: _build_topic_widget_snapshot(ctx),
+    )
     return list(snapshot.get("trendingNewTopics") or [])[: max(1, int(limit))]
 
 
@@ -895,19 +922,24 @@ def _latest_analysis_minutes_ago() -> int:
 
 
 def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
-    stats = run_single(
-        """
-        MATCH (p:Post)
-        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-        WITH count(p) AS postsCount
-        OPTIONAL MATCH (c:Comment)
-        WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
-        WITH postsCount, count(c) AS commentsCount
-        OPTIONAL MATCH (u:User)
-        WHERE u.last_seen >= datetime($start) AND u.last_seen < datetime($end)
-        RETURN postsCount, commentsCount, count(u) AS activeUsersCount
-        """,
-        {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+    stats = dashboard_obs.observe_query_family(
+        "pulse.community_brief.fallback_counts",
+        "neo4j",
+        lambda: run_single(
+            """
+            MATCH (p:Post)
+            WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+            WITH count(p) AS postsCount
+            OPTIONAL MATCH (c:Comment)
+            WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
+            WITH postsCount, count(c) AS commentsCount
+            OPTIONAL MATCH (u:User)
+            WHERE u.last_seen >= datetime($start) AND u.last_seen < datetime($end)
+            RETURN postsCount, commentsCount, count(u) AS activeUsersCount
+            """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="pulse.community_brief.fallback_counts",
+        ),
     ) or {}
     posts = int(stats.get("postsCount") or 0)
     comments = int(stats.get("commentsCount") or 0)
@@ -932,7 +964,11 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
 
 def get_community_brief(ctx: DashboardDateContext) -> dict:
     """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
-    rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
+    rows = dashboard_obs.observe_query_family(
+        "pulse.community_brief.analysis_rows",
+        "supabase",
+        lambda: _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at),
+    )
 
     if not rows:
         return _neo4j_brief_fallback(ctx)

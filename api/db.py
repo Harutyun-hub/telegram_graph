@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, Dict, TypeVar
 
 import config
+from api import dashboard_observability as dashboard_obs
 from loguru import logger
 from neo4j import GraphDatabase, ManagedTransaction
 from neo4j.exceptions import ConfigurationError, DriverError, Neo4jError, ServiceUnavailable, SessionExpired
@@ -89,6 +90,23 @@ def _normalized_uri() -> str:
 
 def _error_text(exc: BaseException) -> str:
     return str(exc).strip()
+
+
+def _dashboard_log_suffix() -> tuple[str, list[Any]]:
+    fields = dashboard_obs.current_neo4j_log_fields()
+    if not fields:
+        return "", []
+    return (
+        " buildId={} tier={} queryFamily={} cacheKey={} triggerRequestId={} reason={}",
+        [
+            fields.get("build_id"),
+            fields.get("tier"),
+            fields.get("query_family"),
+            fields.get("cache_key"),
+            fields.get("trigger_request_id"),
+            fields.get("reason"),
+        ],
+    )
 
 
 def _is_retryable_driver_error(exc: BaseException) -> bool:
@@ -209,11 +227,13 @@ class Neo4jDriverManager:
             now = time.monotonic()
             last_reset = self._reset_cooldowns.get(driver_key, 0.0)
             if (now - last_reset) < NEO4J_DRIVER_RESET_COOLDOWN_SECONDS and self._drivers.get(driver_key) is not None:
+                dashboard_suffix, dashboard_args = _dashboard_log_suffix()
                 logger.warning(
-                    "Neo4j driver reset skipped due to cooldown | driver={} cooldown_s={} reason={}",
+                    "Neo4j driver reset skipped due to cooldown | driver={} cooldown_s={} reason={}" + dashboard_suffix,
                     driver_key,
                     NEO4J_DRIVER_RESET_COOLDOWN_SECONDS,
                     _error_text(reason if isinstance(reason, BaseException) else RuntimeError(str(reason))),
+                    *dashboard_args,
                 )
                 return False
 
@@ -227,10 +247,12 @@ class Neo4jDriverManager:
             driver = self._create_driver(driver_key)
             self._drivers[driver_key] = driver
             self._reset_cooldowns[driver_key] = time.monotonic()
+            dashboard_suffix, dashboard_args = _dashboard_log_suffix()
             logger.warning(
-                "Neo4j driver reset completed | driver={} reason={}",
+                "Neo4j driver reset completed | driver={} reason={}" + dashboard_suffix,
                 driver_key,
                 _error_text(reason if isinstance(reason, BaseException) else RuntimeError(str(reason))),
+                *dashboard_args,
             )
             return True
 
@@ -275,33 +297,37 @@ class Neo4jDriverManager:
                     else:
                         result = session.execute_read(work)
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
+                    dashboard_suffix, dashboard_args = _dashboard_log_suffix()
                     if query_ms >= NEO4J_SLOW_QUERY_MS:
                         logger.warning(
-                            "Neo4j slow {} | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}",
+                            "Neo4j slow {} | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}" + dashboard_suffix,
                             access_mode,
                             driver_key,
                             op_name,
                             retry_count,
                             session_open_ms,
                             query_ms,
+                            *dashboard_args,
                         )
                     else:
                         logger.debug(
-                            "Neo4j {} complete | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}",
+                            "Neo4j {} complete | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}" + dashboard_suffix,
                             access_mode,
                             driver_key,
                             op_name,
                             retry_count,
                             session_open_ms,
                             query_ms,
+                            *dashboard_args,
                         )
                     return result
             except Exception as exc:
                 query_ms = 0.0
                 if query_started_at is not None:
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
+                dashboard_suffix, dashboard_args = _dashboard_log_suffix()
                 logger.warning(
-                    "Neo4j {} failed | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={} neo4jErrorClass={} error={}",
+                    "Neo4j {} failed | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={} neo4jErrorClass={} error={}" + dashboard_suffix,
                     access_mode,
                     driver_key,
                     op_name,
@@ -310,6 +336,7 @@ class Neo4jDriverManager:
                     round(query_ms, 2),
                     exc.__class__.__name__,
                     _error_text(exc),
+                    *dashboard_args,
                 )
                 if retry_count == 0 and _is_retryable_driver_error(exc):
                     did_reset = self.reset_driver(driver_key, exc)

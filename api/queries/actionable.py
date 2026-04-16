@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
+from api import dashboard_observability as dashboard_obs
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 from buffer.supabase_writer import SupabaseWriter
@@ -362,7 +363,10 @@ def _attach_work_signal_evidence(rows: list[dict], ctx: DashboardDateContext) ->
 
 def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
     """Business opportunity signals among users active in the selected window."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "actionable.business_opportunities",
+        "neo4j",
+        lambda: run_query("""
         MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
         WHERE EXISTS {
             MATCH (u)-[i:INTERESTED_IN]->(:Topic)
@@ -388,7 +392,8 @@ def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
         "end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    })
+    }, op_name="actionable.business_opportunities"),
+    )
 
 
 def get_business_opportunity_brief_candidates(
@@ -576,7 +581,10 @@ def get_business_opportunity_brief_candidates(
 
 def get_job_seeking(ctx: DashboardDateContext) -> list[dict]:
     """Current-window work-intent rows with real graph evidence."""
-    return _attach_work_signal_evidence(run_query("""
+    rows = dashboard_obs.observe_query_family(
+        "actionable.job_seeking",
+        "neo4j",
+        lambda: run_query("""
         MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
         WHERE b.type IN ['Job_Seeking', 'Hiring', 'Partnership_Request']
           AND EXISTS {
@@ -594,12 +602,17 @@ def get_job_seeking(ctx: DashboardDateContext) -> list[dict]:
     """, {
         "start": ctx.start_at.isoformat(),
         "end": ctx.end_at.isoformat(),
-    }), ctx)
+    }, op_name="actionable.job_seeking"),
+    )
+    return _attach_work_signal_evidence(rows, ctx)
 
 
 def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
     """Selected-window work-intent trends from the graph."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "actionable.job_trends",
+        "neo4j",
+        lambda: run_query("""
         MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
         WHERE b.type IN ['Job_Seeking', 'Hiring', 'Partnership_Request']
           AND EXISTS {
@@ -625,12 +638,16 @@ def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
         "end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    })
+    }, op_name="actionable.job_trends"),
+    )
 
 
 def get_housing_data() -> list[dict]:
     """Housing-related topics and user interest."""
-    return run_query("""
+    return dashboard_obs.observe_query_family(
+        "actionable.housing_data",
+        "neo4j",
+        lambda: run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE cat.name = 'Economy' AND t.name IN ['Housing Market', 'Investment Opportunity']
         OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
@@ -639,4 +656,5 @@ def get_housing_data() -> list[dict]:
              count(DISTINCT p) AS posts,
              sum(i.count) AS interactions
         RETURN topic, interestedUsers, posts, interactions
-    """)
+    """, op_name="actionable.housing_data"),
+    )
