@@ -194,11 +194,16 @@ class Neo4jDriverManagerTests(unittest.TestCase):
                 reason="dashboard_request",
                 trigger_request_id="req-neo4j-1",
             )
-            with _capture_log_messages() as messages, \
-                 dashboard_obs.bind_build_context(build), \
-                 dashboard_obs.bind_tier_context("network"), \
-                 dashboard_obs.bind_query_family_context("network.key_voices.neo4j"):
-                result = manager.execute_read(lambda _tx: "ok", op_name="network.key_voices.neo4j")
+            producer_context = build.producer_query_context(
+                tier="network",
+                query_family="network.key_voices.neo4j",
+            )
+            with _capture_log_messages() as messages:
+                result = manager.execute_read(
+                    lambda _tx: "ok",
+                    op_name="network.key_voices.neo4j",
+                    producer_context=producer_context,
+                )
 
         self.assertEqual(result, "ok")
         joined = "\n".join(messages)

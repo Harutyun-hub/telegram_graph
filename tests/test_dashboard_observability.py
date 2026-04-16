@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -186,16 +187,28 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
         def _fake_build(_ctx, *, skipped_tiers=None, build_context=None):
             self.assertIsNone(skipped_tiers)
             self.assertIsNotNone(build_context)
-            dashboard_obs.observe_query_family(
-                "pulse.community_brief.analysis_rows",
-                "supabase",
-                lambda: [{"summary": "ok"}],
-            )
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                executor.submit(
+                    dashboard_obs.observe_query_family,
+                    "pulse.community_brief.analysis_rows",
+                    "supabase",
+                    lambda: (time.sleep(0.01), [{"summary": "ok"}])[1],
+                    build_context=build_context,
+                    tier="pulse",
+                ).result()
+                executor.submit(
+                    dashboard_obs.observe_query_family,
+                    "network.key_voices.neo4j",
+                    "neo4j",
+                    lambda: (time.sleep(0.02), [{"userId": "u1"}])[1],
+                    build_context=build_context,
+                    tier="network",
+                ).result()
             tier_times = {
                 "pulse": 1.23,
                 "strategic": None,
                 "behavioral": None,
-                "network": None,
+                "network": 2.34,
                 "psychographic": None,
                 "predictive": None,
                 "actionable": None,
@@ -219,10 +232,11 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
         self.assertEqual(started[0]["trigger_request_id"], "req-default-2")
 
         query_events = [entry for entry in logs if entry.get("event") == "dashboard_default_query_family"]
-        self.assertEqual(len(query_events), 1)
-        self.assertEqual(query_events[0]["query_family"], "pulse.community_brief.analysis_rows")
-        self.assertEqual(query_events[0]["backend"], "supabase")
-        self.assertEqual(query_events[0]["status"], "ok")
+        self.assertEqual(len(query_events), 2)
+        self.assertEqual(
+            sorted(entry["query_family"] for entry in query_events),
+            ["network.key_voices.neo4j", "pulse.community_brief.analysis_rows"],
+        )
 
         completed = [entry for entry in logs if entry.get("event") == "dashboard_default_build_completed"]
         self.assertEqual(len(completed), 1)
@@ -239,11 +253,17 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
         summary_events = [entry for entry in logs if entry.get("event") == "dashboard_default_query_family_summary"]
         self.assertEqual(len(summary_events), 1)
         summary = summary_events[0]["query_families"]
-        self.assertEqual(len(summary), 1)
-        self.assertEqual(summary[0]["query_family"], "pulse.community_brief.analysis_rows")
-        self.assertEqual(summary[0]["backend"], "supabase")
+        self.assertEqual(len(summary), 2)
+        self.assertEqual(summary[0]["query_family"], "network.key_voices.neo4j")
+        self.assertEqual(summary[0]["backend"], "neo4j")
         self.assertEqual(summary[0]["status"], "ok")
         self.assertEqual(summary[0]["attempts"], 1)
+        self.assertIn("first_start_ms", summary[0])
+        self.assertIn("last_end_ms", summary[0])
+        self.assertIn("wall_clock_span_ms", summary[0])
+        self.assertGreaterEqual(float(summary[0]["wall_clock_span_ms"]), 0.0)
+        self.assertEqual(summary[1]["query_family"], "pulse.community_brief.analysis_rows")
+        self.assertEqual(summary[1]["backend"], "supabase")
 
     def test_build_timeout_executor_preserves_default_build_context(self) -> None:
         ctx = aggregator._default_dashboard_context()
@@ -278,12 +298,14 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
             request_id=None,
         )
 
-        def _fake_build(_ctx, *, skipped_tiers=None):
+        def _fake_build(_ctx, *, skipped_tiers=None, build_context=None):
             self.assertIsNone(skipped_tiers)
             dashboard_obs.observe_query_family(
                 "pulse.community_brief.analysis_rows",
                 "supabase",
                 lambda: [{"summary": "ok"}],
+                build_context=build_context,
+                tier="pulse",
             )
             tier_times = {
                 "pulse": 1.0,

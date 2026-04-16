@@ -92,6 +92,17 @@ _SUPABASE_PAGE_SIZE = 200
 _work_signal_snapshot_cache: dict[str, dict] = {}
 
 
+def _producer_context(
+    build_context: dashboard_obs.DefaultProducerBuildContext | None,
+    query_family: str,
+) -> dashboard_obs.ProducerQueryContext | None:
+    return dashboard_obs.producer_query_context(
+        build_context=build_context,
+        tier="actionable",
+        query_family=query_family,
+    )
+
+
 def _get_supabase_writer() -> SupabaseWriter:
     global _supabase_writer
     if _supabase_writer is None:
@@ -361,7 +372,11 @@ def _attach_work_signal_evidence(rows: list[dict], ctx: DashboardDateContext) ->
     return enriched
 
 
-def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
+def get_business_opportunities(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Business opportunity signals among users active in the selected window."""
     return dashboard_obs.observe_query_family(
         "actionable.business_opportunities",
@@ -392,7 +407,12 @@ def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
         "end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    }, op_name="actionable.business_opportunities"),
+    },
+            op_name="actionable.business_opportunities",
+            producer_context=_producer_context(build_context, "actionable.business_opportunities"),
+        ),
+        build_context=build_context,
+        tier="actionable",
     )
 
 
@@ -579,7 +599,11 @@ def get_business_opportunity_brief_candidates(
     })
 
 
-def get_job_seeking(ctx: DashboardDateContext) -> list[dict]:
+def get_job_seeking(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Current-window work-intent rows with real graph evidence."""
     rows = dashboard_obs.observe_query_family(
         "actionable.job_seeking",
@@ -602,12 +626,21 @@ def get_job_seeking(ctx: DashboardDateContext) -> list[dict]:
     """, {
         "start": ctx.start_at.isoformat(),
         "end": ctx.end_at.isoformat(),
-    }, op_name="actionable.job_seeking"),
+    },
+            op_name="actionable.job_seeking",
+            producer_context=_producer_context(build_context, "actionable.job_seeking"),
+        ),
+        build_context=build_context,
+        tier="actionable",
     )
     return _attach_work_signal_evidence(rows, ctx)
 
 
-def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
+def get_job_trends(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Selected-window work-intent trends from the graph."""
     return dashboard_obs.observe_query_family(
         "actionable.job_trends",
@@ -638,11 +671,19 @@ def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
         "end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    }, op_name="actionable.job_trends"),
+    },
+            op_name="actionable.job_trends",
+            producer_context=_producer_context(build_context, "actionable.job_trends"),
+        ),
+        build_context=build_context,
+        tier="actionable",
     )
 
 
-def get_housing_data() -> list[dict]:
+def get_housing_data(
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Housing-related topics and user interest."""
     return dashboard_obs.observe_query_family(
         "actionable.housing_data",
@@ -656,5 +697,10 @@ def get_housing_data() -> list[dict]:
              count(DISTINCT p) AS posts,
              sum(i.count) AS interactions
         RETURN topic, interestedUsers, posts, interactions
-    """, op_name="actionable.housing_data"),
+    """,
+            op_name="actionable.housing_data",
+            producer_context=_producer_context(build_context, "actionable.housing_data"),
+        ),
+        build_context=build_context,
+        tier="actionable",
     )

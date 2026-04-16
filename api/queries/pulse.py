@@ -76,6 +76,17 @@ _TRENDING_NEW_MAX_PREVIOUS = 1
 _TREND_RELIABLE_MIN_SUPPORT = 6
 
 
+def _producer_context(
+    build_context: dashboard_obs.DefaultProducerBuildContext | None,
+    query_family: str,
+) -> dashboard_obs.ProducerQueryContext | None:
+    return dashboard_obs.producer_query_context(
+        build_context=build_context,
+        tier="pulse",
+        query_family=query_family,
+    )
+
+
 def _structure_key(value: Any) -> str:
     text = str(value or "").strip().lower().replace("&", " and ")
     if not text:
@@ -289,7 +300,12 @@ def _analysis_volume(rows: list[dict]) -> dict:
     }
 
 
-def _topic_diversity_score(*, start: datetime, end: datetime) -> dict:
+def _topic_diversity_score(
+    *,
+    start: datetime,
+    end: datetime,
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
+) -> dict:
     rows = run_query(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
@@ -319,6 +335,7 @@ def _topic_diversity_score(*, start: datetime, end: datetime) -> dict:
             "noise": list(_NOISY_TOPIC_NAMES),
         },
         op_name="pulse.community_health.topic_diversity",
+        producer_context=producer_context,
     )
 
     counts = [int(r.get("mentions") or 0) for r in rows if int(r.get("mentions") or 0) > 0]
@@ -445,6 +462,8 @@ def _query_topic_widget_rows(
     ctx: DashboardDateContext,
     *,
     evidence_limit: int = _TOPIC_WIDGET_EVIDENCE_LIMIT,
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
+    op_name: str = "pulse.trending_topics.snapshot",
 ) -> list[dict[str, Any]]:
     rows = run_query(
         """
@@ -552,7 +571,8 @@ def _query_topic_widget_rows(
             "previous_end": ctx.previous_end_at.isoformat(),
             "evidence_limit": max(1, min(int(evidence_limit), 6)),
         },
-        op_name="pulse.trending_topics.snapshot",
+        op_name=op_name,
+        producer_context=producer_context,
     )
     output: list[dict[str, Any]] = []
     for row in rows:
@@ -625,6 +645,8 @@ def _build_topic_widget_snapshot(
     ctx: DashboardDateContext,
     *,
     evidence_limit: int = _TOPIC_WIDGET_EVIDENCE_LIMIT,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+    query_family: str = "pulse.trending_topics.snapshot",
 ) -> dict[str, Any]:
     cache_key = _topic_widget_cache_key(ctx, evidence_limit)
     now = time.monotonic()
@@ -633,7 +655,12 @@ def _build_topic_widget_snapshot(
         if cached and (now - cached[0]) < _TOPIC_WIDGET_CACHE_TTL_SECONDS:
             return cached[1]
 
-    rows = _query_topic_widget_rows(ctx, evidence_limit=evidence_limit)
+    rows = _query_topic_widget_rows(
+        ctx,
+        evidence_limit=evidence_limit,
+        producer_context=_producer_context(build_context, query_family),
+        op_name=query_family,
+    )
     diagnostics = {
         "scannedCanonicalTopics": len(rows),
         "excludedCounts": {
@@ -731,7 +758,11 @@ def _build_topic_widget_snapshot(
     return snapshot
 
 
-def get_community_health(ctx: DashboardDateContext) -> dict:
+def get_community_health(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     """
     Explainable community climate score (0-100) based on:
     - constructive intent share,
@@ -743,11 +774,15 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
         "pulse.community_health.analysis_current",
         "supabase",
         lambda: _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at),
+        build_context=build_context,
+        tier="pulse",
     )
     previous_rows = dashboard_obs.observe_query_family(
         "pulse.community_health.analysis_previous",
         "supabase",
         lambda: _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at),
+        build_context=build_context,
+        tier="pulse",
     )
 
     current_intent = _window_intent_stats(current_rows)
@@ -759,12 +794,24 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     current_diversity = dashboard_obs.observe_query_family(
         "pulse.community_health.topic_diversity_current",
         "neo4j",
-        lambda: _topic_diversity_score(start=ctx.start_at, end=ctx.end_at),
+        lambda: _topic_diversity_score(
+            start=ctx.start_at,
+            end=ctx.end_at,
+            producer_context=_producer_context(build_context, "pulse.community_health.topic_diversity_current"),
+        ),
+        build_context=build_context,
+        tier="pulse",
     )
     previous_diversity = dashboard_obs.observe_query_family(
         "pulse.community_health.topic_diversity_previous",
         "neo4j",
-        lambda: _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at),
+        lambda: _topic_diversity_score(
+            start=ctx.previous_start_at,
+            end=ctx.previous_end_at,
+            producer_context=_producer_context(build_context, "pulse.community_health.topic_diversity_previous"),
+        ),
+        build_context=build_context,
+        tier="pulse",
     )
 
     current_constructive = int(round(current_intent["positive_share"] * 100.0))
@@ -849,22 +896,44 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     }
 
 
-def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+def get_trending_topics(
+    ctx: DashboardDateContext,
+    limit: int = 10,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Evidence-backed top canonical topics for the selected window."""
     snapshot = dashboard_obs.observe_query_family(
         "pulse.trending_topics.snapshot",
         "neo4j",
-        lambda: _build_topic_widget_snapshot(ctx),
+        lambda: _build_topic_widget_snapshot(
+            ctx,
+            build_context=build_context,
+            query_family="pulse.trending_topics.snapshot",
+        ),
+        build_context=build_context,
+        tier="pulse",
     )
     return list(snapshot.get("trendingTopics") or [])[: max(1, int(limit))]
 
 
-def get_trending_new_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+def get_trending_new_topics(
+    ctx: DashboardDateContext,
+    limit: int = 10,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Evidence-backed newly emerging canonical topics for the selected window."""
     snapshot = dashboard_obs.observe_query_family(
         "pulse.trending_new_topics.snapshot",
         "neo4j",
-        lambda: _build_topic_widget_snapshot(ctx),
+        lambda: _build_topic_widget_snapshot(
+            ctx,
+            build_context=build_context,
+            query_family="pulse.trending_new_topics.snapshot",
+        ),
+        build_context=build_context,
+        tier="pulse",
     )
     return list(snapshot.get("trendingNewTopics") or [])[: max(1, int(limit))]
 
@@ -921,7 +990,11 @@ def _latest_analysis_minutes_ago() -> int:
         return 0
 
 
-def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
+def _neo4j_brief_fallback(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     stats = dashboard_obs.observe_query_family(
         "pulse.community_brief.fallback_counts",
         "neo4j",
@@ -939,7 +1012,10 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
             """,
             {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
             op_name="pulse.community_brief.fallback_counts",
+            producer_context=_producer_context(build_context, "pulse.community_brief.fallback_counts"),
         ),
+        build_context=build_context,
+        tier="pulse",
     ) or {}
     posts = int(stats.get("postsCount") or 0)
     comments = int(stats.get("commentsCount") or 0)
@@ -952,8 +1028,8 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
         "totalAnalyses24h": posts + comments,
         "uniqueUsers24h": int(stats.get("activeUsersCount") or 0),
         "refreshedMinutesAgo": 0,
-        "topTopics": [t.get("name") for t in get_trending_topics(ctx, 5) if t.get("name")],
-        "topTopicRows": get_trending_topics(ctx, 5),
+        "topTopics": [t.get("name") for t in get_trending_topics(ctx, 5, build_context=build_context) if t.get("name")],
+        "topTopicRows": get_trending_topics(ctx, 5, build_context=build_context),
         # Backward compatibility keys
         "postsLast24h": posts,
         "commentsLast24h": comments,
@@ -962,20 +1038,26 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
     }
 
 
-def get_community_brief(ctx: DashboardDateContext) -> dict:
+def get_community_brief(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
     rows = dashboard_obs.observe_query_family(
         "pulse.community_brief.analysis_rows",
         "supabase",
         lambda: _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at),
+        build_context=build_context,
+        tier="pulse",
     )
 
     if not rows:
-        return _neo4j_brief_fallback(ctx)
+        return _neo4j_brief_fallback(ctx, build_context=build_context)
 
     volume = _analysis_volume(rows)
     intent = _window_intent_stats(rows)
-    top_topic_rows = get_trending_topics(ctx, 5)
+    top_topic_rows = get_trending_topics(ctx, 5, build_context=build_context)
     top_topic_names = [str(item.get("name") or "").strip() for item in top_topic_rows if item.get("name")]
 
     positive_pct = int(round(intent["positive_share"] * 100.0))

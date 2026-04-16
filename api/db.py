@@ -92,8 +92,10 @@ def _error_text(exc: BaseException) -> str:
     return str(exc).strip()
 
 
-def _dashboard_log_suffix() -> tuple[str, list[Any]]:
-    fields = dashboard_obs.current_neo4j_log_fields()
+def _dashboard_log_suffix(
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
+) -> tuple[str, list[Any]]:
+    fields = dashboard_obs.current_neo4j_log_fields(producer_context)
     if not fields:
         return "", []
     return (
@@ -221,7 +223,13 @@ class Neo4jDriverManager:
             self._reset_cooldowns[driver_key] = time.monotonic()
             return driver
 
-    def reset_driver(self, driver_key: str, reason: BaseException | str) -> bool:
+    def reset_driver(
+        self,
+        driver_key: str,
+        reason: BaseException | str,
+        *,
+        producer_context: dashboard_obs.ProducerQueryContext | None = None,
+    ) -> bool:
         lock = self._reset_lock(driver_key)
         with lock:
             now = time.monotonic()
@@ -247,7 +255,7 @@ class Neo4jDriverManager:
             driver = self._create_driver(driver_key)
             self._drivers[driver_key] = driver
             self._reset_cooldowns[driver_key] = time.monotonic()
-            dashboard_suffix, dashboard_args = _dashboard_log_suffix()
+            dashboard_suffix, dashboard_args = _dashboard_log_suffix(producer_context)
             logger.warning(
                 "Neo4j driver reset completed | driver={} reason={}" + dashboard_suffix,
                 driver_key,
@@ -262,8 +270,15 @@ class Neo4jDriverManager:
         *,
         driver_key: str = REQUEST_DRIVER_KEY,
         op_name: str = "read",
+        producer_context: dashboard_obs.ProducerQueryContext | None = None,
     ) -> T:
-        return self._execute(work, driver_key=driver_key, op_name=op_name, access_mode="read")
+        return self._execute(
+            work,
+            driver_key=driver_key,
+            op_name=op_name,
+            access_mode="read",
+            producer_context=producer_context,
+        )
 
     def execute_write(
         self,
@@ -271,8 +286,15 @@ class Neo4jDriverManager:
         *,
         driver_key: str = BACKGROUND_DRIVER_KEY,
         op_name: str = "write",
+        producer_context: dashboard_obs.ProducerQueryContext | None = None,
     ) -> T:
-        return self._execute(work, driver_key=driver_key, op_name=op_name, access_mode="write")
+        return self._execute(
+            work,
+            driver_key=driver_key,
+            op_name=op_name,
+            access_mode="write",
+            producer_context=producer_context,
+        )
 
     def _execute(
         self,
@@ -281,6 +303,7 @@ class Neo4jDriverManager:
         driver_key: str,
         op_name: str,
         access_mode: str,
+        producer_context: dashboard_obs.ProducerQueryContext | None = None,
     ) -> T:
         retry_count = 0
         while True:
@@ -297,7 +320,7 @@ class Neo4jDriverManager:
                     else:
                         result = session.execute_read(work)
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
-                    dashboard_suffix, dashboard_args = _dashboard_log_suffix()
+                    dashboard_suffix, dashboard_args = _dashboard_log_suffix(producer_context)
                     if query_ms >= NEO4J_SLOW_QUERY_MS:
                         logger.warning(
                             "Neo4j slow {} | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}" + dashboard_suffix,
@@ -325,7 +348,7 @@ class Neo4jDriverManager:
                 query_ms = 0.0
                 if query_started_at is not None:
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
-                dashboard_suffix, dashboard_args = _dashboard_log_suffix()
+                dashboard_suffix, dashboard_args = _dashboard_log_suffix(producer_context)
                 logger.warning(
                     "Neo4j {} failed | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={} neo4jErrorClass={} error={}" + dashboard_suffix,
                     access_mode,
@@ -339,7 +362,7 @@ class Neo4jDriverManager:
                     *dashboard_args,
                 )
                 if retry_count == 0 and _is_retryable_driver_error(exc):
-                    did_reset = self.reset_driver(driver_key, exc)
+                    did_reset = self.reset_driver(driver_key, exc, producer_context=producer_context)
                     if did_reset:
                         retry_count += 1
                         continue
@@ -377,8 +400,14 @@ def execute_read(
     *,
     driver_key: str = REQUEST_DRIVER_KEY,
     op_name: str = "read",
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
 ) -> T:
-    return _driver_manager.execute_read(work, driver_key=driver_key, op_name=op_name)
+    return _driver_manager.execute_read(
+        work,
+        driver_key=driver_key,
+        op_name=op_name,
+        producer_context=producer_context,
+    )
 
 
 def execute_write(
@@ -386,8 +415,14 @@ def execute_write(
     *,
     driver_key: str = BACKGROUND_DRIVER_KEY,
     op_name: str = "write",
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
 ) -> T:
-    return _driver_manager.execute_write(work, driver_key=driver_key, op_name=op_name)
+    return _driver_manager.execute_write(
+        work,
+        driver_key=driver_key,
+        op_name=op_name,
+        producer_context=producer_context,
+    )
 
 
 def run_query(
@@ -396,13 +431,19 @@ def run_query(
     *,
     driver_key: str = REQUEST_DRIVER_KEY,
     op_name: str = "run_query",
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
 ) -> list[dict]:
     payload = dict(params or {})
 
     def _work(tx: ManagedTransaction) -> list[dict]:
         return [dict(record) for record in tx.run(cypher, payload)]
 
-    return execute_read(_work, driver_key=driver_key, op_name=op_name)
+    return execute_read(
+        _work,
+        driver_key=driver_key,
+        op_name=op_name,
+        producer_context=producer_context,
+    )
 
 
 def run_single(
@@ -411,8 +452,15 @@ def run_single(
     *,
     driver_key: str = REQUEST_DRIVER_KEY,
     op_name: str = "run_single",
+    producer_context: dashboard_obs.ProducerQueryContext | None = None,
 ) -> dict | None:
-    rows = run_query(cypher, params, driver_key=driver_key, op_name=op_name)
+    rows = run_query(
+        cypher,
+        params,
+        driver_key=driver_key,
+        op_name=op_name,
+        producer_context=producer_context,
+    )
     return rows[0] if rows else None
 
 

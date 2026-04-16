@@ -36,6 +36,17 @@ _TOPICS_PAGE_GROUP_KEYS = {"Living", "Work", "Family", "Finance", "Lifestyle", "
 USE_TOPIC_QUERY_V2 = os.getenv("TOPIC_QUERY_V2", "false").strip().lower() == "true"
 
 
+def _producer_context(
+    build_context: dashboard_obs.DefaultProducerBuildContext | None,
+    query_family: str,
+) -> dashboard_obs.ProducerQueryContext | None:
+    return dashboard_obs.producer_query_context(
+        build_context=build_context,
+        tier="comparative",
+        query_family=query_family,
+    )
+
+
 def _supabase() -> SupabaseWriter:
     global _SUPABASE_WRITER
     if _SUPABASE_WRITER is None:
@@ -398,7 +409,11 @@ def _weekly_metric_row(
     }
 
 
-def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
+def get_weekly_shifts(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Exact week-over-week metric rows for the comparative widget."""
     stats = dashboard_obs.observe_query_family(
         "comparative.weekly_shifts",
@@ -566,10 +581,15 @@ def get_weekly_shifts(ctx: DashboardDateContext) -> list[dict]:
         "current_end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
-    }, op_name="comparative.weekly_shifts"),
+    },
+            op_name="comparative.weekly_shifts",
+            producer_context=_producer_context(build_context, "comparative.weekly_shifts"),
+        ),
+        build_context=build_context,
+        tier="comparative",
     ) or {}
 
-    health = pulse.get_community_health(ctx)
+    health = pulse.get_community_health(ctx, build_context=build_context)
     previous_ctx = _build_window_context(ctx.previous_start_at, ctx.previous_end_at, ctx.days)
     current_churn_count = len(predictive.get_churn_signals(ctx))
     previous_churn_count = len(predictive.get_churn_signals(previous_ctx))
@@ -717,7 +737,11 @@ def get_sentiment_by_topic_legacy(ctx: DashboardDateContext) -> list[dict]:
     return rows
 
 
-def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
+def get_sentiment_by_topic(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Range-filtered topic sentiment counts using graph-native topic and sentiment edges."""
     rows = dashboard_obs.observe_query_family(
         "comparative.sentiment_by_topic",
@@ -758,7 +782,12 @@ def get_sentiment_by_topic(ctx: DashboardDateContext) -> list[dict]:
     """, {
         **_range_params(ctx),
         "noise": sorted(_NOISY_TOPIC_KEYS),
-    }, op_name="comparative.sentiment_by_topic"),
+    },
+            op_name="comparative.sentiment_by_topic",
+            producer_context=_producer_context(build_context, "comparative.sentiment_by_topic"),
+        ),
+        build_context=build_context,
+        tier="comparative",
     )
     return [
         {
@@ -807,7 +836,11 @@ def compare_sentiment_by_topic(ctx: DashboardDateContext) -> dict[str, object]:
     }
 
 
-def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
+def get_top_posts(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Highest-engagement posts."""
     return dashboard_obs.observe_query_family(
         "comparative.top_posts",
@@ -826,11 +859,21 @@ def get_top_posts(ctx: DashboardDateContext) -> list[dict]:
                topics
         ORDER BY p.views DESC
         LIMIT 20
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="comparative.top_posts"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="comparative.top_posts",
+            producer_context=_producer_context(build_context, "comparative.top_posts"),
+        ),
+        build_context=build_context,
+        tier="comparative",
     )
 
 
-def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
+def get_content_type_performance(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Average engagement by content/media type."""
     return dashboard_obs.observe_query_family(
         "comparative.content_type_performance",
@@ -846,17 +889,32 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
                round(avgViews) AS avgViews,
                round(avgForwards) AS avgForwards
         ORDER BY avgViews DESC
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="comparative.content_type_performance"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="comparative.content_type_performance",
+            producer_context=_producer_context(build_context, "comparative.content_type_performance"),
+        ),
+        build_context=build_context,
+        tier="comparative",
     )
 
 
-def get_vitality_indicators() -> dict:
+def get_vitality_indicators(
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     """Composite community health indicators."""
     total_users = (
         dashboard_obs.observe_query_family(
             "comparative.vitality_indicators",
             "neo4j",
-            lambda: run_single("MATCH (u:User) RETURN count(u) AS n", op_name="comparative.vitality_indicators"),
+            lambda: run_single(
+                "MATCH (u:User) RETURN count(u) AS n",
+                op_name="comparative.vitality_indicators",
+                producer_context=_producer_context(build_context, "comparative.vitality_indicators"),
+            ),
+            build_context=build_context,
+            tier="comparative",
         )
         or {}
     ).get("n", 0)
@@ -870,7 +928,10 @@ def get_vitality_indicators() -> dict:
                 RETURN count(u) AS n
                 """,
                 op_name="comparative.vitality_indicators",
+                producer_context=_producer_context(build_context, "comparative.vitality_indicators"),
             ),
+            build_context=build_context,
+            tier="comparative",
         )
         or {}
     ).get("n", 0)
@@ -878,7 +939,13 @@ def get_vitality_indicators() -> dict:
         dashboard_obs.observe_query_family(
             "comparative.vitality_indicators",
             "neo4j",
-            lambda: run_single("MATCH (t:Topic) RETURN count(t) AS n", op_name="comparative.vitality_indicators"),
+            lambda: run_single(
+                "MATCH (t:Topic) RETURN count(t) AS n",
+                op_name="comparative.vitality_indicators",
+                producer_context=_producer_context(build_context, "comparative.vitality_indicators"),
+            ),
+            build_context=build_context,
+            tier="comparative",
         )
         or {}
     ).get("n", 0)
@@ -886,7 +953,13 @@ def get_vitality_indicators() -> dict:
         dashboard_obs.observe_query_family(
             "comparative.vitality_indicators",
             "neo4j",
-            lambda: run_single("MATCH (p:Post) RETURN count(p) AS n", op_name="comparative.vitality_indicators"),
+            lambda: run_single(
+                "MATCH (p:Post) RETURN count(p) AS n",
+                op_name="comparative.vitality_indicators",
+                producer_context=_producer_context(build_context, "comparative.vitality_indicators"),
+            ),
+            build_context=build_context,
+            tier="comparative",
         )
         or {}
     ).get("n", 0)
@@ -894,7 +967,13 @@ def get_vitality_indicators() -> dict:
         dashboard_obs.observe_query_family(
             "comparative.vitality_indicators",
             "neo4j",
-            lambda: run_single("MATCH (c:Comment) RETURN count(c) AS n", op_name="comparative.vitality_indicators"),
+            lambda: run_single(
+                "MATCH (c:Comment) RETURN count(c) AS n",
+                op_name="comparative.vitality_indicators",
+                producer_context=_producer_context(build_context, "comparative.vitality_indicators"),
+            ),
+            build_context=build_context,
+            tier="comparative",
         )
         or {}
     ).get("n", 0)

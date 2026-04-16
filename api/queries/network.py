@@ -44,6 +44,17 @@ _WIDGET_TYPE_METADATA_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _producer_context(
+    build_context: dashboard_obs.DefaultProducerBuildContext | None,
+    query_family: str,
+) -> dashboard_obs.ProducerQueryContext | None:
+    return dashboard_obs.producer_query_context(
+        build_context=build_context,
+        tier="network",
+        query_family=query_family,
+    )
+
+
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     text = str(value or '').strip()
     if not text:
@@ -163,7 +174,11 @@ def _dominant_widget_type(rows: list[dict]) -> tuple[str, str]:
     return top_type, top_raw_category
 
 
-def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
+def get_community_channels(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Active channels ranked by median recent post engagement with sample controls."""
     post_rows = dashboard_obs.observe_query_family(
         "network.community_channels.posts",
@@ -184,7 +199,13 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
                coalesce(p.forwards, 0) AS forwards,
                coalesce(p.comment_count, 0) AS comments,
                coalesce(p.reactions, '') AS reactions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.posts"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="network.community_channels.posts",
+            producer_context=_producer_context(build_context, "network.community_channels.posts"),
+        ),
+        build_context=build_context,
+        tier="network",
     )
 
     category_rows = dashboard_obs.observe_query_family(
@@ -198,7 +219,13 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
         OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
         RETURN ch.uuid AS channelId, category, mentions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.categories"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="network.community_channels.categories",
+            producer_context=_producer_context(build_context, "network.community_channels.categories"),
+        ),
+        build_context=build_context,
+        tier="network",
     )
 
     comment_rows = dashboard_obs.observe_query_family(
@@ -210,7 +237,13 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
           AND coalesce(ch.source_type, 'channel') = 'channel'
           AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
         RETURN ch.uuid AS channelId, count(c) AS comments7d
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels.comments"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="network.community_channels.comments",
+            producer_context=_producer_context(build_context, "network.community_channels.comments"),
+        ),
+        build_context=build_context,
+        tier="network",
     )
 
     activity_cutoff = ctx.start_at.timestamp()
@@ -340,7 +373,11 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     return processed_results[:50]
 
 
-def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
+def get_key_voices(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Most active recent commenters with real usernames, channels, and topics."""
     # First get data from Neo4j
     neo4j_results = dashboard_obs.observe_query_family(
@@ -398,7 +435,13 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
                topChannels, topics, postsPerWeek, replyRate
         ORDER BY activityScore DESC, commentCount DESC, activeDays DESC
         LIMIT 20
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.key_voices.neo4j"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="network.key_voices.neo4j",
+            producer_context=_producer_context(build_context, "network.key_voices.neo4j"),
+        ),
+        build_context=build_context,
+        tier="network",
     )
 
     # Fetch usernames from Supabase
@@ -418,6 +461,8 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
                 .select('telegram_user_id, username, first_name, last_name')
                 .in_('telegram_user_id', user_ids)
                 .execute(),
+                build_context=build_context,
+                tier="network",
             )
 
             # Create a lookup dictionary
@@ -461,7 +506,10 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
         return neo4j_results
 
 
-def get_hourly_activity() -> list[dict]:
+def get_hourly_activity(
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Comment distribution by hour of day."""
     return dashboard_obs.observe_query_family(
         "network.hourly_activity",
@@ -472,11 +520,16 @@ def get_hourly_activity() -> list[dict]:
         WITH c.posting_hour AS hour, count(c) AS count
         RETURN hour, count
         ORDER BY hour
-    """, op_name="network.hourly_activity"),
+    """, op_name="network.hourly_activity", producer_context=_producer_context(build_context, "network.hourly_activity")),
+        build_context=build_context,
+        tier="network",
     )
 
 
-def get_weekly_activity() -> list[dict]:
+def get_weekly_activity(
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Post count by day of week."""
     return dashboard_obs.observe_query_family(
         "network.weekly_activity",
@@ -486,11 +539,16 @@ def get_weekly_activity() -> list[dict]:
         WITH date(p.posted_at).dayOfWeek AS dow, count(p) AS count
         RETURN dow, count
         ORDER BY dow
-    """, op_name="network.weekly_activity"),
+    """, op_name="network.weekly_activity", producer_context=_producer_context(build_context, "network.weekly_activity")),
+        build_context=build_context,
+        tier="network",
     )
 
 
-def get_recommendations() -> list[dict]:
+def get_recommendations(
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Users with Support/Help intent — recommenders."""
     return dashboard_obs.observe_query_family(
         "network.recommendations",
@@ -503,7 +561,9 @@ def get_recommendations() -> list[dict]:
         RETURN userId, helpCount, topics
         ORDER BY helpCount DESC
         LIMIT 15
-    """, op_name="network.recommendations"),
+    """, op_name="network.recommendations", producer_context=_producer_context(build_context, "network.recommendations")),
+        build_context=build_context,
+        tier="network",
     )
 
 
@@ -519,7 +579,11 @@ def get_viral_topics() -> list[dict]:
     """)
 
 
-def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:
+def get_information_velocity(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> list[dict]:
     """Track how topics spread across channels with real timestamps."""
     return dashboard_obs.observe_query_family(
         "network.information_velocity",
@@ -582,5 +646,11 @@ def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:
                velocity
         ORDER BY totalReach DESC
         LIMIT 15
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.information_velocity"),
+    """,
+            {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()},
+            op_name="network.information_velocity",
+            producer_context=_producer_context(build_context, "network.information_velocity"),
+        ),
+        build_context=build_context,
+        tier="network",
     )

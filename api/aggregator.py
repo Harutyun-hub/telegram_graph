@@ -478,7 +478,11 @@ def _fallback_for_tier(name: str) -> dict:
 
 # ── Tier builders ────────────────────────────────────────────────────────────
 
-def _tier_pulse(ctx: DashboardDateContext) -> dict:
+def _tier_pulse(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     fallback = _fallback_for_tier("pulse")
 
     def _safe(name: str, fn: Callable[[], object], default):
@@ -489,10 +493,26 @@ def _tier_pulse(ctx: DashboardDateContext) -> dict:
             return default
 
     return {
-        "communityHealth": _safe("communityHealth", lambda: pulse.get_community_health(ctx), fallback["communityHealth"]),
-        "trendingTopics": _safe("trendingTopics", lambda: pulse.get_trending_topics(ctx), fallback["trendingTopics"]),
-        "trendingNewTopics": _safe("trendingNewTopics", lambda: pulse.get_trending_new_topics(ctx), fallback["trendingNewTopics"]),
-        "communityBrief": _safe("communityBrief", lambda: pulse.get_community_brief(ctx), fallback["communityBrief"]),
+        "communityHealth": _safe(
+            "communityHealth",
+            lambda: pulse.get_community_health(ctx, build_context=build_context),
+            fallback["communityHealth"],
+        ),
+        "trendingTopics": _safe(
+            "trendingTopics",
+            lambda: pulse.get_trending_topics(ctx, build_context=build_context),
+            fallback["trendingTopics"],
+        ),
+        "trendingNewTopics": _safe(
+            "trendingNewTopics",
+            lambda: pulse.get_trending_new_topics(ctx, build_context=build_context),
+            fallback["trendingNewTopics"],
+        ),
+        "communityBrief": _safe(
+            "communityBrief",
+            lambda: pulse.get_community_brief(ctx, build_context=build_context),
+            fallback["communityBrief"],
+        ),
     }
 
 
@@ -536,15 +556,19 @@ def _tier_behavioral(_ctx: DashboardDateContext) -> dict:
         return _fallback_for_tier("behavioral")
 
 
-def _tier_network(ctx: DashboardDateContext) -> dict:
+def _tier_network(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     try:
         return {
-            "communityChannels": network.get_community_channels(ctx),
-            "keyVoices": network.get_key_voices(ctx),
-            "hourlyActivity": network.get_hourly_activity(),
-            "weeklyActivity": network.get_weekly_activity(),
-            "recommendations": network.get_recommendations(),
-            "viralTopics": network.get_information_velocity(ctx),  # Use new temporal tracking
+            "communityChannels": network.get_community_channels(ctx, build_context=build_context),
+            "keyVoices": network.get_key_voices(ctx, build_context=build_context),
+            "hourlyActivity": network.get_hourly_activity(build_context=build_context),
+            "weeklyActivity": network.get_weekly_activity(build_context=build_context),
+            "recommendations": network.get_recommendations(build_context=build_context),
+            "viralTopics": network.get_information_velocity(ctx, build_context=build_context),  # Use new temporal tracking
         }
     except Exception as e:
         logger.error(f"Tier network failed: {e}")
@@ -589,14 +613,18 @@ def _tier_predictive(_ctx: DashboardDateContext) -> dict:
         return _fallback_for_tier("predictive")
 
 
-def _tier_actionable(_ctx: DashboardDateContext) -> dict:
+def _tier_actionable(
+    _ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     try:
-        housing_data = actionable.get_housing_data()
+        housing_data = actionable.get_housing_data(build_context=build_context)
         return {
-            "businessOpportunities": actionable.get_business_opportunities(_ctx),
+            "businessOpportunities": actionable.get_business_opportunities(_ctx, build_context=build_context),
             "businessOpportunityBriefs": opportunity_briefs.get_business_opportunity_briefs(),
-            "jobSeeking": actionable.get_job_seeking(_ctx),
-            "jobTrends": actionable.get_job_trends(_ctx),
+            "jobSeeking": actionable.get_job_seeking(_ctx, build_context=build_context),
+            "jobTrends": actionable.get_job_trends(_ctx, build_context=build_context),
             "housingData": housing_data,
             "housingHotTopics": housing_data,
         }
@@ -605,14 +633,18 @@ def _tier_actionable(_ctx: DashboardDateContext) -> dict:
         return _fallback_for_tier("actionable")
 
 
-def _tier_comparative(ctx: DashboardDateContext) -> dict:
+def _tier_comparative(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> dict:
     try:
         return {
-            "weeklyShifts": comparative.get_weekly_shifts(ctx),
-            "sentimentByTopic": comparative.get_sentiment_by_topic(ctx),
-            "topPosts": comparative.get_top_posts(ctx),
-            "contentTypePerformance": comparative.get_content_type_performance(ctx),
-            "vitalityIndicators": comparative.get_vitality_indicators(),
+            "weeklyShifts": comparative.get_weekly_shifts(ctx, build_context=build_context),
+            "sentimentByTopic": comparative.get_sentiment_by_topic(ctx, build_context=build_context),
+            "topPosts": comparative.get_top_posts(ctx, build_context=build_context),
+            "contentTypePerformance": comparative.get_content_type_performance(ctx, build_context=build_context),
+            "vitalityIndicators": comparative.get_vitality_indicators(build_context=build_context),
         }
     except Exception as e:
         logger.error(f"Tier comparative failed: {e}")
@@ -633,16 +665,20 @@ def _tier_derived(data: dict) -> dict:
         return {}
 
 
-def _ordered_tiers(ctx: DashboardDateContext) -> List[Tuple[str, Callable[[], dict]]]:
+def _ordered_tiers(
+    ctx: DashboardDateContext,
+    *,
+    build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
+) -> List[Tuple[str, Callable[[], dict]]]:
     return [
-        ("pulse", lambda: _tier_pulse(ctx)),
+        ("pulse", lambda: _tier_pulse(ctx, build_context=build_context)),
         ("strategic", lambda: _tier_strategic(ctx)),
         ("behavioral", lambda: _tier_behavioral(ctx)),
-        ("network", lambda: _tier_network(ctx)),
+        ("network", lambda: _tier_network(ctx, build_context=build_context)),
         ("psychographic", lambda: _tier_psychographic(ctx)),
         ("predictive", lambda: _tier_predictive(ctx)),
-        ("actionable", lambda: _tier_actionable(ctx)),
-        ("comparative", lambda: _tier_comparative(ctx)),
+        ("actionable", lambda: _tier_actionable(ctx, build_context=build_context)),
+        ("comparative", lambda: _tier_comparative(ctx, build_context=build_context)),
     ]
 
 
@@ -673,7 +709,7 @@ def _build_snapshot_sequential_with_skips(
     if build_context is None:
         build_context = dashboard_obs.current_build_context()
 
-    for name, builder in _ordered_tiers(ctx):
+    for name, builder in _ordered_tiers(ctx, build_context=build_context):
         if name in skip_set:
             tier_times[name] = None
             data.update(_fallback_for_tier(name))
@@ -697,7 +733,7 @@ def _build_snapshot_parallel(
     skipped_tiers: set[str] | None = None,
     build_context: dashboard_obs.DefaultProducerBuildContext | None = None,
 ) -> Tuple[dict, Dict[str, Optional[float]]]:
-    ordered = _ordered_tiers(ctx)
+    ordered = _ordered_tiers(ctx, build_context=build_context)
     tier_payloads: Dict[str, dict] = {}
     tier_times: Dict[str, Optional[float]] = {}
     skip_set = skipped_tiers or set()
