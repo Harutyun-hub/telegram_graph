@@ -244,6 +244,30 @@ class DashboardProducerObservabilityBuildTests(unittest.TestCase):
         self.assertEqual(summary[0]["status"], "ok")
         self.assertEqual(summary[0]["attempts"], 1)
 
+    def test_build_timeout_executor_preserves_default_build_context(self) -> None:
+        ctx = aggregator._default_dashboard_context()
+        build = dashboard_obs.DefaultProducerBuildContext(
+            build_id="build-default-thread-1",
+            cache_key=ctx.cache_key,
+            reason="dashboard_request",
+            trigger_request_id="req-thread-1",
+        )
+        seen: dict[str, Any] = {}
+
+        def _fake_build(_ctx, _use_timeouts, *, skipped_tiers=None):
+            self.assertIsNone(skipped_tiers)
+            current = dashboard_obs.current_build_context()
+            seen["build_id"] = current.build_id if current is not None else None
+            seen["cache_key"] = current.cache_key if current is not None else None
+            return {}, {"derived": 0.0}, 0.01, "parallel"
+
+        with patch.object(aggregator, "_build_snapshot", side_effect=_fake_build), \
+             dashboard_obs.bind_build_context(build):
+            aggregator._build_snapshot_with_timeout(ctx)
+
+        self.assertEqual(seen["build_id"], "build-default-thread-1")
+        self.assertEqual(seen["cache_key"], ctx.cache_key)
+
     def test_non_default_refresh_context_emits_no_default_build_or_query_events(self) -> None:
         ctx = aggregator._default_dashboard_context()
         self._prepare_refresh_state(

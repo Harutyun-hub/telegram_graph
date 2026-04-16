@@ -842,8 +842,14 @@ def _build_snapshot_with_timeout(
     *,
     skipped_tiers: set[str] | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
+    build_context = dashboard_obs.current_build_context()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
-    future = executor.submit(_build_snapshot, ctx, True, skipped_tiers=skipped_tiers)
+
+    def _run_build() -> tuple[dict, Dict[str, Optional[float]], float, str]:
+        with dashboard_obs.bind_build_context(build_context):
+            return _build_snapshot(ctx, True, skipped_tiers=skipped_tiers)
+
+    future = executor.submit(_run_build)
     try:
         return future.result(timeout=REFRESH_TIMEOUT_SECONDS)
     except FuturesTimeout as exc:
