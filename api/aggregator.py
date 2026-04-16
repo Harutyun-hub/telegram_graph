@@ -41,6 +41,10 @@ STALE_WHILE_REVALIDATE = _env_flag("DASH_STALE_WHILE_REVALIDATE_ENABLED", True)
 PARALLEL_ENABLED = _env_flag("DASH_PARALLEL_ENABLED", True)
 PARALLEL_MAX_WORKERS = max(1, min(int(os.getenv("DASH_PARALLEL_MAX_WORKERS", "4")), 8))
 TIER_TIMEOUT_SECONDS = max(0.5, float(os.getenv("DASH_TIER_TIMEOUT_SECONDS", "10.0")))
+CRITICAL_TIER_TIMEOUT_SECONDS = max(
+    TIER_TIMEOUT_SECONDS,
+    float(os.getenv("DASH_CRITICAL_TIER_TIMEOUT_SECONDS", "20.0")),
+)
 REFRESH_TIMEOUT_SECONDS = max(5.0, float(os.getenv("DASH_REFRESH_TIMEOUT_SECONDS", "30.0")))
 WAIT_FOR_REFRESH_SECONDS = max(1.0, float(os.getenv("DASH_WAIT_FOR_REFRESH_SECONDS", "8.0")))
 WAIT_FOR_EMPTY_REFRESH_SECONDS = max(
@@ -471,19 +475,17 @@ def _fallback_for_tier(name: str) -> dict:
 def _tier_pulse(ctx: DashboardDateContext) -> dict:
     fallback = _fallback_for_tier("pulse")
 
-    def _safe(name: str, fn: Callable[[], object], default):
-        try:
-            return fn()
-        except Exception as e:
-            logger.error(f"Pulse widget {name} failed: {e}")
-            return default
-
-    return {
-        "communityHealth": _safe("communityHealth", lambda: pulse.get_community_health(ctx), fallback["communityHealth"]),
-        "trendingTopics": _safe("trendingTopics", lambda: pulse.get_trending_topics(ctx), fallback["trendingTopics"]),
-        "trendingNewTopics": _safe("trendingNewTopics", lambda: pulse.get_trending_new_topics(ctx), fallback["trendingNewTopics"]),
-        "communityBrief": _safe("communityBrief", lambda: pulse.get_community_brief(ctx), fallback["communityBrief"]),
-    }
+    try:
+        snapshot = pulse.get_pulse_snapshot(ctx)
+        return {
+            "communityHealth": snapshot.get("communityHealth", fallback["communityHealth"]),
+            "trendingTopics": snapshot.get("trendingTopics", fallback["trendingTopics"]),
+            "trendingNewTopics": snapshot.get("trendingNewTopics", fallback["trendingNewTopics"]),
+            "communityBrief": snapshot.get("communityBrief", fallback["communityBrief"]),
+        }
+    except Exception as e:
+        logger.error(f"Tier pulse failed: {e}")
+        return fallback
 
 
 def _tier_strategic(_ctx: DashboardDateContext) -> dict:
@@ -690,14 +692,15 @@ def _build_snapshot_parallel(
 
     for name, future in futures.items():
         try:
+            timeout_seconds = CRITICAL_TIER_TIMEOUT_SECONDS if name in CRITICAL_TIERS else TIER_TIMEOUT_SECONDS
             if use_timeouts:
-                payload, duration = future.result(timeout=TIER_TIMEOUT_SECONDS)
+                payload, duration = future.result(timeout=timeout_seconds)
             else:
                 payload, duration = future.result()
             tier_payloads[name] = payload
             tier_times[name] = duration
         except FuturesTimeout:
-            logger.warning(f"Tier {name} timed out after {TIER_TIMEOUT_SECONDS}s — using fallback")
+            logger.warning(f"Tier {name} timed out after {timeout_seconds}s — using fallback")
             tier_payloads[name] = _fallback_for_tier(name)
             tier_times[name] = None
             if not future.cancel():

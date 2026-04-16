@@ -8,6 +8,7 @@ Provides:
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import threading
 import time
@@ -65,6 +66,9 @@ _CANONICAL_TOPIC_SET = set(_CANONICAL_TOPIC_NAMES)
 _TOPIC_WIDGET_CACHE_TTL_SECONDS = 180.0
 _TOPIC_WIDGET_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 _TOPIC_WIDGET_CACHE_LOCK = threading.Lock()
+_PULSE_SNAPSHOT_CACHE_TTL_SECONDS = 30.0
+_PULSE_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_PULSE_SNAPSHOT_CACHE_LOCK = threading.Lock()
 _TOPIC_WIDGET_EVIDENCE_LIMIT = 3
 _TRENDING_MIN_MENTIONS = 3
 _TRENDING_MIN_EVIDENCE = 2
@@ -159,7 +163,7 @@ def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 1200
     """Fetch recent analysis rows from Supabase in a bounded paginated scan."""
     try:
         writer = _supabase()
-        page_size = 1000
+        page_size = 2000
         rows: list[dict] = []
         offset = 0
         while len(rows) < max_rows:
@@ -729,24 +733,99 @@ def _build_topic_widget_snapshot(
 
 
 def get_community_health(ctx: DashboardDateContext) -> dict:
-    """
-    Explainable community climate score (0-100) based on:
-    - constructive intent share,
-    - emotional pressure (negative share inverse),
-    - discussion diversity,
-    - conversation depth.
-    """
-    current_rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
-    previous_rows = _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
+    return dict(get_pulse_snapshot(ctx).get("communityHealth") or {})
 
+
+def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+    """Evidence-backed top canonical topics for the selected window."""
+    snapshot = get_pulse_snapshot(ctx)
+    return list(snapshot.get("trendingTopics") or [])[: max(1, int(limit))]
+
+
+def get_trending_new_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
+    """Evidence-backed newly emerging canonical topics for the selected window."""
+    snapshot = get_pulse_snapshot(ctx)
+    return list(snapshot.get("trendingNewTopics") or [])[: max(1, int(limit))]
+
+
+def get_trending_widget_diagnostics(ctx: DashboardDateContext) -> dict[str, Any]:
+    """Diagnostics for widget QA, including candidate counts and evidence integrity."""
+    snapshot = _build_topic_widget_snapshot(ctx)
+    trending_rows = list(snapshot.get("trendingTopics") or [])
+    trending_new_rows = list(snapshot.get("trendingNewTopics") or [])
+
+    def _sample_integrity(rows: list[dict]) -> dict[str, int]:
+        total = len(rows)
+        exact = 0
+        missing = 0
+        for row in rows:
+            sample_id = str(row.get("sampleEvidenceId") or "").strip()
+            sample_quote = str(row.get("sampleQuote") or "").strip()
+            evidence_rows = row.get("evidence") or []
+            if not sample_id or not sample_quote:
+                missing += 1
+                continue
+            matched = next((ev for ev in evidence_rows if str(ev.get("id") or "").strip() == sample_id), None)
+            if matched and str(matched.get("text") or "").strip() == sample_quote:
+                exact += 1
+            else:
+                missing += 1
+        return {
+            "total": total,
+            "exactMatches": exact,
+            "mismatches": missing,
+        }
+
+    return {
+        "generatedAt": snapshot.get("generatedAt"),
+        "windowDays": ctx.days,
+        "diagnostics": snapshot.get("diagnostics") or {},
+        "sampleEvidenceIntegrity": {
+            "trending": _sample_integrity(trending_rows),
+            "trendingNew": _sample_integrity(trending_new_rows),
+        },
+    }
+
+
+def _latest_analysis_minutes_ago() -> int:
+    try:
+        resp = _supabase().client.table("ai_analysis").select("created_at").order("created_at", desc=True).limit(1).execute()
+        row = (resp.data or [None])[0]
+        dt = _parse_dt((row or {}).get("created_at"))
+        if not dt:
+            return 0
+        minutes = int(max(0.0, (_utc_now() - dt).total_seconds()) // 60)
+        return minutes
+    except Exception:
+        return 0
+
+
+def _latest_analysis_minutes_from_rows(rows: list[dict]) -> int:
+    latest_dt: datetime | None = None
+    for row in rows:
+        dt = _parse_dt(row.get("created_at"))
+        if dt is None:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+    if latest_dt is None:
+        return 0
+    return int(max(0.0, (_utc_now() - latest_dt).total_seconds()) // 60)
+
+
+def _community_health_from_inputs(
+    ctx: DashboardDateContext,
+    *,
+    current_rows: list[dict],
+    previous_rows: list[dict],
+    current_diversity: dict,
+    previous_diversity: dict,
+) -> dict:
     current_intent = _window_intent_stats(current_rows)
     previous_intent = _window_intent_stats(previous_rows)
 
     current_volume = _analysis_volume(current_rows)
     previous_volume = _analysis_volume(previous_rows)
-
-    current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
-    previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
     current_constructive = int(round(current_intent["positive_share"] * 100.0))
     previous_constructive = int(round(previous_intent["positive_share"] * 100.0))
@@ -830,71 +909,11 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     }
 
 
-def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
-    """Evidence-backed top canonical topics for the selected window."""
-    snapshot = _build_topic_widget_snapshot(ctx)
-    return list(snapshot.get("trendingTopics") or [])[: max(1, int(limit))]
-
-
-def get_trending_new_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:
-    """Evidence-backed newly emerging canonical topics for the selected window."""
-    snapshot = _build_topic_widget_snapshot(ctx)
-    return list(snapshot.get("trendingNewTopics") or [])[: max(1, int(limit))]
-
-
-def get_trending_widget_diagnostics(ctx: DashboardDateContext) -> dict[str, Any]:
-    """Diagnostics for widget QA, including candidate counts and evidence integrity."""
-    snapshot = _build_topic_widget_snapshot(ctx)
-    trending_rows = list(snapshot.get("trendingTopics") or [])
-    trending_new_rows = list(snapshot.get("trendingNewTopics") or [])
-
-    def _sample_integrity(rows: list[dict]) -> dict[str, int]:
-        total = len(rows)
-        exact = 0
-        missing = 0
-        for row in rows:
-            sample_id = str(row.get("sampleEvidenceId") or "").strip()
-            sample_quote = str(row.get("sampleQuote") or "").strip()
-            evidence_rows = row.get("evidence") or []
-            if not sample_id or not sample_quote:
-                missing += 1
-                continue
-            matched = next((ev for ev in evidence_rows if str(ev.get("id") or "").strip() == sample_id), None)
-            if matched and str(matched.get("text") or "").strip() == sample_quote:
-                exact += 1
-            else:
-                missing += 1
-        return {
-            "total": total,
-            "exactMatches": exact,
-            "mismatches": missing,
-        }
-
-    return {
-        "generatedAt": snapshot.get("generatedAt"),
-        "windowDays": ctx.days,
-        "diagnostics": snapshot.get("diagnostics") or {},
-        "sampleEvidenceIntegrity": {
-            "trending": _sample_integrity(trending_rows),
-            "trendingNew": _sample_integrity(trending_new_rows),
-        },
-    }
-
-
-def _latest_analysis_minutes_ago() -> int:
-    try:
-        resp = _supabase().client.table("ai_analysis").select("created_at").order("created_at", desc=True).limit(1).execute()
-        row = (resp.data or [None])[0]
-        dt = _parse_dt((row or {}).get("created_at"))
-        if not dt:
-            return 0
-        minutes = int(max(0.0, (_utc_now() - dt).total_seconds()) // 60)
-        return minutes
-    except Exception:
-        return 0
-
-
-def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
+def _neo4j_brief_fallback(
+    ctx: DashboardDateContext,
+    *,
+    top_topic_rows: list[dict] | None = None,
+) -> dict:
     stats = run_single(
         """
         MATCH (p:Post)
@@ -911,6 +930,9 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
     ) or {}
     posts = int(stats.get("postsCount") or 0)
     comments = int(stats.get("commentsCount") or 0)
+    resolved_topic_rows = list(top_topic_rows or [])
+    if not resolved_topic_rows:
+        resolved_topic_rows = get_trending_topics(ctx, 5)
     return {
         "postsAnalyzed24h": posts,
         "commentScopesAnalyzed24h": comments,
@@ -920,8 +942,8 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
         "totalAnalyses24h": posts + comments,
         "uniqueUsers24h": int(stats.get("activeUsersCount") or 0),
         "refreshedMinutesAgo": 0,
-        "topTopics": [t.get("name") for t in get_trending_topics(ctx, 5) if t.get("name")],
-        "topTopicRows": get_trending_topics(ctx, 5),
+        "topTopics": [t.get("name") for t in resolved_topic_rows if t.get("name")],
+        "topTopicRows": resolved_topic_rows,
         # Backward compatibility keys
         "postsLast24h": posts,
         "commentsLast24h": comments,
@@ -930,16 +952,17 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
     }
 
 
-def get_community_brief(ctx: DashboardDateContext) -> dict:
-    """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
-    rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
-
+def _community_brief_from_inputs(
+    ctx: DashboardDateContext,
+    *,
+    rows: list[dict],
+    top_topic_rows: list[dict],
+) -> dict:
     if not rows:
-        return _neo4j_brief_fallback(ctx)
+        return _neo4j_brief_fallback(ctx, top_topic_rows=top_topic_rows)
 
     volume = _analysis_volume(rows)
     intent = _window_intent_stats(rows)
-    top_topic_rows = get_trending_topics(ctx, 5)
     top_topic_names = [str(item.get("name") or "").strip() for item in top_topic_rows if item.get("name")]
 
     positive_pct = int(round(intent["positive_share"] * 100.0))
@@ -954,7 +977,7 @@ def get_community_brief(ctx: DashboardDateContext) -> dict:
         "neutralIntentPct24h": neutral_pct,
         "totalAnalyses24h": volume["analysis_units"],
         "uniqueUsers24h": volume["unique_users"],
-        "refreshedMinutesAgo": _latest_analysis_minutes_ago(),
+        "refreshedMinutesAgo": _latest_analysis_minutes_from_rows(rows),
         "topTopics": top_topic_names,
         "topTopicRows": top_topic_rows,
         # Backward compatibility keys
@@ -963,3 +986,55 @@ def get_community_brief(ctx: DashboardDateContext) -> dict:
         "activeUsersLast24h": volume["unique_users"],
         "windowDays": ctx.days,
     }
+
+
+def _health_inputs(ctx: DashboardDateContext) -> dict[str, Any]:
+    return {
+        "current_rows": _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at),
+        "previous_rows": _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at),
+        "current_diversity": _topic_diversity_score(start=ctx.start_at, end=ctx.end_at),
+        "previous_diversity": _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at),
+    }
+
+
+def get_pulse_snapshot(ctx: DashboardDateContext) -> dict[str, Any]:
+    cache_key = ctx.cache_key
+    now = time.monotonic()
+    with _PULSE_SNAPSHOT_CACHE_LOCK:
+        cached = _PULSE_SNAPSHOT_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _PULSE_SNAPSHOT_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pulse-snapshot") as executor:
+        health_future = executor.submit(_health_inputs, ctx)
+        topic_future = executor.submit(_build_topic_widget_snapshot, ctx)
+        health_inputs = health_future.result()
+        topic_snapshot = topic_future.result()
+
+    trending_rows = list(topic_snapshot.get("trendingTopics") or [])
+    trending_new_rows = list(topic_snapshot.get("trendingNewTopics") or [])
+    snapshot = {
+        "communityHealth": _community_health_from_inputs(
+            ctx,
+            current_rows=health_inputs["current_rows"],
+            previous_rows=health_inputs["previous_rows"],
+            current_diversity=health_inputs["current_diversity"],
+            previous_diversity=health_inputs["previous_diversity"],
+        ),
+        "trendingTopics": trending_rows,
+        "trendingNewTopics": trending_new_rows,
+        "communityBrief": _community_brief_from_inputs(
+            ctx,
+            rows=health_inputs["current_rows"],
+            top_topic_rows=trending_rows[:5],
+        ),
+    }
+
+    with _PULSE_SNAPSHOT_CACHE_LOCK:
+        _PULSE_SNAPSHOT_CACHE[cache_key] = (now, snapshot)
+    return snapshot
+
+
+def get_community_brief(ctx: DashboardDateContext) -> dict:
+    """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
+    return dict(get_pulse_snapshot(ctx).get("communityBrief") or {})

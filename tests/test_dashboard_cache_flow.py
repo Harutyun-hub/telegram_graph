@@ -18,6 +18,53 @@ class DashboardCacheFlowTests(unittest.TestCase):
         aggregator.invalidate_cache()
         aggregator._refresh_states.clear()
 
+    def test_tier_pulse_uses_shared_snapshot_builder_once(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        snapshot = {
+            "communityHealth": {"score": 64},
+            "trendingTopics": [{"name": "Housing"}],
+            "trendingNewTopics": [{"name": "Jobs"}],
+            "communityBrief": {"postsAnalyzed24h": 42},
+        }
+
+        with patch.object(aggregator.pulse, "get_pulse_snapshot", return_value=snapshot) as pulse_mock:
+            payload = aggregator._tier_pulse(ctx)
+
+        pulse_mock.assert_called_once_with(ctx)
+        self.assertEqual(payload, snapshot)
+
+    def test_build_snapshot_parallel_uses_extended_timeout_for_critical_tiers(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        captured_timeouts: dict[str, float] = {}
+
+        class DummyExecutor:
+            pass
+
+        class DummyFuture:
+            def __init__(self, name: str, payload: dict) -> None:
+                self.name = name
+                self.payload = payload
+
+            def result(self, timeout=None):
+                captured_timeouts[self.name] = timeout
+                return self.payload, 0.1
+
+        ordered = [
+            ("pulse", lambda: {"communityHealth": {"score": 61}}),
+            ("network", lambda: {"communityChannels": []}),
+        ]
+        futures = {
+            "pulse": DummyFuture("pulse", {"communityHealth": {"score": 61}}),
+            "network": DummyFuture("network", {"communityChannels": []}),
+        }
+
+        with patch.object(aggregator, "_ordered_tiers", return_value=ordered), \
+             patch.object(aggregator, "_submit_tier_futures", return_value=(DummyExecutor(), futures)):
+            aggregator._build_snapshot_parallel(ctx, use_timeouts=True)
+
+        self.assertEqual(captured_timeouts["pulse"], aggregator.CRITICAL_TIER_TIMEOUT_SECONDS)
+        self.assertEqual(captured_timeouts["network"], aggregator.TIER_TIMEOUT_SECONDS)
+
     def test_build_dashboard_snapshot_once_tracks_skipped_tiers(self) -> None:
         ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
         tier_times = {
