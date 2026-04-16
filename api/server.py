@@ -1572,8 +1572,8 @@ def _ensure_background_dashboard_refresh(
     trusted_end_date: str,
     write_default_alias: bool,
 ) -> bool:
-    del trusted_end_date, write_default_alias
-    return bool(refresh_dashboard_snapshot_async(ctx))
+    del trusted_end_date
+    return bool(refresh_dashboard_snapshot_async(ctx, allow_default_bootstrap=bool(write_default_alias)))
 
 
 def _newer_snapshot_choice(
@@ -1857,7 +1857,10 @@ def _build_dashboard_response_payload(
                 stale_meta,
                 cached_at_ts=persisted_built_at.timestamp(),
             )
-        refresh_status = schedule_dashboard_snapshot_refresh(ctx)
+        refresh_status = schedule_dashboard_snapshot_refresh(
+            ctx,
+            allow_default_bootstrap=default_request,
+        )
         if default_request and freshness_snapshot is None:
             _ensure_background_freshness_refresh()
         stale_meta["isStale"] = True
@@ -1886,7 +1889,10 @@ def _build_dashboard_response_payload(
             fallback_reason=fallback_reason,
             refresh_suppressed=bool(refresh_status.get("suppressed")),
         )
-    schedule_dashboard_snapshot_refresh(ctx)
+    schedule_dashboard_snapshot_refresh(
+        ctx,
+        allow_default_bootstrap=default_request,
+    )
     raise DashboardWarmingError("We’re still warming this date range. Please try again shortly.")
 
 
@@ -1896,7 +1902,10 @@ async def _warm_dashboard_cache() -> None:
         loop = asyncio.get_running_loop()
         freshness_snapshot = _dashboard_freshness_snapshot(force_refresh=False)
         ctx = _default_dashboard_context(freshness_snapshot)
-        await loop.run_in_executor(None, lambda: get_dashboard_data(ctx))
+        await loop.run_in_executor(
+            None,
+            lambda: get_dashboard_data(ctx, allow_default_bootstrap=True),
+        )
         logger.info("Dashboard cache warm-up completed")
     except Exception as e:
         logger.warning(f"Dashboard cache warm-up failed: {e}")

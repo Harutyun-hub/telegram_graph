@@ -72,6 +72,7 @@ DETAIL_REFRESH_TIMEOUT_SECONDS = max(
 # If one of these tiers falls back during refresh, prefer preserving an
 # existing healthy cache instead of replacing it with an empty/degraded view.
 CRITICAL_TIERS = {"pulse", "strategic"}
+DEFAULT_BOOTSTRAP_SKIPPED_TIERS = frozenset({"strategic"})
 ALL_TIER_NAMES = (
     "pulse",
     "strategic",
@@ -228,6 +229,16 @@ def _should_preserve_existing_cache(
         return False, fallback
 
     return True, fallback
+
+
+def _can_serve_default_bootstrap_snapshot(
+    snapshot: Optional[dict],
+    tier_times: Dict[str, Optional[float]],
+) -> bool:
+    if not _snapshot_has_core_pulse_data(snapshot):
+        return False
+    critical_fallback = set(_critical_fallback_tiers(_fallback_tiers(tier_times)))
+    return bool(critical_fallback) and critical_fallback.issubset(DEFAULT_BOOTSTRAP_SKIPPED_TIERS)
 
 
 def _is_cache_valid(cache_key: str, now: Optional[float] = None) -> bool:
@@ -743,6 +754,8 @@ def _snapshot_meta(
 def _emergency_degraded_snapshot(
     cache_key: str,
     reason: str,
+    *,
+    failure_count: int | None = None,
 ) -> tuple[dict, DashboardCacheMeta]:
     """Return an all-fallback snapshot when no fresh or stale cache is available."""
     data: dict = {}
@@ -752,16 +765,45 @@ def _emergency_degraded_snapshot(
         tier_times[name] = None
     data.update(_tier_derived(data))
     tier_times["derived"] = 0.0
-    failure_count = _record_refresh_failure(cache_key, reason)
+    effective_failure_count = failure_count if failure_count is not None else _record_refresh_failure(cache_key, reason)
     meta = _snapshot_meta(
         tier_times=tier_times,
         elapsed=0.0,
         mode="emergency_fallback",
         cache_status="emergency_degraded",
         is_stale=True,
-        refresh_failure_count=failure_count,
+        refresh_failure_count=effective_failure_count,
     )
     return data, _with_refresh_state(cache_key, meta)
+
+
+def _cache_bootstrap_snapshot(
+    cache_key: str,
+    data: dict,
+    tier_times: Dict[str, Optional[float]],
+    *,
+    elapsed: float,
+    mode: str,
+    cache_status: str,
+    skipped_tiers: set[str] | None = None,
+) -> tuple[dict, DashboardCacheMeta]:
+    build_meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=elapsed,
+        mode=mode,
+        cache_status=cache_status,
+        is_stale=True,
+        refresh_failure_count=0,
+    )
+    build_meta["maxServeAgeSeconds"] = CRITICAL_DEGRADED_STALE_SECONDS
+    if skipped_tiers:
+        build_meta["skippedTiers"] = sorted(skipped_tiers)
+        build_meta["suppressedDegradedTiers"] = sorted(skipped_tiers)
+    _record_refresh_success(cache_key)
+    build_meta["refreshFailureCount"] = 0
+    with _cache_lock:
+        _cache_entries[cache_key] = (time.time(), data, dict(build_meta))
+    return data, _with_refresh_state(cache_key, build_meta)
 
 
 # ── Main aggregation API ─────────────────────────────────────────────────────
@@ -796,6 +838,7 @@ def _refresh_dashboard_snapshot(
     ctx: DashboardDateContext,
     *,
     stale_entry: DashboardCacheEntry | None = None,
+    allow_default_bootstrap: bool = False,
 ) -> tuple[dict, DashboardCacheMeta]:
     stale_snapshot = stale_entry[1] if stale_entry is not None else None
     stale_meta = dict(stale_entry[2]) if stale_entry is not None else None
@@ -844,6 +887,23 @@ def _refresh_dashboard_snapshot(
                 )
 
             if critical_degraded:
+                if (
+                    allow_default_bootstrap
+                    and stale_snapshot is None
+                    and _can_serve_default_bootstrap_snapshot(data, tier_times)
+                ):
+                    logger.warning(
+                        "Dashboard rebuild accepted canonical default bootstrap snapshot with degraded tiers "
+                        f"| key={cache_key} degraded={critical_degraded} elapsed={elapsed}s mode={mode}"
+                    )
+                    return _cache_bootstrap_snapshot(
+                        cache_key,
+                        data,
+                        tier_times,
+                        elapsed=elapsed,
+                        mode=mode,
+                        cache_status="bootstrap_refresh_success_degraded",
+                    )
                 failure_count = _record_refresh_failure(
                     cache_key,
                     f"critical degraded tiers during refresh: {critical_degraded}",
@@ -865,8 +925,8 @@ def _refresh_dashboard_snapshot(
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
         return data, _with_refresh_state(cache_key, build_meta)
     except Exception as exc:
-        failure_count = _record_refresh_failure(cache_key, exc)
         if stale_snapshot is not None and stale_ts is not None:
+            failure_count = _record_refresh_failure(cache_key, exc)
             logger.warning(f"Dashboard rebuild failed for range {cache_key}; serving stale cache instead: {exc}")
             failure_meta = dict(stale_meta or {})
             failure_meta["cacheStatus"] = "stale_on_error"
@@ -880,22 +940,61 @@ def _refresh_dashboard_snapshot(
                 failure_meta,
                 stale_age_seconds=max(0.0, time.time() - stale_ts),
             )
+        if allow_default_bootstrap:
+            try:
+                skipped_tiers = set(DEFAULT_BOOTSTRAP_SKIPPED_TIERS)
+                data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx, skipped_tiers=skipped_tiers)
+                if _can_serve_default_bootstrap_snapshot(data, tier_times):
+                    logger.warning(
+                        "Dashboard rebuild fell back to canonical default bootstrap snapshot "
+                        f"| key={cache_key} skipped={sorted(skipped_tiers)} elapsed={elapsed}s mode={mode} error={exc}"
+                    )
+                    return _cache_bootstrap_snapshot(
+                        cache_key,
+                        data,
+                        tier_times,
+                        elapsed=elapsed,
+                        mode=mode,
+                        cache_status="bootstrap_refresh_success_skipped_strategic",
+                        skipped_tiers=skipped_tiers,
+                    )
+            except Exception as bootstrap_exc:
+                logger.warning(
+                    "Dashboard canonical default bootstrap snapshot failed "
+                    f"| key={cache_key} skipped={sorted(DEFAULT_BOOTSTRAP_SKIPPED_TIERS)} error={bootstrap_exc}"
+                )
+        failure_count = _record_refresh_failure(cache_key, exc)
         logger.error(f"Dashboard rebuild failed with no fallback cache for range {cache_key}: {exc}")
-        return _emergency_degraded_snapshot(cache_key, str(exc))
+        return _emergency_degraded_snapshot(cache_key, str(exc), failure_count=failure_count)
 
 
-def _background_refresh_dashboard_snapshot(cache_key: str, ctx: DashboardDateContext) -> None:
+def _background_refresh_dashboard_snapshot(
+    cache_key: str,
+    ctx: DashboardDateContext,
+    *,
+    allow_default_bootstrap: bool = False,
+) -> None:
     with _cache_lock:
         stale_entry = _cache_entries.get(cache_key)
     try:
-        _refresh_dashboard_snapshot(cache_key, ctx, stale_entry=stale_entry)
+        _refresh_dashboard_snapshot(
+            cache_key,
+            ctx,
+            stale_entry=stale_entry,
+            allow_default_bootstrap=allow_default_bootstrap,
+        )
     except Exception as exc:
         logger.error(f"Background dashboard refresh failed | key={cache_key} error={exc}")
     finally:
         _release_refresh_slot(cache_key)
 
 
-def _ensure_background_refresh(cache_key: str, ctx: DashboardDateContext) -> bool:
+def _ensure_background_refresh(
+    cache_key: str,
+    ctx: DashboardDateContext,
+    *,
+    allow_default_bootstrap: bool = False,
+) -> bool:
     now = time.time()
     with _refresh_state_lock:
         state = _refresh_states.get(cache_key)
@@ -907,6 +1006,7 @@ def _ensure_background_refresh(cache_key: str, ctx: DashboardDateContext) -> boo
     thread = threading.Thread(
         target=_background_refresh_dashboard_snapshot,
         args=(cache_key, ctx),
+        kwargs={"allow_default_bootstrap": allow_default_bootstrap},
         daemon=True,
         name=f"dash-refresh-{cache_key}",
     )
@@ -917,6 +1017,8 @@ def _ensure_background_refresh(cache_key: str, ctx: DashboardDateContext) -> boo
 def get_dashboard_snapshot(
     ctx: Optional[DashboardDateContext] = None,
     force_refresh: bool = False,
+    *,
+    allow_default_bootstrap: bool = False,
 ) -> tuple[dict, DashboardCacheMeta]:
     """Assemble full AppData snapshot with cache, stale fallback, and single-flight refresh."""
     resolved_ctx = ctx or _default_dashboard_context()
@@ -938,7 +1040,11 @@ def get_dashboard_snapshot(
 
     stale_age_seconds = _cache_entry_age_seconds(stale_entry, now)
     if stale_entry is not None and STALE_WHILE_REVALIDATE and not force_refresh:
-        refresh_started = _ensure_background_refresh(cache_key, resolved_ctx)
+        refresh_started = _ensure_background_refresh(
+            cache_key,
+            resolved_ctx,
+            allow_default_bootstrap=allow_default_bootstrap,
+        )
         stale_meta = dict(stale_entry[2])
         stale_meta["cacheStatus"] = (
             "stale_while_revalidate" if refresh_started else "stale_while_revalidate_inflight"
@@ -985,7 +1091,12 @@ def get_dashboard_snapshot(
         return _emergency_degraded_snapshot(cache_key, reason)
 
     try:
-        return _refresh_dashboard_snapshot(cache_key, resolved_ctx, stale_entry=stale_entry)
+        return _refresh_dashboard_snapshot(
+            cache_key,
+            resolved_ctx,
+            stale_entry=stale_entry,
+            allow_default_bootstrap=allow_default_bootstrap,
+        )
     finally:
         _release_refresh_slot(cache_key)
 
@@ -993,8 +1104,14 @@ def get_dashboard_snapshot(
 def get_dashboard_data(
     ctx: Optional[DashboardDateContext] = None,
     force_refresh: bool = False,
+    *,
+    allow_default_bootstrap: bool = False,
 ) -> dict:
-    snapshot, _meta = get_dashboard_snapshot(ctx, force_refresh=force_refresh)
+    snapshot, _meta = get_dashboard_snapshot(
+        ctx,
+        force_refresh=force_refresh,
+        allow_default_bootstrap=allow_default_bootstrap,
+    )
     return snapshot
 
 
@@ -1072,12 +1189,24 @@ def prime_dashboard_snapshot(
         _cache_entries[ctx.cache_key] = (timestamp, dict(snapshot), dict(meta))
 
 
-def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
+def refresh_dashboard_snapshot_async(
+    ctx: DashboardDateContext,
+    *,
+    allow_default_bootstrap: bool = False,
+) -> bool:
     """Trigger a single-flight background refresh for a dashboard cache key."""
-    return _ensure_background_refresh(ctx.cache_key, ctx)
+    return _ensure_background_refresh(
+        ctx.cache_key,
+        ctx,
+        allow_default_bootstrap=allow_default_bootstrap,
+    )
 
 
-def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, Any]:
+def schedule_dashboard_snapshot_refresh(
+    ctx: DashboardDateContext,
+    *,
+    allow_default_bootstrap: bool = False,
+) -> dict[str, Any]:
     cache_key = ctx.cache_key
     now = time.time()
     with _refresh_state_lock:
@@ -1101,7 +1230,11 @@ def schedule_dashboard_snapshot_refresh(ctx: DashboardDateContext) -> dict[str, 
                 "failureCount": int(state.failure_count),
             }
 
-    started = _ensure_background_refresh(cache_key, ctx)
+    started = _ensure_background_refresh(
+        cache_key,
+        ctx,
+        allow_default_bootstrap=allow_default_bootstrap,
+    )
     return {
         "started": bool(started),
         "inflight": False if started else True,

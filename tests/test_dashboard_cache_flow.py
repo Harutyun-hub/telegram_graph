@@ -85,17 +85,18 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertEqual(second_snapshot, snapshot)
         self.assertEqual(second_meta["cacheStatus"], "stale_while_revalidate")
         self.assertTrue(second_meta["isStale"])
-        refresh_mock.assert_called_once_with(ctx.cache_key, ctx)
+        refresh_mock.assert_called_once_with(ctx.cache_key, ctx, allow_default_bootstrap=False)
 
     def test_schedule_dashboard_snapshot_refresh_is_single_flight_per_key(self) -> None:
         ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
         thread_starts: list[str] = []
 
         class DummyThread:
-            def __init__(self, *, name: str | None = None, target=None, args=(), daemon: bool | None = None):
+            def __init__(self, *, name: str | None = None, target=None, args=(), kwargs=None, daemon: bool | None = None):
                 self.name = name or "dummy"
                 self._target = target
                 self._args = args
+                self._kwargs = kwargs or {}
                 self.daemon = daemon
 
             def start(self) -> None:
@@ -109,6 +110,64 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertTrue(all(not result["suppressed"] for result in results))
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
+
+    def test_default_bootstrap_caches_usable_snapshot_when_full_refresh_times_out(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-14")
+        bootstrap_snapshot = {
+            "communityBrief": {"postsAnalyzed24h": 12},
+            "communityHealth": {"score": 61, "components": []},
+            "trendingTopics": [{"topic": "Topic A"}],
+        }
+        bootstrap_tier_times = {
+            "pulse": 1.2,
+            "strategic": None,
+            "behavioral": 0.8,
+            "network": 0.7,
+            "psychographic": 0.6,
+            "predictive": 0.5,
+            "actionable": 0.4,
+            "comparative": 0.3,
+            "derived": 0.0,
+        }
+
+        def fake_build(_ctx, *, skipped_tiers=None):
+            if skipped_tiers is None:
+                raise TimeoutError("Dashboard rebuild exceeded 30.0s timeout")
+            self.assertEqual(skipped_tiers, {"strategic"})
+            return bootstrap_snapshot, bootstrap_tier_times, 4.5, "parallel"
+
+        with patch.object(aggregator, "_build_snapshot_with_timeout", side_effect=fake_build):
+            snapshot, meta = aggregator.get_dashboard_snapshot(
+                ctx,
+                force_refresh=True,
+                allow_default_bootstrap=True,
+            )
+
+        self.assertEqual(snapshot, bootstrap_snapshot)
+        self.assertEqual(meta["cacheStatus"], "bootstrap_refresh_success_skipped_strategic")
+        self.assertTrue(meta["isStale"])
+        self.assertEqual(meta["skippedTiers"], ["strategic"])
+        self.assertEqual(meta["suppressedDegradedTiers"], ["strategic"])
+        self.assertEqual(meta["refreshFailureCount"], 0)
+        self.assertIn(ctx.cache_key, aggregator._cache_entries)
+
+    def test_custom_range_refresh_timeout_does_not_use_default_bootstrap(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-14")
+
+        with patch.object(
+            aggregator,
+            "_build_snapshot_with_timeout",
+            side_effect=TimeoutError("Dashboard rebuild exceeded 30.0s timeout"),
+        ):
+            snapshot, meta = aggregator.get_dashboard_snapshot(
+                ctx,
+                force_refresh=True,
+                allow_default_bootstrap=False,
+            )
+
+        self.assertEqual(meta["cacheStatus"], "emergency_degraded")
+        self.assertTrue(meta["isStale"])
+        self.assertNotIn(ctx.cache_key, aggregator._cache_entries)
 
 
 class DashboardApiAvailabilityTests(unittest.TestCase):
@@ -176,27 +235,68 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
-                 server,
-                 "_cached_freshness_resolution",
-                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+                server,
+                "_cached_freshness_resolution",
+                return_value={
+                    "snapshot": {
+                        "generated_at": "2026-04-14T08:00:00+00:00",
+                        "health": {"status": "healthy"},
+                    },
+                    "source": "memory",
+                    "snapshotBuiltAt": None,
+                    "persistedReadStatus": None,
+                    "persistedReadMs": None,
+                },
              ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(
-                 server,
-                 "schedule_dashboard_snapshot_refresh",
-                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+                server,
+                "schedule_dashboard_snapshot_refresh",
+                return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
              ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("warming", response.text.lower())
-        schedule_mock.assert_called_once()
+        schedule_mock.assert_called_once_with(unittest.mock.ANY, allow_default_bootstrap=False)
+
+    def test_dashboard_default_exact_miss_enables_default_bootstrap_refresh(self) -> None:
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(
+                server,
+                "_cached_freshness_resolution",
+                return_value={
+                    "snapshot": {
+                        "generated_at": "2026-04-15T08:00:00+00:00",
+                        "health": {"status": "healthy"},
+                        "pipeline": {"sync": {"last_graph_sync_at": "2026-04-15T07:00:00+00:00"}},
+                    },
+                    "source": "memory",
+                    "snapshotBuiltAt": None,
+                    "persistedReadStatus": None,
+                    "persistedReadMs": None,
+                },
+             ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(
+                server,
+                "schedule_dashboard_snapshot_refresh",
+                return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+             ) as schedule_mock:
+            response = self.client.get("/api/dashboard")
+
+        self.assertEqual(response.status_code, 503)
+        schedule_mock.assert_called_once_with(unittest.mock.ANY, allow_default_bootstrap=True)
 
     def test_dashboard_exact_miss_requests_share_single_background_refresh(self) -> None:
         lock = threading.Lock()
         refresh_state = {"inflight": False, "starts": 0}
 
-        def fake_schedule(_ctx):
+        def fake_schedule(_ctx, *, allow_default_bootstrap=False):
+            self.assertFalse(allow_default_bootstrap)
             with lock:
                 if refresh_state["inflight"]:
                     return {"started": False, "inflight": True, "suppressed": False, "failureCount": 0}

@@ -103,6 +103,56 @@ class DetailCacheBehaviorTests(unittest.TestCase):
         self.assertIn("Armenian Government Performance", payload["overview"]["summaryEn"])
 
 
+class DashboardBootstrapStabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        aggregator.invalidate_cache()
+        aggregator._refresh_states.clear()
+
+    def tearDown(self) -> None:
+        aggregator.invalidate_cache()
+        aggregator._refresh_states.clear()
+
+    def test_default_bootstrap_success_clears_refresh_failure_state(self) -> None:
+        ctx = aggregator._default_dashboard_context()
+        bootstrap_snapshot = {
+            "communityBrief": {"postsAnalyzed24h": 8},
+            "communityHealth": {"score": 57, "components": []},
+            "trendingTopics": [{"topic": "Topic A"}],
+        }
+        tier_times = {
+            "pulse": 1.0,
+            "strategic": None,
+            "behavioral": 0.5,
+            "network": 0.5,
+            "psychographic": 0.5,
+            "predictive": 0.5,
+            "actionable": 0.5,
+            "comparative": 0.5,
+            "derived": 0.0,
+        }
+        state = aggregator._get_refresh_state(ctx.cache_key)
+        state.failure_count = 2
+        state.last_error = "prior timeout"
+        state.suppressed_until = time.time() + 120
+
+        with patch.object(
+            aggregator,
+            "_build_snapshot_with_timeout",
+            return_value=(bootstrap_snapshot, tier_times, 3.8, "parallel"),
+        ):
+            _snapshot, meta = aggregator._refresh_dashboard_snapshot(
+                ctx.cache_key,
+                ctx,
+                allow_default_bootstrap=True,
+            )
+
+        self.assertEqual(meta["cacheStatus"], "bootstrap_refresh_success_degraded")
+        refresh_state = aggregator._refresh_state_snapshot(ctx.cache_key)
+        self.assertEqual(refresh_state["refreshFailureCount"], 0)
+        self.assertFalse(refresh_state["refreshSuppressed"])
+        self.assertFalse(refresh_state["refreshInFlight"])
+
+
 class _DummySession:
     def __init__(self, *, value=None, error: Exception | None = None):
         self.value = value
