@@ -64,6 +64,12 @@ class CanonicalDefaultArtifactSeederTests(unittest.TestCase):
             "refreshFailureCount": 0,
         }
 
+    def _strategic_degraded_meta(self) -> dict:
+        meta = self._meta()
+        meta["degradedTiers"] = ["strategic"]
+        meta["tierTimes"] = {"pulse": 1.0, "strategic": None}
+        return meta
+
     def _snapshot(self) -> dict:
         return {"communityHealth": {"score": 71}}
 
@@ -136,6 +142,45 @@ class CanonicalDefaultArtifactSeederTests(unittest.TestCase):
         )
         self.assertEqual(coordinator.acquired[0][0], server._canonical_default_seed_lock_name(ctx.cache_key))
         self.assertEqual(coordinator.released[0], (server._canonical_default_seed_lock_name(ctx.cache_key), "seed-lock"))
+
+    def test_seed_canonical_default_artifact_persists_when_only_strategic_is_degraded(self) -> None:
+        ctx = self._ctx()
+        coordinator = _FakeCoordinator()
+        strategic_degraded = self._strategic_degraded_meta()
+
+        with patch.object(server.config, "DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED", True), \
+             patch.object(server.config, "DASH_DEFAULT_ARTIFACT_SEED_TIMEOUT_SECONDS", 90.0), \
+             patch.object(server.config, "DASH_DEFAULT_ARTIFACT_REFRESH_MINUTES", 30), \
+             patch.object(server, "_dashboard_freshness_snapshot", return_value={"generated_at": "2026-04-15T00:00:00+00:00"}), \
+             patch.object(server, "_default_dashboard_context", return_value=ctx), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[{"status": "miss", "readMs": 1.0}, {"status": "miss", "readMs": 1.1}]), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "get_runtime_coordinator", return_value=coordinator), \
+             patch.object(
+                 server,
+                 "seed_dashboard_snapshot",
+                 return_value={
+                     "started": True,
+                     "snapshot": self._snapshot(),
+                     "meta": strategic_degraded,
+                     "failureCount": 0,
+                 },
+             ), \
+             patch.object(
+                 server,
+                 "_persist_dashboard_snapshot_sync",
+                 return_value={"exactSaved": True, "aliasSaved": True},
+             ) as persist_mock:
+            result = server._seed_canonical_default_artifact_sync(force=False, reason="scheduled")
+
+        self.assertEqual(result["status"], "persisted")
+        persist_mock.assert_called_once_with(
+            ctx,
+            self._snapshot(),
+            strategic_degraded,
+            trusted_end_date=ctx.to_date.isoformat(),
+            write_default_alias=True,
+        )
 
     def test_seed_canonical_default_artifact_returns_lock_held_when_runtime_lock_is_unavailable(self) -> None:
         ctx = self._ctx()

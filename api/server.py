@@ -1681,6 +1681,36 @@ def _should_persist_dashboard_snapshot(meta: dict[str, Any]) -> bool:
     return not bool(degraded.intersection(DASHBOARD_CRITICAL_TIERS))
 
 
+def _persistence_critical_tiers_for_context(
+    ctx=None,
+    *,
+    trusted_end_date: str | None = None,
+) -> set[str]:
+    if ctx is not None and _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
+        return {"pulse"}
+    return set(DASHBOARD_CRITICAL_TIERS)
+
+
+def _should_persist_dashboard_snapshot_for_context(
+    meta: dict[str, Any],
+    *,
+    ctx=None,
+    trusted_end_date: str | None = None,
+) -> bool:
+    if bool(meta.get("isStale")):
+        return False
+    degraded = {
+        str(name).strip()
+        for name in (meta.get("degradedTiers") or [])
+        if str(name).strip()
+    }
+    persistence_critical = _persistence_critical_tiers_for_context(
+        ctx,
+        trusted_end_date=trusted_end_date,
+    )
+    return not bool(degraded.intersection(persistence_critical))
+
+
 def _is_canonical_default_context(ctx, *, trusted_end_date: str | None = None) -> bool:
     cache_key = getattr(ctx, "cache_key", None)
     if not cache_key:
@@ -1705,7 +1735,11 @@ def _persist_dashboard_snapshot_sync(
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or not snapshot:
         return {"exactSaved": False, "aliasSaved": False, "skipped": "empty_snapshot"}
-    if not isinstance(meta, dict) or not _should_persist_dashboard_snapshot(meta):
+    if not isinstance(meta, dict) or not _should_persist_dashboard_snapshot_for_context(
+        meta,
+        ctx=ctx,
+        trusted_end_date=trusted_end_date,
+    ):
         return {"exactSaved": False, "aliasSaved": False, "skipped": "meta_gate"}
     if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
         return {"exactSaved": False, "aliasSaved": False, "skipped": "not_current_default"}
@@ -1775,9 +1809,13 @@ def _handle_dashboard_refresh_complete(
     snapshot: dict,
     meta: dict[str, Any],
 ) -> None:
-    if not _should_persist_dashboard_snapshot(meta):
-        return
     if not _is_canonical_default_context(ctx):
+        return
+    if not _should_persist_dashboard_snapshot_for_context(
+        meta,
+        ctx=ctx,
+        trusted_end_date=ctx.to_date.isoformat(),
+    ):
         return
     _persist_dashboard_snapshot_async(
         ctx,
@@ -1890,7 +1928,11 @@ def _seed_canonical_default_artifact_sync(
             memory_state == "fresh"
             and isinstance(memory_snapshot, dict)
             and isinstance(memory_meta, dict)
-            and _should_persist_dashboard_snapshot(memory_meta)
+            and _should_persist_dashboard_snapshot_for_context(
+                memory_meta,
+                ctx=ctx,
+                trusted_end_date=trusted_end_date,
+            )
         ):
             persist_result = _persist_dashboard_snapshot_sync(
                 ctx,

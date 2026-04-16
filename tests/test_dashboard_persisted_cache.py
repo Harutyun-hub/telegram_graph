@@ -59,6 +59,28 @@ class DashboardPersistedCacheTests(unittest.TestCase):
     def _snapshot(self) -> dict:
         return {"communityHealth": {"score": 72}}
 
+    def test_canonical_default_persistence_gate_allows_strategic_degradation_but_keeps_pulse_required(self) -> None:
+        ctx = self._ctx()
+        strategic_only = self._meta()
+        strategic_only["degradedTiers"] = ["strategic"]
+        pulse_only = self._meta()
+        pulse_only["degradedTiers"] = ["pulse"]
+
+        self.assertTrue(
+            server._should_persist_dashboard_snapshot_for_context(
+                strategic_only,
+                ctx=ctx,
+                trusted_end_date=ctx.to_date.isoformat(),
+            )
+        )
+        self.assertFalse(
+            server._should_persist_dashboard_snapshot_for_context(
+                pulse_only,
+                ctx=ctx,
+                trusted_end_date=ctx.to_date.isoformat(),
+            )
+        )
+
     def test_default_dashboard_uses_persisted_alias_after_exact_default_resolution(self) -> None:
         ctx = self._ctx()
         persisted = {
@@ -209,6 +231,28 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertTrue(result["aliasSaved"])
         self.assertIn(server._dashboard_snapshot_storage_path(ctx.cache_key), writer.payloads)
         self.assertIn(server._DASHBOARD_DEFAULT_ALIAS_PATH, writer.payloads)
+
+    def test_persist_dashboard_snapshot_sync_writes_canonical_default_with_truthful_strategic_degradation(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+        meta = self._meta()
+        meta["degradedTiers"] = ["strategic"]
+        meta["tierTimes"] = {"pulse": 1.0, "strategic": None}
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server, "_is_canonical_default_context", return_value=True):
+            result = server._persist_dashboard_snapshot_sync(
+                ctx,
+                self._snapshot(),
+                meta,
+                trusted_end_date=ctx.to_date.isoformat(),
+                write_default_alias=True,
+            )
+
+        self.assertTrue(result["exactSaved"])
+        self.assertTrue(result["aliasSaved"])
+        alias_payload = writer.payloads[server._DASHBOARD_DEFAULT_ALIAS_PATH]
+        self.assertEqual(alias_payload["dashboardMeta"]["degradedTiers"], ["strategic"])
 
 
 if __name__ == "__main__":
