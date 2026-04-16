@@ -63,8 +63,12 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         ctx = self._ctx()
         strategic_only = self._meta()
         strategic_only["degradedTiers"] = ["strategic"]
+        strategic_only["cacheStatus"] = "refresh_success_uncached_degraded"
+        strategic_only["isStale"] = True
         pulse_only = self._meta()
         pulse_only["degradedTiers"] = ["pulse"]
+        pulse_only["cacheStatus"] = "refresh_success_uncached_degraded"
+        pulse_only["isStale"] = True
 
         self.assertTrue(
             server._should_persist_dashboard_snapshot_for_context(
@@ -76,6 +80,19 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertFalse(
             server._should_persist_dashboard_snapshot_for_context(
                 pulse_only,
+                ctx=ctx,
+                trusted_end_date=ctx.to_date.isoformat(),
+            )
+        )
+
+    def test_canonical_default_persistence_gate_still_rejects_generic_stale_snapshot(self) -> None:
+        ctx = self._ctx()
+        meta = self._meta(cache_status="stale_on_error", is_stale=True)
+        meta["degradedTiers"] = ["strategic"]
+
+        self.assertFalse(
+            server._should_persist_dashboard_snapshot_for_context(
+                meta,
                 ctx=ctx,
                 trusted_end_date=ctx.to_date.isoformat(),
             )

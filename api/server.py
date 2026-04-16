@@ -1691,13 +1691,41 @@ def _persistence_critical_tiers_for_context(
     return set(DASHBOARD_CRITICAL_TIERS)
 
 
+def _persistence_should_treat_meta_as_stale(
+    meta: dict[str, Any],
+    *,
+    ctx=None,
+    trusted_end_date: str | None = None,
+) -> bool:
+    if not bool(meta.get("isStale")):
+        return False
+    if ctx is None or not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
+        return True
+    if str(meta.get("cacheStatus") or "").strip() != "refresh_success_uncached_degraded":
+        return True
+    degraded = {
+        str(name).strip()
+        for name in (meta.get("degradedTiers") or [])
+        if str(name).strip()
+    }
+    persistence_critical = _persistence_critical_tiers_for_context(
+        ctx,
+        trusted_end_date=trusted_end_date,
+    )
+    return bool(degraded.intersection(persistence_critical))
+
+
 def _should_persist_dashboard_snapshot_for_context(
     meta: dict[str, Any],
     *,
     ctx=None,
     trusted_end_date: str | None = None,
 ) -> bool:
-    if bool(meta.get("isStale")):
+    if _persistence_should_treat_meta_as_stale(
+        meta,
+        ctx=ctx,
+        trusted_end_date=trusted_end_date,
+    ):
         return False
     degraded = {
         str(name).strip()
