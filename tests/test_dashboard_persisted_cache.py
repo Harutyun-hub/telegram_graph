@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -8,15 +9,38 @@ from unittest.mock import patch
 from api import server
 
 
+class _FakeRuntimeWriter:
+    def __init__(self) -> None:
+        self.payloads: dict[str, dict] = {}
+
+    def save_runtime_json(self, path: str, payload: dict) -> bool:
+        self.payloads[path] = json.loads(json.dumps(payload))
+        return True
+
+    def read_runtime_json(
+        self,
+        path: str,
+        *,
+        prefer_signed_read: bool = True,
+        timeout_seconds: float | None = None,
+    ) -> dict:
+        del prefer_signed_read, timeout_seconds
+        if path not in self.payloads:
+            return {"status": "missing", "payload": {}, "error": "missing", "elapsed_ms": 1.25}
+        return {"status": "ok", "payload": self.payloads[path], "error": "", "elapsed_ms": 1.25}
+
+
 class DashboardPersistedCacheTests(unittest.TestCase):
-    def _ctx(self) -> SimpleNamespace:
+    def _ctx(self, *, end: date | None = None) -> SimpleNamespace:
+        end_date = end or date(2026, 3, 22)
+        start_date = date.fromordinal(end_date.toordinal() - 14)
         return SimpleNamespace(
-            from_date=datetime(2026, 3, 8, tzinfo=timezone.utc).date(),
-            to_date=datetime(2026, 3, 22, tzinfo=timezone.utc).date(),
+            from_date=start_date,
+            to_date=end_date,
             days=15,
             is_operational=False,
-            range_label="2026-03-08..2026-03-22",
-            cache_key="2026-03-08:2026-03-22",
+            range_label=f"{start_date.isoformat()}..{end_date.isoformat()}",
+            cache_key=f"{start_date.isoformat()}:{end_date.isoformat()}",
         )
 
     def _meta(self, *, cache_status: str = "refresh_success", is_stale: bool = False) -> dict:
@@ -35,7 +59,7 @@ class DashboardPersistedCacheTests(unittest.TestCase):
     def _snapshot(self) -> dict:
         return {"communityHealth": {"score": 72}}
 
-    def test_default_dashboard_uses_persisted_alias_before_live_freshness(self) -> None:
+    def test_default_dashboard_uses_persisted_alias_after_exact_default_resolution(self) -> None:
         ctx = self._ctx()
         persisted = {
             "status": "hit",
@@ -43,16 +67,21 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "snapshot": self._snapshot(),
             "meta": self._meta(),
             "ctx": ctx,
+            "cacheKey": ctx.cache_key,
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
 
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value=persisted), \
-             patch.object(server, "_is_persisted_snapshot_usable", return_value=True), \
+        with patch.object(server, "_cached_freshness_resolution", side_effect=[
+            {"snapshot": None, "source": None},
+            {"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "live"},
+        ]), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[persisted]) as load_mock, \
              patch.object(server, "_is_persisted_snapshot_fresh", return_value=True), \
-             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
-             patch.object(server, "_ensure_background_freshness_refresh", return_value=True) as freshness_refresh_mock:
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock:
             payload = server._build_dashboard_response_payload(None, None)
 
         self.assertEqual(payload["meta"]["cacheSource"], "persisted")
@@ -60,92 +89,58 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["defaultResolutionPath"], "persisted_alias")
         self.assertEqual(payload["meta"]["persistedReadStatus"], "hit")
         self.assertEqual(payload["meta"]["trustedEndDate"], "2026-03-22")
+        load_mock.assert_called_once_with(server._DASHBOARD_DEFAULT_ALIAS_PATH)
         prime_mock.assert_called_once()
-        freshness_refresh_mock.assert_called_once()
 
-    def test_explicit_range_serves_persisted_stale_and_triggers_refresh(self) -> None:
-        ctx = self._ctx()
-        persisted = {
+    def test_default_dashboard_uses_exact_default_artifact_when_alias_cache_key_mismatches(self) -> None:
+        current_ctx = self._ctx()
+        previous_ctx = self._ctx(end=date(2026, 3, 21))
+        alias_snapshot = {
             "status": "hit",
-            "readMs": 11.2,
+            "readMs": 11.0,
             "snapshot": self._snapshot(),
             "meta": self._meta(),
-            "ctx": ctx,
+            "ctx": previous_ctx,
+            "cacheKey": previous_ctx.cache_key,
+            "snapshotBuiltAt": datetime(2026, 3, 21, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-21",
+        }
+        exact_snapshot = {
+            "status": "hit",
+            "readMs": 7.5,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(),
+            "ctx": current_ctx,
+            "cacheKey": current_ctx.cache_key,
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
 
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=current_ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=current_ctx), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value=persisted), \
-             patch.object(server, "_is_persisted_snapshot_fresh", return_value=False), \
-             patch.object(server, "_is_persisted_snapshot_usable", return_value=True), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[alias_snapshot, exact_snapshot]), \
+             patch.object(server, "_is_persisted_snapshot_fresh", return_value=True), \
              patch.object(server, "prime_dashboard_snapshot") as prime_mock:
-            payload = server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
+            payload = server._build_dashboard_response_payload(None, None)
 
         self.assertEqual(payload["meta"]["cacheSource"], "persisted")
-        self.assertTrue(payload["meta"]["isStale"])
-        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_stale_while_revalidate")
-        self.assertEqual(payload["meta"]["fallbackReason"], "exact_stale_snapshot")
-        self.assertFalse(payload["meta"]["refreshSuppressed"])
-        refresh_mock.assert_called_once()
+        self.assertEqual(payload["meta"]["defaultResolutionPath"], "persisted_exact_default")
+        self.assertEqual(payload["meta"]["persistedReadStatus"], "hit")
+        self.assertEqual(payload["meta"]["persistedReadMs"], 7.5)
         prime_mock.assert_called_once()
 
-    def test_missing_snapshot_returns_warming_and_background_refresh_only(self) -> None:
-        ctx = self._ctx()
-
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
-             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
-             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock, \
-             patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
-
-        refresh_mock.assert_called_once_with(ctx)
-        rebuild_mock.assert_not_called()
-        persist_mock.assert_not_called()
-
-    def test_missing_historical_snapshot_returns_warming_without_fastpath_build(self) -> None:
-        ctx = self._ctx()
-        fast_meta = self._meta(cache_status="historical_fastpath_uncached")
-        fast_meta["degradedTiers"] = ["network", "comparative"]
-        fast_meta["skippedTiers"] = ["comparative", "network"]
-
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
-             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
-             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
-             patch.object(server, "_should_use_historical_fastpath", return_value=True), \
-             patch.object(server, "build_dashboard_snapshot_once", return_value=(self._snapshot(), fast_meta)) as fastpath_mock, \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
-
-        fastpath_mock.assert_not_called()
-        refresh_mock.assert_called_once_with(ctx)
-        rebuild_mock.assert_not_called()
-
-    def test_default_dashboard_does_not_use_recent_persisted_fallback_when_alias_missing(self) -> None:
+    def test_default_dashboard_alias_cache_key_mismatch_returns_warming_when_exact_default_is_missing(self) -> None:
         current_ctx = self._ctx()
-        fallback_ctx = SimpleNamespace(
-            from_date=datetime(2026, 3, 7, tzinfo=timezone.utc).date(),
-            to_date=datetime(2026, 3, 21, tzinfo=timezone.utc).date(),
-            days=15,
-            is_operational=False,
-            range_label="2026-03-07..2026-03-21",
-            cache_key="2026-03-07:2026-03-21",
-        )
-        fallback = {
+        previous_ctx = self._ctx(end=date(2026, 3, 21))
+        alias_snapshot = {
             "status": "hit",
-            "readMs": 18.6,
+            "readMs": 9.1,
             "snapshot": self._snapshot(),
-            "meta": self._meta(is_stale=True),
-            "ctx": fallback_ctx,
+            "meta": self._meta(),
+            "ctx": previous_ctx,
+            "cacheKey": previous_ctx.cache_key,
             "snapshotBuiltAt": datetime(2026, 3, 21, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-21",
         }
@@ -154,47 +149,66 @@ class DashboardPersistedCacheTests(unittest.TestCase):
              patch.object(server, "_trusted_end_date_from_freshness", return_value=current_ctx.to_date), \
              patch.object(server, "_dashboard_context_from_trusted_end", return_value=current_ctx), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
-             patch.object(server, "_load_recent_default_dashboard_snapshot", return_value=fallback), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[alias_snapshot, {"status": "miss", "readMs": 4.5}]), \
              patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock:
             with self.assertRaises(server.DashboardWarmingError):
                 server._build_dashboard_response_payload(None, None)
 
         refresh_mock.assert_called_once_with(current_ctx)
         prime_mock.assert_not_called()
-        rebuild_mock.assert_not_called()
 
-    def test_default_dashboard_cold_miss_returns_warming_when_alias_and_recent_fallback_are_missing(self) -> None:
+    def test_explicit_range_does_not_use_durable_default_artifact(self) -> None:
         ctx = self._ctx()
-        live_freshness = {
-            "snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"},
-            "source": "live",
-        }
 
-        with patch.object(server, "_cached_freshness_resolution", side_effect=[
-            {"snapshot": None, "source": None},
-            live_freshness,
-        ]), \
-             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
-             patch.object(server, "_dashboard_context_from_trusted_end", return_value=ctx), \
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
+             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[
-                 {"status": "miss", "readMs": 5.2},
-                 {"status": "miss", "readMs": 4.5},
-             ]), \
-             patch.object(server, "_load_recent_default_dashboard_snapshot", return_value={"status": "miss", "readMs": 6.1}) as fallback_mock, \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock, \
-             patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
+             patch.object(server, "_load_persisted_dashboard_snapshot") as load_mock, \
+             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock:
             with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload(None, None)
+                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
 
-        fallback_mock.assert_called_once_with(ctx.to_date)
+        load_mock.assert_not_called()
         refresh_mock.assert_called_once_with(ctx)
-        rebuild_mock.assert_not_called()
-        persist_mock.assert_not_called()
+
+    def test_load_persisted_dashboard_snapshot_round_trips_runtime_json(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+        payload = server._dashboard_artifact_payload(
+            ctx,
+            self._snapshot(),
+            self._meta(),
+            trusted_end_date=ctx.to_date.isoformat(),
+        )
+        writer.save_runtime_json(server._DASHBOARD_DEFAULT_ALIAS_PATH, payload)
+
+        with patch.object(server, "get_supabase_writer", return_value=writer):
+            loaded = server._load_persisted_dashboard_snapshot(server._DASHBOARD_DEFAULT_ALIAS_PATH)
+
+        self.assertEqual(loaded["status"], "hit")
+        self.assertEqual(loaded["cacheKey"], ctx.cache_key)
+        self.assertEqual(loaded["trustedEndDate"], ctx.to_date.isoformat())
+        self.assertEqual(loaded["snapshot"]["communityHealth"]["score"], 72)
+
+    def test_persist_dashboard_snapshot_sync_writes_exact_and_alias_for_current_default(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server, "_is_canonical_default_context", return_value=True):
+            result = server._persist_dashboard_snapshot_sync(
+                ctx,
+                self._snapshot(),
+                self._meta(),
+                trusted_end_date=ctx.to_date.isoformat(),
+                write_default_alias=True,
+            )
+
+        self.assertTrue(result["exactSaved"])
+        self.assertTrue(result["aliasSaved"])
+        self.assertIn(server._dashboard_snapshot_storage_path(ctx.cache_key), writer.payloads)
+        self.assertIn(server._DASHBOARD_DEFAULT_ALIAS_PATH, writer.payloads)
 
 
 if __name__ == "__main__":

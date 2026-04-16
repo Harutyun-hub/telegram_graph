@@ -109,6 +109,29 @@ class DashboardRefreshState:
 
 
 _refresh_states: Dict[str, DashboardRefreshState] = {}
+_refresh_complete_callback: Optional[Callable[[str, DashboardDateContext, dict, DashboardCacheMeta], None]] = None
+
+
+def set_dashboard_refresh_complete_callback(
+    callback: Optional[Callable[[str, DashboardDateContext, dict, DashboardCacheMeta], None]],
+) -> None:
+    global _refresh_complete_callback
+    _refresh_complete_callback = callback
+
+
+def _emit_refresh_complete(
+    cache_key: str,
+    ctx: DashboardDateContext,
+    snapshot: dict,
+    meta: DashboardCacheMeta,
+) -> None:
+    callback = _refresh_complete_callback
+    if callback is None:
+        return
+    try:
+        callback(cache_key, ctx, snapshot, dict(meta))
+    except Exception as exc:
+        logger.warning(f"Dashboard refresh completion callback failed | key={cache_key} error={exc}")
 _detail_refresh_states: Dict[str, DashboardRefreshState] = {}
 
 
@@ -862,6 +885,7 @@ def _refresh_dashboard_snapshot(
                 build_meta["refreshFailureCount"] = 0
                 _cache_entries[cache_key] = (time.time(), data, build_meta)
 
+        _emit_refresh_complete(cache_key, ctx, data, build_meta)
         logger.success(f"Dashboard data assembled in {elapsed}s ({mode}) | key={cache_key} tiers={tier_times}")
         return data, _with_refresh_state(cache_key, build_meta)
     except Exception as exc:
