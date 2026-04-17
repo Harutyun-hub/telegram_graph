@@ -191,6 +191,47 @@ def _critical_fallback_tiers(tier_names: list[str] | None) -> list[str]:
     return [name for name in tier_names if name in CRITICAL_TIERS]
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _pulse_brief_volume(snapshot: Optional[dict]) -> int:
+    if not isinstance(snapshot, dict):
+        return 0
+    brief = snapshot.get("communityBrief")
+    if not isinstance(brief, dict) or not brief:
+        return 0
+    total_analyses = _to_int(brief.get("totalAnalyses24h"))
+    analyzed_units = _to_int(brief.get("postsAnalyzed24h")) + _to_int(brief.get("commentScopesAnalyzed24h"))
+    raw_volume = _to_int(brief.get("postsLast24h")) + _to_int(brief.get("commentsLast24h"))
+    return max(total_analyses, analyzed_units, raw_volume)
+
+
+def _snapshot_has_usable_pulse_data(snapshot: Optional[dict]) -> bool:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    health = snapshot.get("communityHealth")
+    trending = snapshot.get("trendingTopics")
+    health_components = health.get("components") if isinstance(health, dict) else None
+    has_health_components = isinstance(health_components, list) and len(health_components) > 0
+    has_trending = isinstance(trending, list) and len(trending) > 0
+    return _pulse_brief_volume(snapshot) > 0 and (has_health_components or has_trending)
+
+
+def _snapshot_is_materially_empty_pulse(snapshot: Optional[dict]) -> bool:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return True
+    health = snapshot.get("communityHealth")
+    trending = snapshot.get("trendingTopics")
+    health_components = health.get("components") if isinstance(health, dict) else None
+    has_health_components = isinstance(health_components, list) and len(health_components) > 0
+    has_trending = isinstance(trending, list) and len(trending) > 0
+    return _pulse_brief_volume(snapshot) <= 0 and not has_health_components and not has_trending
+
+
 def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
     if not isinstance(snapshot, dict) or not snapshot:
         return False
@@ -218,13 +259,6 @@ def _snapshot_has_core_pulse_data(snapshot: Optional[dict]) -> bool:
     return has_brief_volume and has_health_shape and len(trending) > 0
 
 
-def _to_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _should_bypass_cached_snapshot(snapshot: Optional[dict], meta: Optional[DashboardCacheMeta]) -> bool:
     if not isinstance(meta, dict):
         return False
@@ -239,22 +273,25 @@ def _should_preserve_existing_cache(
     existing_cache: Optional[dict],
     new_snapshot: dict,
     tier_times: Dict[str, Optional[float]],
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, str | None, list[str]]:
     fallback = _fallback_tiers(tier_times)
+    if not _snapshot_has_usable_pulse_data(existing_cache):
+        return False, None, fallback
+
+    if _snapshot_is_materially_empty_pulse(new_snapshot):
+        return True, "empty_pulse", fallback
+
     if not fallback:
-        return False, fallback
+        return False, None, fallback
 
     critical_fallback = any(name in CRITICAL_TIERS for name in fallback)
     if not critical_fallback:
-        return False, fallback
-
-    if not _snapshot_has_core_pulse_data(existing_cache):
-        return False, fallback
+        return False, None, fallback
 
     if _snapshot_has_core_pulse_data(new_snapshot):
-        return False, fallback
+        return False, None, fallback
 
-    return True, fallback
+    return True, "critical_fallback", fallback
 
 
 def _is_cache_valid(cache_key: str, now: Optional[float] = None) -> bool:
@@ -848,9 +885,10 @@ def _refresh_dashboard_snapshot(
 
         with _cache_lock:
             preserve_existing = False
+            preserve_reason: str | None = None
             fallback_tiers: list[str] = []
             if stale_snapshot is not None:
-                preserve_existing, fallback_tiers = _should_preserve_existing_cache(
+                preserve_existing, preserve_reason, fallback_tiers = _should_preserve_existing_cache(
                     existing_cache=stale_snapshot,
                     new_snapshot=data,
                     tier_times=tier_times,
@@ -858,14 +896,25 @@ def _refresh_dashboard_snapshot(
             if preserve_existing and stale_snapshot is not None and stale_ts is not None:
                 failure_count = _record_refresh_failure(
                     cache_key,
-                    f"critical tier fallback preserved previous cache: {fallback_tiers}",
-                )
-                logger.warning(
-                    "Dashboard rebuild preserved previous range cache because critical tiers fell back "
-                    f"({fallback_tiers}); key={cache_key} elapsed={elapsed}s mode={mode}"
+                    (
+                        f"same-key pulse-empty rebuild preserved previous cache"
+                        if preserve_reason == "empty_pulse"
+                        else f"critical tier fallback preserved previous cache: {fallback_tiers}"
+                    ),
                 )
                 preserved_meta = dict(stale_meta or {})
-                preserved_meta["cacheStatus"] = "preserved_previous_on_fallback"
+                if preserve_reason == "empty_pulse":
+                    logger.warning(
+                        "Dashboard rebuild preserved previous range cache because the new same-key pulse payload "
+                        f"was materially empty | key={cache_key} elapsed={elapsed}s mode={mode}"
+                    )
+                    preserved_meta["cacheStatus"] = "preserved_previous_on_empty_pulse"
+                else:
+                    logger.warning(
+                        "Dashboard rebuild preserved previous range cache because critical tiers fell back "
+                        f"({fallback_tiers}); key={cache_key} elapsed={elapsed}s mode={mode}"
+                    )
+                    preserved_meta["cacheStatus"] = "preserved_previous_on_fallback"
                 preserved_meta["isStale"] = True
                 preserved_meta["suppressedDegradedTiers"] = fallback_tiers
                 preserved_meta["refreshFailureCount"] = failure_count

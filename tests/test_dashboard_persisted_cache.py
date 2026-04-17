@@ -57,7 +57,29 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         }
 
     def _snapshot(self) -> dict:
-        return {"communityHealth": {"score": 72}}
+        return {
+            "communityBrief": {
+                "totalAnalyses24h": 72,
+                "postsAnalyzed24h": 48,
+                "commentScopesAnalyzed24h": 24,
+            },
+            "communityHealth": {
+                "score": 72,
+                "components": [{"label": "Sentiment", "score": 72}],
+            },
+            "trendingTopics": [{"name": "Housing"}],
+        }
+
+    def _empty_pulse_snapshot(self) -> dict:
+        return {
+            "communityBrief": {
+                "totalAnalyses24h": 0,
+                "postsAnalyzed24h": 0,
+                "commentScopesAnalyzed24h": 0,
+            },
+            "communityHealth": {"score": 50, "components": []},
+            "trendingTopics": [],
+        }
 
     def test_canonical_default_persistence_gate_allows_strategic_degradation_but_keeps_pulse_required(self) -> None:
         ctx = self._ctx()
@@ -248,6 +270,37 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertTrue(result["aliasSaved"])
         self.assertIn(server._dashboard_snapshot_storage_path(ctx.cache_key), writer.payloads)
         self.assertIn(server._DASHBOARD_DEFAULT_ALIAS_PATH, writer.payloads)
+
+    def test_persist_dashboard_snapshot_sync_does_not_overwrite_richer_same_key_artifact_with_empty_pulse(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+        existing = {
+            "status": "hit",
+            "readMs": 3.0,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(),
+            "ctx": ctx,
+            "cacheKey": ctx.cache_key,
+            "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
+            "trustedEndDate": ctx.to_date.isoformat(),
+        }
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server, "_is_canonical_default_context", return_value=True), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[existing, {"status": "miss", "readMs": 1.0}]):
+            result = server._persist_dashboard_snapshot_sync(
+                ctx,
+                self._empty_pulse_snapshot(),
+                self._meta(),
+                trusted_end_date=ctx.to_date.isoformat(),
+                write_default_alias=True,
+            )
+
+        self.assertFalse(result["exactSaved"])
+        self.assertFalse(result["aliasSaved"])
+        self.assertEqual(result["skipped"], "preserve_existing_on_empty_pulse")
+        self.assertEqual(result["preservedSource"], "exact")
+        self.assertEqual(writer.payloads, {})
 
     def test_persist_dashboard_snapshot_sync_writes_canonical_default_with_truthful_strategic_degradation(self) -> None:
         writer = _FakeRuntimeWriter()

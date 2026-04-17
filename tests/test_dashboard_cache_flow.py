@@ -134,6 +134,61 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertTrue(second_meta["isStale"])
         refresh_mock.assert_called_once_with(ctx.cache_key, ctx)
 
+    def test_same_key_empty_pulse_rebuild_preserves_richer_previous_snapshot(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        stale_snapshot = {
+            "communityBrief": {"totalAnalyses24h": 128, "postsAnalyzed24h": 90},
+            "communityHealth": {
+                "score": 64,
+                "components": [{"label": "Sentiment", "score": 64}],
+            },
+            "trendingTopics": [{"name": "Housing"}],
+        }
+        stale_meta = {
+            "cacheStatus": "refresh_success",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 1.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 2.1,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
+        empty_pulse_snapshot = {
+            "communityBrief": {
+                "totalAnalyses24h": 0,
+                "postsAnalyzed24h": 0,
+                "commentScopesAnalyzed24h": 0,
+            },
+            "communityHealth": {"score": 50, "components": []},
+            "trendingTopics": [],
+        }
+        tier_times = {
+            "pulse": 1.2,
+            "strategic": 1.0,
+            "behavioral": 1.0,
+            "network": 1.1,
+            "psychographic": 1.0,
+            "predictive": 1.0,
+            "actionable": 1.0,
+            "comparative": 1.0,
+            "derived": 0.0,
+        }
+        with aggregator._cache_lock:
+            aggregator._cache_entries[ctx.cache_key] = (aggregator.time.time(), stale_snapshot, stale_meta)
+
+        with patch.object(
+            aggregator,
+            "_build_snapshot_with_timeout",
+            return_value=(empty_pulse_snapshot, tier_times, 8.2, "parallel"),
+        ):
+            snapshot, meta = aggregator.get_dashboard_snapshot(ctx, force_refresh=True)
+
+        self.assertEqual(snapshot, stale_snapshot)
+        self.assertEqual(meta["cacheStatus"], "preserved_previous_on_empty_pulse")
+        self.assertTrue(meta["isStale"])
+
     def test_schedule_dashboard_snapshot_refresh_is_single_flight_per_key(self) -> None:
         ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
         thread_starts: list[str] = []

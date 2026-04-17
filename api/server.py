@@ -1739,6 +1739,26 @@ def _should_persist_dashboard_snapshot_for_context(
     return not bool(degraded.intersection(persistence_critical))
 
 
+def _current_canonical_snapshot_to_preserve_on_empty_pulse(
+    ctx,
+    *,
+    trusted_end_date: str,
+) -> dict[str, Any] | None:
+    if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
+        return None
+
+    candidates = [
+        ("exact", _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))),
+        ("alias", _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)),
+    ]
+    for source, loaded in candidates:
+        if not _persisted_snapshot_matches_context(loaded, ctx, trusted_end_date=trusted_end_date):
+            continue
+        if dashboard_aggregator._snapshot_has_usable_pulse_data(loaded.get("snapshot")):
+            return {"source": source, "snapshot": loaded}
+    return None
+
+
 def _is_canonical_default_context(ctx, *, trusted_end_date: str | None = None) -> bool:
     cache_key = getattr(ctx, "cache_key", None)
     if not cache_key:
@@ -1771,6 +1791,24 @@ def _persist_dashboard_snapshot_sync(
         return {"exactSaved": False, "aliasSaved": False, "skipped": "meta_gate"}
     if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
         return {"exactSaved": False, "aliasSaved": False, "skipped": "not_current_default"}
+    if dashboard_aggregator._snapshot_is_materially_empty_pulse(snapshot):
+        preserved = _current_canonical_snapshot_to_preserve_on_empty_pulse(
+            ctx,
+            trusted_end_date=trusted_end_date,
+        )
+        if preserved is not None:
+            logger.warning(
+                "Skipped persisting canonical default dashboard artifact because the new same-key pulse payload "
+                "was materially empty | key={} preserved_source={}",
+                ctx.cache_key,
+                preserved.get("source"),
+            )
+            return {
+                "exactSaved": False,
+                "aliasSaved": False,
+                "skipped": "preserve_existing_on_empty_pulse",
+                "preservedSource": preserved.get("source"),
+            }
 
     payload = _dashboard_artifact_payload(
         ctx,
