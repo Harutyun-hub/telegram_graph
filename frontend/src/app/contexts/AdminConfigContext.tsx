@@ -34,7 +34,7 @@ export function AdminConfigProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const canLoadRemoteConfig = !authLoading && authMode === 'supabase' && isAuthenticated;
+  const canLoadRemoteConfig = !authLoading && isAuthenticated && authMode !== 'none';
 
   const refresh = useCallback(async () => {
     if (!canLoadRemoteConfig) {
@@ -60,7 +60,7 @@ export function AdminConfigProvider({ children }: { children: ReactNode }) {
 
   const updateConfig = useCallback(async (patch: AdminConfigPatch) => {
     if (!canLoadRemoteConfig) {
-      const message = 'Admin configuration requires an operator Supabase session.';
+      const message = 'Admin configuration requires an authenticated operator session.';
       setError(message);
       throw new Error(message);
     }

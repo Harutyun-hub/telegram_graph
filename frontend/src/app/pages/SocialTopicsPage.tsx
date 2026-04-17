@@ -294,7 +294,7 @@ function buildSocialOverview(
 
 export function SocialTopicsPage() {
   const { lang } = useLanguage();
-  const { authMode } = useAuth();
+  const { isAuthenticated } = useAuth();
   const { range } = useDashboardDateRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const ru = lang === 'ru';
@@ -369,7 +369,6 @@ export function SocialTopicsPage() {
     setProofView(requestedView === 'questions' ? 'questions' : 'evidence');
   }, [requestedView]);
 
-  const usingSupabaseSession = authMode === 'supabase';
   const accessDenied = listAccessDenied || detailAccessDenied;
   const totalMentions = topicViewModels.reduce((sum, topic) => sum + topic.count, 0);
   const requestedTopicMissing = Boolean(requestedTopic && !topicsLoading && !selectedTopic);
@@ -455,13 +454,13 @@ export function SocialTopicsPage() {
     setSearchParams(next);
   };
 
-  if (!usingSupabaseSession) {
+  if (!isAuthenticated) {
     return (
       <SocialAccessDeniedState
-        title={ru ? 'Для Social Topics нужен вход через Supabase' : 'Social Topics requires a Supabase sign-in'}
+        title={ru ? 'Для Social Topics нужен вход оператора' : 'Social Topics requires an operator sign-in'}
         description={ru
-          ? 'Текущая локальная сессия не передаёт Supabase user token в operator-only social endpoints. Выйдите и войдите через Supabase-аккаунт оператора, чтобы открыть social topic evidence.'
-          : 'The current local session does not send a Supabase user token to the operator-only social endpoints. Sign out and sign back in with the operator Supabase account to inspect social topic evidence.'}
+          ? 'Войдите под операторской учётной записью, чтобы открыть social topic evidence.'
+          : 'Sign in with the operator credentials to inspect social topic evidence.'}
       />
     );
   }

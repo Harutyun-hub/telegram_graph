@@ -8,9 +8,13 @@ import {
   validateSimpleCredentials,
 } from '../auth';
 
+type AuthMode = 'simple' | 'none';
+
 interface AuthContextValue {
   isAuthenticated: boolean;
   username: string | null;
+  loading: boolean;
+  authMode: AuthMode;
   login: (username: string, password: string) => boolean;
   logout: () => void;
 }
@@ -45,6 +49,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         isAuthenticated: Boolean(session),
         username: session?.username ?? null,
+        loading: false,
+        authMode: session ? 'simple' : 'none',
         login,
         logout,
       }}

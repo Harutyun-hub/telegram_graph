@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apiFetch, kbListCollections, kbUploadDocument } from './api';
 
-const getSession = vi.fn();
-const buildSimpleAuthApiAuthorization = vi.fn();
+const { getSession, buildSimpleAuthApiAuthorization } = vi.hoisted(() => ({
+  getSession: vi.fn(),
+  buildSimpleAuthApiAuthorization: vi.fn(),
+}));
 
 vi.mock('../auth', () => ({
   buildSimpleAuthApiAuthorization,

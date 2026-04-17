@@ -1,10 +1,16 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { isSimpleAuthEnabled } from '../auth';
 
 let browserClient: SupabaseClient | null | undefined;
 const viteEnv = import.meta.env as Record<string, string | boolean | undefined>;
 
 export function getSupabaseBrowserClient(): SupabaseClient | null {
   if (browserClient !== undefined) {
+    return browserClient;
+  }
+
+  if (isSimpleAuthEnabled()) {
+    browserClient = null;
     return browserClient;
   }
 

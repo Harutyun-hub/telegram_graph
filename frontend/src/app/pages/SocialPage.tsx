@@ -185,7 +185,7 @@ const TIERS: TierConfig[] = [
 export function SocialPage() {
   const navigate = useNavigate();
   const { lang } = useLanguage();
-  const { authMode } = useAuth();
+  const { isAuthenticated } = useAuth();
   const { range } = useDashboardDateRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
@@ -219,8 +219,6 @@ export function SocialPage() {
     business: true,
     analytics: true,
   });
-
-  const usingSupabaseSession = authMode === 'supabase';
 
   const {
     overview,
@@ -321,13 +319,13 @@ export function SocialPage() {
     };
   }, [evidenceRequest, filters, ru]);
 
-  if (!usingSupabaseSession) {
+  if (!isAuthenticated) {
     return (
       <SocialAccessDeniedState
-        title={ru ? 'Для Social нужен вход через Supabase' : 'Social requires a Supabase sign-in'}
+        title={ru ? 'Для Social нужен вход оператора' : 'Social requires an operator sign-in'}
         description={ru
-          ? 'Текущая локальная сессия не передаёт Supabase user token в operator-only social endpoints. Выйдите и войдите через Supabase-аккаунт оператора, чтобы открыть social dashboard.'
-          : 'The current local session does not send a Supabase user token to the operator-only social endpoints. Sign out and sign back in with the operator Supabase account to open the social dashboard.'}
+          ? 'Войдите под операторской учётной записью, чтобы открыть social dashboard.'
+          : 'Sign in with the operator credentials to open the social dashboard.'}
       />
     );
   }
