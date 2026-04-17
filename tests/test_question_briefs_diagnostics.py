@@ -202,5 +202,112 @@ class QuestionBriefDiagnosticsTests(unittest.TestCase):
         self.assertEqual(diagnostics["snapshot"]["writeSucceeded"], True)
         self.assertEqual(diagnostics["snapshot"]["loadedCards"], 1)
 
+    def test_refresh_preserves_existing_card_on_transient_materialization_failure(self) -> None:
+        previous_card = {
+            "clusterId": "qc-visa-support",
+            "id": "qc-qc-visa-support",
+            "topic": "Visa Support",
+            "category": "Legal",
+            "canonicalQuestionEn": "How can people renew a visa in Armenia without conflicting instructions?",
+            "canonicalQuestionRu": "Как людям продлить визу в Армении без противоречивых инструкций?",
+            "summaryEn": "People repeatedly ask for a clear visa-renewal process.",
+            "summaryRu": "Люди постоянно просят понятный процесс продления визы.",
+            "confidence": "high",
+            "confidenceScore": 0.86,
+            "status": "needs_guide",
+            "resolvedPct": 22,
+            "demandSignals": {
+                "messages": 6,
+                "uniqueUsers": 3,
+                "channels": 2,
+                "trend7dPct": 55,
+            },
+            "sampleEvidenceId": "ev-1",
+            "latestAt": "2026-03-19T10:00:00Z",
+            "evidence": [
+                {
+                    "id": "ev-1",
+                    "quote": "How do I renew my visa in Armenia?",
+                    "channel": "chan-a",
+                    "timestamp": "2026-03-18T10:00:00Z",
+                    "kind": "comment",
+                },
+                {
+                    "id": "ev-2",
+                    "quote": "Where can I extend my visa in Yerevan?",
+                    "channel": "chan-b",
+                    "timestamp": "2026-03-19T10:00:00Z",
+                    "kind": "comment",
+                },
+            ],
+        }
+        saved_state: dict = {}
+        saved_snapshot: dict = {}
+
+        def _fake_save_state(state: dict) -> bool:
+            saved_state.clear()
+            saved_state.update(state)
+            return True
+
+        def _fake_save_snapshot(cards: list[dict], metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
+            saved_snapshot["cards"] = list(cards)
+            saved_snapshot["metadata"] = dict(metadata or {})
+            if isinstance(diagnostics, dict):
+                diagnostics["snapshot"]["writeAttempted"] = True
+                diagnostics["snapshot"]["writeSucceeded"] = True
+                diagnostics["snapshot"]["readbackCards"] = len(cards)
+            return True
+
+        invalid_synth_rows = [
+            {
+                "clusterId": "qc-visa-support",
+                "canonicalQuestionEn": "Visa renewal instructions",
+                "canonicalQuestionRu": "Инструкции по продлению визы",
+                "summaryEn": "Not a valid question card.",
+                "summaryRu": "Это невалидная карточка вопроса.",
+                "confidence": "high",
+                "confidenceScore": 0.95,
+                "evidenceIds": ["ev-1", "ev-2"],
+            }
+        ]
+
+        existing_state = {
+            "schemaVersion": 1,
+            "clusters": {
+                "qc-visa-support": {
+                    "fingerprint": "stale-fingerprint",
+                    "status": "accepted",
+                    "updatedAt": "2026-03-20T10:00:00Z",
+                    "card": previous_card,
+                    "topic": "Visa Support",
+                }
+            },
+        }
+
+        with patch.object(question_briefs.strategic, "get_question_brief_candidates", return_value=[_candidate_row()]), \
+             patch.object(question_briefs, "_acquire_refresh_lease", return_value=True), \
+             patch.object(question_briefs, "_load_state", return_value=existing_state), \
+             patch.object(question_briefs, "_save_state", side_effect=_fake_save_state), \
+             patch.object(question_briefs, "_save_snapshot_cards", side_effect=_fake_save_snapshot), \
+             patch.object(question_briefs, "_load_snapshot_cards", return_value=[]), \
+             patch.object(question_briefs, "_synthesize_cards", return_value=invalid_synth_rows), \
+             patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES", 2), \
+             patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_USERS", 2), \
+             patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_CHANNELS", 2):
+            diagnostics = question_briefs.refresh_question_briefs_with_diagnostics(force=True)
+
+        self.assertEqual(diagnostics["cardsProduced"], 1)
+        self.assertEqual(diagnostics["stages"]["finalCards"], 1)
+        self.assertEqual(diagnostics["firstRejectionBucket"], "invalid_question_form")
+        self.assertEqual(saved_snapshot["cards"], [previous_card])
+        self.assertEqual(
+            saved_state["clusters"]["qc-visa-support"]["card"]["id"],
+            previous_card["id"],
+        )
+        self.assertEqual(
+            saved_state["clusters"]["qc-visa-support"]["fingerprint"],
+            "stale-fingerprint",
+        )
+
 if __name__ == "__main__":
     unittest.main()

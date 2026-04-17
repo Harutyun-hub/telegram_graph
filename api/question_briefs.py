@@ -1321,6 +1321,7 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
         if not cid:
             continue
         fingerprint = fingerprints.get(cid, "")
+        previous_record = cluster_state.get(cid) if isinstance(cluster_state, dict) else None
         card = cards_by_cluster.get(cid)
         if card:
             next_cluster_state[cid] = {
@@ -1333,6 +1334,17 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
             continue
 
         decision = triage.get(cid, {})
+        if (
+            isinstance(previous_record, dict)
+            and _as_str(previous_record.get("status"), "") == "accepted"
+            and isinstance(previous_record.get("card"), dict)
+            and _as_str(decision.get("status"), "") != "rejected"
+        ):
+            # Keep the previous accepted card visible until we either replace it
+            # with a new grounded card or receive an explicit rejection.
+            next_cluster_state[cid] = previous_record
+            continue
+
         next_cluster_state[cid] = {
             "fingerprint": fingerprint,
             "status": "rejected",
