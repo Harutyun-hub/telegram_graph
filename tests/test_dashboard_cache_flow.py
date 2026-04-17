@@ -320,57 +320,89 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         self.assertFalse(payload["meta"]["refreshSuppressed"])
         schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_returns_fast_warming_without_foreground_rebuild(self) -> None:
+    def test_dashboard_exact_miss_builds_synchronously_and_returns_200(self) -> None:
+        built_snapshot = {
+            "communityHealth": {"score": 52},
+            "trendingTopics": [{"name": "Housing"}],
+            "communityBrief": {"postsAnalyzed24h": 42},
+        }
+        built_meta = {
+            "cacheStatus": "sync_exact_build",
+            "cacheSource": "rebuild",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 0.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+            "skippedTiers": [],
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
                  server,
                  "_cached_freshness_resolution",
-                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+                 return_value={"snapshot": {"generated_at": "2026-04-06T00:00:00Z"}, "source": "memory", "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
              ), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=build_dashboard_date_context("2026-03-23", "2026-04-06").to_date), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(
                  server,
-                 "schedule_dashboard_snapshot_refresh",
-                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
-             ) as schedule_mock:
+                 "_build_exact_range_snapshot_sync",
+                 return_value=(built_snapshot, built_meta, "sync_exact_build"),
+             ) as build_mock, \
+             patch.object(server, "schedule_dashboard_snapshot_refresh") as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("warming", response.text.lower())
-        schedule_mock.assert_called_once()
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["from"], "2026-03-31")
+        self.assertEqual(payload["meta"]["to"], "2026-04-06")
+        self.assertEqual(payload["meta"]["rangeResolutionPath"], "sync_exact_build")
+        self.assertEqual(payload["meta"]["cacheStatus"], "sync_exact_build")
+        self.assertEqual(payload["data"]["communityHealth"]["score"], 52)
+        self.assertEqual(payload["data"]["trendingTopics"][0]["name"], "Housing")
+        build_mock.assert_called_once()
+        schedule_mock.assert_not_called()
 
-    def test_dashboard_exact_miss_requests_share_single_background_refresh(self) -> None:
-        lock = threading.Lock()
-        refresh_state = {"inflight": False, "starts": 0}
-
-        def fake_schedule(_ctx):
-            with lock:
-                if refresh_state["inflight"]:
-                    return {"started": False, "inflight": True, "suppressed": False, "failureCount": 0}
-                refresh_state["inflight"] = True
-                refresh_state["starts"] += 1
-                return {"started": True, "inflight": False, "suppressed": False, "failureCount": 0}
-
+    def test_dashboard_historical_exact_range_returns_truthful_skipped_tiers(self) -> None:
+        built_snapshot = {"communityHealth": {"score": 52}}
+        built_meta = {
+            "cacheStatus": "sync_exact_historical_fastpath",
+            "cacheSource": "rebuild",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 0.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+            "skippedTiers": ["comparative", "network", "predictive"],
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
                  server,
                  "_cached_freshness_resolution",
-                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+                 return_value={"snapshot": {"generated_at": "2026-04-15T00:00:00Z"}, "source": "memory", "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
              ), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=build_dashboard_date_context("2026-04-01", "2026-04-15").to_date), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", side_effect=fake_schedule):
-            with ThreadPoolExecutor(max_workers=6) as executor:
-                responses = list(
-                    executor.map(
-                        lambda _idx: self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06"),
-                        range(6),
-                    )
-                )
+             patch.object(
+                 server,
+                 "_build_exact_range_snapshot_sync",
+                 return_value=(built_snapshot, built_meta, "sync_exact_historical_fastpath"),
+             ) as build_mock:
+            response = self.client.get("/api/dashboard?from=2025-12-01&to=2026-01-31")
 
-        self.assertTrue(all(response.status_code == 503 for response in responses))
-        self.assertEqual(refresh_state["starts"], 1)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["rangeResolutionPath"], "sync_exact_historical_fastpath")
+        self.assertEqual(payload["meta"]["skippedTiers"], ["comparative", "network", "predictive"])
+        build_mock.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -129,6 +129,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(),
             "ctx": ctx,
             "cacheKey": ctx.cache_key,
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
@@ -162,6 +164,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
             "ctx": ctx,
             "cacheKey": ctx.cache_key,
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
@@ -194,6 +198,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
             "ctx": ctx,
             "cacheKey": ctx.cache_key,
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
@@ -228,6 +234,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
             "ctx": previous_ctx,
             "cacheKey": previous_ctx.cache_key,
+            "from": previous_ctx.from_date.isoformat(),
+            "to": previous_ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
@@ -255,6 +263,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(),
             "ctx": previous_ctx,
             "cacheKey": previous_ctx.cache_key,
+            "from": previous_ctx.from_date.isoformat(),
+            "to": previous_ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 21, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-21",
         }
@@ -265,6 +275,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(),
             "ctx": current_ctx,
             "cacheKey": current_ctx.cache_key,
+            "from": current_ctx.from_date.isoformat(),
+            "to": current_ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-22",
         }
@@ -294,6 +306,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(),
             "ctx": previous_ctx,
             "cacheKey": previous_ctx.cache_key,
+            "from": previous_ctx.from_date.isoformat(),
+            "to": previous_ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 21, tzinfo=timezone.utc),
             "trustedEndDate": "2026-03-21",
         }
@@ -311,18 +325,61 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         refresh_mock.assert_called_once_with(current_ctx)
         prime_mock.assert_not_called()
 
-    def test_explicit_range_does_not_use_durable_default_artifact(self) -> None:
+    def test_explicit_range_uses_exact_artifact_only_and_builds_sync_on_miss(self) -> None:
         ctx = server.build_dashboard_date_context("2026-03-18", "2026-03-22")
+        built_meta = self._meta(cache_status="sync_exact_build")
 
-        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=self._ctx()), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "_load_persisted_dashboard_snapshot") as load_mock, \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-18", "2026-03-22")
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}) as load_mock, \
+             patch.object(server, "_build_exact_range_snapshot_sync", return_value=(self._snapshot(), built_meta, "sync_exact_build")) as build_mock, \
+             patch.object(server, "schedule_dashboard_snapshot_refresh") as refresh_mock:
+            payload = server._build_dashboard_response_payload("2026-03-18", "2026-03-22")
 
-        load_mock.assert_not_called()
-        refresh_mock.assert_called_once_with(ctx)
+        self.assertEqual(payload["meta"]["from"], "2026-03-18")
+        self.assertEqual(payload["meta"]["to"], "2026-03-22")
+        self.assertEqual(payload["meta"]["rangeResolutionPath"], "sync_exact_build")
+        self.assertEqual(payload["meta"]["cacheStatus"], "sync_exact_build")
+        self.assertEqual(payload["meta"]["cacheSource"], "rebuild")
+        self.assertIsNone(payload["meta"]["defaultResolutionPath"])
+        load_mock.assert_called_once_with(server._dashboard_snapshot_storage_path(ctx.cache_key))
+        build_mock.assert_called_once_with(ctx, trusted_end_date="2026-03-22")
+        refresh_mock.assert_not_called()
+
+    def test_explicit_non_canonical_range_serves_exact_artifact_as_last_known_good_when_expired(self) -> None:
+        ctx = server.build_dashboard_date_context("2026-03-18", "2026-03-22")
+        persisted = {
+            "status": "hit",
+            "readMs": 14.2,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
+            "ctx": ctx,
+            "cacheKey": ctx.cache_key,
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
+            "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-22",
+        }
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=self._ctx()), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value=persisted), \
+             patch.object(server, "_is_persisted_snapshot_fresh", return_value=False), \
+             patch.object(server, "_is_persisted_snapshot_usable", return_value=False), \
+             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}), \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock:
+            payload = server._build_dashboard_response_payload(ctx.from_date.isoformat(), ctx.to_date.isoformat())
+
+        self.assertEqual(payload["meta"]["cacheSource"], "persisted")
+        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_last_known_good")
+        self.assertEqual(payload["meta"]["rangeResolutionPath"], "persisted_exact_last_known_good")
+        self.assertIsNone(payload["meta"]["defaultResolutionPath"])
+        self.assertEqual(payload["meta"]["fallbackReason"], "current_exact_persisted_last_known_good")
+        prime_mock.assert_called_once()
 
     def test_load_persisted_dashboard_snapshot_round_trips_runtime_json(self) -> None:
         writer = _FakeRuntimeWriter()
@@ -362,6 +419,26 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertIn(server._dashboard_snapshot_storage_path(ctx.cache_key), writer.payloads)
         self.assertIn(server._DASHBOARD_DEFAULT_ALIAS_PATH, writer.payloads)
 
+    def test_persist_dashboard_snapshot_sync_writes_exact_only_for_non_canonical_range(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = server.build_dashboard_date_context("2026-03-18", "2026-03-22")
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server, "_is_canonical_default_context", return_value=False):
+            result = server._persist_dashboard_snapshot_sync(
+                ctx,
+                self._snapshot(),
+                self._meta(),
+                trusted_end_date="2026-03-22",
+                write_default_alias=True,
+            )
+
+        self.assertTrue(result["exactSaved"])
+        self.assertFalse(result["aliasSaved"])
+        exact_payload = writer.payloads[server._dashboard_snapshot_storage_path(ctx.cache_key)]
+        self.assertEqual(exact_payload["artifactType"], server._DASHBOARD_PERSISTED_EXACT_ARTIFACT_TYPE)
+        self.assertNotIn(server._DASHBOARD_DEFAULT_ALIAS_PATH, writer.payloads)
+
     def test_persist_dashboard_snapshot_sync_does_not_overwrite_richer_same_key_artifact_with_empty_pulse(self) -> None:
         writer = _FakeRuntimeWriter()
         ctx = self._ctx()
@@ -372,6 +449,8 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             "meta": self._meta(),
             "ctx": ctx,
             "cacheKey": ctx.cache_key,
+            "from": ctx.from_date.isoformat(),
+            "to": ctx.to_date.isoformat(),
             "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
             "trustedEndDate": ctx.to_date.isoformat(),
         }
@@ -414,6 +493,26 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertTrue(result["aliasSaved"])
         alias_payload = writer.payloads[server._DASHBOARD_DEFAULT_ALIAS_PATH]
         self.assertEqual(alias_payload["dashboardMeta"]["degradedTiers"], ["strategic"])
+
+    def test_build_exact_range_snapshot_sync_uses_historical_fastpath_for_long_ranges(self) -> None:
+        ctx = server.build_dashboard_date_context("2026-01-01", "2026-03-15")
+        meta = self._meta(cache_status="sync_exact_historical_fastpath")
+
+        with patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(self._snapshot(), meta)) as build_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
+             patch.object(server, "_persist_dashboard_snapshot_sync") as persist_mock:
+            _snapshot, returned_meta, resolution_path = server._build_exact_range_snapshot_sync(
+                ctx,
+                trusted_end_date="2026-04-15",
+            )
+
+        self.assertEqual(returned_meta, meta)
+        self.assertEqual(resolution_path, "sync_exact_historical_fastpath")
+        _args, kwargs = build_mock.call_args
+        self.assertEqual(kwargs["cache_status"], "sync_exact_historical_fastpath")
+        self.assertEqual(kwargs["skipped_tiers"], set(server._HISTORICAL_FASTPATH_SKIP_TIERS))
+        prime_mock.assert_called_once()
+        persist_mock.assert_called_once()
 
 
 if __name__ == "__main__":

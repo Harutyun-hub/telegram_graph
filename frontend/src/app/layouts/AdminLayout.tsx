@@ -24,6 +24,23 @@ function formatDisplayDate(dateStr: string, lang: Lang) {
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
+function formatRangeSummary(range: { from: string; to: string } | null, lang: Lang) {
+  if (!range) return '';
+  return `${formatDisplayDate(range.from, lang)} — ${formatDisplayDate(range.to, lang)}`;
+}
+function formatSkippedTierLabel(tier: string, ru: boolean) {
+  const labels: Record<string, { en: string; ru: string }> = {
+    network: { en: 'Network', ru: 'Сетевой слой' },
+    comparative: { en: 'Comparative', ru: 'Сравнительный слой' },
+    predictive: { en: 'Predictive', ru: 'Прогнозный слой' },
+    strategic: { en: 'Strategic', ru: 'Стратегический слой' },
+    behavioral: { en: 'Behavioral', ru: 'Поведенческий слой' },
+    psychographic: { en: 'Psychographic', ru: 'Психографический слой' },
+    actionable: { en: 'Actionable', ru: 'Практический слой' },
+    pulse: { en: 'Pulse', ru: 'Пульс' },
+  };
+  return labels[tier]?.[ru ? 'ru' : 'en'] ?? tier;
+}
 function useIsMobile(bp = 768) {
   const [mobile, setMobile] = useState(false);
   useEffect(() => {
@@ -213,7 +230,12 @@ export function AdminLayout() {
     loading,
     isRefreshing,
     hasLiveData,
+    isStaleForSelection,
     error,
+    dashboardMeta,
+    selectedRange,
+    visibleRange,
+    lastSuccessfulRange,
     refresh,
   } = useData();
   const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
@@ -371,6 +393,19 @@ export function AdminLayout() {
       ? 'Диапазон общий для Telegram и Social. Актуальность Social показана на самой странице.'
       : 'This date range is shared across Telegram and Social. Social freshness is shown on the page itself.')
     : (freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`));
+  const skippedTierLabels = (dashboardMeta?.skippedTiers ?? []).map((tier) => formatSkippedTierLabel(tier, ru));
+  const selectedRangeSummary = formatRangeSummary(selectedRange, lang);
+  const visibleRangeSummary = formatRangeSummary(visibleRange ?? lastSuccessfulRange, lang);
+  const showPreviousRangeBanner = Boolean(
+    hasLiveData
+    && isStaleForSelection
+    && selectedRange
+    && visibleRange
+    && (
+      selectedRange.from !== visibleRange.from
+      || selectedRange.to !== visibleRange.to
+    )
+  );
 
   // Date picker content (shared between desktop dropdown and mobile sheet)
   const DatePickerContent = () => (
@@ -692,6 +727,47 @@ export function AdminLayout() {
               </div>
             ) : (
               <>
+                {showPreviousRangeBanner ? (
+                  <div className="px-4 md:px-6 pt-4">
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="mt-0.5 w-4 h-4 text-amber-600 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-sm text-amber-950" style={{ fontWeight: 600 }}>
+                            {ru ? 'Выбранный период не загрузился' : 'Selected range did not load'}
+                          </p>
+                          <p className="text-xs text-amber-800 mt-0.5">
+                            {ru
+                              ? `Период ${selectedRangeSummary} не загрузился. Сейчас на экране остаётся предыдущий успешный период ${visibleRangeSummary}.`
+                              : `The selected range ${selectedRangeSummary} did not load. The dashboard is still showing the previous successful range ${visibleRangeSummary}.`}
+                          </p>
+                          {error && (
+                            <p className="text-xs text-amber-900 mt-1">{error}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                {hasLiveData && skippedTierLabels.length > 0 && (
+                  <div className="px-4 md:px-6 pt-4">
+                    <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 shadow-sm">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="mt-0.5 w-4 h-4 text-blue-600 flex-shrink-0" />
+                        <div className="min-w-0">
+                          <p className="text-sm text-blue-950" style={{ fontWeight: 600 }}>
+                            {ru ? 'Период загружен частично' : 'Range loaded with partial coverage'}
+                          </p>
+                          <p className="text-xs text-blue-800 mt-0.5">
+                            {ru
+                              ? `Для выбранного периода некоторые слои были намеренно пропущены: ${skippedTierLabels.join(', ')}.`
+                              : `Some sections were intentionally skipped for this range: ${skippedTierLabels.join(', ')}.`}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {hasLiveData && isRefreshing && (
                   <div className="px-4 md:px-6 pt-4">
                     <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">

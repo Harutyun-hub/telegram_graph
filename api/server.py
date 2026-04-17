@@ -196,7 +196,12 @@ _DASHBOARD_DEFAULT_ALIAS_PATH = f"{_DASHBOARD_PERSISTED_PREFIX}/default.json"
 _DASHBOARD_DEFAULT_SEED_LOCK_PREFIX = "dashboard-default-artifact-seed"
 _DASHBOARD_DEFAULT_SEED_LOCK_FLOOR_SECONDS = 300
 _DASHBOARD_PERSISTED_SCHEMA_VERSION = 1
-_DASHBOARD_PERSISTED_ARTIFACT_TYPE = "canonical_default_dashboard"
+_DASHBOARD_PERSISTED_CANONICAL_ARTIFACT_TYPE = "canonical_default_dashboard"
+_DASHBOARD_PERSISTED_EXACT_ARTIFACT_TYPE = "exact_dashboard"
+_DASHBOARD_PERSISTED_ARTIFACT_TYPES = {
+    _DASHBOARD_PERSISTED_CANONICAL_ARTIFACT_TYPE,
+    _DASHBOARD_PERSISTED_EXACT_ARTIFACT_TYPE,
+}
 _DASHBOARD_PERSISTED_READ_TIMEOUT_SECONDS = max(
     0.1,
     float(os.getenv("DASH_PERSISTED_READ_TIMEOUT_SECONDS", "1.5")),
@@ -1430,11 +1435,17 @@ def _dashboard_artifact_payload(
     meta: dict[str, Any],
     *,
     trusted_end_date: str,
+    artifact_type: str | None = None,
 ) -> dict[str, Any]:
     freshness_snapshot = _freshness_memory_snapshot() or {}
+    resolved_artifact_type = artifact_type or (
+        _DASHBOARD_PERSISTED_CANONICAL_ARTIFACT_TYPE
+        if _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date)
+        else _DASHBOARD_PERSISTED_EXACT_ARTIFACT_TYPE
+    )
     return {
         "schemaVersion": _DASHBOARD_PERSISTED_SCHEMA_VERSION,
-        "artifactType": _DASHBOARD_PERSISTED_ARTIFACT_TYPE,
+        "artifactType": resolved_artifact_type,
         "cacheKey": ctx.cache_key,
         "from": ctx.from_date.isoformat(),
         "to": ctx.to_date.isoformat(),
@@ -1460,7 +1471,12 @@ def _persisted_snapshot_matches_context(
     loaded_ctx = loaded.get("ctx")
     if loaded_ctx is None or getattr(loaded_ctx, "cache_key", None) != ctx.cache_key:
         return False
-    return str(loaded.get("trustedEndDate") or "") == str(trusted_end_date or ctx.to_date.isoformat())
+    return (
+        getattr(loaded_ctx, "from_date", None) == ctx.from_date
+        and getattr(loaded_ctx, "to_date", None) == ctx.to_date
+        and str(loaded.get("from") or "") == ctx.from_date.isoformat()
+        and str(loaded.get("to") or "") == ctx.to_date.isoformat()
+    )
 
 
 def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
@@ -1494,7 +1510,8 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
 
     if payload.get("schemaVersion") != _DASHBOARD_PERSISTED_SCHEMA_VERSION:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact schema version mismatch"}
-    if payload.get("artifactType") != _DASHBOARD_PERSISTED_ARTIFACT_TYPE:
+    artifact_type = str(payload.get("artifactType") or "").strip()
+    if artifact_type not in _DASHBOARD_PERSISTED_ARTIFACT_TYPES:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact type mismatch"}
 
     snapshot = payload.get("dashboardData")
@@ -1529,7 +1546,10 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
         "snapshot": snapshot,
         "meta": meta,
         "ctx": ctx,
+        "artifactType": artifact_type,
         "cacheKey": cache_key,
+        "from": from_date,
+        "to": to_date,
         "trustedEndDate": trusted_end_date,
         "snapshotBuiltAt": snapshot_built_at,
     }
@@ -1579,15 +1599,13 @@ def _can_serve_persisted_last_known_good(
     trusted_end_date: str,
     can_use_default_artifact: bool,
 ) -> bool:
-    if not can_use_default_artifact:
-        return False
     if not _persisted_snapshot_matches_context(
         loaded,
         ctx,
         trusted_end_date=trusted_end_date,
     ):
         return False
-    return _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date)
+    return True
 
 
 def get_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
@@ -1704,9 +1722,8 @@ def _persistence_critical_tiers_for_context(
     *,
     trusted_end_date: str | None = None,
 ) -> set[str]:
-    if ctx is not None and _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
-        return {"pulse"}
-    return set(DASHBOARD_CRITICAL_TIERS)
+    del ctx, trusted_end_date
+    return {"pulse"}
 
 
 def _persistence_should_treat_meta_as_stale(
@@ -1757,18 +1774,14 @@ def _should_persist_dashboard_snapshot_for_context(
     return not bool(degraded.intersection(persistence_critical))
 
 
-def _current_canonical_snapshot_to_preserve_on_empty_pulse(
+def _current_exact_snapshot_to_preserve_on_empty_pulse(
     ctx,
     *,
     trusted_end_date: str,
 ) -> dict[str, Any] | None:
-    if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
-        return None
-
-    candidates = [
-        ("exact", _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))),
-        ("alias", _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)),
-    ]
+    candidates = [("exact", _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key)))]
+    if _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
+        candidates.append(("alias", _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)))
     for source, loaded in candidates:
         if not _persisted_snapshot_matches_context(loaded, ctx, trusted_end_date=trusted_end_date):
             continue
@@ -1807,16 +1820,14 @@ def _persist_dashboard_snapshot_sync(
         trusted_end_date=trusted_end_date,
     ):
         return {"exactSaved": False, "aliasSaved": False, "skipped": "meta_gate"}
-    if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
-        return {"exactSaved": False, "aliasSaved": False, "skipped": "not_current_default"}
     if dashboard_aggregator._snapshot_is_materially_empty_pulse(snapshot):
-        preserved = _current_canonical_snapshot_to_preserve_on_empty_pulse(
+        preserved = _current_exact_snapshot_to_preserve_on_empty_pulse(
             ctx,
             trusted_end_date=trusted_end_date,
         )
         if preserved is not None:
             logger.warning(
-                "Skipped persisting canonical default dashboard artifact because the new same-key pulse payload "
+                "Skipped persisting dashboard artifact because the new same-key pulse payload "
                 "was materially empty | key={} preserved_source={}",
                 ctx.cache_key,
                 preserved.get("source"),
@@ -1828,6 +1839,9 @@ def _persist_dashboard_snapshot_sync(
                 "preservedSource": preserved.get("source"),
             }
 
+    write_default_alias = bool(
+        write_default_alias and _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date)
+    )
     payload = _dashboard_artifact_payload(
         ctx,
         snapshot,
@@ -1844,8 +1858,9 @@ def _persist_dashboard_snapshot_sync(
         alias_saved = False
 
     logger.info(
-        "Persisted canonical default dashboard artifact | key={} exact_saved={} alias_saved={}".format(
+        "Persisted dashboard artifact | key={} artifact_type={} exact_saved={} alias_saved={}".format(
             ctx.cache_key,
+            payload.get("artifactType"),
             exact_saved,
             alias_saved,
         )
@@ -1893,8 +1908,6 @@ def _handle_dashboard_refresh_complete(
     snapshot: dict,
     meta: dict[str, Any],
 ) -> None:
-    if not _is_canonical_default_context(ctx):
-        return
     if not _should_persist_dashboard_snapshot_for_context(
         meta,
         ctx=ctx,
@@ -1906,7 +1919,7 @@ def _handle_dashboard_refresh_complete(
         snapshot,
         meta,
         trusted_end_date=ctx.to_date.isoformat(),
-        write_default_alias=True,
+        write_default_alias=_is_canonical_default_context(ctx),
     )
 
 
@@ -2178,6 +2191,115 @@ def _should_use_historical_fastpath(
     )
 
 
+def _resolve_dashboard_request_context(
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> dict[str, Any]:
+    default_request = not from_date or not to_date
+    freshness_resolution = _cached_freshness_resolution(allow_live=False)
+    freshness_snapshot = freshness_resolution.get("snapshot")
+    freshness_source = freshness_resolution.get("source")
+    persisted_read_status = freshness_resolution.get("persistedReadStatus")
+    persisted_read_ms = freshness_resolution.get("persistedReadMs")
+
+    if freshness_snapshot is None:
+        freshness_resolution = _cached_freshness_resolution(allow_live=True)
+        freshness_snapshot = freshness_resolution.get("snapshot")
+        freshness_source = freshness_resolution.get("source")
+        persisted_read_status = freshness_resolution.get("persistedReadStatus")
+        persisted_read_ms = freshness_resolution.get("persistedReadMs")
+
+    trusted_end = _trusted_end_date_from_freshness(freshness_snapshot or {})
+    trusted_end_iso = trusted_end.isoformat()
+    if default_request:
+        ctx = _dashboard_context_from_trusted_end(trusted_end)
+    else:
+        ctx = build_dashboard_date_context(from_date or "", to_date or "")
+
+    requested_from = from_date or ctx.from_date.isoformat()
+    requested_to = to_date or ctx.to_date.isoformat()
+    canonical_default_ctx = _dashboard_context_from_trusted_end(trusted_end)
+    exact_canonical_request = (
+        not default_request
+        and ctx.cache_key == canonical_default_ctx.cache_key
+        and requested_from == canonical_default_ctx.from_date.isoformat()
+        and requested_to == canonical_default_ctx.to_date.isoformat()
+    )
+    return {
+        "defaultRequest": default_request,
+        "ctx": ctx,
+        "trustedEnd": trusted_end,
+        "trustedEndDate": trusted_end_iso,
+        "requestedFrom": requested_from,
+        "requestedTo": requested_to,
+        "freshnessSnapshot": freshness_snapshot or {},
+        "freshnessSource": freshness_source,
+        "persistedReadStatus": persisted_read_status,
+        "persistedReadMs": persisted_read_ms,
+        "canonicalDefaultContext": canonical_default_ctx,
+        "exactCanonicalRequest": exact_canonical_request,
+    }
+
+
+def _should_build_exact_range_with_fastpath(
+    ctx,
+    *,
+    trusted_end_date: date,
+) -> bool:
+    return bool(
+        ctx.days > 30
+        or _should_use_historical_fastpath(
+            default_request=False,
+            ctx=ctx,
+            trusted_end_date=trusted_end_date,
+        )
+    )
+
+
+def _build_exact_range_snapshot_sync(
+    ctx,
+    *,
+    trusted_end_date: str,
+) -> tuple[dict, dict[str, Any], str]:
+    use_historical_fastpath = _should_build_exact_range_with_fastpath(
+        ctx,
+        trusted_end_date=date.fromisoformat(trusted_end_date),
+    )
+    skipped_tiers = set(_HISTORICAL_FASTPATH_SKIP_TIERS) if use_historical_fastpath else None
+    range_resolution_path = (
+        "sync_exact_historical_fastpath"
+        if use_historical_fastpath
+        else "sync_exact_build"
+    )
+    snapshot, meta = dashboard_aggregator.build_dashboard_snapshot_once(
+        ctx,
+        skipped_tiers=skipped_tiers,
+        cache_status=range_resolution_path,
+        timeout_seconds=dashboard_aggregator.REFRESH_TIMEOUT_SECONDS,
+    )
+    logger.info(
+        "Built exact dashboard snapshot synchronously | key={} mode={} skipped_tiers={}",
+        ctx.cache_key,
+        range_resolution_path,
+        sorted(skipped_tiers or []),
+    )
+    snapshot_built_at = _parse_snapshot_date(meta.get("snapshotBuiltAt"))
+    prime_dashboard_snapshot(
+        ctx,
+        snapshot,
+        meta,
+        cached_at_ts=snapshot_built_at.timestamp() if snapshot_built_at is not None else None,
+    )
+    _persist_dashboard_snapshot_sync(
+        ctx,
+        snapshot,
+        meta,
+        trusted_end_date=trusted_end_date,
+        write_default_alias=False,
+    )
+    return snapshot, meta, range_resolution_path
+
+
 def _build_dashboard_api_payload(
     *,
     ctx,
@@ -2193,6 +2315,7 @@ def _build_dashboard_api_payload(
     persisted_read_ms: float | None = None,
     cache_status_override: str | None = None,
     default_resolution_path: str | None = None,
+    range_resolution_path: str | None = None,
     fallback_reason: str | None = None,
     refresh_suppressed: bool | None = None,
 ) -> dict[str, Any]:
@@ -2223,6 +2346,7 @@ def _build_dashboard_api_payload(
             "persistedReadStatus": persisted_read_status,
             "persistedReadMs": persisted_read_ms,
             "defaultResolutionPath": default_resolution_path,
+            "rangeResolutionPath": range_resolution_path,
             "freshness": {
                 "status": freshness_snapshot.get("health", {}).get("status") if isinstance(freshness_snapshot, dict) else None,
                 "generatedAt": freshness_snapshot.get("generated_at") if isinstance(freshness_snapshot, dict) else None,
@@ -2243,38 +2367,19 @@ def _build_dashboard_response_payload(
     from_date: Optional[str],
     to_date: Optional[str],
 ) -> dict[str, Any]:
-    default_request = not from_date or not to_date
-    freshness_snapshot: dict | None = None
-    freshness_source: str | None = None
-    persisted_read_status: str | None = None
-    persisted_read_ms: float | None = None
-
-    if default_request:
-        freshness_resolution = _cached_freshness_resolution(allow_live=False)
-        freshness_snapshot = freshness_resolution.get("snapshot")
-        freshness_source = freshness_resolution.get("source")
-        if freshness_snapshot is None:
-            freshness_resolution = _cached_freshness_resolution(allow_live=True)
-            freshness_snapshot = freshness_resolution.get("snapshot")
-            freshness_source = freshness_resolution.get("source")
-        trusted_end = _trusted_end_date_from_freshness(freshness_snapshot or {})
-        ctx = _dashboard_context_from_trusted_end(trusted_end)
-        trusted_end_iso = trusted_end.isoformat()
-    else:
-        ctx = build_dashboard_date_context(from_date or "", to_date or "")
-        trusted_end_iso = ctx.to_date.isoformat()
-        freshness_resolution = _cached_freshness_resolution(allow_live=False)
-        freshness_snapshot = freshness_resolution.get("snapshot")
-        freshness_source = freshness_resolution.get("source")
-
-    requested_from = from_date or ctx.from_date.isoformat()
-    requested_to = to_date or ctx.to_date.isoformat()
-    canonical_default_ctx = _dashboard_context_from_trusted_end(date.fromisoformat(trusted_end_iso))
+    request_resolution = _resolve_dashboard_request_context(from_date, to_date)
+    default_request = bool(request_resolution["defaultRequest"])
+    ctx = request_resolution["ctx"]
+    trusted_end_iso = str(request_resolution["trustedEndDate"])
+    requested_from = str(request_resolution["requestedFrom"])
+    requested_to = str(request_resolution["requestedTo"])
+    freshness_snapshot = request_resolution["freshnessSnapshot"]
+    freshness_source = request_resolution["freshnessSource"]
+    persisted_read_status = request_resolution["persistedReadStatus"]
+    persisted_read_ms = request_resolution["persistedReadMs"]
+    canonical_default_ctx = request_resolution["canonicalDefaultContext"]
     exact_canonical_request = (
-        not default_request
-        and ctx.cache_key == canonical_default_ctx.cache_key
-        and requested_from == canonical_default_ctx.from_date.isoformat()
-        and requested_to == canonical_default_ctx.to_date.isoformat()
+        bool(request_resolution["exactCanonicalRequest"])
     )
     can_use_default_artifact = bool(default_request or exact_canonical_request)
 
@@ -2291,6 +2396,7 @@ def _build_dashboard_response_payload(
             freshness_snapshot=freshness_snapshot or {},
             freshness_source=freshness_source,
             cache_status_override="memory_fresh",
+            range_resolution_path="memory_exact",
         )
 
     persisted_snapshot: dict[str, Any] | None = None
@@ -2324,7 +2430,21 @@ def _build_dashboard_response_payload(
                 persisted_read_ms = exact_snapshot.get("readMs")
             elif persisted_read_status is None or exact_snapshot.get("status") not in {None, "miss"}:
                 persisted_read_status = exact_snapshot.get("status")
-                persisted_read_ms = exact_snapshot.get("readMs")
+            persisted_read_ms = exact_snapshot.get("readMs")
+
+    else:
+        exact_snapshot = _load_persisted_dashboard_snapshot(_dashboard_snapshot_storage_path(ctx.cache_key))
+        if _persisted_snapshot_matches_context(
+            exact_snapshot,
+            ctx,
+            trusted_end_date=trusted_end_iso,
+        ):
+            persisted_snapshot = exact_snapshot
+            persisted_read_status = "hit"
+            persisted_read_ms = exact_snapshot.get("readMs")
+        else:
+            persisted_read_status = exact_snapshot.get("status")
+            persisted_read_ms = exact_snapshot.get("readMs")
 
     memory_stale_choice: tuple[str, dict, dict[str, Any], datetime | None] | None = None
     if memory_state == "stale" and memory_snapshot is not None and memory_meta is not None:
@@ -2361,6 +2481,11 @@ def _build_dashboard_response_payload(
                 persisted_read_ms=persisted_read_ms,
                 default_resolution_path=default_resolution_path,
                 cache_status_override="persisted_fresh",
+                range_resolution_path=(
+                    "persisted_alias"
+                    if default_resolution_path == "persisted_alias"
+                    else "persisted_exact"
+                ),
             )
 
         if _is_persisted_snapshot_usable(persisted_built_at):
@@ -2396,16 +2521,28 @@ def _build_dashboard_response_payload(
         response_cache_source = cache_source
         cache_status = f"{cache_source}_stale_while_revalidate"
         fallback_reason = "exact_stale_snapshot"
+        range_resolution_path = "memory_exact"
         if cache_source == "persisted_last_known_good":
             response_cache_source = "persisted"
             cache_status = "persisted_last_known_good"
             fallback_reason = "current_exact_persisted_last_known_good"
+            range_resolution_path = (
+                "persisted_alias"
+                if default_resolution_path == "persisted_alias"
+                else "persisted_exact_last_known_good"
+            )
             if refresh_status.get("suppressed"):
                 cache_status = "persisted_last_known_good_refresh_suppressed"
                 fallback_reason = "current_exact_persisted_last_known_good_refresh_suppressed"
             elif not refresh_status.get("started"):
                 cache_status = "persisted_last_known_good_refresh_inflight"
                 fallback_reason = "current_exact_persisted_last_known_good_refresh_inflight"
+        elif cache_source == "persisted":
+            range_resolution_path = (
+                "persisted_alias"
+                if default_resolution_path == "persisted_alias"
+                else "persisted_exact"
+            )
         elif refresh_status.get("suppressed"):
             cache_status = f"{cache_source}_stale_refresh_suppressed"
             fallback_reason = "exact_stale_snapshot_refresh_suppressed"
@@ -2426,9 +2563,47 @@ def _build_dashboard_response_payload(
             persisted_read_ms=persisted_read_ms,
             default_resolution_path=default_resolution_path if response_cache_source == "persisted" else None,
             cache_status_override=cache_status,
+            range_resolution_path=range_resolution_path,
             fallback_reason=fallback_reason,
             refresh_suppressed=bool(refresh_status.get("suppressed")),
         )
+    if not default_request:
+        try:
+            exact_snapshot, exact_meta, range_resolution_path = _build_exact_range_snapshot_sync(
+                ctx,
+                trusted_end_date=trusted_end_iso,
+            )
+            return _build_dashboard_api_payload(
+                ctx=ctx,
+                trusted_end_date=trusted_end_iso,
+                dashboard_data=exact_snapshot,
+                dashboard_runtime_meta=exact_meta,
+                requested_from=requested_from,
+                requested_to=requested_to,
+                cache_source="rebuild",
+                freshness_snapshot=freshness_snapshot or {},
+                freshness_source=freshness_source,
+                persisted_read_status=persisted_read_status,
+                persisted_read_ms=persisted_read_ms,
+                cache_status_override=str(exact_meta.get("cacheStatus") or range_resolution_path),
+                range_resolution_path=range_resolution_path,
+            )
+        except TimeoutError as exc:
+            logger.warning(
+                "Exact dashboard build timed out | key={} requested={}..{} error={}",
+                ctx.cache_key,
+                requested_from,
+                requested_to,
+                exc,
+            )
+        except Exception as exc:
+            logger.error(
+                "Exact dashboard build failed | key={} requested={}..{} error={}",
+                ctx.cache_key,
+                requested_from,
+                requested_to,
+                exc,
+            )
     schedule_dashboard_snapshot_refresh(ctx)
     raise DashboardWarmingError("We’re still warming this date range. Please try again shortly.")
 

@@ -25,27 +25,13 @@ import type { AppData } from '../types/data';
 import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
-
-interface DashboardRangeRef {
-  from: string;
-  to: string;
-}
-
-interface DashboardMeta {
-  trustedEndDate?: string;
-  freshnessStatus?: string;
-  rangeLabel?: string;
-  requestedFrom?: string;
-  requestedTo?: string;
-  degradedTiers?: string[];
-  suppressedDegradedTiers?: string[];
-  tierTimes?: Record<string, number | null>;
-  snapshotBuiltAt?: string;
-  cacheStatus?: string;
-  isStale?: boolean;
-  responseBytes?: number;
-  responseSerializeMs?: number;
-}
+import {
+  type DashboardMeta,
+  type DashboardRangeRef,
+  getRangeFromMeta,
+  responseMatchesRequestedRange,
+  sameRange,
+} from './dashboardRangeState';
 
 // Keep the browser timeout above the backend cold-start budget so the client
 // does not abort a request that the server is still about to satisfy.
@@ -84,10 +70,6 @@ const DataContext = createContext<DataContextValue>({
 
 function snapshotKeyForRange(from: string, to: string): string {
   return `radar.dashboard.snapshot.v5:${from}:${to}`;
-}
-
-function sameRange(a: DashboardRangeRef | null, b: DashboardRangeRef | null): boolean {
-  return Boolean(a && b && a.from === b.from && a.to === b.to);
 }
 
 function loadSnapshot(from: string, to: string): { data: AppData; meta: DashboardMeta | null } | null {
@@ -133,6 +115,8 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
   return {
     data: adaptDashboardPayload(payload),
     meta: {
+      from: payload?.meta?.from,
+      to: payload?.meta?.to,
       trustedEndDate: payload?.meta?.trustedEndDate,
       freshnessStatus: payload?.meta?.freshness?.status,
       rangeLabel: payload?.meta?.rangeLabel,
@@ -143,9 +127,13 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
       tierTimes: payload?.meta?.tierTimes && typeof payload.meta.tierTimes === 'object' ? payload.meta.tierTimes : {},
       snapshotBuiltAt: payload?.meta?.snapshotBuiltAt,
       cacheStatus: payload?.meta?.cacheStatus,
+      cacheSource: payload?.meta?.cacheSource,
       isStale: Boolean(payload?.meta?.isStale),
+      skippedTiers: Array.isArray(payload?.meta?.skippedTiers) ? payload.meta.skippedTiers : [],
       responseBytes: Number.isFinite(Number(payload?.meta?.responseBytes)) ? Number(payload.meta.responseBytes) : undefined,
       responseSerializeMs: Number.isFinite(Number(payload?.meta?.responseSerializeMs)) ? Number(payload.meta.responseSerializeMs) : undefined,
+      rangeResolutionPath: payload?.meta?.rangeResolutionPath,
+      defaultResolutionPath: payload?.meta?.defaultResolutionPath,
     },
   };
 }
@@ -153,13 +141,16 @@ async function fetchData(from: string, to: string, signal?: AbortSignal): Promis
 export function DataProvider({ children }: { children: ReactNode }) {
   const { range, ready } = useDashboardDateRange();
   const initialSnapshot = loadSnapshot(range.from, range.to);
+  const initialVisibleRange = initialSnapshot
+    ? (getRangeFromMeta(initialSnapshot.meta) ?? { from: range.from, to: range.to })
+    : null;
   const [appData, setAppData] = useState<AppData>(initialSnapshot?.data ?? createEmptyAppData());
   const [hasLiveData, setHasLiveData] = useState(Boolean(initialSnapshot));
   const [loading, setLoading] = useState(!initialSnapshot || !ready);
   const [error, setError] = useState<string | null>(null);
   const [dashboardMeta, setDashboardMeta] = useState<DashboardMeta | null>(initialSnapshot?.meta ?? null);
-  const [visibleRange, setVisibleRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
-  const [lastSuccessfulRange, setLastSuccessfulRange] = useState<DashboardRangeRef | null>(initialSnapshot ? { from: range.from, to: range.to } : null);
+  const [visibleRange, setVisibleRange] = useState<DashboardRangeRef | null>(initialVisibleRange);
+  const [lastSuccessfulRange, setLastSuccessfulRange] = useState<DashboardRangeRef | null>(initialVisibleRange);
   const abortRef = useRef<AbortController | null>(null);
 
   const doFetch = useCallback(async () => {
@@ -174,14 +165,26 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
     try {
       const payload = await fetchData(range.from, range.to, controller.signal);
+      const requestedRange = { from: range.from, to: range.to };
+      const resolvedRange = getRangeFromMeta(payload.meta);
+      if (!responseMatchesRequestedRange(payload.meta, requestedRange) || !resolvedRange) {
+        if (!controller.signal.aborted) {
+          setError(
+            `Selected range ${requestedRange.from}..${requestedRange.to} did not load exactly. ` +
+            `Still showing the previous successful dashboard snapshot.`,
+          );
+          setLoading(false);
+        }
+        return;
+      }
       // Only update if this request wasn't aborted
       if (!controller.signal.aborted) {
         setAppData(payload.data);
         setDashboardMeta(payload.meta);
-        setVisibleRange({ from: range.from, to: range.to });
-        setLastSuccessfulRange({ from: range.from, to: range.to });
+        setVisibleRange(resolvedRange);
+        setLastSuccessfulRange(resolvedRange);
         setHasLiveData(true);
-        saveSnapshot(range.from, range.to, payload.data, payload.meta);
+        saveSnapshot(resolvedRange.from, resolvedRange.to, payload.data, payload.meta);
         setLoading(false);
       }
     } catch (err: any) {
@@ -199,10 +202,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const snapshot = loadSnapshot(range.from, range.to);
     setError(null);
     if (snapshot) {
+      const resolvedRange = getRangeFromMeta(snapshot.meta) ?? { from: range.from, to: range.to };
       setAppData(snapshot.data);
       setDashboardMeta(snapshot.meta);
-      setVisibleRange({ from: range.from, to: range.to });
-      setLastSuccessfulRange({ from: range.from, to: range.to });
+      setVisibleRange(resolvedRange);
+      setLastSuccessfulRange(resolvedRange);
       setHasLiveData(true);
     }
   }, [range.from, range.to]);
