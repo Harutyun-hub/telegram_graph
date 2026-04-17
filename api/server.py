@@ -1572,6 +1572,24 @@ def _is_persisted_snapshot_usable(snapshot_built_at: datetime | None) -> bool:
     return age_seconds is not None and age_seconds < float(dashboard_aggregator.MAX_STALE_SECONDS)
 
 
+def _can_serve_persisted_last_known_good(
+    loaded: dict[str, Any],
+    ctx,
+    *,
+    trusted_end_date: str,
+    can_use_default_artifact: bool,
+) -> bool:
+    if not can_use_default_artifact:
+        return False
+    if not _persisted_snapshot_matches_context(
+        loaded,
+        ctx,
+        trusted_end_date=trusted_end_date,
+    ):
+        return False
+    return _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date)
+
+
 def get_cached_freshness_snapshot() -> tuple[dict | None, datetime | None]:
     snapshot = freshness_runtime._CACHE if isinstance(freshness_runtime._CACHE, dict) else None
     return snapshot, freshness_runtime._CACHE_TS
@@ -2251,6 +2269,14 @@ def _build_dashboard_response_payload(
 
     requested_from = from_date or ctx.from_date.isoformat()
     requested_to = to_date or ctx.to_date.isoformat()
+    canonical_default_ctx = _dashboard_context_from_trusted_end(date.fromisoformat(trusted_end_iso))
+    exact_canonical_request = (
+        not default_request
+        and ctx.cache_key == canonical_default_ctx.cache_key
+        and requested_from == canonical_default_ctx.from_date.isoformat()
+        and requested_to == canonical_default_ctx.to_date.isoformat()
+    )
+    can_use_default_artifact = bool(default_request or exact_canonical_request)
 
     memory_snapshot, memory_meta, memory_state = peek_dashboard_snapshot(ctx)
     if memory_state == "fresh" and memory_snapshot is not None and memory_meta is not None:
@@ -2269,7 +2295,7 @@ def _build_dashboard_response_payload(
 
     persisted_snapshot: dict[str, Any] | None = None
     default_resolution_path: str | None = None
-    if default_request:
+    if can_use_default_artifact:
         alias_snapshot = _load_persisted_dashboard_snapshot(_DASHBOARD_DEFAULT_ALIAS_PATH)
         persisted_read_status = alias_snapshot.get("status")
         persisted_read_ms = alias_snapshot.get("readMs")
@@ -2339,11 +2365,23 @@ def _build_dashboard_response_payload(
 
         if _is_persisted_snapshot_usable(persisted_built_at):
             persisted_stale_choice = ("persisted", persisted_snapshot["snapshot"], persisted_meta, persisted_built_at)
+        elif _can_serve_persisted_last_known_good(
+            persisted_snapshot,
+            ctx,
+            trusted_end_date=trusted_end_iso,
+            can_use_default_artifact=can_use_default_artifact,
+        ):
+            persisted_stale_choice = (
+                "persisted_last_known_good",
+                persisted_snapshot["snapshot"],
+                persisted_meta,
+                persisted_built_at,
+            )
 
     stale_choice = _newer_snapshot_choice(memory_stale_choice, persisted_stale_choice)
     if stale_choice is not None:
         cache_source, stale_snapshot, stale_meta, persisted_built_at = stale_choice
-        if cache_source == "persisted" and persisted_built_at is not None:
+        if cache_source in {"persisted", "persisted_last_known_good"} and persisted_built_at is not None:
             prime_dashboard_snapshot(
                 ctx,
                 stale_snapshot,
@@ -2355,9 +2393,20 @@ def _build_dashboard_response_payload(
             _ensure_background_freshness_refresh()
         stale_meta["isStale"] = True
         stale_meta["refreshSuppressed"] = bool(refresh_status.get("suppressed"))
+        response_cache_source = cache_source
         cache_status = f"{cache_source}_stale_while_revalidate"
         fallback_reason = "exact_stale_snapshot"
-        if refresh_status.get("suppressed"):
+        if cache_source == "persisted_last_known_good":
+            response_cache_source = "persisted"
+            cache_status = "persisted_last_known_good"
+            fallback_reason = "current_exact_persisted_last_known_good"
+            if refresh_status.get("suppressed"):
+                cache_status = "persisted_last_known_good_refresh_suppressed"
+                fallback_reason = "current_exact_persisted_last_known_good_refresh_suppressed"
+            elif not refresh_status.get("started"):
+                cache_status = "persisted_last_known_good_refresh_inflight"
+                fallback_reason = "current_exact_persisted_last_known_good_refresh_inflight"
+        elif refresh_status.get("suppressed"):
             cache_status = f"{cache_source}_stale_refresh_suppressed"
             fallback_reason = "exact_stale_snapshot_refresh_suppressed"
         elif not refresh_status.get("started"):
@@ -2370,12 +2419,12 @@ def _build_dashboard_response_payload(
             dashboard_runtime_meta=stale_meta,
             requested_from=requested_from,
             requested_to=requested_to,
-            cache_source=cache_source,
+            cache_source=response_cache_source,
             freshness_snapshot=freshness_snapshot or {},
             freshness_source=freshness_source,
             persisted_read_status=persisted_read_status,
             persisted_read_ms=persisted_read_ms,
-            default_resolution_path=default_resolution_path if cache_source == "persisted" else None,
+            default_resolution_path=default_resolution_path if response_cache_source == "persisted" else None,
             cache_status_override=cache_status,
             fallback_reason=fallback_reason,
             refresh_suppressed=bool(refresh_status.get("suppressed")),

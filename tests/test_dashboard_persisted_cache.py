@@ -153,6 +153,98 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         load_mock.assert_called_once_with(server._DASHBOARD_DEFAULT_ALIAS_PATH)
         prime_mock.assert_called_once()
 
+    def test_default_dashboard_serves_current_exact_artifact_as_last_known_good_when_it_is_expired(self) -> None:
+        ctx = self._ctx()
+        persisted = {
+            "status": "hit",
+            "readMs": 23.4,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
+            "ctx": ctx,
+            "cacheKey": ctx.cache_key,
+            "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-22",
+        }
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[persisted]), \
+             patch.object(server, "_is_persisted_snapshot_fresh", return_value=False), \
+             patch.object(server, "_is_persisted_snapshot_usable", return_value=False), \
+             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock:
+            payload = server._build_dashboard_response_payload(None, None)
+
+        self.assertEqual(payload["meta"]["cacheSource"], "persisted")
+        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_last_known_good")
+        self.assertEqual(payload["meta"]["defaultResolutionPath"], "persisted_alias")
+        self.assertEqual(payload["meta"]["fallbackReason"], "current_exact_persisted_last_known_good")
+        self.assertTrue(payload["meta"]["isStale"])
+        refresh_mock.assert_called_once_with(ctx)
+        prime_mock.assert_called_once()
+
+    def test_explicit_canonical_range_serves_current_exact_artifact_as_last_known_good_when_it_is_expired(self) -> None:
+        ctx = self._ctx()
+        persisted = {
+            "status": "hit",
+            "readMs": 14.2,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
+            "ctx": ctx,
+            "cacheKey": ctx.cache_key,
+            "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-22",
+        }
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=ctx), \
+             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[persisted]), \
+             patch.object(server, "_is_persisted_snapshot_fresh", return_value=False), \
+             patch.object(server, "_is_persisted_snapshot_usable", return_value=False), \
+             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}), \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock:
+            payload = server._build_dashboard_response_payload(ctx.from_date.isoformat(), ctx.to_date.isoformat())
+
+        self.assertEqual(payload["meta"]["cacheSource"], "persisted")
+        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_last_known_good")
+        self.assertEqual(payload["meta"]["requestedFrom"], ctx.from_date.isoformat())
+        self.assertEqual(payload["meta"]["requestedTo"], ctx.to_date.isoformat())
+        self.assertEqual(payload["meta"]["defaultResolutionPath"], "persisted_alias")
+        self.assertEqual(payload["meta"]["fallbackReason"], "current_exact_persisted_last_known_good")
+        prime_mock.assert_called_once()
+
+    def test_default_dashboard_does_not_serve_last_known_good_after_canonical_rollover(self) -> None:
+        current_ctx = self._ctx(end=date(2026, 3, 23))
+        previous_ctx = self._ctx(end=date(2026, 3, 22))
+        persisted = {
+            "status": "hit",
+            "readMs": 18.4,
+            "snapshot": self._snapshot(),
+            "meta": self._meta(cache_status="refresh_success_uncached_degraded", is_stale=True),
+            "ctx": previous_ctx,
+            "cacheKey": previous_ctx.cache_key,
+            "snapshotBuiltAt": datetime(2026, 3, 22, tzinfo=timezone.utc),
+            "trustedEndDate": "2026-03-22",
+        }
+
+        with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": {"generated_at": "2026-03-23T00:00:00+00:00"}, "source": "memory"}), \
+             patch.object(server, "_trusted_end_date_from_freshness", return_value=current_ctx.to_date), \
+             patch.object(server, "_dashboard_context_from_trusted_end", return_value=current_ctx), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", side_effect=[persisted, {"status": "miss", "readMs": 2.5}]), \
+             patch.object(server, "_is_persisted_snapshot_fresh", return_value=False), \
+             patch.object(server, "_is_persisted_snapshot_usable", return_value=False), \
+             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock:
+            with self.assertRaises(server.DashboardWarmingError):
+                server._build_dashboard_response_payload(None, None)
+
+        refresh_mock.assert_called_once_with(current_ctx)
+
     def test_default_dashboard_uses_exact_default_artifact_when_alias_cache_key_mismatches(self) -> None:
         current_ctx = self._ctx()
         previous_ctx = self._ctx(end=date(2026, 3, 21))
@@ -220,15 +312,14 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         prime_mock.assert_not_called()
 
     def test_explicit_range_does_not_use_durable_default_artifact(self) -> None:
-        ctx = self._ctx()
+        ctx = server.build_dashboard_date_context("2026-03-18", "2026-03-22")
 
         with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
-             patch.object(server, "build_dashboard_date_context", return_value=ctx), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(server, "_load_persisted_dashboard_snapshot") as load_mock, \
              patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock:
             with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
+                server._build_dashboard_response_payload("2026-03-18", "2026-03-22")
 
         load_mock.assert_not_called()
         refresh_mock.assert_called_once_with(ctx)
