@@ -1520,8 +1520,6 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
 
     if payload.get("schemaVersion") != _DASHBOARD_PERSISTED_SCHEMA_VERSION:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact schema version mismatch"}
-    if int(payload.get("communityBriefMetricVersion") or 0) < _DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION:
-        return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact communityBrief metric version mismatch"}
     artifact_type = str(payload.get("artifactType") or "").strip()
     if artifact_type not in _DASHBOARD_PERSISTED_ARTIFACT_TYPES:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact type mismatch"}
@@ -1552,6 +1550,37 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
     if snapshot_built_at is None:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact missing snapshotBuiltAt"}
 
+    community_brief_repaired = False
+    community_brief_version = int(payload.get("communityBriefMetricVersion") or 0)
+    if community_brief_version < _DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION:
+        try:
+            repaired_snapshot = dict(snapshot)
+            existing_brief = dict(repaired_snapshot.get("communityBrief") or {})
+            fallback_topic_rows = existing_brief.get("topTopicRows")
+            if not isinstance(fallback_topic_rows, list) or not fallback_topic_rows:
+                fallback_topic_rows = list(repaired_snapshot.get("trendingTopics") or [])[:5]
+            repaired_snapshot["communityBrief"] = pulse.rebuild_community_brief_for_snapshot(
+                ctx,
+                existing_brief=existing_brief,
+                fallback_topic_rows=list(fallback_topic_rows or []),
+            )
+            payload["dashboardData"] = repaired_snapshot
+            payload["communityBriefMetricVersion"] = _DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION
+            if not bool(get_supabase_writer().save_runtime_json(key, payload)):
+                return {
+                    "status": "invalid",
+                    "readMs": read_ms,
+                    "error": "Persisted dashboard artifact communityBrief metric repair did not persist",
+                }
+            snapshot = repaired_snapshot
+            community_brief_repaired = True
+        except Exception as exc:
+            return {
+                "status": "invalid",
+                "readMs": read_ms,
+                "error": f"Persisted dashboard artifact communityBrief metric repair failed: {exc}",
+            }
+
     return {
         "status": "hit",
         "readMs": read_ms,
@@ -1564,6 +1593,7 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
         "to": to_date,
         "trustedEndDate": trusted_end_date,
         "snapshotBuiltAt": snapshot_built_at,
+        "communityBriefRepairApplied": community_brief_repaired,
     }
 
 

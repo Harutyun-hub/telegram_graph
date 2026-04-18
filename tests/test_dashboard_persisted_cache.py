@@ -404,7 +404,7 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             server._DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION,
         )
 
-    def test_load_persisted_dashboard_snapshot_rejects_outdated_community_brief_metric_version(self) -> None:
+    def test_load_persisted_dashboard_snapshot_repairs_outdated_community_brief_metric_version(self) -> None:
         writer = _FakeRuntimeWriter()
         ctx = self._ctx()
         payload = server._dashboard_artifact_payload(
@@ -416,11 +416,76 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         payload.pop("communityBriefMetricVersion", None)
         writer.save_runtime_json(server._DASHBOARD_DEFAULT_ALIAS_PATH, payload)
 
-        with patch.object(server, "get_supabase_writer", return_value=writer):
+        repaired_brief = {
+            "postsAnalyzedInWindow": 60,
+            "commentScopesAnalyzedInWindow": 30,
+            "totalAnalysesInWindow": 90,
+            "uniqueUsersInWindow": 40,
+            "postsAnalyzed24h": 60,
+            "commentScopesAnalyzed24h": 30,
+            "totalAnalyses24h": 90,
+            "uniqueUsers24h": 40,
+            "postsLast24h": 60,
+            "commentsLast24h": 30,
+            "activeUsersLast24h": 40,
+            "windowDays": ctx.days,
+        }
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server.pulse, "rebuild_community_brief_for_snapshot", return_value=repaired_brief) as rebuild_mock:
             loaded = server._load_persisted_dashboard_snapshot(server._DASHBOARD_DEFAULT_ALIAS_PATH)
 
-        self.assertEqual(loaded["status"], "invalid")
-        self.assertIn("communityBrief metric version mismatch", loaded["error"])
+        self.assertEqual(loaded["status"], "hit")
+        self.assertTrue(loaded["communityBriefRepairApplied"])
+        self.assertEqual(loaded["snapshot"]["communityBrief"]["totalAnalysesInWindow"], 90)
+        self.assertEqual(
+            writer.payloads[server._DASHBOARD_DEFAULT_ALIAS_PATH]["communityBriefMetricVersion"],
+            server._DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION,
+        )
+        self.assertEqual(
+            writer.payloads[server._DASHBOARD_DEFAULT_ALIAS_PATH]["dashboardData"]["communityBrief"]["postsAnalyzedInWindow"],
+            60,
+        )
+        rebuild_mock.assert_called_once()
+
+    def test_repaired_exact_artifact_reloads_without_repairing_again(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+        exact_path = server._dashboard_snapshot_storage_path(ctx.cache_key)
+        payload = server._dashboard_artifact_payload(
+            ctx,
+            self._snapshot(),
+            self._meta(),
+            trusted_end_date=ctx.to_date.isoformat(),
+        )
+        payload.pop("communityBriefMetricVersion", None)
+        writer.save_runtime_json(exact_path, payload)
+
+        repaired_brief = {
+            "postsAnalyzedInWindow": 60,
+            "commentScopesAnalyzedInWindow": 30,
+            "totalAnalysesInWindow": 90,
+            "uniqueUsersInWindow": 40,
+            "postsAnalyzed24h": 60,
+            "commentScopesAnalyzed24h": 30,
+            "totalAnalyses24h": 90,
+            "uniqueUsers24h": 40,
+            "postsLast24h": 60,
+            "commentsLast24h": 30,
+            "activeUsersLast24h": 40,
+            "windowDays": ctx.days,
+        }
+
+        with patch.object(server, "get_supabase_writer", return_value=writer), \
+             patch.object(server.pulse, "rebuild_community_brief_for_snapshot", return_value=repaired_brief) as rebuild_mock:
+            first_load = server._load_persisted_dashboard_snapshot(exact_path)
+            second_load = server._load_persisted_dashboard_snapshot(exact_path)
+
+        self.assertEqual(first_load["status"], "hit")
+        self.assertTrue(first_load["communityBriefRepairApplied"])
+        self.assertEqual(second_load["status"], "hit")
+        self.assertFalse(second_load["communityBriefRepairApplied"])
+        rebuild_mock.assert_called_once()
 
     def test_persist_dashboard_snapshot_sync_writes_exact_and_alias_for_current_default(self) -> None:
         writer = _FakeRuntimeWriter()

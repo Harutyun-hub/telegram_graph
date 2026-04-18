@@ -1026,6 +1026,19 @@ def _community_brief_from_source_scope(
     )
 
 
+def rebuild_community_brief_for_snapshot(
+    ctx: DashboardDateContext,
+    *,
+    existing_brief: dict[str, Any] | None = None,
+    fallback_topic_rows: list[dict] | None = None,
+) -> dict:
+    preserved_brief = dict(existing_brief or {})
+    topic_rows = preserved_brief.get("topTopicRows")
+    if not isinstance(topic_rows, list) or not topic_rows:
+        topic_rows = list(fallback_topic_rows or [])
+    return _community_brief_from_source_scope(ctx, top_topic_rows=list(topic_rows or []))
+
+
 def _community_brief_from_inputs(
     ctx: DashboardDateContext,
     *,
