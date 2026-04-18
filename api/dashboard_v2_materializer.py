@@ -24,6 +24,11 @@ from buffer.supabase_writer import SupabaseWriter
 DASHBOARD_V2_FACT_VERSION = 2
 _INCREMENTAL_LOOKBACK_DAYS = 2
 _COVERAGE_ROW_KEY = build_dashboard_v2_coverage_row_key()
+_HEAVY_JOB_MODES = {"backfill", "reconciliation"}
+_DEFAULT_SLICE_DAYS = 7
+_SLICE_DAYS_BY_FAMILY: dict[str, int] = {
+    "content": 3,
+}
 _EXACT_FACT_WIDGET_IDS_BY_FAMILY: dict[str, tuple[str, ...]] = {
     family: tuple(
         widget_id
@@ -350,6 +355,22 @@ class DashboardV2MaterializeSummary:
 
 
 @dataclass(frozen=True)
+class DashboardV2MaterializeSlicePlan:
+    fact_family: str
+    slice_order: int
+    slice_start: date
+    slice_end: date
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fact_family": self.fact_family,
+            "slice_order": self.slice_order,
+            "slice_start": self.slice_start,
+            "slice_end": self.slice_end,
+        }
+
+
+@dataclass(frozen=True)
 class DashboardV2WidgetBuildResult:
     outputs: dict[str, Any]
     failed_widget_ids: tuple[str, ...]
@@ -359,6 +380,64 @@ def _default_window_context(end_date: date | None = None) -> DashboardDateContex
     resolved_end = end_date or _default_end_date()
     start_date = resolved_end - timedelta(days=max(1, int(config.DASH_DEFAULT_RANGE_DAYS)) - 1)
     return build_dashboard_date_context(start_date.isoformat(), resolved_end.isoformat())
+
+
+def _slice_days_for_family(fact_family: str) -> int:
+    return max(1, int(_SLICE_DAYS_BY_FAMILY.get(fact_family, _DEFAULT_SLICE_DAYS)))
+
+
+def _resolve_materialize_window(
+    *,
+    mode: str,
+    end_date: date | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    lookback_days: int | None = None,
+) -> tuple[date, date]:
+    normalized_mode = str(mode or "").strip().lower()
+    resolved_end = to_date or end_date or _default_end_date()
+    if from_date is not None or to_date is not None:
+        if from_date is None or to_date is None:
+            raise ValueError("Both from_date and to_date are required when overriding the Dashboard V2 materialize window.")
+        if from_date > to_date:
+            raise ValueError("Dashboard V2 materialize from_date must be on or before to_date.")
+        return from_date, to_date
+    default_lookback = _INCREMENTAL_LOOKBACK_DAYS if normalized_mode == "incremental" else int(
+        config.DASH_V2_RECONCILE_LOOKBACK_DAYS
+    )
+    resolved_lookback = max(1, int(lookback_days or default_lookback))
+    return resolved_end - timedelta(days=resolved_lookback - 1), resolved_end
+
+
+def plan_dashboard_v2_materialize_slices(
+    *,
+    mode: str,
+    requested_start: date,
+    requested_end: date,
+) -> list[DashboardV2MaterializeSlicePlan]:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in _HEAVY_JOB_MODES:
+        raise ValueError(f"Unsupported Dashboard V2 materialize mode: {mode}")
+    if requested_start > requested_end:
+        raise ValueError("Dashboard V2 materialize requested_start must be on or before requested_end.")
+    plans: list[DashboardV2MaterializeSlicePlan] = []
+    slice_order = 0
+    for fact_family in FACT_FAMILIES:
+        slice_days = _slice_days_for_family(fact_family)
+        current = requested_start
+        while current <= requested_end:
+            slice_end = min(requested_end, current + timedelta(days=slice_days - 1))
+            plans.append(
+                DashboardV2MaterializeSlicePlan(
+                    fact_family=fact_family,
+                    slice_order=slice_order,
+                    slice_start=current,
+                    slice_end=slice_end,
+                )
+            )
+            slice_order += 1
+            current = slice_end + timedelta(days=1)
+    return plans
 
 
 def _build_exact_widget_outputs(ctx: DashboardDateContext) -> DashboardV2WidgetBuildResult:
@@ -1241,6 +1320,112 @@ def _materialize_secondary_rows(store: DashboardV2Store, *, end_date: date, sour
     return results
 
 
+def _materialize_family_window(
+    store: DashboardV2Store,
+    *,
+    family: str,
+    coverage_start: date,
+    coverage_end: date,
+    mode: str,
+    source_watermark: datetime,
+    heartbeat: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    run_id = store.create_fact_run(
+        fact_family=family,
+        fact_version=DASHBOARD_V2_FACT_VERSION,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        meta_json={"mode": mode, "materializationStage": "pr2b_transitional_assembler_ready"},
+    )
+    rows_inserted = 0
+    days_processed = 0
+    degraded_days: list[str] = []
+    failed_widgets: set[str] = set()
+    try:
+        for fact_day in _iter_days(coverage_start, coverage_end):
+            if callable(heartbeat):
+                heartbeat()
+            ctx = build_dashboard_date_context(fact_day.isoformat(), fact_day.isoformat())
+            build_result = _build_exact_widget_outputs(ctx)
+            family_failed_widgets = _failed_exact_widgets_for_family(family, build_result.failed_widget_ids)
+            rows = _materialize_family_rows(
+                family,
+                ctx,
+                build_result.outputs,
+                failed_widget_ids=build_result.failed_widget_ids,
+                source_watermark=source_watermark,
+                materialized_at=source_watermark,
+            )
+            if family_failed_widgets:
+                degraded_days.append(fact_day.isoformat())
+                failed_widgets.update(family_failed_widgets)
+            rows_inserted += store.replace_daily_fact_rows(
+                fact_family=family,
+                fact_date=fact_day,
+                run_id=run_id,
+                fact_version=DASHBOARD_V2_FACT_VERSION,
+                rows=rows,
+                source_watermark=source_watermark,
+            )
+            store.mark_overlapping_artifacts_stale(
+                fact_family=family,
+                changed_date=fact_day,
+                new_watermark=source_watermark,
+                reason=f"{mode}:{family}:{fact_day.isoformat()}:fact_version_{DASHBOARD_V2_FACT_VERSION}",
+            )
+            days_processed += 1
+        store.complete_fact_run(
+            run_id,
+            status="completed",
+            source_watermark=source_watermark,
+            meta_json={
+                "rowsInserted": rows_inserted,
+                "daysProcessed": days_processed,
+                "degradedDays": degraded_days,
+                "failedWidgets": sorted(failed_widgets),
+                "mode": mode,
+                "factVersion": DASHBOARD_V2_FACT_VERSION,
+            },
+        )
+        return {
+            "factFamily": family,
+            "runId": run_id,
+            "status": "completed",
+            "rowsInserted": rows_inserted,
+            "daysProcessed": days_processed,
+            "degradedDays": degraded_days,
+            "failedWidgets": sorted(failed_widgets),
+            "factVersion": DASHBOARD_V2_FACT_VERSION,
+        }
+    except Exception as exc:
+        store.complete_fact_run(
+            run_id,
+            status="failed",
+            source_watermark=source_watermark,
+            error=str(exc),
+            meta_json={
+                "rowsInserted": rows_inserted,
+                "daysProcessed": days_processed,
+                "degradedDays": degraded_days,
+                "failedWidgets": sorted(failed_widgets),
+                "mode": mode,
+                "factVersion": DASHBOARD_V2_FACT_VERSION,
+            },
+        )
+        logger.exception("Dashboard V2 foundation materialization failed | family={} error={}", family, exc)
+        return {
+            "factFamily": family,
+            "runId": run_id,
+            "status": "failed",
+            "rowsInserted": rows_inserted,
+            "daysProcessed": days_processed,
+            "degradedDays": degraded_days,
+            "failedWidgets": sorted(failed_widgets),
+            "error": str(exc),
+            "factVersion": DASHBOARD_V2_FACT_VERSION,
+        }
+
+
 def materialize_dashboard_v2_foundation(
     store: DashboardV2Store,
     *,
@@ -1248,110 +1433,25 @@ def materialize_dashboard_v2_foundation(
     end_date: date | None = None,
     lookback_days: int | None = None,
 ) -> dict[str, Any]:
-    resolved_end = end_date or _default_end_date()
-    default_lookback = _INCREMENTAL_LOOKBACK_DAYS if mode == "incremental" else int(config.DASH_V2_RECONCILE_LOOKBACK_DAYS)
-    resolved_lookback = max(1, int(lookback_days or default_lookback))
-    coverage_start = resolved_end - timedelta(days=resolved_lookback - 1)
+    coverage_start, resolved_end = _resolve_materialize_window(
+        mode=mode,
+        end_date=end_date,
+        lookback_days=lookback_days,
+    )
     source_watermark = _utc_now()
 
     family_runs: list[dict[str, Any]] = []
     for family in FACT_FAMILIES:
-        run_id = store.create_fact_run(
-            fact_family=family,
-            fact_version=DASHBOARD_V2_FACT_VERSION,
-            coverage_start=coverage_start,
-            coverage_end=resolved_end,
-            meta_json={"mode": mode, "materializationStage": "pr2b_transitional_assembler_ready"},
+        family_runs.append(
+            _materialize_family_window(
+                store,
+                family=family,
+                coverage_start=coverage_start,
+                coverage_end=resolved_end,
+                mode=mode,
+                source_watermark=source_watermark,
+            )
         )
-        rows_inserted = 0
-        days_processed = 0
-        degraded_days: list[str] = []
-        failed_widgets: set[str] = set()
-        try:
-            for fact_day in _iter_days(coverage_start, resolved_end):
-                ctx = build_dashboard_date_context(fact_day.isoformat(), fact_day.isoformat())
-                build_result = _build_exact_widget_outputs(ctx)
-                family_failed_widgets = _failed_exact_widgets_for_family(family, build_result.failed_widget_ids)
-                rows = _materialize_family_rows(
-                    family,
-                    ctx,
-                    build_result.outputs,
-                    failed_widget_ids=build_result.failed_widget_ids,
-                    source_watermark=source_watermark,
-                    materialized_at=source_watermark,
-                )
-                if family_failed_widgets:
-                    degraded_days.append(fact_day.isoformat())
-                    failed_widgets.update(family_failed_widgets)
-                rows_inserted += store.replace_daily_fact_rows(
-                    fact_family=family,
-                    fact_date=fact_day,
-                    run_id=run_id,
-                    fact_version=DASHBOARD_V2_FACT_VERSION,
-                    rows=rows,
-                    source_watermark=source_watermark,
-                )
-                store.mark_overlapping_artifacts_stale(
-                    fact_family=family,
-                    changed_date=fact_day,
-                    new_watermark=source_watermark,
-                    reason=f"{mode}:{family}:{fact_day.isoformat()}:fact_version_{DASHBOARD_V2_FACT_VERSION}",
-                )
-                days_processed += 1
-            store.complete_fact_run(
-                run_id,
-                status="completed",
-                source_watermark=source_watermark,
-                meta_json={
-                    "rowsInserted": rows_inserted,
-                    "daysProcessed": days_processed,
-                    "degradedDays": degraded_days,
-                    "failedWidgets": sorted(failed_widgets),
-                    "mode": mode,
-                    "factVersion": DASHBOARD_V2_FACT_VERSION,
-                },
-            )
-            family_runs.append(
-                {
-                    "factFamily": family,
-                    "runId": run_id,
-                    "status": "completed",
-                    "rowsInserted": rows_inserted,
-                    "daysProcessed": days_processed,
-                    "degradedDays": degraded_days,
-                    "failedWidgets": sorted(failed_widgets),
-                    "factVersion": DASHBOARD_V2_FACT_VERSION,
-                }
-            )
-        except Exception as exc:
-            store.complete_fact_run(
-                run_id,
-                status="failed",
-                source_watermark=source_watermark,
-                error=str(exc),
-                meta_json={
-                    "rowsInserted": rows_inserted,
-                    "daysProcessed": days_processed,
-                    "degradedDays": degraded_days,
-                    "failedWidgets": sorted(failed_widgets),
-                    "mode": mode,
-                    "factVersion": DASHBOARD_V2_FACT_VERSION,
-                },
-            )
-            logger.exception("Dashboard V2 foundation materialization failed | family={} error={}", family, exc)
-            family_runs.append(
-                {
-                    "factFamily": family,
-                    "runId": run_id,
-                    "status": "failed",
-                    "rowsInserted": rows_inserted,
-                    "daysProcessed": days_processed,
-                    "degradedDays": degraded_days,
-                    "failedWidgets": sorted(failed_widgets),
-                    "error": str(exc),
-                    "factVersion": DASHBOARD_V2_FACT_VERSION,
-                }
-            )
 
     secondary_runs = _materialize_secondary_rows(store, end_date=resolved_end, source_watermark=source_watermark)
     summary = DashboardV2MaterializeSummary(
@@ -1385,6 +1485,142 @@ def materialize_dashboard_v2_backfill(store: DashboardV2Store, *, end_date: date
         end_date=end_date,
         lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
     )
+
+
+def enqueue_dashboard_v2_materialize_job(
+    store: DashboardV2Store,
+    *,
+    mode: str,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    requested_by_role: str | None = None,
+    requested_by_actor: str | None = None,
+    job_owner: str = "worker",
+) -> dict[str, Any]:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in _HEAVY_JOB_MODES:
+        raise ValueError(f"Unsupported Dashboard V2 materialize mode: {mode}")
+    requested_start, requested_end = _resolve_materialize_window(
+        mode=normalized_mode,
+        from_date=from_date,
+        to_date=to_date,
+        lookback_days=(
+            int(config.DASH_V2_FACT_LOOKBACK_DAYS)
+            if normalized_mode == "backfill"
+            else int(config.DASH_V2_RECONCILE_LOOKBACK_DAYS)
+        ),
+    )
+    slices = [
+        plan.to_dict()
+        for plan in plan_dashboard_v2_materialize_slices(
+            mode=normalized_mode,
+            requested_start=requested_start,
+            requested_end=requested_end,
+        )
+    ]
+    return store.enqueue_materialize_job(
+        mode=normalized_mode,
+        requested_start=requested_start,
+        requested_end=requested_end,
+        fact_version=DASHBOARD_V2_FACT_VERSION,
+        requested_by_role=requested_by_role,
+        requested_by_actor=requested_by_actor,
+        job_owner=job_owner,
+        slices=slices,
+    )
+
+
+def run_dashboard_v2_materialize_slice_once(
+    store: DashboardV2Store,
+    *,
+    worker_id: str,
+    lease_seconds: int | None = None,
+) -> dict[str, Any] | None:
+    claimed = store.claim_next_materialize_slice(
+        worker_id=worker_id,
+        lease_seconds=max(30, int(lease_seconds or config.DASH_V2_SLICE_LEASE_SECONDS)),
+    )
+    if not claimed:
+        return None
+    job = claimed.get("job") or {}
+    slice_summary = claimed.get("slice") or {}
+    job_id = str(job.get("jobId") or "")
+    slice_id = str(slice_summary.get("sliceId") or "")
+    fact_family = str(slice_summary.get("factFamily") or "")
+    slice_start = date.fromisoformat(str(slice_summary.get("sliceStart")))
+    slice_end = date.fromisoformat(str(slice_summary.get("sliceEnd")))
+    source_watermark = _utc_now()
+
+    def _heartbeat() -> None:
+        store.heartbeat_materialize_slice(
+            job_id=job_id,
+            slice_id=slice_id,
+            worker_id=worker_id,
+            lease_seconds=max(30, int(lease_seconds or config.DASH_V2_SLICE_LEASE_SECONDS)),
+        )
+
+    try:
+        family_run = _materialize_family_window(
+            store,
+            family=fact_family,
+            coverage_start=slice_start,
+            coverage_end=slice_end,
+            mode=str(job.get("mode") or "backfill"),
+            source_watermark=source_watermark,
+            heartbeat=_heartbeat,
+        )
+        if str(family_run.get("status") or "").strip().lower() != "completed":
+            updated_job = store.fail_materialize_slice(
+                job_id=job_id,
+                slice_id=slice_id,
+                worker_id=worker_id,
+                error=str(family_run.get("error") or "slice_failed"),
+                rows_inserted=int(family_run.get("rowsInserted") or 0),
+                days_processed=int(family_run.get("daysProcessed") or 0),
+                degraded_days=family_run.get("degradedDays"),
+                failed_widgets=family_run.get("failedWidgets"),
+                fact_run_id=family_run.get("runId"),
+            )
+            return {
+                "job": updated_job,
+                "slice": slice_summary,
+                "familyRun": family_run,
+                "error": family_run.get("error"),
+            }
+        updated_job = store.complete_materialize_slice(
+            job_id=job_id,
+            slice_id=slice_id,
+            worker_id=worker_id,
+            rows_inserted=int(family_run.get("rowsInserted") or 0),
+            days_processed=int(family_run.get("daysProcessed") or 0),
+            degraded_days=family_run.get("degradedDays"),
+            failed_widgets=family_run.get("failedWidgets"),
+            fact_run_id=family_run.get("runId"),
+        )
+        return {
+            "job": updated_job,
+            "slice": slice_summary,
+            "familyRun": family_run,
+        }
+    except Exception as exc:
+        updated_job = store.fail_materialize_slice(
+            job_id=job_id,
+            slice_id=slice_id,
+            worker_id=worker_id,
+            error=str(exc),
+        )
+        logger.exception(
+            "Dashboard V2 slice execution failed | job={} slice={} family={} error={}",
+            job_id,
+            slice_id,
+            fact_family,
+            exc,
+        )
+        return {
+            "job": updated_job,
+            "slice": slice_summary,
+            "error": str(exc),
+        }
 
 
 def make_dashboard_v2_store(writer: SupabaseWriter) -> DashboardV2Store:

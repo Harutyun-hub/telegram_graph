@@ -18,6 +18,12 @@ from api.dashboard_v2_registry import (
 from buffer.supabase_writer import SupabaseWriter
 
 
+MATERIALIZE_JOB_ACTIVE_STATUSES = ("queued", "running", "paused")
+MATERIALIZE_JOB_RESUMABLE_STATUSES = ("queued", "running", "paused", "failed")
+MATERIALIZE_SLICE_ACTIVE_STATUSES = ("pending", "running")
+MATERIALIZE_JOB_HEAVY_MODES = ("backfill", "reconciliation")
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -49,6 +55,17 @@ def _normalize_json(value: Any) -> dict[str, Any]:
 
 def _normalize_str_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return [str(value).strip() for value in (values or []) if str(value).strip()]
+
+
+def _parse_date(value: Any) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except Exception:
+        return None
 
 
 _COVERAGE_ROW_KEY = build_dashboard_v2_coverage_row_key()
@@ -330,6 +347,542 @@ class DashboardV2Store:
                     ],
                 )
             return len(rows)
+
+    def _materialize_job_summary_from_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "jobId": str(row.get("job_id") or ""),
+            "mode": str(row.get("mode") or ""),
+            "requestedStart": row.get("requested_start").isoformat() if isinstance(row.get("requested_start"), date) else str(row.get("requested_start") or ""),
+            "requestedEnd": row.get("requested_end").isoformat() if isinstance(row.get("requested_end"), date) else str(row.get("requested_end") or ""),
+            "factVersion": int(row.get("fact_version") or 0),
+            "status": str(row.get("status") or ""),
+            "requestedByRole": row.get("requested_by_role"),
+            "requestedByActor": row.get("requested_by_actor"),
+            "jobOwner": row.get("job_owner"),
+            "createdAt": _as_iso(_parse_dt(row.get("created_at"))),
+            "startedAt": _as_iso(_parse_dt(row.get("started_at"))),
+            "finishedAt": _as_iso(_parse_dt(row.get("finished_at"))),
+            "updatedAt": _as_iso(_parse_dt(row.get("updated_at"))),
+            "activeWorkerId": row.get("active_worker_id"),
+            "lastHeartbeatAt": _as_iso(_parse_dt(row.get("last_heartbeat_at"))),
+            "lastError": row.get("last_error"),
+            "totalSlices": int(row.get("total_slices") or 0),
+            "completedSlices": int(row.get("completed_slices") or 0),
+            "failedSlices": int(row.get("failed_slices") or 0),
+            "totalDays": int(row.get("total_days") or 0),
+            "completedDays": int(row.get("completed_days") or 0),
+        }
+
+    def _materialize_slice_summary_from_row(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "sliceId": str(row.get("slice_id") or ""),
+            "jobId": str(row.get("job_id") or ""),
+            "factFamily": str(row.get("fact_family") or ""),
+            "sliceOrder": int(row.get("slice_order") or 0),
+            "sliceStart": row.get("slice_start").isoformat() if isinstance(row.get("slice_start"), date) else str(row.get("slice_start") or ""),
+            "sliceEnd": row.get("slice_end").isoformat() if isinstance(row.get("slice_end"), date) else str(row.get("slice_end") or ""),
+            "status": str(row.get("status") or ""),
+            "attemptCount": int(row.get("attempt_count") or 0),
+            "leaseOwner": row.get("lease_owner"),
+            "leaseExpiresAt": _as_iso(_parse_dt(row.get("lease_expires_at"))),
+            "startedAt": _as_iso(_parse_dt(row.get("started_at"))),
+            "finishedAt": _as_iso(_parse_dt(row.get("finished_at"))),
+            "rowsInserted": int(row.get("rows_inserted") or 0),
+            "daysProcessed": int(row.get("days_processed") or 0),
+            "degradedDays": _normalize_str_list(row.get("degraded_days")),
+            "failedWidgets": _normalize_str_list(row.get("failed_widgets")),
+            "factRunId": str(row.get("fact_run_id") or "") or None,
+            "lastError": row.get("last_error"),
+        }
+
+    def _refresh_materialize_job_progress_cur(self, cur, *, job_id: str) -> dict[str, Any]:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*)::int AS total_slices,
+              COUNT(*) FILTER (WHERE status = 'completed')::int AS completed_slices,
+              COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_slices,
+              COUNT(*) FILTER (WHERE status = 'running')::int AS running_slices,
+              COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_slices,
+              COALESCE(SUM((slice_end - slice_start) + 1), 0)::int AS total_days,
+              COALESCE(SUM(CASE WHEN status = 'completed' THEN days_processed ELSE 0 END), 0)::int AS completed_days
+            FROM public.dashboard_materialize_slices_v2
+            WHERE job_id = %s::uuid
+            """,
+            (job_id,),
+        )
+        aggregate = cur.fetchone() or {}
+        running_slices = int(aggregate.get("running_slices") or 0)
+        pending_slices = int(aggregate.get("pending_slices") or 0)
+        failed_slices = int(aggregate.get("failed_slices") or 0)
+        if running_slices > 0:
+            status = "running"
+        elif pending_slices > 0:
+            status = "queued"
+        elif failed_slices > 0:
+            status = "failed"
+        else:
+            status = "completed"
+        finished_at = _utc_now() if status in {"completed", "failed", "cancelled"} else None
+        cur.execute(
+            """
+            UPDATE public.dashboard_materialize_jobs_v2
+            SET status = %s,
+                updated_at = timezone('utc', now()),
+                finished_at = COALESCE(%s, finished_at),
+                total_slices = %s,
+                completed_slices = %s,
+                failed_slices = %s,
+                total_days = %s,
+                completed_days = %s
+            WHERE job_id = %s::uuid
+            RETURNING *
+            """,
+            (
+                status,
+                finished_at,
+                int(aggregate.get("total_slices") or 0),
+                int(aggregate.get("completed_slices") or 0),
+                failed_slices,
+                int(aggregate.get("total_days") or 0),
+                int(aggregate.get("completed_days") or 0),
+                job_id,
+            ),
+        )
+        return self._materialize_job_summary_from_row(cur.fetchone()) or {}
+
+    def _fetch_materialize_job_cur(
+        self,
+        cur,
+        *,
+        job_id: str,
+        include_slices: bool = False,
+        slice_limit: int = 200,
+    ) -> dict[str, Any] | None:
+        cur.execute(
+            """
+            SELECT *
+            FROM public.dashboard_materialize_jobs_v2
+            WHERE job_id = %s::uuid
+            LIMIT 1
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        summary = self._materialize_job_summary_from_row(row) or {}
+        cur.execute(
+            """
+            SELECT *
+            FROM public.dashboard_materialize_slices_v2
+            WHERE job_id = %s::uuid
+              AND status = 'running'
+            ORDER BY slice_order ASC
+            LIMIT 1
+            """,
+            (job_id,),
+        )
+        current_slice = self._materialize_slice_summary_from_row(cur.fetchone())
+        summary["currentSlice"] = current_slice
+        if include_slices:
+            cur.execute(
+                """
+                SELECT *
+                FROM public.dashboard_materialize_slices_v2
+                WHERE job_id = %s::uuid
+                ORDER BY slice_order ASC
+                LIMIT %s
+                """,
+                (job_id, max(1, int(slice_limit))),
+            )
+            summary["slices"] = [
+                self._materialize_slice_summary_from_row(item)
+                for item in (cur.fetchall() or [])
+            ]
+        return summary
+
+    def enqueue_materialize_job(
+        self,
+        *,
+        mode: str,
+        requested_start: date,
+        requested_end: date,
+        fact_version: int,
+        requested_by_role: str | None = None,
+        requested_by_actor: str | None = None,
+        job_owner: str = "worker",
+        slices: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode not in MATERIALIZE_JOB_HEAVY_MODES:
+            raise ValueError(f"Unsupported Dashboard V2 materialize mode: {mode}")
+        with self.writer._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM public.dashboard_materialize_jobs_v2
+                WHERE mode = %s
+                  AND requested_start = %s
+                  AND requested_end = %s
+                  AND fact_version = %s
+                  AND status = ANY(%s)
+                ORDER BY created_at DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (
+                    normalized_mode,
+                    requested_start,
+                    requested_end,
+                    int(fact_version),
+                    list(MATERIALIZE_JOB_RESUMABLE_STATUSES),
+                ),
+            )
+            existing = cur.fetchone()
+            if existing:
+                job_id = str(existing["job_id"])
+                if str(existing.get("status") or "").strip().lower() in {"failed", "paused"}:
+                    cur.execute(
+                        """
+                        UPDATE public.dashboard_materialize_slices_v2
+                        SET status = 'pending',
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            updated_at = timezone('utc', now()),
+                            last_error = NULL
+                        WHERE job_id = %s::uuid
+                          AND (
+                            status = 'failed'
+                            OR (status = 'running' AND lease_expires_at < timezone('utc', now()))
+                          )
+                        """,
+                        (job_id,),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE public.dashboard_materialize_jobs_v2
+                        SET status = 'queued',
+                            updated_at = timezone('utc', now()),
+                            finished_at = NULL,
+                            last_error = NULL,
+                            active_worker_id = NULL
+                        WHERE job_id = %s::uuid
+                        """,
+                        (job_id,),
+                    )
+                    self._refresh_materialize_job_progress_cur(cur, job_id=job_id)
+                return self._fetch_materialize_job_cur(cur, job_id=job_id) or {}
+
+            job_id = str(uuid.uuid4())
+            cur.execute(
+                """
+                INSERT INTO public.dashboard_materialize_jobs_v2 (
+                  job_id,
+                  mode,
+                  requested_start,
+                  requested_end,
+                  fact_version,
+                  status,
+                  requested_by_role,
+                  requested_by_actor,
+                  job_owner,
+                  total_slices,
+                  total_days
+                )
+                VALUES (%s::uuid, %s, %s, %s, %s, 'queued', %s, %s, %s, %s, %s)
+                """,
+                (
+                    job_id,
+                    normalized_mode,
+                    requested_start,
+                    requested_end,
+                    int(fact_version),
+                    requested_by_role,
+                    requested_by_actor,
+                    job_owner,
+                    len(slices),
+                    sum(((item["slice_end"] - item["slice_start"]).days + 1) for item in slices),
+                ),
+            )
+            if slices:
+                cur.executemany(
+                    """
+                    INSERT INTO public.dashboard_materialize_slices_v2 (
+                      slice_id,
+                      job_id,
+                      fact_family,
+                      slice_order,
+                      slice_start,
+                      slice_end,
+                      status
+                    )
+                    VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, 'pending')
+                    """,
+                    [
+                        (
+                            str(uuid.uuid4()),
+                            job_id,
+                            str(item["fact_family"]),
+                            int(item["slice_order"]),
+                            item["slice_start"],
+                            item["slice_end"],
+                        )
+                        for item in slices
+                    ],
+                )
+            self._refresh_materialize_job_progress_cur(cur, job_id=job_id)
+            return self._fetch_materialize_job_cur(cur, job_id=job_id) or {}
+
+    def list_recent_materialize_jobs(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.writer.pg_fetchall(
+            """
+            SELECT *
+            FROM public.dashboard_materialize_jobs_v2
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (max(1, int(limit)),),
+        )
+        return [self._materialize_job_summary_from_row(row) for row in rows]
+
+    def get_materialize_job(self, job_id: str, *, include_slices: bool = False, slice_limit: int = 200) -> dict[str, Any] | None:
+        with self.writer._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            return self._fetch_materialize_job_cur(cur, job_id=job_id, include_slices=include_slices, slice_limit=slice_limit)
+
+    def get_active_materialize_job(self) -> dict[str, Any] | None:
+        row = self.writer.pg_fetchone(
+            """
+            SELECT *
+            FROM public.dashboard_materialize_jobs_v2
+            WHERE status = ANY(%s)
+            ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at ASC
+            LIMIT 1
+            """,
+            (list(MATERIALIZE_JOB_ACTIVE_STATUSES),),
+        )
+        if not row:
+            return None
+        return self.get_materialize_job(str(row["job_id"]), include_slices=False)
+
+    def has_active_materialize_job(self) -> bool:
+        return self.get_active_materialize_job() is not None
+
+    def claim_next_materialize_slice(self, *, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        with self.writer._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM public.dashboard_materialize_jobs_v2
+                WHERE status = ANY(%s)
+                  AND job_owner = 'worker'
+                ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                (list(("running", "queued")),),
+            )
+            job_row = cur.fetchone()
+            if not job_row:
+                return None
+            job_id = str(job_row["job_id"])
+            cur.execute(
+                """
+                SELECT *
+                FROM public.dashboard_materialize_slices_v2
+                WHERE job_id = %s::uuid
+                  AND (
+                    status = 'pending'
+                    OR (status = 'running' AND lease_expires_at < timezone('utc', now()))
+                  )
+                ORDER BY slice_order ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                (job_id,),
+            )
+            slice_row = cur.fetchone()
+            if not slice_row:
+                self._refresh_materialize_job_progress_cur(cur, job_id=job_id)
+                return None
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_slices_v2
+                SET status = 'running',
+                    attempt_count = attempt_count + 1,
+                    lease_owner = %s,
+                    lease_expires_at = timezone('utc', now()) + (%s * interval '1 second'),
+                    started_at = COALESCE(started_at, timezone('utc', now())),
+                    updated_at = timezone('utc', now()),
+                    last_error = NULL
+                WHERE slice_id = %s::uuid
+                RETURNING *
+                """,
+                (
+                    worker_id,
+                    max(30, int(lease_seconds)),
+                    str(slice_row["slice_id"]),
+                ),
+            )
+            claimed_slice = cur.fetchone()
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_jobs_v2
+                SET status = 'running',
+                    active_worker_id = %s,
+                    started_at = COALESCE(started_at, timezone('utc', now())),
+                    last_heartbeat_at = timezone('utc', now()),
+                    updated_at = timezone('utc', now())
+                WHERE job_id = %s::uuid
+                """,
+                (worker_id, job_id),
+            )
+            return {
+                "job": self._fetch_materialize_job_cur(cur, job_id=job_id, include_slices=False),
+                "slice": self._materialize_slice_summary_from_row(claimed_slice),
+            }
+
+    def heartbeat_materialize_slice(
+        self,
+        *,
+        job_id: str,
+        slice_id: str,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> None:
+        self.writer.pg_execute(
+            """
+            UPDATE public.dashboard_materialize_slices_v2
+            SET lease_owner = %s,
+                lease_expires_at = timezone('utc', now()) + (%s * interval '1 second'),
+                updated_at = timezone('utc', now())
+            WHERE slice_id = %s::uuid
+              AND job_id = %s::uuid
+            """,
+            (worker_id, max(30, int(lease_seconds)), slice_id, job_id),
+        )
+        self.writer.pg_execute(
+            """
+            UPDATE public.dashboard_materialize_jobs_v2
+            SET active_worker_id = %s,
+                last_heartbeat_at = timezone('utc', now()),
+                updated_at = timezone('utc', now())
+            WHERE job_id = %s::uuid
+            """,
+            (worker_id, job_id),
+        )
+
+    def complete_materialize_slice(
+        self,
+        *,
+        job_id: str,
+        slice_id: str,
+        worker_id: str,
+        rows_inserted: int,
+        days_processed: int,
+        degraded_days: list[str] | tuple[str, ...] | None,
+        failed_widgets: list[str] | tuple[str, ...] | None,
+        fact_run_id: str | None,
+    ) -> dict[str, Any]:
+        with self.writer._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_slices_v2
+                SET status = 'completed',
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    finished_at = timezone('utc', now()),
+                    updated_at = timezone('utc', now()),
+                    rows_inserted = %s,
+                    days_processed = %s,
+                    degraded_days = %s::text[],
+                    failed_widgets = %s::text[],
+                    fact_run_id = %s::uuid,
+                    last_error = NULL
+                WHERE slice_id = %s::uuid
+                  AND job_id = %s::uuid
+                """,
+                (
+                    int(rows_inserted),
+                    int(days_processed),
+                    _normalize_str_list(degraded_days),
+                    _normalize_str_list(failed_widgets),
+                    fact_run_id,
+                    slice_id,
+                    job_id,
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_jobs_v2
+                SET active_worker_id = %s,
+                    last_heartbeat_at = timezone('utc', now()),
+                    updated_at = timezone('utc', now()),
+                    last_error = NULL
+                WHERE job_id = %s::uuid
+                """,
+                (worker_id, job_id),
+            )
+            return self._refresh_materialize_job_progress_cur(cur, job_id=job_id)
+
+    def fail_materialize_slice(
+        self,
+        *,
+        job_id: str,
+        slice_id: str,
+        worker_id: str,
+        error: str,
+        rows_inserted: int = 0,
+        days_processed: int = 0,
+        degraded_days: list[str] | tuple[str, ...] | None = None,
+        failed_widgets: list[str] | tuple[str, ...] | None = None,
+        fact_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self.writer._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_slices_v2
+                SET status = 'failed',
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    finished_at = timezone('utc', now()),
+                    updated_at = timezone('utc', now()),
+                    rows_inserted = %s,
+                    days_processed = %s,
+                    degraded_days = %s::text[],
+                    failed_widgets = %s::text[],
+                    fact_run_id = %s::uuid,
+                    last_error = %s
+                WHERE slice_id = %s::uuid
+                  AND job_id = %s::uuid
+                """,
+                (
+                    int(rows_inserted),
+                    int(days_processed),
+                    _normalize_str_list(degraded_days),
+                    _normalize_str_list(failed_widgets),
+                    fact_run_id,
+                    error,
+                    slice_id,
+                    job_id,
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE public.dashboard_materialize_jobs_v2
+                SET active_worker_id = %s,
+                    last_heartbeat_at = timezone('utc', now()),
+                    updated_at = timezone('utc', now()),
+                    last_error = %s
+                WHERE job_id = %s::uuid
+                """,
+                (worker_id, error, job_id),
+            )
+            return self._refresh_materialize_job_progress_cur(cur, job_id=job_id)
 
     def upsert_secondary_materialization(
         self,
@@ -905,7 +1458,33 @@ class DashboardV2Store:
         min_fact_version: int = 1,
         lookback_days: int = 400,
         end_date: date | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> dict[str, Any]:
+        if from_date is not None or to_date is not None:
+            if from_date is None or to_date is None:
+                raise ValueError("Both from_date and to_date are required for exact Dashboard V2 readiness checks.")
+            exact_readiness = self.get_range_readiness(
+                from_date=from_date,
+                to_date=to_date,
+                fact_families=FULL_DASHBOARD_REQUIRED_FACT_FAMILIES,
+                min_fact_version=min_fact_version,
+            )
+            return {
+                "coverageStart": exact_readiness["availabilityStart"],
+                "coverageEnd": exact_readiness["availabilityEnd"],
+                "routeReadyWindowStart": from_date.isoformat() if exact_readiness["ready"] else None,
+                "routeReadyWindowEnd": to_date.isoformat() if exact_readiness["ready"] else None,
+                "requestedFrom": from_date.isoformat(),
+                "requestedTo": to_date.isoformat(),
+                "minRequiredFactVersion": int(min_fact_version),
+                "v2RouteReady": bool(exact_readiness["ready"]),
+                "missingFamilies": exact_readiness["missingFactFamilies"],
+                "missingDates": exact_readiness["missingDates"],
+                "degradedFamilies": exact_readiness["degradedFactFamilies"],
+                "degradedDates": exact_readiness["degradedDates"],
+                "factFamilies": exact_readiness["factFamilies"],
+            }
         resolved_end = end_date or (_utc_now().date() - timedelta(days=1))
         resolved_lookback = max(1, int(lookback_days))
         requested_start = resolved_end - timedelta(days=resolved_lookback - 1)
@@ -1061,17 +1640,24 @@ class DashboardV2Store:
         *,
         run_limit: int = 20,
         artifact_limit: int = 20,
+        job_limit: int = 10,
         min_fact_version: int = 1,
         lookback_days: int = 400,
+        from_date: date | None = None,
+        to_date: date | None = None,
     ) -> dict[str, Any]:
         try:
             return {
                 "factRuns": self.list_recent_fact_runs(limit=run_limit),
                 "artifacts": self.summarize_recent_artifacts(limit=artifact_limit),
                 "compareRuns": self.list_recent_compare_runs(limit=min(run_limit, 10)),
+                "materializeJobs": self.list_recent_materialize_jobs(limit=job_limit),
+                "activeJob": self.get_active_materialize_job(),
                 "readiness": self.summarize_v2_route_readiness(
                     min_fact_version=min_fact_version,
                     lookback_days=lookback_days,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
             }
         except Exception as exc:

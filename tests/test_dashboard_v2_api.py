@@ -118,6 +118,59 @@ class _RouteStore:
         return None
 
 
+class _StatusRouteStore:
+    def summarize_v2_route_readiness(self, *, min_fact_version: int = 1, lookback_days: int = 400, from_date=None, to_date=None):
+        del min_fact_version, lookback_days
+        return {
+            "coverageStart": "2026-04-12",
+            "coverageEnd": "2026-04-18",
+            "routeReadyWindowStart": from_date.isoformat() if from_date else "2026-04-12",
+            "routeReadyWindowEnd": to_date.isoformat() if to_date else "2026-04-18",
+            "requestedFrom": from_date.isoformat() if from_date else None,
+            "requestedTo": to_date.isoformat() if to_date else None,
+            "v2RouteReady": True,
+            "missingFamilies": [],
+            "degradedFamilies": [],
+        }
+
+    def status_snapshot(self, *, run_limit: int = 20, artifact_limit: int = 20, job_limit: int = 10, min_fact_version: int = 1, lookback_days: int = 400, from_date=None, to_date=None):
+        del run_limit, artifact_limit, job_limit, min_fact_version, lookback_days
+        return {
+            "factRuns": [],
+            "artifacts": [],
+            "compareRuns": [],
+            "materializeJobs": [],
+            "activeJob": {
+                "jobId": "job-1",
+                "mode": "backfill",
+                "status": "running",
+                "totalSlices": 8,
+                "completedSlices": 3,
+                "failedSlices": 0,
+                "currentSlice": {"sliceId": "slice-4", "factFamily": "topics"},
+                "lastHeartbeatAt": "2026-04-18T12:00:00+00:00",
+            },
+            "readiness": self.summarize_v2_route_readiness(from_date=from_date, to_date=to_date),
+        }
+
+    def get_active_materialize_job(self):
+        return {"jobId": "job-1", "mode": "backfill", "status": "running"}
+
+    def get_materialize_job(self, job_id, *, include_slices=False):
+        return {
+            "jobId": job_id,
+            "mode": "backfill",
+            "status": "running",
+            "requestedStart": "2026-04-12",
+            "requestedEnd": "2026-04-18",
+            "totalSlices": 8,
+            "completedSlices": 3,
+            "failedSlices": 0,
+            "currentSlice": {"sliceId": "slice-4", "factFamily": "topics"},
+            "slices": [{"sliceId": "slice-1"}] if include_slices else [],
+        }
+
+
 class DashboardV2ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -219,6 +272,50 @@ class DashboardV2ApiTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["dataPlane"], "dashboard_v2")
         self.assertEqual(payload["meta"]["skippedTiers"], [])
         self.assertEqual(payload["data"]["communityBrief"]["postsAnalyzedInWindow"], 4)
+
+    def test_dashboard_v2_materialize_enqueues_job_without_running_inline(self) -> None:
+        with patch.object(server.config, "ADMIN_API_KEY", ""), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_dashboard_v2_store", return_value=object()), \
+             patch(
+                 "api.server.enqueue_dashboard_v2_materialize_job",
+                 return_value={
+                     "jobId": "job-1",
+                     "status": "queued",
+                     "requestedStart": "2026-04-12",
+                     "requestedEnd": "2026-04-18",
+                     "totalSlices": 8,
+                     "completedSlices": 0,
+                     "failedSlices": 0,
+                 },
+             ):
+            response = self.client.post("/api/dashboard-v2/materialize?mode=backfill&from=2026-04-12&to=2026-04-18")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["jobId"], "job-1")
+        self.assertEqual(response.json()["result"]["status"], "queued")
+
+    def test_dashboard_v2_status_accepts_exact_window_and_returns_active_job(self) -> None:
+        with patch.object(server.config, "ADMIN_API_KEY", ""), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_dashboard_v2_store", return_value=_StatusRouteStore()):
+            response = self.client.get("/api/dashboard-v2/status?from=2026-04-12&to=2026-04-18")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"]["activeJob"]["jobId"], "job-1")
+        self.assertEqual(payload["status"]["readiness"]["requestedFrom"], "2026-04-12")
+        self.assertEqual(payload["status"]["readiness"]["requestedTo"], "2026-04-18")
+
+    def test_dashboard_v2_materialize_job_route_returns_job_detail(self) -> None:
+        with patch.object(server.config, "ADMIN_API_KEY", ""), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_dashboard_v2_store", return_value=_StatusRouteStore()):
+            response = self.client.get("/api/dashboard-v2/materialize/jobs/job-1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["jobId"], "job-1")
+        self.assertEqual(response.json()["result"]["currentSlice"]["factFamily"], "topics")
 
 
 if __name__ == "__main__":

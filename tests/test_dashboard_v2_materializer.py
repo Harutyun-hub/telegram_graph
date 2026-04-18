@@ -7,8 +7,10 @@ from unittest.mock import patch
 from api.dashboard_dates import build_dashboard_date_context
 from api.dashboard_v2_materializer import (
     DashboardV2FactRow,
+    plan_dashboard_v2_materialize_slices,
     _materialize_family_rows,
     materialize_dashboard_v2_foundation,
+    run_dashboard_v2_materialize_slice_once,
 )
 
 
@@ -36,7 +38,84 @@ class _FakeStore:
         self.completed_runs.append((run_id, status, meta_json or {}))
 
 
+class _SliceQueueStore:
+    def __init__(self) -> None:
+        self.claimed = False
+        self.heartbeats: list[tuple[str, str, str, int]] = []
+        self.completed: list[tuple[str, str, str, int, int, tuple[str, ...], tuple[str, ...], str | None]] = []
+        self.failed: list[tuple[str, str, str, str]] = []
+
+    def claim_next_materialize_slice(self, *, worker_id, lease_seconds):
+        if self.claimed:
+            return None
+        self.claimed = True
+        return {
+            "job": {
+                "jobId": "job-1",
+                "mode": "backfill",
+            },
+            "slice": {
+                "sliceId": "slice-1",
+                "factFamily": "content",
+                "sliceStart": "2026-04-16",
+                "sliceEnd": "2026-04-18",
+            },
+        }
+
+    def heartbeat_materialize_slice(self, *, job_id, slice_id, worker_id, lease_seconds):
+        self.heartbeats.append((job_id, slice_id, worker_id, lease_seconds))
+
+    def complete_materialize_slice(
+        self,
+        *,
+        job_id,
+        slice_id,
+        worker_id,
+        rows_inserted,
+        days_processed,
+        degraded_days,
+        failed_widgets,
+        fact_run_id,
+    ):
+        self.completed.append(
+            (
+                job_id,
+                slice_id,
+                worker_id,
+                rows_inserted,
+                days_processed,
+                tuple(degraded_days or ()),
+                tuple(failed_widgets or ()),
+                fact_run_id,
+            )
+        )
+        return {"jobId": job_id, "status": "running"}
+
+    def fail_materialize_slice(self, *, job_id, slice_id, worker_id, error, **kwargs):
+        self.failed.append((job_id, slice_id, worker_id, error))
+        return {"jobId": job_id, "status": "failed"}
+
+
 class DashboardV2MaterializerTests(unittest.TestCase):
+    def test_slice_planner_uses_content_3_day_slices_and_others_7_day_slices(self) -> None:
+        with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content", "topics")):
+            plans = plan_dashboard_v2_materialize_slices(
+                mode="backfill",
+                requested_start=date(2026, 4, 1),
+                requested_end=date(2026, 4, 8),
+            )
+
+        self.assertEqual(
+            [(plan.fact_family, plan.slice_start.isoformat(), plan.slice_end.isoformat()) for plan in plans],
+            [
+                ("content", "2026-04-01", "2026-04-03"),
+                ("content", "2026-04-04", "2026-04-06"),
+                ("content", "2026-04-07", "2026-04-08"),
+                ("topics", "2026-04-01", "2026-04-07"),
+                ("topics", "2026-04-08", "2026-04-08"),
+            ],
+        )
+
     def test_multi_family_widget_materializes_into_each_declared_family(self) -> None:
         ctx = build_dashboard_date_context("2026-04-18", "2026-04-18")
         with patch(
@@ -132,6 +211,27 @@ class DashboardV2MaterializerTests(unittest.TestCase):
         self.assertEqual(result["family_runs"][0]["degradedDays"], ["2026-04-18"])
         self.assertEqual(result["family_runs"][0]["failedWidgets"], ["community_brief"])
         self.assertEqual(store.completed_runs[0][2]["degradedDays"], ["2026-04-18"])
+
+    def test_run_dashboard_v2_materialize_slice_once_completes_claimed_slice(self) -> None:
+        store = _SliceQueueStore()
+
+        with patch(
+            "api.dashboard_v2_materializer._materialize_family_window",
+            return_value={
+                "factFamily": "content",
+                "runId": "fact-run-1",
+                "status": "completed",
+                "rowsInserted": 9,
+                "daysProcessed": 3,
+                "degradedDays": [],
+                "failedWidgets": [],
+            },
+        ):
+            result = run_dashboard_v2_materialize_slice_once(store, worker_id="worker-1", lease_seconds=90)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(store.completed[0][:5], ("job-1", "slice-1", "worker-1", 9, 3))
+        self.assertEqual(result["job"]["status"], "running")
 
 
 if __name__ == "__main__":

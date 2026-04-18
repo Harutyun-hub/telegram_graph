@@ -93,9 +93,11 @@ from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError, assemble_d
 from api.dashboard_v2_compare import run_dashboard_v2_compare
 from api.dashboard_v2_materializer import (
     DASHBOARD_V2_FACT_VERSION,
+    enqueue_dashboard_v2_materialize_job,
     materialize_dashboard_v2_backfill,
     materialize_dashboard_v2_incremental,
     materialize_dashboard_v2_reconciliation,
+    run_dashboard_v2_materialize_slice_once,
 )
 from api.dashboard_v2_registry import build_widget_coverage_report
 from api.dashboard_v2_runtime import normalize_dashboard_v2_job_owner, should_run_dashboard_v2_jobs
@@ -143,6 +145,16 @@ def _should_run_dashboard_v2_background_jobs() -> bool:
         config.DASH_V2_FACTS_ENABLED
         and should_run_dashboard_v2_jobs(app_role=APP_ROLE, job_owner=_dashboard_v2_job_owner())
     )
+
+
+def _dashboard_v2_worker_id() -> str:
+    replica = str(
+        os.getenv("RAILWAY_REPLICA_ID")
+        or os.getenv("RAILWAY_SERVICE_ID")
+        or os.getenv("HOSTNAME")
+        or os.getpid()
+    ).strip()
+    return f"dashboard-v2:{replica}"
 
 
 def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | None = None) -> dict[str, Any]:
@@ -2893,6 +2905,15 @@ async def _materialize_dashboard_v2_incremental_once(force: bool = False) -> Non
     """Refresh recent Dashboard V2 facts off the request path."""
     del force  # Reserved for future PR2B/PR2C behavior.
     try:
+        active_job = get_dashboard_v2_store().get_active_materialize_job()
+        if active_job and str(active_job.get("mode") or "") in {"backfill", "reconciliation"}:
+            logger.info(
+                "Dashboard V2 incremental materialization skipped | active_job={} mode={} status={}",
+                active_job.get("jobId"),
+                active_job.get("mode"),
+                active_job.get("status"),
+            )
+            return
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
@@ -2913,20 +2934,54 @@ async def _reconcile_dashboard_v2_facts_once(force: bool = False) -> None:
     """Reconcile the recent Dashboard V2 fact window."""
     del force  # Reserved for future PR2B/PR2C behavior.
     try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: materialize_dashboard_v2_reconciliation(get_dashboard_v2_store()),
+            lambda: enqueue_dashboard_v2_materialize_job(
+                get_dashboard_v2_store(),
+                mode="reconciliation",
+                requested_by_role=APP_ROLE,
+                requested_by_actor="scheduler",
+                job_owner=_dashboard_v2_job_owner(),
+            ),
         )
         logger.info(
-            "Dashboard V2 reconciliation completed | coverage={}..{} families={} secondary={}",
-            result.get("coverage_start"),
-            result.get("coverage_end"),
-            len(result.get("family_runs") or []),
-            len(result.get("secondary_runs") or []),
+            "Dashboard V2 reconciliation enqueued | job={} status={} window={}..{}",
+            result.get("jobId"),
+            result.get("status"),
+            result.get("requestedStart"),
+            result.get("requestedEnd"),
         )
     except Exception as e:
         logger.warning(f"Dashboard V2 reconciliation failed: {e}")
+
+
+async def _run_dashboard_v2_materialize_queue_loop() -> None:
+    """Worker-owned loop that claims and processes one V2 materialize slice at a time."""
+    worker_id = _dashboard_v2_worker_id()
+    while True:
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: run_dashboard_v2_materialize_slice_once(
+                    get_dashboard_v2_store(),
+                    worker_id=worker_id,
+                ),
+            )
+            if result:
+                logger.info(
+                    "Dashboard V2 materialize slice processed | job={} slice={} family={} status={}",
+                    (result.get("job") or {}).get("jobId"),
+                    (result.get("slice") or {}).get("sliceId"),
+                    (result.get("slice") or {}).get("factFamily"),
+                    (result.get("job") or {}).get("status"),
+                )
+                await asyncio.sleep(0)
+                continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Dashboard V2 materialize queue loop failed: {exc}")
+        await asyncio.sleep(max(1, int(config.DASH_V2_SLICE_POLL_SECONDS)))
 
 
 async def _run_dashboard_v2_compare_samples_once() -> None:
@@ -5014,13 +5069,22 @@ async def seed_default_dashboard_artifact():
 
 
 @app.get("/api/dashboard-v2/coverage", dependencies=[Depends(require_operator_access)])
-async def get_dashboard_v2_coverage():
+async def get_dashboard_v2_coverage(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """Return the Dashboard V2 widget-to-fact coverage map."""
+    if bool(from_date) ^ bool(to_date):
+        raise HTTPException(status_code=422, detail={"code": "v2_exact_range_required", "message": "Both from and to are required."})
+    readiness_from = date.fromisoformat(from_date) if from_date else None
+    readiness_to = date.fromisoformat(to_date) if to_date else None
     readiness = await asyncio.get_running_loop().run_in_executor(
         None,
         lambda: get_dashboard_v2_store().summarize_v2_route_readiness(
             min_fact_version=DASHBOARD_V2_FACT_VERSION,
             lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+            from_date=readiness_from,
+            to_date=readiness_to,
         ),
     )
     return {
@@ -5034,20 +5098,30 @@ async def get_dashboard_v2_coverage():
         "processOwnsJobs": _should_run_dashboard_v2_background_jobs(),
         "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
         "minRequiredFactVersion": int(DASHBOARD_V2_FACT_VERSION),
+        "activeJob": get_dashboard_v2_store().get_active_materialize_job(),
         "readiness": readiness,
         "widgets": build_widget_coverage_report(),
     }
 
 
 @app.get("/api/dashboard-v2/status", dependencies=[Depends(require_operator_access)])
-async def get_dashboard_v2_status():
+async def get_dashboard_v2_status(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
     """Return Dashboard V2 materialization status without changing serving behavior."""
     try:
+        if bool(from_date) ^ bool(to_date):
+            raise HTTPException(status_code=422, detail={"code": "v2_exact_range_required", "message": "Both from and to are required."})
+        readiness_from = date.fromisoformat(from_date) if from_date else None
+        readiness_to = date.fromisoformat(to_date) if to_date else None
         status = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: get_dashboard_v2_store().status_snapshot(
                 min_fact_version=DASHBOARD_V2_FACT_VERSION,
                 lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+                from_date=readiness_from,
+                to_date=readiness_to,
             ),
         )
         return {
@@ -5067,26 +5141,60 @@ async def get_dashboard_v2_status():
             "coverage": build_widget_coverage_report(),
             "status": status,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Dashboard V2 status endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/dashboard-v2/materialize", dependencies=[Depends(require_operator_access)])
-async def materialize_dashboard_v2(mode: str = Query("incremental", pattern="^(incremental|reconciliation|backfill)$")):
-    """Run the PR2B Dashboard V2 fact materializer once."""
+async def materialize_dashboard_v2(
+    mode: str = Query(..., pattern="^(reconciliation|backfill)$"),
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Enqueue or resume a PR2B Dashboard V2 chunked materialization job."""
     try:
-        loop = asyncio.get_running_loop()
-        store = get_dashboard_v2_store()
-        if mode == "reconciliation":
-            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_reconciliation(store))
-        elif mode == "backfill":
-            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_backfill(store))
-        else:
-            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_incremental(store))
+        if bool(from_date) ^ bool(to_date):
+            raise HTTPException(status_code=422, detail={"code": "v2_exact_range_required", "message": "Both from and to are required."})
+        requested_from = date.fromisoformat(from_date) if from_date else None
+        requested_to = date.fromisoformat(to_date) if to_date else None
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: enqueue_dashboard_v2_materialize_job(
+                get_dashboard_v2_store(),
+                mode=mode,
+                from_date=requested_from,
+                to_date=requested_to,
+                requested_by_role=APP_ROLE,
+                requested_by_actor="operator",
+                job_owner=_dashboard_v2_job_owner(),
+            ),
+        )
         return {"success": True, "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Dashboard V2 materialize endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard-v2/materialize/jobs/{job_id}", dependencies=[Depends(require_operator_access)])
+async def get_dashboard_v2_materialize_job(job_id: str):
+    """Return the current state of a Dashboard V2 chunked materialization job."""
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: get_dashboard_v2_store().get_materialize_job(job_id, include_slices=True),
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Dashboard V2 materialize job not found")
+        return {"success": True, "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Dashboard V2 materialize job endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

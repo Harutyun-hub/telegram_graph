@@ -78,6 +78,8 @@ async def run_worker() -> None:
             startup_tasks.append(asyncio.create_task(server._materialize_topic_overviews_once(force=False)))
         if server._should_run_dashboard_v2_background_jobs():
             startup_tasks.append(asyncio.create_task(server._materialize_dashboard_v2_incremental_once(force=False)))
+    if server._should_run_dashboard_v2_background_jobs():
+        startup_tasks.append(asyncio.create_task(server._run_dashboard_v2_materialize_queue_loop()))
 
     try:
         await asyncio.Event().wait()

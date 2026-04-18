@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 from api.dashboard_v2_store import DashboardV2Store, compute_max_fact_watermark, compute_stale_fact_families, same_key_last_known_good_allowed
 
@@ -156,6 +157,57 @@ class DashboardV2StoreHelperTests(unittest.TestCase):
         self.assertFalse(readiness["v2RouteReady"])
         self.assertEqual(readiness["routeReadyWindowStart"], "2026-04-18")
         self.assertEqual(readiness["routeReadyWindowEnd"], "2026-04-16")
+
+    def test_summarize_route_readiness_uses_exact_window_when_from_to_are_provided(self) -> None:
+        store = _CoverageOnlyStore(
+            {
+                "content": [
+                    {
+                        "fact_date": date(2026, 4, 17),
+                        "fact_version": 2,
+                        "materialized_at": "2026-04-18T10:00:00+00:00",
+                        "source_watermark": "2026-04-18T10:00:00+00:00",
+                        "payload_json": {"coverageReady": True},
+                    },
+                    {
+                        "fact_date": date(2026, 4, 18),
+                        "fact_version": 2,
+                        "materialized_at": "2026-04-18T10:00:00+00:00",
+                        "source_watermark": "2026-04-18T10:00:00+00:00",
+                        "payload_json": {"coverageReady": True},
+                    },
+                ],
+                "topics": [
+                    {
+                        "fact_date": date(2026, 4, 17),
+                        "fact_version": 2,
+                        "materialized_at": "2026-04-18T10:00:00+00:00",
+                        "source_watermark": "2026-04-18T10:00:00+00:00",
+                        "payload_json": {"coverageReady": True},
+                    },
+                    {
+                        "fact_date": date(2026, 4, 18),
+                        "fact_version": 2,
+                        "materialized_at": "2026-04-18T10:00:00+00:00",
+                        "source_watermark": "2026-04-18T10:00:00+00:00",
+                        "payload_json": {"coverageReady": True},
+                    },
+                ],
+            }
+        )
+
+        with patch("api.dashboard_v2_store.FULL_DASHBOARD_REQUIRED_FACT_FAMILIES", ("content", "topics")):
+            readiness = store.summarize_v2_route_readiness(
+                min_fact_version=2,
+                from_date=date(2026, 4, 17),
+                to_date=date(2026, 4, 18),
+            )
+
+        self.assertTrue(readiness["v2RouteReady"])
+        self.assertEqual(readiness["routeReadyWindowStart"], "2026-04-17")
+        self.assertEqual(readiness["routeReadyWindowEnd"], "2026-04-18")
+        self.assertEqual(readiness["requestedFrom"], "2026-04-17")
+        self.assertEqual(readiness["requestedTo"], "2026-04-18")
 
     def test_get_range_readiness_reports_degraded_coverage(self) -> None:
         store = _CoverageOnlyStore(
