@@ -274,6 +274,7 @@ class DashboardV2CompareTests(unittest.TestCase):
         self.assertTrue(result["widgetDiffs"]["topic_lifecycle"]["dashboardV2"]["present"])
         assemble_mock.assert_called_once()
         self.assertEqual(assemble_mock.call_args.kwargs["allow_stale_exact_last_known_good"], False)
+        self.assertEqual(assemble_mock.call_args.kwargs["prefer_cached_exact_artifacts"], False)
 
 
 if __name__ == "__main__":

@@ -166,6 +166,7 @@ def run_dashboard_v2_compare(
             store,
             ctx=ctx,
             allow_stale_exact_last_known_good=False,
+            prefer_cached_exact_artifacts=False,
         )
         v2_snapshot = dict(v2_result.snapshot or {})
         v2_meta = {

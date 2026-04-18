@@ -490,6 +490,7 @@ def assemble_dashboard_v2_exact(
     *,
     ctx: DashboardDateContext,
     allow_stale_exact_last_known_good: bool = True,
+    prefer_cached_exact_artifacts: bool = True,
 ) -> DashboardV2AssemblyResult:
     route_readiness = store.summarize_v2_route_readiness(
         min_fact_version=DASHBOARD_V2_FACT_VERSION,
@@ -520,84 +521,85 @@ def assemble_dashboard_v2_exact(
         min_fact_version=DASHBOARD_V2_FACT_VERSION,
     )
 
-    cached = _cache_get(ctx.cache_key)
-    if _artifact_matches_exact_context(cached, ctx):
-        stale_fact_families = compute_stale_fact_families(cached.get("dependency_watermarks") or {}, latest_dependency_watermarks)
-        if not stale_fact_families and not bool(cached.get("is_stale")):
-            return DashboardV2AssemblyResult(
-                snapshot=dict(cached.get("payload_json") or {}),
-                cache_status="memory_exact",
-                cache_source="memory",
-                range_resolution_path="v2_memory_exact",
-                is_stale=False,
-                fact_version=DASHBOARD_V2_FACT_VERSION,
-                artifact_version=int(cached.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
-                fact_watermark=_as_str(cached.get("fact_watermark")) or None,
-                materialized_at=_as_str(cached.get("materialized_at")) or None,
-                stale_fact_families=[],
-            )
+    if prefer_cached_exact_artifacts:
+        cached = _cache_get(ctx.cache_key)
+        if _artifact_matches_exact_context(cached, ctx):
+            stale_fact_families = compute_stale_fact_families(cached.get("dependency_watermarks") or {}, latest_dependency_watermarks)
+            if not stale_fact_families and not bool(cached.get("is_stale")):
+                return DashboardV2AssemblyResult(
+                    snapshot=dict(cached.get("payload_json") or {}),
+                    cache_status="memory_exact",
+                    cache_source="memory",
+                    range_resolution_path="v2_memory_exact",
+                    is_stale=False,
+                    fact_version=DASHBOARD_V2_FACT_VERSION,
+                    artifact_version=int(cached.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
+                    fact_watermark=_as_str(cached.get("fact_watermark")) or None,
+                    materialized_at=_as_str(cached.get("materialized_at")) or None,
+                    stale_fact_families=[],
+                )
 
-    artifact = store.get_range_artifact(ctx.cache_key)
-    if _artifact_matches_exact_context(artifact, ctx):
-        stale_fact_families = sorted(
-            set(compute_stale_fact_families(artifact.get("dependency_watermarks") or {}, latest_dependency_watermarks))
-            | set(_as_list(artifact.get("stale_fact_families")))
-        )
-        if not stale_fact_families and not bool(artifact.get("is_stale")):
-            payload_json = dict(artifact.get("payload_json") or {})
-            _cache_put(
-                ctx.cache_key,
-                {
-                    "cache_key": ctx.cache_key,
-                    "from_date": ctx.from_date,
-                    "to_date": ctx.to_date,
-                    "range_mode": "exact",
-                    "payload_json": payload_json,
-                    "dependency_watermarks": latest_dependency_watermarks,
-                    "fact_watermark": compute_max_fact_watermark(latest_dependency_watermarks).isoformat()
-                    if compute_max_fact_watermark(latest_dependency_watermarks)
-                    else None,
-                    "artifact_version": int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
-                    "materialized_at": _as_str(artifact.get("materialized_at")) or None,
-                    "is_stale": False,
-                },
+        artifact = store.get_range_artifact(ctx.cache_key)
+        if _artifact_matches_exact_context(artifact, ctx):
+            stale_fact_families = sorted(
+                set(compute_stale_fact_families(artifact.get("dependency_watermarks") or {}, latest_dependency_watermarks))
+                | set(_as_list(artifact.get("stale_fact_families")))
             )
-            return DashboardV2AssemblyResult(
-                snapshot=payload_json,
-                cache_status="persisted_exact",
-                cache_source="persisted",
-                range_resolution_path="v2_persisted_exact",
-                is_stale=False,
-                fact_version=DASHBOARD_V2_FACT_VERSION,
-                artifact_version=int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
-                fact_watermark=_as_str(artifact.get("fact_watermark")) or None,
-                materialized_at=_as_str(artifact.get("materialized_at")) or None,
-                stale_fact_families=[],
+            if not stale_fact_families and not bool(artifact.get("is_stale")):
+                payload_json = dict(artifact.get("payload_json") or {})
+                _cache_put(
+                    ctx.cache_key,
+                    {
+                        "cache_key": ctx.cache_key,
+                        "from_date": ctx.from_date,
+                        "to_date": ctx.to_date,
+                        "range_mode": "exact",
+                        "payload_json": payload_json,
+                        "dependency_watermarks": latest_dependency_watermarks,
+                        "fact_watermark": compute_max_fact_watermark(latest_dependency_watermarks).isoformat()
+                        if compute_max_fact_watermark(latest_dependency_watermarks)
+                        else None,
+                        "artifact_version": int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
+                        "materialized_at": _as_str(artifact.get("materialized_at")) or None,
+                        "is_stale": False,
+                    },
+                )
+                return DashboardV2AssemblyResult(
+                    snapshot=payload_json,
+                    cache_status="persisted_exact",
+                    cache_source="persisted",
+                    range_resolution_path="v2_persisted_exact",
+                    is_stale=False,
+                    fact_version=DASHBOARD_V2_FACT_VERSION,
+                    artifact_version=int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
+                    fact_watermark=_as_str(artifact.get("fact_watermark")) or None,
+                    materialized_at=_as_str(artifact.get("materialized_at")) or None,
+                    stale_fact_families=[],
+                )
+            newer_exact_exists = store.exact_artifact_has_newer_same_key(
+                cache_key=ctx.cache_key,
+                materialized_at=artifact.get("materialized_at"),
             )
-        newer_exact_exists = store.exact_artifact_has_newer_same_key(
-            cache_key=ctx.cache_key,
-            materialized_at=artifact.get("materialized_at"),
-        )
-        if allow_stale_exact_last_known_good and same_key_last_known_good_allowed(
-            request_from=ctx.from_date,
-            request_to=ctx.to_date,
-            artifact_from=artifact.get("from_date"),
-            artifact_to=artifact.get("to_date"),
-            artifact_is_stale=bool(stale_fact_families or artifact.get("is_stale")),
-            newer_exact_exists=newer_exact_exists,
-        ):
-            return DashboardV2AssemblyResult(
-                snapshot=dict(artifact.get("payload_json") or {}),
-                cache_status="exact_last_known_good",
-                cache_source="persisted",
-                range_resolution_path="v2_persisted_exact_last_known_good",
-                is_stale=True,
-                fact_version=DASHBOARD_V2_FACT_VERSION,
-                artifact_version=int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
-                fact_watermark=_as_str(artifact.get("fact_watermark")) or None,
-                materialized_at=_as_str(artifact.get("materialized_at")) or None,
-                stale_fact_families=stale_fact_families,
-            )
+            if allow_stale_exact_last_known_good and same_key_last_known_good_allowed(
+                request_from=ctx.from_date,
+                request_to=ctx.to_date,
+                artifact_from=artifact.get("from_date"),
+                artifact_to=artifact.get("to_date"),
+                artifact_is_stale=bool(stale_fact_families or artifact.get("is_stale")),
+                newer_exact_exists=newer_exact_exists,
+            ):
+                return DashboardV2AssemblyResult(
+                    snapshot=dict(artifact.get("payload_json") or {}),
+                    cache_status="exact_last_known_good",
+                    cache_source="persisted",
+                    range_resolution_path="v2_persisted_exact_last_known_good",
+                    is_stale=True,
+                    fact_version=DASHBOARD_V2_FACT_VERSION,
+                    artifact_version=int(artifact.get("artifact_version") or DASHBOARD_V2_ARTIFACT_VERSION),
+                    fact_watermark=_as_str(artifact.get("fact_watermark")) or None,
+                    materialized_at=_as_str(artifact.get("materialized_at")) or None,
+                    stale_fact_families=stale_fact_families,
+                )
 
     build_started_at = time.perf_counter()
     rows_by_family = {

@@ -282,6 +282,34 @@ class DashboardV2AssemblerTests(unittest.TestCase):
         self.assertEqual(result.range_resolution_path, "v2_assembled_exact_from_facts")
         self.assertEqual(result.snapshot["communityBrief"]["messagesAnalyzed"], 24)
 
+    def test_exact_assembly_can_bypass_fresh_exact_artifact_cache(self) -> None:
+        store = _AssemblerStore()
+        store.range_artifact = {
+            "cache_key": "2026-04-18:2026-04-18",
+            "from_date": date(2026, 4, 18),
+            "to_date": date(2026, 4, 18),
+            "range_mode": "exact",
+            "payload_json": {"communityBrief": {"messagesAnalyzed": 12}},
+            "dependency_watermarks": {"content": _utc_iso(10), "topics": _utc_iso(11), "secondary:question_cloud": _utc_iso(11)},
+            "artifact_version": 1,
+            "materialized_at": _utc_iso(11),
+            "fact_watermark": _utc_iso(11),
+            "is_stale": False,
+            "stale_fact_families": [],
+        }
+        store.rows_by_family["content"] = [
+            _make_fact_row("2026-04-18", {"communityBrief": {"messagesAnalyzed": 24, "postsAnalyzedInWindow": 10}})
+        ]
+
+        result = assemble_dashboard_v2_exact(
+            store,
+            ctx=build_dashboard_date_context("2026-04-18", "2026-04-18"),
+            prefer_cached_exact_artifacts=False,
+        )
+
+        self.assertEqual(result.range_resolution_path, "v2_assembled_exact_from_facts")
+        self.assertEqual(result.snapshot["communityBrief"]["messagesAnalyzed"], 24)
+
     def test_request_time_secondary_builder_stays_non_networked(self) -> None:
         snapshot = {
             "trendingTopics": [{"topic": "Road And Transit", "mentions": 3, "category": "Transport"}],
