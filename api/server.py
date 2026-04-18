@@ -312,6 +312,7 @@ _init_sentry()
 async def app_lifespan(_app: FastAPI):
     startup_started_at = time.perf_counter()
     startup_phases: dict[str, float] = {}
+    global dashboard_v2_materialize_queue_task
     key_fp = hashlib.sha256(config.OPENAI_API_KEY.encode("utf-8")).hexdigest()[:12] if config.OPENAI_API_KEY else "missing"
     logger.info(f"AI runtime configured | model={config.OPENAI_MODEL} key_fp={key_fp} role={APP_ROLE}")
 
@@ -350,6 +351,8 @@ async def app_lifespan(_app: FastAPI):
             _start_dashboard_v2_fact_scheduler()
             if config.DASH_V2_COMPARE_ENABLED:
                 _start_dashboard_v2_compare_scheduler()
+            if APP_ROLE == "worker" and dashboard_v2_materialize_queue_task is None:
+                dashboard_v2_materialize_queue_task = asyncio.create_task(_run_dashboard_v2_materialize_queue_loop())
         startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
         if RUN_STARTUP_WARMERS:
             warmers_started_at = time.perf_counter()
@@ -437,6 +440,10 @@ async def app_lifespan(_app: FastAPI):
             except Exception:
                 pass
             dashboard_v2_compare_scheduler = None
+        if dashboard_v2_materialize_queue_task is not None:
+            dashboard_v2_materialize_queue_task.cancel()
+            await asyncio.gather(dashboard_v2_materialize_queue_task, return_exceptions=True)
+            dashboard_v2_materialize_queue_task = None
         if scraper_scheduler is not None:
             await scraper_scheduler.shutdown()
             scraper_scheduler = None
@@ -715,6 +722,7 @@ topic_overviews_scheduler: AsyncIOScheduler | None = None
 default_dashboard_artifact_scheduler: AsyncIOScheduler | None = None
 dashboard_v2_fact_scheduler: AsyncIOScheduler | None = None
 dashboard_v2_compare_scheduler: AsyncIOScheduler | None = None
+dashboard_v2_materialize_queue_task: asyncio.Task | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 _analytics_rate_limit_lock = threading.Lock()
 _analytics_rate_limit_buckets: dict[tuple[str, str], list[float]] = {}
