@@ -182,26 +182,39 @@ def _merge_list_field(values: list[tuple[date, Any]], *, field_name: str) -> lis
 
 
 def _merge_lifecycle(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
-    stages: dict[str, dict[str, Any]] = {}
+    lifecycle_rows: dict[str, dict[str, Any]] = {}
     for _fact_date, raw_value in values:
-        for stage in _as_list(raw_value):
-            if not isinstance(stage, dict):
+        flattened: list[dict[str, Any]] = []
+        for index, entry in enumerate(_as_list(raw_value)):
+            if not isinstance(entry, dict):
                 continue
-            stage_name = _as_str(stage.get("stage"), "_stage")
-            entry = stages.setdefault(stage_name, {"stage": stage_name, "topics": []})
-            entry.update({key: value for key, value in stage.items() if key != "topics"})
-            topic_map: dict[str, dict[str, Any]] = {
-                _identity_key(item, fallback_prefix=stage_name, index=index): dict(item)
-                for index, item in enumerate(_as_list(entry.get("topics")))
-                if isinstance(item, dict)
-            }
-            for index, item in enumerate(_as_list(stage.get("topics"))):
-                if not isinstance(item, dict):
-                    continue
-                identity = _identity_key(item, fallback_prefix=stage_name, index=index)
-                topic_map[identity] = _merge_item_dict(topic_map.get(identity, {}), item)
-            entry["topics"] = list(topic_map.values())
-    return list(stages.values())
+            if isinstance(entry.get("topics"), list):
+                stage_name = _as_str(entry.get("stage"), "_stage")
+                for topic_index, topic in enumerate(_as_list(entry.get("topics"))):
+                    if not isinstance(topic, dict):
+                        continue
+                    merged_topic = dict(topic)
+                    if stage_name and not _as_str(merged_topic.get("stage")):
+                        merged_topic["stage"] = stage_name
+                    if _as_str(entry.get("color")) and not _as_str(merged_topic.get("color")):
+                        merged_topic["color"] = _as_str(entry.get("color"))
+                    flattened.append(merged_topic)
+            else:
+                flattened.append(dict(entry))
+        for index, item in enumerate(flattened):
+            stage_name = _as_str(item.get("stage"), "_stage")
+            identity = _identity_key(
+                {
+                    "stage": stage_name,
+                    "sourceTopic": item.get("sourceTopic"),
+                    "topic": item.get("topic"),
+                    "name": item.get("name"),
+                },
+                fallback_prefix=stage_name,
+                index=index,
+            )
+            lifecycle_rows[identity] = _merge_item_dict(lifecycle_rows.get(identity, {}), item)
+    return list(lifecycle_rows.values())
 
 
 def _merge_community_brief(values: list[tuple[date, Any]], snapshot: dict[str, Any], materialized_at: str | None) -> dict[str, Any]:

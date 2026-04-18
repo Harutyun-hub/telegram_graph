@@ -150,6 +150,32 @@ class DashboardV2MaterializerTests(unittest.TestCase):
         self.assertEqual(coverage.payload_json["coverageState"], "degraded")
         self.assertIn("community_brief", coverage.payload_json["failedWidgets"])
 
+    def test_topic_lifecycle_materializes_flat_rows_from_legacy_query_shape(self) -> None:
+        ctx = build_dashboard_date_context("2026-04-18", "2026-04-18")
+        rows = _materialize_family_rows(
+            "topics",
+            ctx,
+            {
+                "topic_lifecycle": [
+                    {
+                        "topic": "Road And Transit",
+                        "stage": "growing",
+                        "weeklyCurrent": 12,
+                        "weeklyDelta": 3,
+                        "ageDays": 7,
+                    }
+                ]
+            },
+        )
+
+        lifecycle_rows = [row for row in rows if row.row_key.startswith("kind=topic_lifecycle_day|")]
+        self.assertEqual(len(lifecycle_rows), 1)
+        payload = lifecycle_rows[0].payload_json
+        self.assertEqual(payload["factHints"]["widgetPayloads"]["lifecycleStages"][0]["topic"], "Road And Transit")
+        self.assertEqual(payload["factHints"]["widgetPayloads"]["lifecycleStages"][0]["stage"], "growing")
+        self.assertEqual(payload["metrics"]["volume"], 12.0)
+        self.assertEqual(payload["metrics"]["momentum"], 3.0)
+
     def test_foundation_materializer_records_runs_for_each_family(self) -> None:
         store = _FakeStore()
         with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content", "topics")), \

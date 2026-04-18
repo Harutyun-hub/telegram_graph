@@ -99,6 +99,27 @@ def _evidence_refs(item: Any) -> list[dict[str, Any]]:
     return refs
 
 
+def _iter_topic_lifecycle_items(raw_value: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for entry in _as_list(raw_value):
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("topics"), list):
+            stage_name = _as_str(entry.get("stage"))
+            for topic in _as_list(entry.get("topics")):
+                if not isinstance(topic, dict):
+                    continue
+                flattened = dict(topic)
+                if stage_name and not _as_str(flattened.get("stage")):
+                    flattened["stage"] = stage_name
+                if _as_str(entry.get("color")) and not _as_str(flattened.get("color")):
+                    flattened["color"] = _as_str(entry.get("color"))
+                items.append(flattened)
+            continue
+        items.append(dict(entry))
+    return items
+
+
 def _source_refs(item: Any, *keys: str) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
     if not isinstance(item, dict):
@@ -736,27 +757,28 @@ def _build_topics_family_rows(ctx: DashboardDateContext, outputs: dict[str, Any]
                 ),
             ),
         )
-    for stage in _as_list(outputs.get("topic_lifecycle")):
-        if not isinstance(stage, dict):
-            continue
-        for item in _as_list(stage.get("topics")):
-            topic_key = _identity_text(item, "sourceTopic", "name", "topic", default="_topic")
-            _append_row(
-                row_map,
-                _build_row(
+    for item in _iter_topic_lifecycle_items(outputs.get("topic_lifecycle")):
+        topic_key = _identity_text(item, "sourceTopic", "name", "topic", default="_topic")
+        _append_row(
+            row_map,
+            _build_row(
+                kind="topic_lifecycle_day",
+                dimensions={"topic": topic_key},
+                source_event_at=_utc_day_start(ctx.from_date),
+                topic_key=topic_key,
+                payload_json=_make_fact_payload(
                     kind="topic_lifecycle_day",
                     dimensions={"topic": topic_key},
-                    source_event_at=_utc_day_start(ctx.from_date),
-                    topic_key=topic_key,
-                    payload_json=_make_fact_payload(
-                        kind="topic_lifecycle_day",
-                        dimensions={"topic": topic_key},
-                        metrics={"momentum": _as_float(item.get("momentum")), "volume": _as_float(item.get("volume"))},
-                        widget_ids=["topic_lifecycle"],
-                        widget_payloads={"lifecycleStages": [{"stage": stage.get("stage"), "topics": [item], "color": stage.get("color")}]},
-                    ),
+                    metrics={
+                        "momentum": _as_float(item.get("momentum", item.get("weeklyDelta"))),
+                        "volume": _as_float(item.get("volume", item.get("weeklyCurrent"))),
+                        "daysActive": _as_float(item.get("daysActive", item.get("ageDays"))),
+                    },
+                    widget_ids=["topic_lifecycle"],
+                    widget_payloads={"lifecycleStages": [item]},
                 ),
-            )
+            ),
+        )
     for item in _as_list(outputs.get("information_velocity")):
         topic_key = _identity_text(item, "sourceTopic", "topic", default="_topic")
         _append_row(

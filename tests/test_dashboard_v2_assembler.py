@@ -266,6 +266,30 @@ class DashboardV2AssemblerTests(unittest.TestCase):
 
         self.assertIn("questionCategories", payload)
 
+    def test_assembler_reconstructs_flat_lifecycle_payload_from_fact_rows(self) -> None:
+        store = _AssemblerStore()
+        store.rows_by_family["topics"] = [
+            _make_fact_row(
+                "2026-04-15",
+                {
+                    "lifecycleStages": [
+                        {
+                            "topic": "Road And Transit",
+                            "stage": "growing",
+                            "weeklyCurrent": 12,
+                            "weeklyDelta": 3,
+                        }
+                    ]
+                },
+            )
+        ]
+
+        result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-09", "2026-04-15"))
+
+        self.assertTrue(result.snapshot["lifecycleStages"])
+        self.assertEqual(result.snapshot["lifecycleStages"][0]["topic"], "Road And Transit")
+        self.assertEqual(result.snapshot["lifecycleStages"][0]["stage"], "growing")
+
     def test_request_path_does_not_call_legacy_query_modules(self) -> None:
         store = _AssemblerStore()
         store.rows_by_family["content"] = [
