@@ -909,6 +909,45 @@ def _community_health_from_inputs(
     }
 
 
+def _community_brief_payload(
+    ctx: DashboardDateContext,
+    *,
+    posts_analyzed: int,
+    comment_scopes_analyzed: int,
+    unique_users: int,
+    positive_pct: int,
+    negative_pct: int,
+    neutral_pct: int,
+    refreshed_minutes_ago: int,
+    top_topic_rows: list[dict],
+) -> dict:
+    total_analyses = max(0, int(posts_analyzed)) + max(0, int(comment_scopes_analyzed))
+    resolved_topic_rows = list(top_topic_rows or [])
+    top_topic_names = [str(item.get("name") or "").strip() for item in resolved_topic_rows if item.get("name")]
+
+    return {
+        "postsAnalyzedInWindow": max(0, int(posts_analyzed)),
+        "commentScopesAnalyzedInWindow": max(0, int(comment_scopes_analyzed)),
+        "totalAnalysesInWindow": total_analyses,
+        "uniqueUsersInWindow": max(0, int(unique_users)),
+        "positiveIntentPct24h": positive_pct,
+        "negativeIntentPct24h": negative_pct,
+        "neutralIntentPct24h": neutral_pct,
+        "refreshedMinutesAgo": max(0, int(refreshed_minutes_ago)),
+        "topTopics": top_topic_names,
+        "topTopicRows": resolved_topic_rows,
+        # Backward compatibility aliases for the existing dashboard contract.
+        "postsAnalyzed24h": max(0, int(posts_analyzed)),
+        "commentScopesAnalyzed24h": max(0, int(comment_scopes_analyzed)),
+        "totalAnalyses24h": total_analyses,
+        "uniqueUsers24h": max(0, int(unique_users)),
+        "postsLast24h": max(0, int(posts_analyzed)),
+        "commentsLast24h": max(0, int(comment_scopes_analyzed)),
+        "activeUsersLast24h": max(0, int(unique_users)),
+        "windowDays": ctx.days,
+    }
+
+
 def _neo4j_brief_fallback(
     ctx: DashboardDateContext,
     *,
@@ -933,23 +972,58 @@ def _neo4j_brief_fallback(
     resolved_topic_rows = list(top_topic_rows or [])
     if not resolved_topic_rows:
         resolved_topic_rows = get_trending_topics(ctx, 5)
-    return {
-        "postsAnalyzed24h": posts,
-        "commentScopesAnalyzed24h": comments,
-        "positiveIntentPct24h": 0,
-        "negativeIntentPct24h": 0,
-        "neutralIntentPct24h": 100 if (posts + comments) > 0 else 0,
-        "totalAnalyses24h": posts + comments,
-        "uniqueUsers24h": int(stats.get("activeUsersCount") or 0),
-        "refreshedMinutesAgo": 0,
-        "topTopics": [t.get("name") for t in resolved_topic_rows if t.get("name")],
-        "topTopicRows": resolved_topic_rows,
-        # Backward compatibility keys
-        "postsLast24h": posts,
-        "commentsLast24h": comments,
-        "activeUsersLast24h": int(stats.get("activeUsersCount") or 0),
-        "windowDays": ctx.days,
-    }
+    return _community_brief_payload(
+        ctx,
+        posts_analyzed=posts,
+        comment_scopes_analyzed=comments,
+        unique_users=int(stats.get("activeUsersCount") or 0),
+        positive_pct=0,
+        negative_pct=0,
+        neutral_pct=100 if (posts + comments) > 0 else 0,
+        refreshed_minutes_ago=0,
+        top_topic_rows=resolved_topic_rows,
+    )
+
+
+def _community_brief_from_source_scope(
+    ctx: DashboardDateContext,
+    *,
+    top_topic_rows: list[dict],
+) -> dict:
+    writer = _supabase()
+    start_iso = ctx.start_at.isoformat()
+    end_iso = ctx.end_at.isoformat()
+
+    post_ids = writer.get_post_ids_in_exact_window(start_iso, end_iso)
+    comment_scopes = writer.get_comment_scopes_in_exact_window(start_iso, end_iso)
+    post_analyses = writer.get_latest_post_analyses_for_post_ids(post_ids)
+    scope_analyses = writer.get_latest_batch_analyses_for_scopes(comment_scopes)
+
+    matched_rows = list(post_analyses.values()) + list(scope_analyses.values())
+    intent = _window_intent_stats(matched_rows)
+
+    positive_pct = int(round(intent["positive_share"] * 100.0))
+    negative_pct = int(round(intent["negative_share"] * 100.0))
+    neutral_pct = int(round(intent["neutral_share"] * 100.0))
+    unique_users = len(
+        {
+            str(scope.get("telegramUserId") or "").strip()
+            for scope in comment_scopes
+            if str(scope.get("telegramUserId") or "").strip()
+        }
+    )
+
+    return _community_brief_payload(
+        ctx,
+        posts_analyzed=len(post_analyses),
+        comment_scopes_analyzed=len(scope_analyses),
+        unique_users=unique_users,
+        positive_pct=positive_pct,
+        negative_pct=negative_pct,
+        neutral_pct=neutral_pct,
+        refreshed_minutes_ago=_latest_analysis_minutes_from_rows(matched_rows),
+        top_topic_rows=top_topic_rows,
+    )
 
 
 def _community_brief_from_inputs(
@@ -958,34 +1032,8 @@ def _community_brief_from_inputs(
     rows: list[dict],
     top_topic_rows: list[dict],
 ) -> dict:
-    if not rows:
-        return _neo4j_brief_fallback(ctx, top_topic_rows=top_topic_rows)
-
-    volume = _analysis_volume(rows)
-    intent = _window_intent_stats(rows)
-    top_topic_names = [str(item.get("name") or "").strip() for item in top_topic_rows if item.get("name")]
-
-    positive_pct = int(round(intent["positive_share"] * 100.0))
-    negative_pct = int(round(intent["negative_share"] * 100.0))
-    neutral_pct = int(round(intent["neutral_share"] * 100.0))
-
-    return {
-        "postsAnalyzed24h": volume["posts_analyzed"],
-        "commentScopesAnalyzed24h": volume["comment_scopes_analyzed"],
-        "positiveIntentPct24h": positive_pct,
-        "negativeIntentPct24h": negative_pct,
-        "neutralIntentPct24h": neutral_pct,
-        "totalAnalyses24h": volume["analysis_units"],
-        "uniqueUsers24h": volume["unique_users"],
-        "refreshedMinutesAgo": _latest_analysis_minutes_from_rows(rows),
-        "topTopics": top_topic_names,
-        "topTopicRows": top_topic_rows,
-        # Backward compatibility keys
-        "postsLast24h": volume["posts_analyzed"],
-        "commentsLast24h": volume["comment_scopes_analyzed"],
-        "activeUsersLast24h": volume["unique_users"],
-        "windowDays": ctx.days,
-    }
+    del rows
+    return _community_brief_from_source_scope(ctx, top_topic_rows=top_topic_rows)
 
 
 def _health_inputs(ctx: DashboardDateContext) -> dict[str, Any]:
@@ -1023,11 +1071,7 @@ def get_pulse_snapshot(ctx: DashboardDateContext) -> dict[str, Any]:
         ),
         "trendingTopics": trending_rows,
         "trendingNewTopics": trending_new_rows,
-        "communityBrief": _community_brief_from_inputs(
-            ctx,
-            rows=health_inputs["current_rows"],
-            top_topic_rows=trending_rows[:5],
-        ),
+        "communityBrief": _community_brief_from_source_scope(ctx, top_topic_rows=trending_rows[:5]),
     }
 
     with _PULSE_SNAPSHOT_CACHE_LOCK:

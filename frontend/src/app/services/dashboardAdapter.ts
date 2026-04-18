@@ -392,14 +392,23 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
-    const posts24h = asNum(raw?.communityBrief?.postsAnalyzed24h, asNum(raw?.communityBrief?.postsLast24h, 0));
-    const commentScopes24h = asNum(raw?.communityBrief?.commentScopesAnalyzed24h, asNum(raw?.communityBrief?.commentsLast24h, 0));
+    const posts24h = asNum(
+      raw?.communityBrief?.postsAnalyzedInWindow,
+      asNum(raw?.communityBrief?.postsAnalyzed24h, asNum(raw?.communityBrief?.postsLast24h, 0)),
+    );
+    const commentScopes24h = asNum(
+      raw?.communityBrief?.commentScopesAnalyzedInWindow,
+      asNum(raw?.communityBrief?.commentScopesAnalyzed24h, asNum(raw?.communityBrief?.commentsLast24h, 0)),
+    );
     const positiveIntentPct = clamp(asNum(raw?.communityBrief?.positiveIntentPct24h, 0), 0, 100);
     const negativeIntentPct = clamp(asNum(raw?.communityBrief?.negativeIntentPct24h, 0), 0, 100);
     const neutralIntentPct = clamp(100 - positiveIntentPct - negativeIntentPct, 0, 100);
     const topTopics = asArray<string>(raw?.communityBrief?.topTopics).slice(0, 5);
     const topTopicsRu = topTopics.map((t) => translateTopicRu(t));
-    const totalAnalyses = asNum(raw?.communityBrief?.totalAnalyses24h, posts24h + commentScopes24h);
+    const totalAnalyses = asNum(
+      raw?.communityBrief?.totalAnalysesInWindow,
+      asNum(raw?.communityBrief?.totalAnalyses24h, posts24h + commentScopes24h),
+    );
     app.communityBrief.messagesAnalyzed = totalAnalyses;
     app.communityBrief.updatedMinutesAgo = asNum(raw?.communityBrief?.refreshedMinutesAgo, 5);
     app.communityBrief.postsAnalyzed24h = posts24h;

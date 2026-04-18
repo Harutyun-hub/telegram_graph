@@ -3385,6 +3385,195 @@ class SupabaseWriter:
             .execute()
         return res.data or []
 
+    def _iter_rows_in_exact_window(
+        self,
+        *,
+        table_name: str,
+        select_columns: str,
+        time_column: str,
+        start_iso: str,
+        end_iso: str,
+        page_size: int = 1000,
+    ):
+        """Yield rows for an exact [start, end) time window in stable time order."""
+        start = 0
+        size = max(100, int(page_size))
+        while True:
+            res = self.client.table(table_name) \
+                .select(select_columns) \
+                .gte(time_column, start_iso) \
+                .lt(time_column, end_iso) \
+                .order(time_column, desc=False) \
+                .range(start, start + size - 1) \
+                .execute()
+            rows = res.data or []
+            if not rows:
+                break
+            yield rows
+            if len(rows) < size:
+                break
+            start += len(rows)
+
+    @staticmethod
+    def _normalize_supabase_scalar(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lstrip("-").isdigit():
+            try:
+                return int(text)
+            except Exception:
+                return text
+        return text
+
+    def get_post_ids_in_exact_window(self, start_iso: str, end_iso: str) -> list[str]:
+        """Return distinct post ids whose posted_at falls inside the selected window."""
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for rows in self._iter_rows_in_exact_window(
+            table_name="telegram_posts",
+            select_columns="id",
+            time_column="posted_at",
+            start_iso=start_iso,
+            end_iso=end_iso,
+        ):
+            for row in rows:
+                post_id = str(row.get("id") or "").strip()
+                if not post_id or post_id in seen:
+                    continue
+                seen.add(post_id)
+                ordered.append(post_id)
+        return ordered
+
+    def get_comment_scopes_in_exact_window(self, start_iso: str, end_iso: str) -> list[dict]:
+        """Return distinct (post, channel, user) comment scopes active in the selected window."""
+        scopes: dict[tuple[str, str, str], dict] = {}
+        for rows in self._iter_rows_in_exact_window(
+            table_name="telegram_comments",
+            select_columns="post_id, channel_id, telegram_user_id, posted_at",
+            time_column="posted_at",
+            start_iso=start_iso,
+            end_iso=end_iso,
+        ):
+            for row in rows:
+                post_id = str(row.get("post_id") or "").strip()
+                channel_id = str(row.get("channel_id") or "").strip()
+                user_raw = self._normalize_supabase_scalar(row.get("telegram_user_id"))
+                user_id = str(user_raw or "").strip()
+                if not post_id or not channel_id or not user_id:
+                    continue
+                key = (post_id, channel_id, user_id)
+                if key in scopes:
+                    continue
+                scopes[key] = {
+                    "postId": post_id,
+                    "channelId": channel_id,
+                    "telegramUserId": user_id,
+                }
+        return list(scopes.values())
+
+    def get_latest_post_analyses_for_post_ids(self, post_ids: list[str]) -> dict[str, dict]:
+        """Return the most recent post-level analysis row for each post id."""
+        ids = [str(post_id).strip() for post_id in (post_ids or []) if str(post_id).strip()]
+        if not ids:
+            return {}
+
+        analyses: dict[str, dict] = {}
+        for chunk in _chunked_strings(ids, size=150):
+            res = self.client.table("ai_analysis") \
+                .select("id, content_id, channel_id, telegram_user_id, primary_intent, sentiment_score, created_at") \
+                .eq("content_type", "post") \
+                .in_("content_id", chunk) \
+                .execute()
+            for analysis in (res.data or []):
+                post_id = str(analysis.get("content_id") or "").strip()
+                if post_id and self._analysis_is_newer(analysis, analyses.get(post_id)):
+                    analyses[post_id] = analysis
+        return analyses
+
+    def get_latest_batch_analyses_for_scopes(self, scopes: list[dict]) -> dict[tuple[str, str, str], dict]:
+        """
+        Return the most recent batch analysis row for each comment scope.
+
+        Prefers content-scoped batch analyses and falls back to legacy channel/user
+        analyses only when a scoped row is absent for that exact scope.
+        """
+        normalized_scopes: list[dict] = []
+        scope_keys: set[tuple[str, str, str]] = set()
+        for scope in scopes or []:
+            if not isinstance(scope, dict):
+                continue
+            post_id = str(scope.get("postId") or scope.get("post_id") or "").strip()
+            channel_id = str(scope.get("channelId") or scope.get("channel_id") or "").strip()
+            user_id = str(scope.get("telegramUserId") or scope.get("telegram_user_id") or "").strip()
+            if not post_id or not channel_id or not user_id:
+                continue
+            key = (post_id, channel_id, user_id)
+            if key in scope_keys:
+                continue
+            scope_keys.add(key)
+            normalized_scopes.append(
+                {
+                    "postId": post_id,
+                    "channelId": channel_id,
+                    "telegramUserId": user_id,
+                }
+            )
+
+        if not normalized_scopes:
+            return {}
+
+        scope_key_set = {
+            (scope["postId"], scope["channelId"], scope["telegramUserId"])
+            for scope in normalized_scopes
+        }
+        channel_user_pairs = {
+            (scope["channelId"], scope["telegramUserId"])
+            for scope in normalized_scopes
+        }
+
+        scoped_analyses: dict[tuple[str, str, str], dict] = {}
+        post_ids = sorted({scope["postId"] for scope in normalized_scopes})
+        for chunk in _chunked_strings(post_ids, size=150):
+            res = self.client.table("ai_analysis") \
+                .select("id, content_id, channel_id, telegram_user_id, primary_intent, sentiment_score, created_at") \
+                .eq("content_type", "batch") \
+                .in_("content_id", chunk) \
+                .execute()
+            for analysis in (res.data or []):
+                post_id = str(analysis.get("content_id") or "").strip()
+                channel_id = str(analysis.get("channel_id") or "").strip()
+                user_id = str(self._normalize_supabase_scalar(analysis.get("telegram_user_id")) or "").strip()
+                key = (post_id, channel_id, user_id)
+                if key in scope_key_set and self._analysis_is_newer(analysis, scoped_analyses.get(key)):
+                    scoped_analyses[key] = analysis
+
+        fallback_analyses: dict[tuple[str, str], dict] = {}
+        channel_ids = sorted({scope["channelId"] for scope in normalized_scopes})
+        for chunk in _chunked_strings(channel_ids, size=150):
+            res = self.client.table("ai_analysis") \
+                .select("id, content_id, channel_id, telegram_user_id, primary_intent, sentiment_score, created_at") \
+                .eq("content_type", "batch") \
+                .is_("content_id", "null") \
+                .in_("channel_id", chunk) \
+                .execute()
+            for analysis in (res.data or []):
+                channel_id = str(analysis.get("channel_id") or "").strip()
+                user_id = str(self._normalize_supabase_scalar(analysis.get("telegram_user_id")) or "").strip()
+                pair = (channel_id, user_id)
+                if pair in channel_user_pairs and self._analysis_is_newer(analysis, fallback_analyses.get(pair)):
+                    fallback_analyses[pair] = analysis
+
+        resolved: dict[tuple[str, str, str], dict] = {}
+        for scope in normalized_scopes:
+            key = (scope["postId"], scope["channelId"], scope["telegramUserId"])
+            analysis = scoped_analyses.get(key) or fallback_analyses.get((scope["channelId"], scope["telegramUserId"]))
+            if analysis is not None:
+                resolved[key] = analysis
+        return resolved
+
     def get_comment_thread_stats(self, post_ids: list[str]) -> dict[str, dict]:
         """Return aggregate message/thread stats for thread anchor posts."""
         ids = [str(post_id).strip() for post_id in (post_ids or []) if str(post_id).strip()]

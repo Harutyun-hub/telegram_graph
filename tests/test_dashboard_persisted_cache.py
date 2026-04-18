@@ -399,6 +399,28 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertEqual(loaded["cacheKey"], ctx.cache_key)
         self.assertEqual(loaded["trustedEndDate"], ctx.to_date.isoformat())
         self.assertEqual(loaded["snapshot"]["communityHealth"]["score"], 72)
+        self.assertEqual(
+            writer.payloads[server._DASHBOARD_DEFAULT_ALIAS_PATH]["communityBriefMetricVersion"],
+            server._DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION,
+        )
+
+    def test_load_persisted_dashboard_snapshot_rejects_outdated_community_brief_metric_version(self) -> None:
+        writer = _FakeRuntimeWriter()
+        ctx = self._ctx()
+        payload = server._dashboard_artifact_payload(
+            ctx,
+            self._snapshot(),
+            self._meta(),
+            trusted_end_date=ctx.to_date.isoformat(),
+        )
+        payload.pop("communityBriefMetricVersion", None)
+        writer.save_runtime_json(server._DASHBOARD_DEFAULT_ALIAS_PATH, payload)
+
+        with patch.object(server, "get_supabase_writer", return_value=writer):
+            loaded = server._load_persisted_dashboard_snapshot(server._DASHBOARD_DEFAULT_ALIAS_PATH)
+
+        self.assertEqual(loaded["status"], "invalid")
+        self.assertIn("communityBrief metric version mismatch", loaded["error"])
 
     def test_persist_dashboard_snapshot_sync_writes_exact_and_alias_for_current_default(self) -> None:
         writer = _FakeRuntimeWriter()

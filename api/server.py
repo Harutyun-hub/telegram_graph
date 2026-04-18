@@ -196,6 +196,7 @@ _DASHBOARD_DEFAULT_ALIAS_PATH = f"{_DASHBOARD_PERSISTED_PREFIX}/default.json"
 _DASHBOARD_DEFAULT_SEED_LOCK_PREFIX = "dashboard-default-artifact-seed"
 _DASHBOARD_DEFAULT_SEED_LOCK_FLOOR_SECONDS = 300
 _DASHBOARD_PERSISTED_SCHEMA_VERSION = 1
+_DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION = 1
 _DASHBOARD_PERSISTED_CANONICAL_ARTIFACT_TYPE = "canonical_default_dashboard"
 _DASHBOARD_PERSISTED_EXACT_ARTIFACT_TYPE = "exact_dashboard"
 _DASHBOARD_PERSISTED_ARTIFACT_TYPES = {
@@ -1453,6 +1454,7 @@ def _dashboard_artifact_payload(
     )
     return {
         "schemaVersion": _DASHBOARD_PERSISTED_SCHEMA_VERSION,
+        "communityBriefMetricVersion": _DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION,
         "artifactType": resolved_artifact_type,
         "cacheKey": ctx.cache_key,
         "from": ctx.from_date.isoformat(),
@@ -1518,6 +1520,8 @@ def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
 
     if payload.get("schemaVersion") != _DASHBOARD_PERSISTED_SCHEMA_VERSION:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact schema version mismatch"}
+    if int(payload.get("communityBriefMetricVersion") or 0) < _DASHBOARD_COMMUNITY_BRIEF_METRIC_VERSION:
+        return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact communityBrief metric version mismatch"}
     artifact_type = str(payload.get("artifactType") or "").strip()
     if artifact_type not in _DASHBOARD_PERSISTED_ARTIFACT_TYPES:
         return {"status": "invalid", "readMs": read_ms, "error": "Persisted dashboard artifact type mismatch"}
