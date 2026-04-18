@@ -20,15 +20,27 @@ from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError
 
 
 class _RouteStore:
-    def summarize_v2_route_readiness(self, *, min_fact_version: int = 1, lookback_days: int = 400):
+    def summarize_v2_route_readiness(
+        self,
+        *,
+        min_fact_version: int = 1,
+        lookback_days: int = 400,
+        from_date=None,
+        to_date=None,
+    ):
         del min_fact_version, lookback_days
         return {
             "coverageStart": "2025-03-15",
             "coverageEnd": "2026-04-18",
-            "routeReadyWindowStart": "2025-03-15",
-            "routeReadyWindowEnd": "2026-04-18",
+            "routeReadyWindowStart": from_date.isoformat() if from_date else "2025-03-15",
+            "routeReadyWindowEnd": to_date.isoformat() if to_date else "2026-04-18",
+            "requestedFrom": from_date.isoformat() if from_date else None,
+            "requestedTo": to_date.isoformat() if to_date else None,
             "v2RouteReady": True,
             "missingFamilies": [],
+            "missingDates": [],
+            "degradedFamilies": [],
+            "degradedDates": [],
         }
 
     def get_range_readiness(self, *, from_date, to_date, fact_families, min_fact_version: int = 1):

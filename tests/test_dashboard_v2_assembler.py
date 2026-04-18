@@ -23,6 +23,7 @@ def _utc_iso(hour: int) -> str:
 class _AssemblerStore:
     def __init__(self) -> None:
         self.route_ready = True
+        self.exact_route_ready = True
         self.range_ready = True
         self.range_missing_dates: list[str] = []
         self.range_missing_families: list[str] = []
@@ -33,16 +34,33 @@ class _AssemblerStore:
         self.secondary_upserts: list[dict] = []
         self.secondary_stale_marks: list[dict] = []
         self.artifact_upserts: list[dict] = []
+        self.route_readiness_calls: list[dict[str, str | None]] = []
 
-    def summarize_v2_route_readiness(self, *, min_fact_version: int = 1, lookback_days: int = 400) -> dict:
+    def summarize_v2_route_readiness(
+        self,
+        *,
+        min_fact_version: int = 1,
+        lookback_days: int = 400,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> dict:
         del min_fact_version, lookback_days
+        self.route_readiness_calls.append(
+            {
+                "from_date": from_date.isoformat() if from_date else None,
+                "to_date": to_date.isoformat() if to_date else None,
+            }
+        )
+        route_ready = self.exact_route_ready if from_date and to_date else self.route_ready
         return {
             "coverageStart": "2025-03-15",
             "coverageEnd": "2026-04-18",
-            "routeReadyWindowStart": "2025-03-15",
-            "routeReadyWindowEnd": "2026-04-18",
-            "v2RouteReady": self.route_ready,
-            "missingFamilies": [] if self.route_ready else ["content"],
+            "routeReadyWindowStart": from_date.isoformat() if from_date and route_ready else "2025-03-15" if route_ready else None,
+            "routeReadyWindowEnd": to_date.isoformat() if to_date and route_ready else "2026-04-18" if route_ready else None,
+            "requestedFrom": from_date.isoformat() if from_date else None,
+            "requestedTo": to_date.isoformat() if to_date else None,
+            "v2RouteReady": route_ready,
+            "missingFamilies": [] if route_ready else ["content"],
         }
 
     def get_range_readiness(self, *, from_date: date, to_date: date, fact_families, min_fact_version: int = 1) -> dict:
@@ -135,6 +153,7 @@ class DashboardV2AssemblerTests(unittest.TestCase):
 
     def test_assembler_rejects_range_when_v2_facts_are_not_ready(self) -> None:
         store = _AssemblerStore()
+        store.exact_route_ready = False
         store.range_ready = False
         store.range_missing_families = ["topics", "users"]
         store.range_missing_dates = ["2026-04-16", "2026-04-17"]
@@ -145,6 +164,32 @@ class DashboardV2AssemblerTests(unittest.TestCase):
         self.assertEqual(ctx.exception.detail["code"], "v2_facts_not_ready")
         self.assertEqual(ctx.exception.detail["missingFactFamilies"], ["topics", "users"])
         self.assertEqual(ctx.exception.detail["missingDates"], ["2026-04-16", "2026-04-17"])
+
+    def test_assembler_uses_exact_window_readiness_when_global_window_is_not_ready(self) -> None:
+        store = _AssemblerStore()
+        store.route_ready = False
+        store.exact_route_ready = True
+        store.rows_by_family["content"] = [
+            _make_fact_row(
+                "2026-04-15",
+                {
+                    "communityBrief": {
+                        "messagesAnalyzed": 12,
+                        "postsAnalyzedInWindow": 4,
+                        "commentScopesAnalyzedInWindow": 8,
+                        "totalAnalysesInWindow": 12,
+                    }
+                },
+            )
+        ]
+
+        result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-09", "2026-04-15"))
+
+        self.assertEqual(result.range_resolution_path, "v2_assembled_exact_from_facts")
+        self.assertEqual(
+            store.route_readiness_calls[-1],
+            {"from_date": "2026-04-09", "to_date": "2026-04-15"},
+        )
 
     def test_assembler_builds_exact_snapshot_from_facts_and_persists_artifact(self) -> None:
         store = _AssemblerStore()

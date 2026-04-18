@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-import config
 from api.dashboard_dates import DashboardDateContext
 from api.dashboard_v2_registry import (
     FACT_FAMILIES,
@@ -463,23 +462,16 @@ def assemble_dashboard_v2_exact(
 ) -> DashboardV2AssemblyResult:
     route_readiness = store.summarize_v2_route_readiness(
         min_fact_version=DASHBOARD_V2_FACT_VERSION,
-        lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+        from_date=ctx.from_date,
+        to_date=ctx.to_date,
     )
-    if not bool(route_readiness.get("v2RouteReady")):
-        raise DashboardV2FactsNotReadyError(
-            _request_range_not_ready_detail(
-                ctx=ctx,
-                readiness={"missingFactFamilies": route_readiness.get("missingFamilies") or [], "missingDates": []},
-                route_readiness=route_readiness,
-            )
-        )
     range_readiness = store.get_range_readiness(
         from_date=ctx.from_date,
         to_date=ctx.to_date,
         fact_families=FULL_DASHBOARD_REQUIRED_FACT_FAMILIES,
         min_fact_version=DASHBOARD_V2_FACT_VERSION,
     )
-    if not bool(range_readiness.get("ready")):
+    if not bool(route_readiness.get("v2RouteReady")) or not bool(range_readiness.get("ready")):
         raise DashboardV2FactsNotReadyError(
             _request_range_not_ready_detail(
                 ctx=ctx,
