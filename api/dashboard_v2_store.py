@@ -787,6 +787,8 @@ class DashboardV2Store:
         requested_end: date,
         min_fact_version: int,
     ) -> dict[str, Any]:
+        degraded_dates: list[str] = []
+        failed_widgets: set[str] = set()
         covered_dates = sorted(
             {
                 row.get("fact_date")
@@ -796,6 +798,20 @@ class DashboardV2Store:
                 and int(row.get("fact_version") or 0) >= int(min_fact_version)
             }
         )
+        for row in rows:
+            payload = row.get("payload_json")
+            fact_date = row.get("fact_date")
+            if not isinstance(payload, dict) or not isinstance(fact_date, date):
+                continue
+            if int(row.get("fact_version") or 0) < int(min_fact_version):
+                continue
+            if bool(payload.get("coverageDegraded")) or list(payload.get("failedWidgets") or []):
+                degraded_dates.append(fact_date.isoformat())
+                failed_widgets.update(
+                    str(widget_id)
+                    for widget_id in (payload.get("failedWidgets") or [])
+                    if str(widget_id).strip()
+                )
         date_set = {item for item in covered_dates if isinstance(item, date)}
         latest_fact_version = max([int(row.get("fact_version") or 0) for row in rows], default=0)
         last_materialized = max([_parse_dt(row.get("materialized_at")) for row in rows if row.get("materialized_at")], default=None)
@@ -832,6 +848,8 @@ class DashboardV2Store:
             "lastSourceWatermark": _as_iso(last_source_watermark),
             "gapCount": gap_count,
             "missingDates": missing_dates,
+            "degradedDates": sorted(set(degraded_dates)),
+            "failedWidgets": sorted(failed_widgets),
         }
 
     def get_range_readiness(
@@ -845,6 +863,8 @@ class DashboardV2Store:
         family_summaries: dict[str, Any] = {}
         missing_families: list[str] = []
         missing_dates: set[str] = set()
+        degraded_families: list[str] = []
+        degraded_dates: set[str] = set()
         for fact_family in (fact_families or FULL_DASHBOARD_REQUIRED_FACT_FAMILIES):
             rows = self._coverage_rows_for_family(
                 fact_family=fact_family,
@@ -862,6 +882,9 @@ class DashboardV2Store:
             if summary["missingDates"]:
                 missing_families.append(fact_family)
                 missing_dates.update(summary["missingDates"])
+            if summary["degradedDates"]:
+                degraded_families.append(fact_family)
+                degraded_dates.update(summary["degradedDates"])
         available_starts = [summary["coverageStart"] for summary in family_summaries.values() if summary.get("coverageStart")]
         available_ends = [summary["coverageEnd"] for summary in family_summaries.values() if summary.get("coverageEnd")]
         return {
@@ -869,8 +892,10 @@ class DashboardV2Store:
             "availabilityEnd": max(available_ends) if available_ends else None,
             "missingFactFamilies": sorted(set(missing_families)),
             "missingDates": sorted(missing_dates),
+            "degradedFactFamilies": sorted(set(degraded_families)),
+            "degradedDates": sorted(degraded_dates),
             "factFamilies": family_summaries,
-            "ready": not missing_families and not missing_dates,
+            "ready": not missing_families and not missing_dates and not degraded_families and not degraded_dates,
             "minRequiredFactVersion": int(min_fact_version),
         }
 
@@ -907,11 +932,16 @@ class DashboardV2Store:
             for family, summary in family_summaries.items()
             if summary.get("continuousCoverageStart") is None or summary.get("continuousCoverageEnd") is None
         ]
+        degraded_families = [
+            family
+            for family, summary in family_summaries.items()
+            if summary.get("degradedDates")
+        ]
         v2_route_ready = False
         if route_ready_window_start and route_ready_window_end:
             start_dt = date.fromisoformat(str(route_ready_window_start))
             end_dt = date.fromisoformat(str(route_ready_window_end))
-            v2_route_ready = (end_dt - start_dt).days + 1 >= resolved_lookback
+            v2_route_ready = (end_dt - start_dt).days + 1 >= resolved_lookback and not degraded_families
         return {
             "coverageStart": min([summary["coverageStart"] for summary in family_summaries.values() if summary.get("coverageStart")], default=None),
             "coverageEnd": max([summary["coverageEnd"] for summary in family_summaries.values() if summary.get("coverageEnd")], default=None),
@@ -920,6 +950,7 @@ class DashboardV2Store:
             "minRequiredFactVersion": int(min_fact_version),
             "v2RouteReady": bool(v2_route_ready),
             "missingFamilies": sorted(set(missing_families)),
+            "degradedFamilies": sorted(set(degraded_families)),
             "factFamilies": family_summaries,
         }
 

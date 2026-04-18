@@ -176,6 +176,8 @@ class DashboardV2ApiTests(unittest.TestCase):
                          "requestedTo": "2026-04-18",
                          "missingFactFamilies": ["topics"],
                          "missingDates": ["2026-04-18"],
+                         "degradedFactFamilies": ["content"],
+                         "degradedDates": ["2026-04-18"],
                      }
                  ),
              ):
@@ -183,6 +185,7 @@ class DashboardV2ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["code"], "v2_facts_not_ready")
+        self.assertEqual(response.json()["detail"]["degradedFactFamilies"], ["content"])
 
     def test_dashboard_v2_serves_fact_only_response_without_legacy_queries(self) -> None:
         ctx = build_dashboard_date_context("2026-04-18", "2026-04-18")

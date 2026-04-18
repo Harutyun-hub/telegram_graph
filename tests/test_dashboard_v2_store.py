@@ -157,6 +157,37 @@ class DashboardV2StoreHelperTests(unittest.TestCase):
         self.assertEqual(readiness["routeReadyWindowStart"], "2026-04-18")
         self.assertEqual(readiness["routeReadyWindowEnd"], "2026-04-16")
 
+    def test_get_range_readiness_reports_degraded_coverage(self) -> None:
+        store = _CoverageOnlyStore(
+            {
+                "content": [
+                    {
+                        "fact_date": date(2026, 4, 18),
+                        "fact_version": 2,
+                        "materialized_at": "2026-04-18T10:00:00+00:00",
+                        "source_watermark": "2026-04-18T10:00:00+00:00",
+                        "payload_json": {
+                            "coverageReady": False,
+                            "coverageDegraded": True,
+                            "failedWidgets": ["community_brief"],
+                        },
+                    }
+                ]
+            }
+        )
+
+        readiness = store.get_range_readiness(
+            from_date=date(2026, 4, 18),
+            to_date=date(2026, 4, 18),
+            fact_families=("content",),
+            min_fact_version=2,
+        )
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["degradedFactFamilies"], ["content"])
+        self.assertEqual(readiness["degradedDates"], ["2026-04-18"])
+        self.assertEqual(readiness["factFamilies"]["content"]["failedWidgets"], ["community_brief"])
+
 
 if __name__ == "__main__":
     unittest.main()

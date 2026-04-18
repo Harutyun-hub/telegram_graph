@@ -57,6 +57,20 @@ class DashboardV2MaterializerTests(unittest.TestCase):
         self.assertIn("communityBrief", content_summary.payload_json["factHints"]["widgetPayloads"])
         self.assertIn("communityBrief", topic_summary.payload_json["factHints"]["widgetPayloads"])
 
+    def test_failed_widget_build_marks_family_coverage_degraded(self) -> None:
+        ctx = build_dashboard_date_context("2026-04-18", "2026-04-18")
+        with patch(
+            "api.dashboard_v2_materializer._WIDGET_FACT_BUILDERS",
+            {"community_brief": lambda _ctx: (_ for _ in ()).throw(RuntimeError("boom"))},
+        ):
+            rows = _materialize_family_rows("content", ctx)
+
+        coverage = next(row for row in rows if row.row_key == "kind=coverage_marker|scope=all")
+        self.assertFalse(coverage.payload_json["coverageReady"])
+        self.assertTrue(coverage.payload_json["coverageDegraded"])
+        self.assertEqual(coverage.payload_json["coverageState"], "degraded")
+        self.assertIn("community_brief", coverage.payload_json["failedWidgets"])
+
     def test_foundation_materializer_records_runs_for_each_family(self) -> None:
         store = _FakeStore()
         with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content", "topics")), \
@@ -84,6 +98,40 @@ class DashboardV2MaterializerTests(unittest.TestCase):
         self.assertEqual(len(store.completed_runs), 2)
         self.assertEqual(len(store.marked_stale), 4)
         self.assertEqual(result["secondary_runs"], [{"widgetId": "question_cloud", "status": "ready"}])
+
+    def test_foundation_materializer_records_degraded_days_in_run_meta(self) -> None:
+        store = _FakeStore()
+        build_results = [
+            {"community_brief": {"messagesAnalyzed": 3}},
+            {"community_brief": None},
+        ]
+        failed_widgets = [(), ("community_brief",)]
+
+        def fake_build(_ctx):
+            index = len(store.replaced_rows)
+            from api.dashboard_v2_materializer import DashboardV2WidgetBuildResult
+
+            return DashboardV2WidgetBuildResult(
+                outputs=build_results[index],
+                failed_widget_ids=failed_widgets[index],
+            )
+
+        with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content",)), \
+             patch("api.dashboard_v2_materializer._build_exact_widget_outputs", side_effect=fake_build), \
+             patch(
+                 "api.dashboard_v2_materializer._materialize_secondary_rows",
+                 return_value=[],
+             ):
+            result = materialize_dashboard_v2_foundation(
+                store,
+                mode="incremental",
+                end_date=date(2026, 4, 18),
+                lookback_days=2,
+            )
+
+        self.assertEqual(result["family_runs"][0]["degradedDays"], ["2026-04-18"])
+        self.assertEqual(result["family_runs"][0]["failedWidgets"], ["community_brief"])
+        self.assertEqual(store.completed_runs[0][2]["degradedDays"], ["2026-04-18"])
 
 
 if __name__ == "__main__":

@@ -419,6 +419,8 @@ def _request_range_not_ready_detail(
         "availabilityEnd": readiness.get("availabilityEnd") or route_readiness.get("coverageEnd"),
         "missingFactFamilies": readiness.get("missingFactFamilies") or route_readiness.get("missingFamilies") or [],
         "missingDates": readiness.get("missingDates") or [],
+        "degradedFactFamilies": readiness.get("degradedFactFamilies") or route_readiness.get("degradedFamilies") or [],
+        "degradedDates": readiness.get("degradedDates") or [],
     }
 
 

@@ -24,6 +24,14 @@ from buffer.supabase_writer import SupabaseWriter
 DASHBOARD_V2_FACT_VERSION = 2
 _INCREMENTAL_LOOKBACK_DAYS = 2
 _COVERAGE_ROW_KEY = build_dashboard_v2_coverage_row_key()
+_EXACT_FACT_WIDGET_IDS_BY_FAMILY: dict[str, tuple[str, ...]] = {
+    family: tuple(
+        widget_id
+        for widget_id, coverage in WIDGET_COVERAGE_BY_ID.items()
+        if coverage.exact_fact_backed and family in coverage.fact_families
+    )
+    for family in FACT_FAMILIES
+}
 
 
 def _utc_now() -> datetime:
@@ -196,11 +204,15 @@ def _build_row(
 
 def _coverage_row(
     *,
+    family: str,
     ctx: DashboardDateContext,
     row_count: int,
     materialized_at: datetime | None,
     source_watermark: datetime | None,
+    coverage_ready: bool,
+    failed_widgets: list[str] | tuple[str, ...] | None = None,
 ) -> DashboardV2FactRow:
+    failed_widget_list = sorted({str(widget_id) for widget_id in (failed_widgets or []) if str(widget_id).strip()})
     return DashboardV2FactRow(
         row_key=_COVERAGE_ROW_KEY,
         payload_json={
@@ -215,12 +227,16 @@ def _coverage_row(
                 "materializationStage": "pr2b_transitional_assembler_ready",
                 "sourceEngine": "legacy_query_modules",
             },
-            "coverageReady": True,
+            "coverageReady": bool(coverage_ready),
+            "coverageDegraded": bool(failed_widget_list),
+            "coverageState": "degraded" if failed_widget_list else "ready",
             "rowCount": int(row_count),
-            "zeroData": int(row_count) == 0,
+            "zeroData": int(row_count) == 0 and not failed_widget_list,
             "factVersion": DASHBOARD_V2_FACT_VERSION,
             "materializedAt": (materialized_at or _utc_now()).isoformat(),
             "sourceWatermark": source_watermark.isoformat() if source_watermark else None,
+            "failedWidgets": failed_widget_list,
+            "requiredWidgets": list(_EXACT_FACT_WIDGET_IDS_BY_FAMILY.get(family, ())),
             "range": {
                 "from": ctx.from_date.isoformat(),
                 "to": ctx.to_date.isoformat(),
@@ -333,21 +349,41 @@ class DashboardV2MaterializeSummary:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class DashboardV2WidgetBuildResult:
+    outputs: dict[str, Any]
+    failed_widget_ids: tuple[str, ...]
+
+
 def _default_window_context(end_date: date | None = None) -> DashboardDateContext:
     resolved_end = end_date or _default_end_date()
     start_date = resolved_end - timedelta(days=max(1, int(config.DASH_DEFAULT_RANGE_DAYS)) - 1)
     return build_dashboard_date_context(start_date.isoformat(), resolved_end.isoformat())
 
 
-def _build_exact_widget_outputs(ctx: DashboardDateContext) -> dict[str, Any]:
+def _build_exact_widget_outputs(ctx: DashboardDateContext) -> DashboardV2WidgetBuildResult:
     outputs: dict[str, Any] = {}
+    failed_widget_ids: list[str] = []
     for widget_id, builder in _WIDGET_FACT_BUILDERS.items():
         try:
             outputs[widget_id] = builder(ctx)
         except Exception as exc:
             logger.warning("Dashboard V2 widget fact build failed | widget={} day={} error={}", widget_id, ctx.cache_key, exc)
             outputs[widget_id] = None
-    return outputs
+            failed_widget_ids.append(widget_id)
+    return DashboardV2WidgetBuildResult(
+        outputs=outputs,
+        failed_widget_ids=tuple(sorted(set(failed_widget_ids))),
+    )
+
+
+def _failed_exact_widgets_for_family(
+    family: str,
+    failed_widget_ids: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    required = set(_EXACT_FACT_WIDGET_IDS_BY_FAMILY.get(family, ()))
+    failed = {str(widget_id) for widget_id in (failed_widget_ids or [])}
+    return sorted(required & failed)
 
 
 def _build_content_family_rows(ctx: DashboardDateContext, outputs: dict[str, Any]) -> list[DashboardV2FactRow]:
@@ -1118,19 +1154,32 @@ def _materialize_family_rows(
     ctx: DashboardDateContext,
     widget_outputs: dict[str, Any] | None = None,
     *,
+    failed_widget_ids: list[str] | tuple[str, ...] | None = None,
     source_watermark: datetime | None = None,
     materialized_at: datetime | None = None,
 ) -> list[DashboardV2FactRow]:
-    outputs = widget_outputs or _build_exact_widget_outputs(ctx)
+    build_result: DashboardV2WidgetBuildResult | None = None
+    if widget_outputs is None:
+        build_result = _build_exact_widget_outputs(ctx)
+        outputs = build_result.outputs
+    else:
+        outputs = widget_outputs
+    family_failed_widgets = _failed_exact_widgets_for_family(
+        family,
+        failed_widget_ids if failed_widget_ids is not None else (build_result.failed_widget_ids if build_result else ()),
+    )
     builder = _FAMILY_ROW_BUILDERS[family]
     rows = builder(ctx, outputs)
     rows_with_coverage = list(rows)
     rows_with_coverage.append(
         _coverage_row(
+            family=family,
             ctx=ctx,
             row_count=len(rows),
             materialized_at=materialized_at or _utc_now(),
             source_watermark=source_watermark,
+            coverage_ready=not bool(family_failed_widgets),
+            failed_widgets=family_failed_widgets,
         )
     )
     return rows_with_coverage
@@ -1216,17 +1265,24 @@ def materialize_dashboard_v2_foundation(
         )
         rows_inserted = 0
         days_processed = 0
+        degraded_days: list[str] = []
+        failed_widgets: set[str] = set()
         try:
             for fact_day in _iter_days(coverage_start, resolved_end):
                 ctx = build_dashboard_date_context(fact_day.isoformat(), fact_day.isoformat())
-                daily_outputs = _build_exact_widget_outputs(ctx)
+                build_result = _build_exact_widget_outputs(ctx)
+                family_failed_widgets = _failed_exact_widgets_for_family(family, build_result.failed_widget_ids)
                 rows = _materialize_family_rows(
                     family,
                     ctx,
-                    daily_outputs,
+                    build_result.outputs,
+                    failed_widget_ids=build_result.failed_widget_ids,
                     source_watermark=source_watermark,
                     materialized_at=source_watermark,
                 )
+                if family_failed_widgets:
+                    degraded_days.append(fact_day.isoformat())
+                    failed_widgets.update(family_failed_widgets)
                 rows_inserted += store.replace_daily_fact_rows(
                     fact_family=family,
                     fact_date=fact_day,
@@ -1249,6 +1305,8 @@ def materialize_dashboard_v2_foundation(
                 meta_json={
                     "rowsInserted": rows_inserted,
                     "daysProcessed": days_processed,
+                    "degradedDays": degraded_days,
+                    "failedWidgets": sorted(failed_widgets),
                     "mode": mode,
                     "factVersion": DASHBOARD_V2_FACT_VERSION,
                 },
@@ -1260,6 +1318,8 @@ def materialize_dashboard_v2_foundation(
                     "status": "completed",
                     "rowsInserted": rows_inserted,
                     "daysProcessed": days_processed,
+                    "degradedDays": degraded_days,
+                    "failedWidgets": sorted(failed_widgets),
                     "factVersion": DASHBOARD_V2_FACT_VERSION,
                 }
             )
@@ -1272,6 +1332,8 @@ def materialize_dashboard_v2_foundation(
                 meta_json={
                     "rowsInserted": rows_inserted,
                     "daysProcessed": days_processed,
+                    "degradedDays": degraded_days,
+                    "failedWidgets": sorted(failed_widgets),
                     "mode": mode,
                     "factVersion": DASHBOARD_V2_FACT_VERSION,
                 },
@@ -1284,6 +1346,8 @@ def materialize_dashboard_v2_foundation(
                     "status": "failed",
                     "rowsInserted": rows_inserted,
                     "daysProcessed": days_processed,
+                    "degradedDays": degraded_days,
+                    "failedWidgets": sorted(failed_widgets),
                     "error": str(exc),
                     "factVersion": DASHBOARD_V2_FACT_VERSION,
                 }
