@@ -55,6 +55,21 @@ def minimal_source_metadata_from_entity(
     }
 
 
+def channel_peer_ref_from_entity(
+    entity: Channel,
+    *,
+    username: Optional[str] = None,
+) -> dict:
+    resolved_username = _canonical_channel_username(getattr(entity, "username", None))
+    if not resolved_username:
+        resolved_username = _canonical_channel_username(username)
+    return {
+        "peer_id": getattr(entity, "id", None),
+        "access_hash": getattr(entity, "access_hash", None),
+        "resolved_username": resolved_username,
+    }
+
+
 async def get_full_channel_metadata(
     client: TelegramClient,
     *,

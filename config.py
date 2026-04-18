@@ -33,6 +33,7 @@ ENVIRONMENT_NAME = _environment_name()
 IS_STAGING = ENVIRONMENT_NAME in {"stage", "staging"}
 IS_PRODUCTION = ENVIRONMENT_NAME in {"prod", "production"}
 IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
+ALLOW_STAGING_WORKER = _env_bool("ALLOW_STAGING_WORKER", False)
 
 
 def _normalize_app_role_for_validation(value=None) -> str:
@@ -348,6 +349,7 @@ KB_EMBED_DIM           = int(os.getenv("KB_EMBED_DIM", "768"))
 KB_TOP_K               = int(os.getenv("KB_TOP_K", "8"))
 KB_CHUNK_SIZE          = int(os.getenv("KB_CHUNK_SIZE", "1500"))
 KB_CHUNK_OVERLAP       = int(os.getenv("KB_CHUNK_OVERLAP", "200"))
+KB_MAX_CHUNKS_PER_DOC  = max(1, int(os.getenv("KB_MAX_CHUNKS_PER_DOC", "400")))
 KB_GENERATION_MODEL    = os.getenv("KB_GENERATION_MODEL", "")  # Defaults to OPENAI_MODEL at runtime
 KB_UPLOAD_MAX_MB       = int(os.getenv("KB_UPLOAD_MAX_MB", "50"))
 
@@ -358,8 +360,10 @@ SOCIAL_ANALYSIS_BATCH_SIZE = max(1, min(int(os.getenv("SOCIAL_ANALYSIS_BATCH_SIZ
 SOCIAL_ANALYSIS_MODEL = os.getenv("SOCIAL_ANALYSIS_MODEL", OPENAI_MODEL).strip() or OPENAI_MODEL
 SOCIAL_ANALYSIS_PROMPT_VERSION = os.getenv("SOCIAL_ANALYSIS_PROMPT_VERSION", "social-v1").strip() or "social-v1"
 SOCIAL_GRAPH_PROJECTION_VERSION = os.getenv("SOCIAL_GRAPH_PROJECTION_VERSION", "social-graph-v1").strip() or "social-graph-v1"
+SOCIAL_NORMALIZATION_VERSION = os.getenv("SOCIAL_NORMALIZATION_VERSION", "social-v2").strip() or "social-v2"
 SOCIAL_TIKTOK_ENABLED = _env_bool("SOCIAL_TIKTOK_ENABLED", False)
 SOCIAL_RUNTIME_ENABLED = _env_bool("SOCIAL_RUNTIME_ENABLED", True)
+SOCIAL_CONTROL_POLL_SECONDS = max(2, int(os.getenv("SOCIAL_CONTROL_POLL_SECONDS", "5")))
 SOCIAL_ACTIVITY_RETENTION_DAYS = max(30, int(os.getenv("SOCIAL_ACTIVITY_RETENTION_DAYS", "365")))
 SOCIAL_PAYLOAD_RETENTION_DAYS = max(7, int(os.getenv("SOCIAL_PAYLOAD_RETENTION_DAYS", "90")))
 SOCIAL_STAGE_CLAIM_LIMIT = max(1, int(os.getenv("SOCIAL_STAGE_CLAIM_LIMIT", "120")))

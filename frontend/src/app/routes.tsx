@@ -171,6 +171,13 @@ export const router = createBrowserRouter([
             },
           },
           {
+            path: "social/topics",
+            lazy: async () => {
+              const { SocialTopicsPage } = await import("./pages/SocialTopicsPage");
+              return { Component: SocialTopicsPage };
+            },
+          },
+          {
             path: "social/ops",
             lazy: async () => {
               const { SocialOpsPage } = await import("./pages/SocialOpsPage");

@@ -826,6 +826,56 @@ def get_dashboard_data(
     return snapshot
 
 
+def peek_dashboard_snapshot(
+    ctx: Optional[DashboardDateContext] = None,
+) -> tuple[dict | None, DashboardCacheMeta | None, str]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+    if entry is None:
+        return None, None, "missing"
+    _ts, snapshot, meta = entry
+    if _is_cache_valid(cache_key, now):
+        if _should_bypass_cached_snapshot(snapshot, meta):
+            return snapshot, _with_refresh_state(cache_key, dict(meta)), "degraded"
+        return snapshot, _with_refresh_state(cache_key, dict(meta)), "fresh"
+    if _can_serve_stale(entry, now):
+        return snapshot, _with_refresh_state(
+            cache_key,
+            dict(meta),
+            stale_age_seconds=_cache_entry_age_seconds(entry, now),
+        ), "stale"
+    return snapshot, _with_refresh_state(cache_key, dict(meta)), "expired"
+
+
+def refresh_dashboard_snapshot_async(ctx: Optional[DashboardDateContext] = None) -> bool:
+    resolved_ctx = ctx or _default_dashboard_context()
+    return _ensure_background_refresh(resolved_ctx.cache_key, resolved_ctx)
+
+
+def schedule_dashboard_snapshot_refresh(ctx: Optional[DashboardDateContext] = None) -> dict[str, Any]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    state = _get_refresh_state(cache_key)
+    if state.inflight:
+        return {
+            "started": False,
+            "inflight": True,
+            "suppressed": True,
+            "cacheKey": cache_key,
+        }
+    started = _ensure_background_refresh(cache_key, resolved_ctx)
+    state = _get_refresh_state(cache_key)
+    return {
+        "started": bool(started),
+        "inflight": bool(state.inflight),
+        "suppressed": not bool(started),
+        "cacheKey": cache_key,
+    }
+
+
 # ── Detail page queries (independent cache) ──────────────────────────────────
 
 def _get_cached_detail_value(

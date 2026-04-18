@@ -230,11 +230,76 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertIn("healthy Redis runtime coordinator", str(ctx.exception))
 
     def test_worker_is_blocked_in_staging_testing_environment(self) -> None:
-        with patch.object(worker.config, "IS_STAGING", True):
+        with patch.object(worker.config, "IS_STAGING", True), \
+             patch.object(worker.config, "ALLOW_STAGING_WORKER", False):
             with self.assertRaises(RuntimeError) as ctx:
                 asyncio.run(worker.run_worker())
 
-        self.assertIn("web-only", str(ctx.exception))
+        self.assertIn("ALLOW_STAGING_WORKER", str(ctx.exception))
+
+    def test_web_role_reads_shared_social_runtime_snapshot(self) -> None:
+        shared = {
+            "status": "active",
+            "is_active": True,
+            "interval_minutes": 360,
+            "running_now": False,
+            "last_success_at": "2026-04-18T09:00:00+00:00",
+            "worker_id": "social-worker-1",
+        }
+        store = SimpleNamespace(get_runtime_snapshot=lambda default=None: shared)
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "social_runtime_service", None), \
+             patch.object(server, "get_social_store", return_value=store):
+            payload = server.get_current_social_runtime_status()
+
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(payload["worker_id"], "social-worker-1")
+
+    def test_web_social_run_once_enqueues_worker_control_command(self) -> None:
+        saved: dict[str, object] = {}
+        store = SimpleNamespace(
+            save_runtime_control_command=lambda payload: saved.update(payload) or payload,
+            get_runtime_snapshot=lambda default=None: {
+                "status": "stopped",
+                "is_active": False,
+                "interval_minutes": 360,
+                "running_now": False,
+                "last_result": None,
+                "run_history": [],
+            },
+        )
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_social_store", return_value=store):
+            payload = asyncio.run(server.run_social_runtime_once())
+
+        self.assertEqual(saved["action"], "run_once")
+        self.assertEqual(saved["status"], "pending")
+        self.assertEqual(payload["worker_control"]["action"], "run_once")
+
+    def test_worker_starts_social_runtime_service(self) -> None:
+        fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
+        fake_social_runtime = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
+
+        async def scenario() -> None:
+            with patch.object(worker.config, "IS_STAGING", False), \
+                 patch.object(worker.config, "IS_LOCKED_ENV", False), \
+                 patch.object(worker, "get_runtime_coordinator", return_value=_CoordinatorStub(ping_result=True)), \
+                 patch.object(server, "get_scraper_scheduler", return_value=fake_scheduler), \
+                 patch.object(server, "get_social_runtime", return_value=fake_social_runtime), \
+                 patch.object(server, "_start_question_cards_scheduler"), \
+                 patch.object(server, "_start_behavioral_cards_scheduler"), \
+                 patch.object(server, "_start_opportunity_cards_scheduler"), \
+                 patch.object(server, "_start_topic_overviews_scheduler"), \
+                 patch.object(server, "RUN_STARTUP_WARMERS", False):
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(worker.run_worker(), timeout=0.01)
+
+        asyncio.run(scenario())
+
+        fake_scheduler.startup.assert_awaited_once()
+        fake_social_runtime.startup.assert_awaited_once()
 
 
 class SchedulerDistributedLockTests(unittest.TestCase):
