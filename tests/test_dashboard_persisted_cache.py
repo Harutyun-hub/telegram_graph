@@ -510,7 +510,30 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         self.assertEqual(resolution_path, "sync_exact_historical_fastpath")
         _args, kwargs = build_mock.call_args
         self.assertEqual(kwargs["cache_status"], "sync_exact_historical_fastpath")
-        self.assertEqual(kwargs["skipped_tiers"], set(server._HISTORICAL_FASTPATH_SKIP_TIERS))
+        self.assertEqual(
+            kwargs["skipped_tiers"],
+            set(server._EXACT_RANGE_FASTPATH_SKIP_TIERS).union(server._HISTORICAL_FASTPATH_SKIP_TIERS),
+        )
+        prime_mock.assert_called_once()
+        persist_mock.assert_called_once()
+
+    def test_build_exact_range_snapshot_sync_uses_exact_fastpath_for_short_noncanonical_ranges(self) -> None:
+        ctx = server.build_dashboard_date_context("2026-04-09", "2026-04-15")
+        meta = self._meta(cache_status="sync_exact_fastpath")
+
+        with patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(self._snapshot(), meta)) as build_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
+             patch.object(server, "_persist_dashboard_snapshot_sync") as persist_mock:
+            _snapshot, returned_meta, resolution_path = server._build_exact_range_snapshot_sync(
+                ctx,
+                trusted_end_date="2026-04-15",
+            )
+
+        self.assertEqual(returned_meta, meta)
+        self.assertEqual(resolution_path, "sync_exact_fastpath")
+        _args, kwargs = build_mock.call_args
+        self.assertEqual(kwargs["cache_status"], "sync_exact_fastpath")
+        self.assertEqual(kwargs["skipped_tiers"], set(server._EXACT_RANGE_FASTPATH_SKIP_TIERS))
         prime_mock.assert_called_once()
         persist_mock.assert_called_once()
 

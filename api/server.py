@@ -214,6 +214,14 @@ _HISTORICAL_FASTPATH_SKIP_TIERS = {
     ).split(",")
     if item.strip()
 }
+_EXACT_RANGE_FASTPATH_SKIP_TIERS = {
+    item.strip().lower()
+    for item in os.getenv(
+        "DASH_EXACT_RANGE_FASTPATH_SKIP_TIERS",
+        "strategic,behavioral,network,psychographic,predictive,actionable,comparative",
+    ).split(",")
+    if item.strip()
+}
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
 
@@ -2256,20 +2264,38 @@ def _should_build_exact_range_with_fastpath(
     )
 
 
+def _exact_range_skip_tiers(
+    ctx,
+    *,
+    trusted_end_date: str,
+) -> tuple[set[str] | None, str]:
+    skip_tiers: set[str] = set()
+    if not _is_canonical_default_context(ctx, trusted_end_date=trusted_end_date):
+        skip_tiers.update(_EXACT_RANGE_FASTPATH_SKIP_TIERS)
+
+    use_historical_fastpath = _should_build_exact_range_with_fastpath(
+        ctx,
+        trusted_end_date=date.fromisoformat(trusted_end_date),
+    )
+    if use_historical_fastpath:
+        skip_tiers.update(_HISTORICAL_FASTPATH_SKIP_TIERS)
+
+    if not skip_tiers:
+        return None, "sync_exact_build"
+    return (
+        skip_tiers,
+        "sync_exact_historical_fastpath" if use_historical_fastpath else "sync_exact_fastpath",
+    )
+
+
 def _build_exact_range_snapshot_sync(
     ctx,
     *,
     trusted_end_date: str,
 ) -> tuple[dict, dict[str, Any], str]:
-    use_historical_fastpath = _should_build_exact_range_with_fastpath(
+    skipped_tiers, range_resolution_path = _exact_range_skip_tiers(
         ctx,
-        trusted_end_date=date.fromisoformat(trusted_end_date),
-    )
-    skipped_tiers = set(_HISTORICAL_FASTPATH_SKIP_TIERS) if use_historical_fastpath else None
-    range_resolution_path = (
-        "sync_exact_historical_fastpath"
-        if use_historical_fastpath
-        else "sync_exact_build"
+        trusted_end_date=trusted_end_date,
     )
     snapshot, meta = dashboard_aggregator.build_dashboard_snapshot_once(
         ctx,
