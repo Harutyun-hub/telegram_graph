@@ -514,6 +514,7 @@ class DashboardPersistedCacheTests(unittest.TestCase):
             kwargs["skipped_tiers"],
             set(server._EXACT_RANGE_FASTPATH_SKIP_TIERS).union(server._HISTORICAL_FASTPATH_SKIP_TIERS),
         )
+        self.assertFalse(kwargs["parallel_enabled"])
         prime_mock.assert_called_once()
         persist_mock.assert_called_once()
 
@@ -534,6 +535,7 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         _args, kwargs = build_mock.call_args
         self.assertEqual(kwargs["cache_status"], "sync_exact_fastpath")
         self.assertEqual(kwargs["skipped_tiers"], set(server._EXACT_RANGE_FASTPATH_SKIP_TIERS))
+        self.assertFalse(kwargs["parallel_enabled"])
         prime_mock.assert_called_once()
         persist_mock.assert_called_once()
 

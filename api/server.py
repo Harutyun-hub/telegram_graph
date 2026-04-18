@@ -2297,11 +2297,13 @@ def _build_exact_range_snapshot_sync(
         ctx,
         trusted_end_date=trusted_end_date,
     )
+    exact_fastpath = range_resolution_path in {"sync_exact_fastpath", "sync_exact_historical_fastpath"}
     snapshot, meta = dashboard_aggregator.build_dashboard_snapshot_once(
         ctx,
         skipped_tiers=skipped_tiers,
         cache_status=range_resolution_path,
         timeout_seconds=dashboard_aggregator.REFRESH_TIMEOUT_SECONDS,
+        parallel_enabled=False if exact_fastpath else None,
     )
     logger.info(
         "Built exact dashboard snapshot synchronously | key={} mode={} skipped_tiers={}",

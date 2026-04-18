@@ -93,6 +93,40 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertEqual(meta["cacheStatus"], "historical_fastpath_uncached")
         self.assertEqual(meta["skippedTiers"], ["network", "predictive"])
 
+    def test_build_dashboard_snapshot_once_can_force_sequential_mode(self) -> None:
+        ctx = build_dashboard_date_context("2026-04-09", "2026-04-15")
+        tier_times = {
+            "pulse": 3.8,
+            "strategic": None,
+            "behavioral": None,
+            "network": None,
+            "psychographic": None,
+            "predictive": None,
+            "actionable": None,
+            "comparative": None,
+            "derived": 0.0,
+        }
+
+        with patch.object(
+            aggregator,
+            "_build_snapshot_with_timeout",
+            return_value=({"communityHealth": {"score": 55}}, tier_times, 3.8, "sequential"),
+        ) as build_mock:
+            _snapshot, meta = aggregator.build_dashboard_snapshot_once(
+                ctx,
+                skipped_tiers={"strategic", "behavioral"},
+                cache_status="sync_exact_fastpath",
+                parallel_enabled=False,
+            )
+
+        build_mock.assert_called_once_with(
+            ctx,
+            skipped_tiers={"strategic", "behavioral"},
+            parallel_enabled=False,
+        )
+        self.assertEqual(meta["cacheStatus"], "sync_exact_fastpath")
+        self.assertEqual(meta["buildMode"], "sequential")
+
     def test_critical_degraded_rebuild_seeds_short_lived_stale_snapshot(self) -> None:
         ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
         tier_times = {

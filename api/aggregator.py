@@ -762,11 +762,13 @@ def _build_snapshot(
     use_timeouts: bool = True,
     *,
     skipped_tiers: set[str] | None = None,
+    parallel_enabled: bool | None = None,
 ) -> Tuple[dict, Dict[str, Optional[float]], float, str]:
-    mode = "parallel" if PARALLEL_ENABLED else "sequential"
+    use_parallel = PARALLEL_ENABLED if parallel_enabled is None else bool(parallel_enabled)
+    mode = "parallel" if use_parallel else "sequential"
     t0 = time.time()
 
-    if PARALLEL_ENABLED:
+    if use_parallel:
         data, tier_times = _build_snapshot_parallel(
             ctx,
             use_timeouts=use_timeouts,
@@ -841,10 +843,17 @@ def _build_snapshot_with_timeout(
     *,
     skipped_tiers: set[str] | None = None,
     timeout_seconds: float | None = None,
+    parallel_enabled: bool | None = None,
 ) -> tuple[dict, Dict[str, Optional[float]], float, str]:
     effective_timeout = REFRESH_TIMEOUT_SECONDS if timeout_seconds is None else max(5.0, float(timeout_seconds))
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dash-refresh")
-    future = executor.submit(_build_snapshot, ctx, True, skipped_tiers=skipped_tiers)
+    future = executor.submit(
+        _build_snapshot,
+        ctx,
+        True,
+        skipped_tiers=skipped_tiers,
+        parallel_enabled=parallel_enabled,
+    )
     try:
         return future.result(timeout=effective_timeout)
     except FuturesTimeout as exc:
@@ -1088,11 +1097,14 @@ def build_dashboard_snapshot_once(
     skipped_tiers: set[str] | None = None,
     cache_status: str = "refresh_success_uncached",
     timeout_seconds: float | None = None,
+    parallel_enabled: bool | None = None,
 ) -> tuple[dict, DashboardCacheMeta]:
     """Build a one-off dashboard snapshot without mutating the shared cache."""
     build_kwargs: dict[str, Any] = {"skipped_tiers": skipped_tiers}
     if timeout_seconds is not None:
         build_kwargs["timeout_seconds"] = timeout_seconds
+    if parallel_enabled is not None:
+        build_kwargs["parallel_enabled"] = parallel_enabled
     data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx, **build_kwargs)
     meta = _snapshot_meta(
         tier_times=tier_times,
