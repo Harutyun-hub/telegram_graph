@@ -214,7 +214,24 @@ def _merge_lifecycle(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
                 index=index,
             )
             lifecycle_rows[identity] = _merge_item_dict(lifecycle_rows.get(identity, {}), item)
-    return list(lifecycle_rows.values())
+    stage_rank = {
+        "growing": 1,
+        "emerging": 2,
+        "stable": 3,
+        "declining": 4,
+    }
+
+    def _lifecycle_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        stage_name = _as_str(item.get("stage"), "").lower()
+        topic_name = _as_str(item.get("topic"), _as_str(item.get("name"), ""))
+        return (
+            stage_rank.get(stage_name, 99),
+            -_as_float(item.get("weeklyCurrent"), item.get("volume")),
+            -_as_float(item.get("stageConfidence")),
+            topic_name.lower(),
+        )
+
+    return sorted(lifecycle_rows.values(), key=_lifecycle_sort_key)
 
 
 def _merge_community_brief(values: list[tuple[date, Any]], snapshot: dict[str, Any], materialized_at: str | None) -> dict[str, Any]:

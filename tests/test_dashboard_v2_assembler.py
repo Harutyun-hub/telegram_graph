@@ -316,6 +316,43 @@ class DashboardV2AssemblerTests(unittest.TestCase):
 
         self.assertTrue(result.snapshot["lifecycleStages"])
         self.assertEqual(result.snapshot["lifecycleStages"][0]["topic"], "Road And Transit")
+
+    def test_assembler_sorts_lifecycle_payload_like_legacy_query(self) -> None:
+        store = _AssemblerStore()
+        store.rows_by_family["topics"] = [
+            _make_fact_row(
+                "2026-04-15",
+                {
+                    "lifecycleStages": [
+                        {
+                            "topic": "Alpha Topic",
+                            "stage": "growing",
+                            "weeklyCurrent": 12,
+                            "stageConfidence": 60,
+                        },
+                        {
+                            "topic": "Zulu Topic",
+                            "stage": "growing",
+                            "weeklyCurrent": 20,
+                            "stageConfidence": 40,
+                        },
+                        {
+                            "topic": "Beta Topic",
+                            "stage": "declining",
+                            "weeklyCurrent": 50,
+                            "stageConfidence": 99,
+                        },
+                    ]
+                },
+            )
+        ]
+
+        result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-15", "2026-04-15"))
+
+        self.assertEqual(
+            [item["topic"] for item in result.snapshot["lifecycleStages"][:3]],
+            ["Zulu Topic", "Alpha Topic", "Beta Topic"],
+        )
         self.assertEqual(result.snapshot["lifecycleStages"][0]["stage"], "growing")
 
     def test_request_path_does_not_call_legacy_query_modules(self) -> None:
