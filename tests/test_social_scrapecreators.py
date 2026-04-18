@@ -183,6 +183,57 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
         post_detail_mock.assert_called_once()
         comments_mock.assert_called_once()
 
+    def test_collect_source_falls_back_to_page_url_when_page_id_returns_empty_posts(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+        source = {
+            "id": "source-1",
+            "entity_id": "entity-1",
+            "provider_key": "scrapecreators",
+            "platform": "facebook",
+            "target_type": "page_id",
+            "account_external_id": "1378368079150250",
+            "source_key": "scrapecreators:facebook:page_id:1378368079150250",
+            "content_types": ["post"],
+            "metadata": {
+                "page_url": "https://www.facebook.com/nikol.pashinyan",
+            },
+        }
+
+        with patch.object(
+            client,
+            "fetch_facebook_profile_posts",
+            side_effect=[
+                {"success": True, "posts": [], "cursor": None},
+                {
+                    "success": True,
+                    "posts": [
+                        {
+                            "id": "1498926111588685",
+                            "text": "Primary post",
+                            "url": "https://www.facebook.com/reel/1583932262675815/",
+                            "author": {"name": "Nikol Pashinyan / Նիկոլ Փաշինյան", "id": "100044139324388"},
+                            "reactionCount": 568,
+                            "commentCount": 53,
+                            "publishTime": "2026-04-17T17:30:14.000Z",
+                        }
+                    ],
+                    "cursor": None,
+                },
+            ],
+        ) as posts_mock:
+            activities = client.collect_source(source, max_pages=1, page_size=50)
+
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["source_kind"], "post")
+        self.assertEqual(activities[0]["provider_item_id"], "1498926111588685")
+        self.assertEqual(posts_mock.call_count, 2)
+        first_call = posts_mock.call_args_list[0]
+        second_call = posts_mock.call_args_list[1]
+        self.assertEqual(first_call.kwargs["page_id"], "1378368079150250")
+        self.assertIsNone(first_call.kwargs.get("url"))
+        self.assertEqual(second_call.kwargs["url"], "https://www.facebook.com/nikol.pashinyan")
+        self.assertIsNone(second_call.kwargs.get("page_id"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -222,11 +222,18 @@ class ScrapeCreatorsClient(SocialProviderAdapter):
                 health_status="network_error",
             ) from exc
 
-    def fetch_facebook_profile_posts(self, *, page_id: str, cursor: str | None = None) -> dict[str, Any]:
+    def fetch_facebook_profile_posts(
+        self,
+        *,
+        page_id: str | None = None,
+        url: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
         return self._get(
             "/v1/facebook/profile/posts",
             {
                 "pageId": page_id,
+                "url": url,
                 "cursor": cursor,
             },
         )
@@ -371,6 +378,20 @@ class ScrapeCreatorsClient(SocialProviderAdapter):
             return raw
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _source_metadata(source: dict[str, Any]) -> dict[str, Any]:
+        payload = source.get("metadata")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _facebook_page_url(self, source: dict[str, Any]) -> str | None:
+        metadata = self._source_metadata(source)
+        return _coalesce(
+            metadata.get("page_url"),
+            metadata.get("url"),
+            source.get("page_url"),
+            source.get("url"),
+        )
+
     def collect_source(
         self,
         source: dict[str, Any],
@@ -437,6 +458,14 @@ class ScrapeCreatorsClient(SocialProviderAdapter):
             if platform == "facebook":
                 payload = self.fetch_facebook_profile_posts(page_id=identifier or "", cursor=cursor)
                 request_params["pageId"] = identifier
+                rows = payload.get("posts") or payload.get("results") or payload.get("items") or []
+                page_url = self._facebook_page_url(source)
+                if not rows and page_url:
+                    payload = self.fetch_facebook_profile_posts(url=page_url, cursor=cursor)
+                    rows = payload.get("posts") or payload.get("results") or payload.get("items") or []
+                    if rows:
+                        request_params["url"] = page_url
+                        request_params["pageId_fallback_empty"] = True
             elif platform == "instagram":
                 payload = self.fetch_instagram_posts(handle=identifier or "", cursor=cursor, page_size=page_size)
                 request_params["handle"] = identifier
