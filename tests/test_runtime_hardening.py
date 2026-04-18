@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import config
 from api import server
 from api import worker
 from api.scraper_scheduler import ScraperSchedulerService
@@ -33,11 +34,27 @@ class _CoordinatorStub:
 
 class RuntimeStartupHardeningTests(unittest.TestCase):
     def test_staging_forces_web_only_defaults(self) -> None:
-        with patch.object(server.config, "IS_STAGING", True):
+        with patch.object(server.config, "IS_STAGING", True), \
+             patch.object(server.config, "STAGING_ENABLE_BACKGROUND_JOBS", False):
             role, warmers = server._apply_testing_release_invariants("all", True)
 
         self.assertEqual(role, "web")
         self.assertFalse(warmers)
+
+    def test_staging_allows_dedicated_worker_when_enabled(self) -> None:
+        with patch.object(server.config, "IS_STAGING", True), \
+             patch.object(server.config, "STAGING_ENABLE_BACKGROUND_JOBS", True):
+            role, warmers = server._apply_testing_release_invariants("worker", True)
+
+        self.assertEqual(role, "worker")
+        self.assertFalse(warmers)
+
+    def test_config_validation_role_allows_staging_worker_when_enabled(self) -> None:
+        with patch.object(config, "IS_STAGING", True), \
+             patch.object(config, "STAGING_ENABLE_BACKGROUND_JOBS", True):
+            role = config._normalize_app_role_for_validation("worker")
+
+        self.assertEqual(role, "worker")
 
     def test_web_role_skips_background_scheduler_startup(self) -> None:
         async def enter_lifespan() -> None:

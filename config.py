@@ -84,6 +84,8 @@ def _normalize_app_role_for_validation(value=None) -> str:
     if role not in {"web", "worker", "all"}:
         role = "all"
     if IS_STAGING:
+        if STAGING_ENABLE_BACKGROUND_JOBS and role == "worker":
+            return "worker"
         return "web"
     return role
 

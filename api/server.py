@@ -200,6 +200,10 @@ def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | No
 
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
     if config.IS_STAGING:
+        if config.STAGING_ENABLE_BACKGROUND_JOBS and role == "worker":
+            if warmers_enabled:
+                logger.warning("Staging/testing environment forced to RUN_STARTUP_WARMERS=false")
+            return "worker", False
         if role != "web":
             logger.warning("Staging/testing environment forced to APP_ROLE=web (was {})", role)
         if warmers_enabled:
