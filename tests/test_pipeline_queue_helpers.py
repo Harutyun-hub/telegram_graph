@@ -51,6 +51,14 @@ class _FakeConnection:
         return self._cursor
 
 
+class _PipelineConnectConnection:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class PipelineQueueHelpersTests(unittest.TestCase):
     def test_repair_pipeline_stage_queues_returns_counts(self) -> None:
         writer = object.__new__(SupabaseWriter)
@@ -135,6 +143,24 @@ class PipelineQueueHelpersTests(unittest.TestCase):
         self.assertIn("post.is_processed = TRUE", sql)
         self.assertIn("post.neo4j_synced = FALSE", sql)
         self.assertEqual(params, (3, "worker-neo4j", 180))
+
+    def test_pipeline_connection_disables_prepared_statements_for_pooler(self) -> None:
+        writer = object.__new__(SupabaseWriter)
+        mock_dict_row = object()
+        conn = _PipelineConnectConnection()
+
+        with patch("buffer.supabase_writer.config.PIPELINE_DATABASE_URL", "postgresql://pooler"), \
+             patch("buffer.supabase_writer.dict_row", mock_dict_row), \
+             patch("buffer.supabase_writer.psycopg.connect", return_value=conn) as connect_mock:
+            with SupabaseWriter._pipeline_connection(writer) as active_conn:
+                self.assertIs(active_conn, conn)
+
+        connect_mock.assert_called_once_with(
+            "postgresql://pooler",
+            row_factory=mock_dict_row,
+            prepare_threshold=None,
+        )
+        self.assertTrue(conn.closed)
 
 
 if __name__ == "__main__":

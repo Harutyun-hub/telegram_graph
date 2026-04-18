@@ -829,7 +829,13 @@ class SupabaseWriter:
             raise RuntimeError("PIPELINE_DATABASE_URL (or SUPABASE_DB_URL) is required for atomic pipeline queue helpers.")
         if psycopg is None or dict_row is None:
             raise RuntimeError("psycopg is required for atomic pipeline queue helpers.")
-        conn = psycopg.connect(database_url, row_factory=dict_row)
+        # Supabase's transaction pooler rejects psycopg prepared statements, so
+        # the direct pipeline connection must keep them disabled.
+        conn = psycopg.connect(
+            database_url,
+            row_factory=dict_row,
+            prepare_threshold=None,
+        )
         try:
             yield conn
         finally:
