@@ -46,17 +46,25 @@ class DashboardV2MaterializerTests(unittest.TestCase):
             content_rows = _materialize_family_rows("content", ctx)
             topic_rows = _materialize_family_rows("topics", ctx)
 
-        self.assertEqual([row.row_key for row in content_rows if row.row_key == "community_brief"], ["community_brief"])
-        self.assertEqual([row.row_key for row in topic_rows if row.row_key == "community_brief"], ["community_brief"])
-        self.assertEqual(content_rows[0].payload_json["factFamily"], "content")
-        self.assertEqual(topic_rows[0].payload_json["factFamily"], "topics")
+        content_keys = [row.row_key for row in content_rows]
+        topic_keys = [row.row_key for row in topic_rows]
+        self.assertIn("kind=day_summary|scope=all", content_keys)
+        self.assertIn("kind=topic_day|topic=_summary", topic_keys)
+        self.assertIn("kind=coverage_marker|scope=all", content_keys)
+        self.assertIn("kind=coverage_marker|scope=all", topic_keys)
+        content_summary = next(row for row in content_rows if row.row_key == "kind=day_summary|scope=all")
+        topic_summary = next(row for row in topic_rows if row.row_key == "kind=topic_day|topic=_summary")
+        self.assertIn("communityBrief", content_summary.payload_json["factHints"]["widgetPayloads"])
+        self.assertIn("communityBrief", topic_summary.payload_json["factHints"]["widgetPayloads"])
 
     def test_foundation_materializer_records_runs_for_each_family(self) -> None:
         store = _FakeStore()
         with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content", "topics")), \
              patch(
                  "api.dashboard_v2_materializer._materialize_family_rows",
-                 side_effect=lambda family, ctx: [DashboardV2FactRow(row_key=f"{family}-{ctx.cache_key}", payload_json={"ok": True})],
+                 side_effect=lambda family, ctx, *args, **kwargs: [
+                     DashboardV2FactRow(row_key=f"{family}-{ctx.cache_key}", payload_json={"ok": True})
+                 ],
              ), \
              patch(
                  "api.dashboard_v2_materializer._materialize_secondary_rows",

@@ -89,8 +89,10 @@ from api.admin_runtime import (
 from api import db
 from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_coordinator import get_runtime_coordinator
+from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError, assemble_dashboard_v2_exact
 from api.dashboard_v2_compare import run_dashboard_v2_compare
 from api.dashboard_v2_materializer import (
+    DASHBOARD_V2_FACT_VERSION,
     materialize_dashboard_v2_backfill,
     materialize_dashboard_v2_incremental,
     materialize_dashboard_v2_reconciliation,
@@ -2475,6 +2477,104 @@ def _build_dashboard_api_payload(
     return response
 
 
+def _build_dashboard_v2_api_payload(
+    *,
+    ctx,
+    requested_from: str,
+    requested_to: str,
+    trusted_end_date: str,
+    dashboard_data: dict[str, Any],
+    freshness_snapshot: dict[str, Any],
+    freshness_source: str | None,
+    persisted_read_status: str | None,
+    persisted_read_ms: float | None,
+    cache_status: str,
+    cache_source: str,
+    range_resolution_path: str,
+    is_stale: bool,
+    fact_version: int,
+    artifact_version: int,
+    fact_watermark: str | None,
+    materialized_at: str | None,
+    stale_fact_families: list[str] | None,
+) -> dict[str, Any]:
+    response = _build_dashboard_api_payload(
+        ctx=ctx,
+        requested_from=requested_from,
+        requested_to=requested_to,
+        trusted_end_date=trusted_end_date,
+        dashboard_data=dashboard_data,
+        dashboard_runtime_meta={
+            "cacheStatus": cache_status,
+            "cacheSource": cache_source,
+            "isStale": bool(is_stale),
+            "snapshotBuiltAt": materialized_at,
+            "buildMode": "dashboard_v2_facts_only",
+            "buildElapsedSeconds": None,
+            "refreshFailureCount": 0,
+            "skippedTiers": [],
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {},
+        },
+        freshness_snapshot=freshness_snapshot,
+        freshness_source=freshness_source,
+        persisted_read_status=persisted_read_status,
+        persisted_read_ms=persisted_read_ms,
+        cache_status_override=cache_status,
+        range_resolution_path=range_resolution_path,
+    )
+    response["meta"].update(
+        {
+            "dataPlane": "dashboard_v2",
+            "factVersion": int(fact_version),
+            "artifactVersion": int(artifact_version),
+            "factWatermark": fact_watermark,
+            "materializedAt": materialized_at,
+            "rangeMode": "exact",
+            "staleFactFamilies": list(stale_fact_families or []),
+            "skippedTiers": [],
+        }
+    )
+    return response
+
+
+def _build_dashboard_v2_response_payload(
+    from_date: str,
+    to_date: str,
+) -> dict[str, Any]:
+    request_resolution = _resolve_dashboard_request_context(from_date, to_date)
+    ctx = request_resolution["ctx"]
+    if ctx.days < 1:
+        raise ValueError("Dashboard V2 exact ranges must include at least one day.")
+    if ctx.days > 365:
+        raise ValueError("Summarized mode for ranges over 365 days is deferred to PR2C.")
+    result = assemble_dashboard_v2_exact(
+        get_dashboard_v2_store(),
+        ctx=ctx,
+    )
+    return _build_dashboard_v2_api_payload(
+        ctx=ctx,
+        requested_from=str(request_resolution["requestedFrom"]),
+        requested_to=str(request_resolution["requestedTo"]),
+        trusted_end_date=str(request_resolution["trustedEndDate"]),
+        dashboard_data=result.snapshot,
+        freshness_snapshot=request_resolution["freshnessSnapshot"] or {},
+        freshness_source=request_resolution["freshnessSource"],
+        persisted_read_status=request_resolution["persistedReadStatus"],
+        persisted_read_ms=request_resolution["persistedReadMs"],
+        cache_status=result.cache_status,
+        cache_source=result.cache_source,
+        range_resolution_path=result.range_resolution_path,
+        is_stale=result.is_stale,
+        fact_version=result.fact_version,
+        artifact_version=result.artifact_version,
+        fact_watermark=result.fact_watermark,
+        materialized_at=result.materialized_at,
+        stale_fact_families=result.stale_fact_families,
+    )
+
+
 def _build_dashboard_response_payload(
     from_date: Optional[str],
     to_date: Optional[str],
@@ -3469,6 +3569,68 @@ async def dashboard(
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard-v2", dependencies=[Depends(require_analytics_access)])
+async def dashboard_v2(
+    request: Request,
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+):
+    """Parallel Dashboard V2 exact-range route backed only by V2 facts and V2 artifacts."""
+    if not bool(config.DASH_V2_API_ENABLED):
+        raise HTTPException(status_code=404, detail="Dashboard V2 API is disabled.")
+    if not from_date or not to_date:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "v2_exact_range_required",
+                "message": "Dashboard V2 requires explicit from/to dates in PR2B.",
+            },
+        )
+    query_started_at = time.perf_counter()
+    try:
+        ctx = build_dashboard_date_context(from_date, to_date)
+        if ctx.days > 365:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "v2_summary_mode_deferred",
+                    "message": "Summarized mode for ranges over 365 days is deferred to PR2C.",
+                    "requestedFrom": from_date,
+                    "requestedTo": to_date,
+                },
+            )
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: _build_dashboard_v2_response_payload(from_date, to_date),
+        )
+        _record_query_timing(
+            request,
+            query_started_at,
+            cache_status=str(response.get("meta", {}).get("cacheStatus") or ""),
+        )
+        request.state.dashboard_meta = response["meta"]
+        return _dashboard_response(response)
+    except DashboardV2FactsNotReadyError as exc:
+        _record_query_timing(request, query_started_at, cache_status="v2_facts_not_ready")
+        raise HTTPException(status_code=503, detail=exc.detail)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "v2_summary_mode_deferred",
+                "message": str(exc),
+                "requestedFrom": from_date,
+                "requestedTo": to_date,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"Dashboard V2 endpoint error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/ai/query", dependencies=[Depends(require_analytics_access)])
@@ -4854,8 +5016,15 @@ async def seed_default_dashboard_artifact():
 @app.get("/api/dashboard-v2/coverage", dependencies=[Depends(require_operator_access)])
 async def get_dashboard_v2_coverage():
     """Return the Dashboard V2 widget-to-fact coverage map."""
+    readiness = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: get_dashboard_v2_store().summarize_v2_route_readiness(
+            min_fact_version=DASHBOARD_V2_FACT_VERSION,
+            lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+        ),
+    )
     return {
-        "stage": "pr2a_transitional_scaffolding",
+        "stage": "pr2b_transitional_assembler_ready",
         "enabled": bool(config.DASH_V2_FACTS_ENABLED),
         "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
         "apiEnabled": bool(config.DASH_V2_API_ENABLED),
@@ -4864,6 +5033,8 @@ async def get_dashboard_v2_coverage():
         "currentRole": APP_ROLE,
         "processOwnsJobs": _should_run_dashboard_v2_background_jobs(),
         "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
+        "minRequiredFactVersion": int(DASHBOARD_V2_FACT_VERSION),
+        "readiness": readiness,
         "widgets": build_widget_coverage_report(),
     }
 
@@ -4874,10 +5045,13 @@ async def get_dashboard_v2_status():
     try:
         status = await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: get_dashboard_v2_store().status_snapshot(),
+            lambda: get_dashboard_v2_store().status_snapshot(
+                min_fact_version=DASHBOARD_V2_FACT_VERSION,
+                lookback_days=int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+            ),
         )
         return {
-            "stage": "pr2a_transitional_scaffolding",
+            "stage": "pr2b_transitional_assembler_ready",
             "enabled": bool(config.DASH_V2_FACTS_ENABLED),
             "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
             "apiEnabled": bool(config.DASH_V2_API_ENABLED),
@@ -4889,6 +5063,7 @@ async def get_dashboard_v2_status():
             "factLookbackDays": int(config.DASH_V2_FACT_LOOKBACK_DAYS),
             "reconcileLookbackDays": int(config.DASH_V2_RECONCILE_LOOKBACK_DAYS),
             "materializeIntervalMinutes": int(config.DASH_V2_FACT_MATERIALIZE_INTERVAL_MINUTES),
+            "minRequiredFactVersion": int(DASHBOARD_V2_FACT_VERSION),
             "coverage": build_widget_coverage_report(),
             "status": status,
         }
@@ -4899,7 +5074,7 @@ async def get_dashboard_v2_status():
 
 @app.post("/api/dashboard-v2/materialize", dependencies=[Depends(require_operator_access)])
 async def materialize_dashboard_v2(mode: str = Query("incremental", pattern="^(incremental|reconciliation|backfill)$")):
-    """Run the PR2A Dashboard V2 foundation materializer once."""
+    """Run the PR2B Dashboard V2 fact materializer once."""
     try:
         loop = asyncio.get_running_loop()
         store = get_dashboard_v2_store()
@@ -4920,7 +5095,7 @@ async def compare_dashboard_v2(
     from_date: str = Query(...),
     to_date: str = Query(...),
 ):
-    """Compare old dashboard output, stored V2 artifacts, and direct source-date truth."""
+    """Compare old dashboard output, assembled V2 output, and direct source-date truth."""
     try:
         result = await asyncio.get_running_loop().run_in_executor(
             None,

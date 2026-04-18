@@ -171,6 +171,12 @@ EXACT_FACT_BACKED_WIDGET_IDS = tuple(item.widget_id for item in WIDGET_COVERAGE 
 SECONDARY_MATERIALIZED_WIDGET_IDS = tuple(
     item.widget_id for item in WIDGET_COVERAGE if item.secondary_materialization is not None
 )
+SECONDARY_STORAGE_KEY_BY_WIDGET_ID = {
+    item.widget_id: str(item.secondary_materialization)
+    for item in WIDGET_COVERAGE
+    if item.secondary_materialization is not None
+}
+FULL_DASHBOARD_REQUIRED_FACT_FAMILIES: tuple[str, ...] = FACT_FAMILIES
 DIRECT_SOURCE_TRUTH_WIDGET_IDS = (
     "community_brief",
     "community_health_score",
@@ -180,6 +186,37 @@ DIRECT_SOURCE_TRUTH_WIDGET_IDS = (
     "sentiment_by_topic",
     "week_over_week_shifts",
 )
+
+RAW_SNAPSHOT_FIELDS_BY_WIDGET_ID: dict[str, tuple[str, ...]] = {
+    "community_brief": ("communityBrief",),
+    "community_health_score": ("communityHealth",),
+    "trending_topics_feed": ("trendingTopics", "trendingNewTopics"),
+    "topic_landscape": ("topicBubbles",),
+    "conversation_trends": ("trendLines", "trendData"),
+    "question_cloud": ("questionCategories", "questionBriefs", "qaGap"),
+    "topic_lifecycle": ("lifecycleStages",),
+    "problem_tracker": ("problemBriefs", "problems"),
+    "service_gap_detector": ("serviceGapBriefs", "serviceGaps"),
+    "satisfaction_by_area": ("satisfactionAreas",),
+    "mood_over_time": ("moodData", "moodConfig"),
+    "emotional_urgency_index": ("urgencySignals",),
+    "top_channels": ("communityChannels", "hourlyActivity", "weeklyActivity"),
+    "key_voices": ("keyVoices",),
+    "recommendation_tracker": ("recommendations",),
+    "information_velocity": ("viralTopics",),
+    "persona_gallery": ("personas", "origins", "integrationData", "integrationLevels", "integrationSeriesConfig"),
+    "interest_radar": ("interests",),
+    "community_growth_funnel": ("growthFunnel",),
+    "retention_risk_gauge": ("retentionFactors", "churnSignals"),
+    "decision_stage_tracker": ("decisionStages",),
+    "emerging_interests": ("emergingInterests",),
+    "new_vs_returning_voice": ("newVsReturningVoiceWidget",),
+    "business_opportunity_tracker": ("businessOpportunityBriefs", "businessOpportunities"),
+    "job_market_pulse": ("jobSeeking", "jobTrends", "housingData", "housingHotTopics"),
+    "week_over_week_shifts": ("weeklyShifts",),
+    "sentiment_by_topic": ("sentimentByTopic",),
+    "content_performance": ("topPosts", "contentTypePerformance", "vitalityIndicators"),
+}
 
 
 def get_widget_coverage(widget_id: str) -> DashboardV2WidgetCoverage:
@@ -199,3 +236,11 @@ def validate_widget_coverage(expected_widget_ids: tuple[str, ...] | list[str]) -
     missing = sorted(expected - actual)
     unexpected = sorted(actual - expected)
     return missing, unexpected
+
+
+def required_fact_families_for_widgets(widget_ids: tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
+    target_ids = tuple(widget_ids or ALL_WIDGET_IDS)
+    families: set[str] = set()
+    for widget_id in target_ids:
+        families.update(get_widget_coverage(widget_id).fact_families)
+    return tuple(family for family in FACT_FAMILIES if family in families)
