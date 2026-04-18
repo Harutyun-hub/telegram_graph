@@ -56,6 +56,10 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
 
         self.assertEqual(role, "worker")
 
+    def test_config_can_skip_telegram_runtime_credentials_when_disabled(self) -> None:
+        with patch.object(config, "REQUIRE_TELEGRAM_CREDENTIALS", False):
+            self.assertFalse(config.needs_telegram_runtime_credentials())
+
     def test_web_role_skips_background_scheduler_startup(self) -> None:
         async def enter_lifespan() -> None:
             async with server.app_lifespan(server.app):

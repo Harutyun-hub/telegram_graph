@@ -95,6 +95,7 @@ TELEGRAM_API_HASH     = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE        = os.getenv("TELEGRAM_PHONE", "")
 TELEGRAM_SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "telegram_scraper")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")  # For Railway/cloud deployment
+REQUIRE_TELEGRAM_CREDENTIALS = _env_bool("REQUIRE_TELEGRAM_CREDENTIALS", True)
 
 
 def has_telegram_runtime_credentials() -> bool:
@@ -106,6 +107,8 @@ def has_telegram_login_credentials() -> bool:
 
 
 def needs_telegram_runtime_credentials() -> bool:
+    if not REQUIRE_TELEGRAM_CREDENTIALS:
+        return False
     return _normalize_app_role_for_validation() in {"worker", "all"}
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
