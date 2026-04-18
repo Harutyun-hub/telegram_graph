@@ -89,6 +89,14 @@ from api.admin_runtime import (
 from api import db
 from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_coordinator import get_runtime_coordinator
+from api.dashboard_v2_compare import run_dashboard_v2_compare
+from api.dashboard_v2_materializer import (
+    materialize_dashboard_v2_backfill,
+    materialize_dashboard_v2_incremental,
+    materialize_dashboard_v2_reconciliation,
+)
+from api.dashboard_v2_registry import build_widget_coverage_report
+from api.dashboard_v2_store import DashboardV2Store
 from api.source_resolution import (
     build_pending_source_payload,
     enqueue_missing_peer_ref_backfill,
@@ -308,6 +316,10 @@ async def app_lifespan(_app: FastAPI):
         if _should_run_topic_overviews_materializer():
             _start_topic_overviews_scheduler()
         _start_default_dashboard_artifact_scheduler()
+        if config.DASH_V2_FACTS_ENABLED:
+            _start_dashboard_v2_fact_scheduler()
+            if config.DASH_V2_COMPARE_ENABLED:
+                _start_dashboard_v2_compare_scheduler()
         startup_phases["cardsSchedulerStartupMs"] = round((time.perf_counter() - cards_scheduler_started_at) * 1000, 2)
         if RUN_STARTUP_WARMERS:
             warmers_started_at = time.perf_counter()
@@ -320,6 +332,8 @@ async def app_lifespan(_app: FastAPI):
                 asyncio.create_task(_materialize_opportunity_cards_once(force=False))
             if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_topic_overviews_once(force=False))
+            if config.DASH_V2_FACTS_ENABLED:
+                asyncio.create_task(_materialize_dashboard_v2_incremental_once(force=False))
             startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
         if config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED and config.DASH_DEFAULT_ARTIFACT_SEED_ON_STARTUP:
             seed_started_at = time.perf_counter()
@@ -349,7 +363,8 @@ async def app_lifespan(_app: FastAPI):
     finally:
         global question_cards_scheduler, behavioral_cards_scheduler, opportunity_cards_scheduler, topic_overviews_scheduler
         global default_dashboard_artifact_scheduler
-        global scraper_scheduler, supabase_writer, social_runtime_service, social_store_writer
+        global dashboard_v2_fact_scheduler, dashboard_v2_compare_scheduler
+        global scraper_scheduler, supabase_writer, dashboard_v2_store, social_runtime_service, social_store_writer
         if question_cards_scheduler is not None:
             try:
                 question_cards_scheduler.shutdown(wait=False)
@@ -380,6 +395,18 @@ async def app_lifespan(_app: FastAPI):
             except Exception:
                 pass
             default_dashboard_artifact_scheduler = None
+        if dashboard_v2_fact_scheduler is not None:
+            try:
+                dashboard_v2_fact_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            dashboard_v2_fact_scheduler = None
+        if dashboard_v2_compare_scheduler is not None:
+            try:
+                dashboard_v2_compare_scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            dashboard_v2_compare_scheduler = None
         if scraper_scheduler is not None:
             await scraper_scheduler.shutdown()
             scraper_scheduler = None
@@ -387,6 +414,7 @@ async def app_lifespan(_app: FastAPI):
             await social_runtime_service.shutdown()
             social_runtime_service = None
         supabase_writer = None
+        dashboard_v2_store = None
         social_store_writer = None
         db.close()
         logger.info("API server shut down — Neo4j driver closed")
@@ -655,9 +683,12 @@ behavioral_cards_scheduler: AsyncIOScheduler | None = None
 opportunity_cards_scheduler: AsyncIOScheduler | None = None
 topic_overviews_scheduler: AsyncIOScheduler | None = None
 default_dashboard_artifact_scheduler: AsyncIOScheduler | None = None
+dashboard_v2_fact_scheduler: AsyncIOScheduler | None = None
+dashboard_v2_compare_scheduler: AsyncIOScheduler | None = None
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 _analytics_rate_limit_lock = threading.Lock()
 _analytics_rate_limit_buckets: dict[tuple[str, str], list[float]] = {}
+dashboard_v2_store: DashboardV2Store | None = None
 ADMIN_WIDGET_IDS = (
     "community_brief",
     "community_health_score",
@@ -728,6 +759,13 @@ def get_supabase_writer() -> SupabaseWriter:
     if supabase_writer is None:
         supabase_writer = SupabaseWriter()
     return supabase_writer
+
+
+def get_dashboard_v2_store() -> DashboardV2Store:
+    global dashboard_v2_store
+    if dashboard_v2_store is None:
+        dashboard_v2_store = DashboardV2Store(get_supabase_writer())
+    return dashboard_v2_store
 
 
 def get_scraper_scheduler() -> ScraperSchedulerService:
@@ -2739,6 +2777,80 @@ async def _materialize_topic_overviews_once(force: bool = False) -> None:
         logger.warning(f"Topic overviews materialization failed: {e}")
 
 
+async def _materialize_dashboard_v2_incremental_once(force: bool = False) -> None:
+    """Refresh recent Dashboard V2 facts off the request path."""
+    del force  # Reserved for future PR2B/PR2C behavior.
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: materialize_dashboard_v2_incremental(get_dashboard_v2_store()),
+        )
+        logger.info(
+            "Dashboard V2 incremental materialization completed | coverage={}..{} families={} secondary={}",
+            result.get("coverage_start"),
+            result.get("coverage_end"),
+            len(result.get("family_runs") or []),
+            len(result.get("secondary_runs") or []),
+        )
+    except Exception as e:
+        logger.warning(f"Dashboard V2 incremental materialization failed: {e}")
+
+
+async def _reconcile_dashboard_v2_facts_once(force: bool = False) -> None:
+    """Reconcile the recent Dashboard V2 fact window."""
+    del force  # Reserved for future PR2B/PR2C behavior.
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: materialize_dashboard_v2_reconciliation(get_dashboard_v2_store()),
+        )
+        logger.info(
+            "Dashboard V2 reconciliation completed | coverage={}..{} families={} secondary={}",
+            result.get("coverage_start"),
+            result.get("coverage_end"),
+            len(result.get("family_runs") or []),
+            len(result.get("secondary_runs") or []),
+        )
+    except Exception as e:
+        logger.warning(f"Dashboard V2 reconciliation failed: {e}")
+
+
+async def _run_dashboard_v2_compare_samples_once() -> None:
+    """Run sample-range comparisons between old dashboard output and V2 truth scaffolding."""
+    sample_days: list[int] = []
+    for raw in config.DASH_V2_COMPARE_SAMPLE_DAYS:
+        try:
+            sample_days.append(max(1, int(raw)))
+        except Exception:
+            continue
+    if not sample_days:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        end_date = _default_dashboard_context().to_date
+
+        def _run() -> list[dict[str, Any]]:
+            store = get_dashboard_v2_store()
+            results: list[dict[str, Any]] = []
+            for days in sample_days:
+                start_date = end_date - timedelta(days=days - 1)
+                results.append(
+                    run_dashboard_v2_compare(
+                        store,
+                        from_value=start_date.isoformat(),
+                        to_value=end_date.isoformat(),
+                    )
+                )
+            return results
+
+        results = await loop.run_in_executor(None, _run)
+        logger.info("Dashboard V2 compare samples completed | samples={}", len(results))
+    except Exception as e:
+        logger.warning(f"Dashboard V2 compare samples failed: {e}")
+
+
 def _start_question_cards_scheduler() -> None:
     """Start recurring question-card materialization scheduler."""
     global question_cards_scheduler
@@ -2817,6 +2929,56 @@ def _start_topic_overviews_scheduler() -> None:
     scheduler.start()
     topic_overviews_scheduler = scheduler
     logger.info(f"Topic overviews scheduler ready | interval={interval}m")
+
+
+def _start_dashboard_v2_fact_scheduler() -> None:
+    """Start recurring Dashboard V2 fact materialization and reconciliation jobs."""
+    global dashboard_v2_fact_scheduler
+
+    interval = max(5, int(config.DASH_V2_FACT_MATERIALIZE_INTERVAL_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _materialize_dashboard_v2_incremental_once,
+        "interval",
+        minutes=interval,
+        id="dashboard-v2-facts-incremental",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _reconcile_dashboard_v2_facts_once,
+        "cron",
+        hour=2,
+        minute=15,
+        id="dashboard-v2-facts-reconcile",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=900,
+    )
+    scheduler.start()
+    dashboard_v2_fact_scheduler = scheduler
+    logger.info(f"Dashboard V2 fact scheduler ready | interval={interval}m")
+
+
+def _start_dashboard_v2_compare_scheduler() -> None:
+    """Start recurring Dashboard V2 comparison samples."""
+    global dashboard_v2_compare_scheduler
+
+    interval = max(5, int(config.DASH_V2_FACT_MATERIALIZE_INTERVAL_MINUTES))
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        _run_dashboard_v2_compare_samples_once,
+        "interval",
+        minutes=interval,
+        id="dashboard-v2-compare-samples",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.start()
+    dashboard_v2_compare_scheduler = scheduler
+    logger.info(f"Dashboard V2 compare scheduler ready | interval={interval}m")
 
 
 def _start_default_dashboard_artifact_scheduler() -> None:
@@ -4674,6 +4836,83 @@ async def seed_default_dashboard_artifact():
         return JSONResponse(status_code=503, content=result)
     except Exception as e:
         logger.error(f"Canonical default artifact seeder endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard-v2/coverage", dependencies=[Depends(require_operator_access)])
+async def get_dashboard_v2_coverage():
+    """Return the Dashboard V2 widget-to-fact coverage map."""
+    return {
+        "enabled": bool(config.DASH_V2_FACTS_ENABLED),
+        "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
+        "apiEnabled": bool(config.DASH_V2_API_ENABLED),
+        "frontendReadEnabled": bool(config.DASH_V2_FRONTEND_READ_ENABLED),
+        "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
+        "widgets": build_widget_coverage_report(),
+    }
+
+
+@app.get("/api/dashboard-v2/status", dependencies=[Depends(require_operator_access)])
+async def get_dashboard_v2_status():
+    """Return Dashboard V2 materialization status without changing serving behavior."""
+    try:
+        status = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: get_dashboard_v2_store().status_snapshot(),
+        )
+        return {
+            "enabled": bool(config.DASH_V2_FACTS_ENABLED),
+            "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
+            "apiEnabled": bool(config.DASH_V2_API_ENABLED),
+            "frontendReadEnabled": bool(config.DASH_V2_FRONTEND_READ_ENABLED),
+            "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
+            "factLookbackDays": int(config.DASH_V2_FACT_LOOKBACK_DAYS),
+            "reconcileLookbackDays": int(config.DASH_V2_RECONCILE_LOOKBACK_DAYS),
+            "materializeIntervalMinutes": int(config.DASH_V2_FACT_MATERIALIZE_INTERVAL_MINUTES),
+            "coverage": build_widget_coverage_report(),
+            "status": status,
+        }
+    except Exception as e:
+        logger.error(f"Dashboard V2 status endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dashboard-v2/materialize", dependencies=[Depends(require_operator_access)])
+async def materialize_dashboard_v2(mode: str = Query("incremental", pattern="^(incremental|reconciliation|backfill)$")):
+    """Run the PR2A Dashboard V2 foundation materializer once."""
+    try:
+        loop = asyncio.get_running_loop()
+        store = get_dashboard_v2_store()
+        if mode == "reconciliation":
+            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_reconciliation(store))
+        elif mode == "backfill":
+            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_backfill(store))
+        else:
+            result = await loop.run_in_executor(None, lambda: materialize_dashboard_v2_incremental(store))
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"Dashboard V2 materialize endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dashboard-v2/compare", dependencies=[Depends(require_operator_access)])
+async def compare_dashboard_v2(
+    from_date: str = Query(...),
+    to_date: str = Query(...),
+):
+    """Compare old dashboard output, stored V2 artifacts, and direct source-date truth."""
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: run_dashboard_v2_compare(
+                get_dashboard_v2_store(),
+                from_value=from_date,
+                to_value=to_date,
+            ),
+        )
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"Dashboard V2 compare endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -841,6 +841,21 @@ class SupabaseWriter:
         value = base * (2 ** max(0, int(attempt_count) - 1))
         return int(min(max_backoff, value))
 
+    def pg_fetchall(self, sql: str, params=None) -> list[dict]:
+        with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall() or []
+
+    def pg_fetchone(self, sql: str, params=None):
+        with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone()
+
+    def pg_execute(self, sql: str, params=None) -> int:
+        with self._pipeline_connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(sql, params)
+            return int(getattr(cur, "rowcount", 0) or 0)
+
     def enqueue_ai_post_jobs(self, *, limit: int | None = None) -> int:
         row_limit = max(1, int(limit or config.PIPELINE_QUEUE_REPAIR_BATCH_SIZE))
         try:

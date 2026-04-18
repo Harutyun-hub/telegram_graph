@@ -23,6 +23,8 @@ async def _shutdown_background_services() -> None:
         "opportunity_cards_scheduler",
         "topic_overviews_scheduler",
         "default_dashboard_artifact_scheduler",
+        "dashboard_v2_fact_scheduler",
+        "dashboard_v2_compare_scheduler",
     ):
         scheduler = getattr(server, scheduler_name, None)
         if scheduler is None:
@@ -55,6 +57,10 @@ async def run_worker() -> None:
     server._start_opportunity_cards_scheduler()
     server._start_topic_overviews_scheduler()
     server._start_default_dashboard_artifact_scheduler()
+    if config.DASH_V2_FACTS_ENABLED:
+        server._start_dashboard_v2_fact_scheduler()
+        if config.DASH_V2_COMPARE_ENABLED:
+            server._start_dashboard_v2_compare_scheduler()
 
     startup_tasks: list[asyncio.Task] = []
     if config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED and config.DASH_DEFAULT_ARTIFACT_SEED_ON_STARTUP:
@@ -70,6 +76,8 @@ async def run_worker() -> None:
             startup_tasks.append(asyncio.create_task(server._materialize_opportunity_cards_once(force=False)))
         if config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
             startup_tasks.append(asyncio.create_task(server._materialize_topic_overviews_once(force=False)))
+        if config.DASH_V2_FACTS_ENABLED:
+            startup_tasks.append(asyncio.create_task(server._materialize_dashboard_v2_incremental_once(force=False)))
 
     try:
         await asyncio.Event().wait()
