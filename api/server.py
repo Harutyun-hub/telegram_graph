@@ -96,6 +96,7 @@ from api.dashboard_v2_materializer import (
     materialize_dashboard_v2_reconciliation,
 )
 from api.dashboard_v2_registry import build_widget_coverage_report
+from api.dashboard_v2_runtime import normalize_dashboard_v2_job_owner, should_run_dashboard_v2_jobs
 from api.dashboard_v2_store import DashboardV2Store
 from api.source_resolution import (
     build_pending_source_payload,
@@ -129,6 +130,17 @@ def _should_run_background_jobs(role: str | None = None) -> bool:
 
 def _should_run_topic_overviews_materializer() -> bool:
     return _should_run_background_jobs() and bool(config.FEATURE_TOPIC_OVERVIEWS_AI)
+
+
+def _dashboard_v2_job_owner() -> str:
+    return normalize_dashboard_v2_job_owner(getattr(config, "DASH_V2_JOB_OWNER", "worker"))
+
+
+def _should_run_dashboard_v2_background_jobs() -> bool:
+    return bool(
+        config.DASH_V2_FACTS_ENABLED
+        and should_run_dashboard_v2_jobs(app_role=APP_ROLE, job_owner=_dashboard_v2_job_owner())
+    )
 
 
 def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | None = None) -> dict[str, Any]:
@@ -316,7 +328,7 @@ async def app_lifespan(_app: FastAPI):
         if _should_run_topic_overviews_materializer():
             _start_topic_overviews_scheduler()
         _start_default_dashboard_artifact_scheduler()
-        if config.DASH_V2_FACTS_ENABLED:
+        if _should_run_dashboard_v2_background_jobs():
             _start_dashboard_v2_fact_scheduler()
             if config.DASH_V2_COMPARE_ENABLED:
                 _start_dashboard_v2_compare_scheduler()
@@ -332,7 +344,7 @@ async def app_lifespan(_app: FastAPI):
                 asyncio.create_task(_materialize_opportunity_cards_once(force=False))
             if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_topic_overviews_once(force=False))
-            if config.DASH_V2_FACTS_ENABLED:
+            if _should_run_dashboard_v2_background_jobs():
                 asyncio.create_task(_materialize_dashboard_v2_incremental_once(force=False))
             startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
         if config.DASH_DEFAULT_ARTIFACT_SEEDER_ENABLED and config.DASH_DEFAULT_ARTIFACT_SEED_ON_STARTUP:
@@ -4843,10 +4855,14 @@ async def seed_default_dashboard_artifact():
 async def get_dashboard_v2_coverage():
     """Return the Dashboard V2 widget-to-fact coverage map."""
     return {
+        "stage": "pr2a_transitional_scaffolding",
         "enabled": bool(config.DASH_V2_FACTS_ENABLED),
         "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
         "apiEnabled": bool(config.DASH_V2_API_ENABLED),
         "frontendReadEnabled": bool(config.DASH_V2_FRONTEND_READ_ENABLED),
+        "jobOwner": _dashboard_v2_job_owner(),
+        "currentRole": APP_ROLE,
+        "processOwnsJobs": _should_run_dashboard_v2_background_jobs(),
         "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
         "widgets": build_widget_coverage_report(),
     }
@@ -4861,10 +4877,14 @@ async def get_dashboard_v2_status():
             lambda: get_dashboard_v2_store().status_snapshot(),
         )
         return {
+            "stage": "pr2a_transitional_scaffolding",
             "enabled": bool(config.DASH_V2_FACTS_ENABLED),
             "compareEnabled": bool(config.DASH_V2_COMPARE_ENABLED),
             "apiEnabled": bool(config.DASH_V2_API_ENABLED),
             "frontendReadEnabled": bool(config.DASH_V2_FRONTEND_READ_ENABLED),
+            "jobOwner": _dashboard_v2_job_owner(),
+            "currentRole": APP_ROLE,
+            "processOwnsJobs": _should_run_dashboard_v2_background_jobs(),
             "defaultRangeDays": int(config.DASH_DEFAULT_RANGE_DAYS),
             "factLookbackDays": int(config.DASH_V2_FACT_LOOKBACK_DAYS),
             "reconcileLookbackDays": int(config.DASH_V2_RECONCILE_LOOKBACK_DAYS),

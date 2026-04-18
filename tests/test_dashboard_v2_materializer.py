@@ -4,7 +4,12 @@ import unittest
 from datetime import date
 from unittest.mock import patch
 
-from api.dashboard_v2_materializer import DashboardV2FactRow, materialize_dashboard_v2_foundation
+from api.dashboard_dates import build_dashboard_date_context
+from api.dashboard_v2_materializer import (
+    DashboardV2FactRow,
+    _materialize_family_rows,
+    materialize_dashboard_v2_foundation,
+)
 
 
 class _FakeStore:
@@ -32,6 +37,20 @@ class _FakeStore:
 
 
 class DashboardV2MaterializerTests(unittest.TestCase):
+    def test_multi_family_widget_materializes_into_each_declared_family(self) -> None:
+        ctx = build_dashboard_date_context("2026-04-18", "2026-04-18")
+        with patch(
+            "api.dashboard_v2_materializer._WIDGET_FACT_BUILDERS",
+            {"community_brief": lambda _ctx: {"messagesAnalyzed": 10}},
+        ):
+            content_rows = _materialize_family_rows("content", ctx)
+            topic_rows = _materialize_family_rows("topics", ctx)
+
+        self.assertEqual([row.row_key for row in content_rows if row.row_key == "community_brief"], ["community_brief"])
+        self.assertEqual([row.row_key for row in topic_rows if row.row_key == "community_brief"], ["community_brief"])
+        self.assertEqual(content_rows[0].payload_json["factFamily"], "content")
+        self.assertEqual(topic_rows[0].payload_json["factFamily"], "topics")
+
     def test_foundation_materializer_records_runs_for_each_family(self) -> None:
         store = _FakeStore()
         with patch("api.dashboard_v2_materializer.FACT_FAMILIES", ("content", "topics")), \

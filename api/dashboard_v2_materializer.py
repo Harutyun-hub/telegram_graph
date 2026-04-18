@@ -49,6 +49,8 @@ def _iter_days(start_date: date, end_date: date):
 def _row_payload(widget_id: str, ctx: DashboardDateContext, data: Any) -> dict[str, Any]:
     return {
         "widgetId": widget_id,
+        "materializationStage": "pr2a_transitional",
+        "sourceEngine": "legacy_query_modules",
         "range": {
             "from": ctx.from_date.isoformat(),
             "to": ctx.to_date.isoformat(),
@@ -170,7 +172,7 @@ def _materialize_family_rows(family: str, ctx: DashboardDateContext) -> list[Das
     rows: list[DashboardV2FactRow] = []
     for widget_id in EXACT_FACT_BACKED_WIDGET_IDS:
         coverage = WIDGET_COVERAGE_BY_ID[widget_id]
-        if not coverage.fact_families or coverage.fact_families[0] != family:
+        if family not in coverage.fact_families:
             continue
         builder = _WIDGET_FACT_BUILDERS.get(widget_id)
         if builder is None:
@@ -179,7 +181,11 @@ def _materialize_family_rows(family: str, ctx: DashboardDateContext) -> list[Das
         rows.append(
             DashboardV2FactRow(
                 row_key=widget_id,
-                payload_json=_row_payload(widget_id, ctx, payload),
+                payload_json={
+                    **_row_payload(widget_id, ctx, payload),
+                    "factFamily": family,
+                    "declaredFactFamilies": list(coverage.fact_families),
+                },
                 source_event_at=_utc_day_start(ctx.from_date),
                 content_type="widget_snapshot" if family == "content" else None,
             )

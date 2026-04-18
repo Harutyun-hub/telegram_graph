@@ -57,7 +57,7 @@ async def run_worker() -> None:
     server._start_opportunity_cards_scheduler()
     server._start_topic_overviews_scheduler()
     server._start_default_dashboard_artifact_scheduler()
-    if config.DASH_V2_FACTS_ENABLED:
+    if server._should_run_dashboard_v2_background_jobs():
         server._start_dashboard_v2_fact_scheduler()
         if config.DASH_V2_COMPARE_ENABLED:
             server._start_dashboard_v2_compare_scheduler()
@@ -76,7 +76,7 @@ async def run_worker() -> None:
             startup_tasks.append(asyncio.create_task(server._materialize_opportunity_cards_once(force=False)))
         if config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
             startup_tasks.append(asyncio.create_task(server._materialize_topic_overviews_once(force=False)))
-        if config.DASH_V2_FACTS_ENABLED:
+        if server._should_run_dashboard_v2_background_jobs():
             startup_tasks.append(asyncio.create_task(server._materialize_dashboard_v2_incremental_once(force=False)))
 
     try:
