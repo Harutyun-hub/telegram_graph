@@ -162,7 +162,11 @@ def run_dashboard_v2_compare(
     v2_meta: dict[str, Any]
     v2_snapshot: dict[str, Any] = {}
     try:
-        v2_result = assemble_dashboard_v2_exact(store, ctx=ctx)
+        v2_result = assemble_dashboard_v2_exact(
+            store,
+            ctx=ctx,
+            allow_stale_exact_last_known_good=False,
+        )
         v2_snapshot = dict(v2_result.snapshot or {})
         v2_meta = {
             "status": "ready",

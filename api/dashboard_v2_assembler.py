@@ -472,6 +472,7 @@ def assemble_dashboard_v2_exact(
     store: DashboardV2Store,
     *,
     ctx: DashboardDateContext,
+    allow_stale_exact_last_known_good: bool = True,
 ) -> DashboardV2AssemblyResult:
     route_readiness = store.summarize_v2_route_readiness(
         min_fact_version=DASHBOARD_V2_FACT_VERSION,
@@ -560,7 +561,7 @@ def assemble_dashboard_v2_exact(
             cache_key=ctx.cache_key,
             materialized_at=artifact.get("materialized_at"),
         )
-        if same_key_last_known_good_allowed(
+        if allow_stale_exact_last_known_good and same_key_last_known_good_allowed(
             request_from=ctx.from_date,
             request_to=ctx.to_date,
             artifact_from=artifact.get("from_date"),

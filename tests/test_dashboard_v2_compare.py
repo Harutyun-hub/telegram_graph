@@ -235,6 +235,46 @@ class DashboardV2CompareTests(unittest.TestCase):
         self.assertEqual(store.created_runs[0]["v2_meta"]["status"], "ready")
         self.assertEqual(store.created_runs[0]["v2_meta"]["rangeResolutionPath"], "v2_assembled_exact_from_facts")
 
+    def test_compare_bypasses_stale_exact_last_known_good_artifacts(self) -> None:
+        store = _CompareStore()
+        ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
+        old_snapshot = {
+            "lifecycleStages": [{"topic": "Road And Transit", "stage": "growing"}],
+        }
+        v2_result = DashboardV2AssemblyResult(
+            snapshot={
+                "lifecycleStages": [{"topic": "Road And Transit", "stage": "growing"}],
+            },
+            cache_status="assembled_exact_from_facts",
+            cache_source="assembled",
+            range_resolution_path="v2_assembled_exact_from_facts",
+            is_stale=False,
+            fact_version=2,
+            artifact_version=1,
+            fact_watermark="2026-04-18T11:00:00+00:00",
+            materialized_at="2026-04-18T11:00:00+00:00",
+            stale_fact_families=[],
+        )
+        direct_truth = {
+            "community_brief": {"messagesAnalyzed": 14, "postsAnalyzedInWindow": 5},
+            "community_health_score": {"currentScore": 55},
+            "trending_topics_feed": [{"topic": "Road And Transit", "mentions": 11}],
+            "conversation_trends": [{"topic": "Road And Transit"}],
+            "topic_lifecycle": [{"topic": "Road And Transit", "stage": "growing"}],
+            "sentiment_by_topic": [{"topic": "Road And Transit", "positive": 60}],
+            "week_over_week_shifts": [{"metric": "volume", "delta": 7}],
+        }
+
+        with patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", return_value=old_snapshot), \
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=v2_result) as assemble_mock, \
+             patch("api.dashboard_v2_compare.build_direct_truth_snapshot", return_value=direct_truth):
+            result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
+
+        self.assertEqual(result["v2Status"], "ready")
+        self.assertTrue(result["widgetDiffs"]["topic_lifecycle"]["dashboardV2"]["present"])
+        assemble_mock.assert_called_once()
+        self.assertEqual(assemble_mock.call_args.kwargs["allow_stale_exact_last_known_good"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

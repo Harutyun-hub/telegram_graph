@@ -254,6 +254,34 @@ class DashboardV2AssemblerTests(unittest.TestCase):
 
         self.assertEqual(result.range_resolution_path, "v2_assembled_exact_from_facts")
 
+    def test_exact_assembly_can_bypass_stale_same_key_last_known_good(self) -> None:
+        store = _AssemblerStore()
+        store.range_artifact = {
+            "cache_key": "2026-04-18:2026-04-18",
+            "from_date": date(2026, 4, 18),
+            "to_date": date(2026, 4, 18),
+            "range_mode": "exact",
+            "payload_json": {"communityBrief": {"messagesAnalyzed": 12}},
+            "dependency_watermarks": {"content": _utc_iso(9)},
+            "artifact_version": 1,
+            "materialized_at": _utc_iso(9),
+            "fact_watermark": _utc_iso(9),
+            "is_stale": True,
+            "stale_fact_families": ["content"],
+        }
+        store.rows_by_family["content"] = [
+            _make_fact_row("2026-04-18", {"communityBrief": {"messagesAnalyzed": 24, "postsAnalyzedInWindow": 10}})
+        ]
+
+        result = assemble_dashboard_v2_exact(
+            store,
+            ctx=build_dashboard_date_context("2026-04-18", "2026-04-18"),
+            allow_stale_exact_last_known_good=False,
+        )
+
+        self.assertEqual(result.range_resolution_path, "v2_assembled_exact_from_facts")
+        self.assertEqual(result.snapshot["communityBrief"]["messagesAnalyzed"], 24)
+
     def test_request_time_secondary_builder_stays_non_networked(self) -> None:
         snapshot = {
             "trendingTopics": [{"topic": "Road And Transit", "mentions": 3, "category": "Transport"}],
