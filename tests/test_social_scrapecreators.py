@@ -40,7 +40,7 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
         self.assertEqual(ctx.exception.health_status, "provider_404")
         self.assertEqual(ctx.exception.status_code, 404)
 
-    def test_normalize_payloads_emits_canonical_activity_shape(self) -> None:
+    def test_normalize_payloads_emits_canonical_facebook_post_shape(self) -> None:
         client = ScrapeCreatorsClient(api_key="test-key")
         activities = client.normalize_payloads(
             {
@@ -49,26 +49,22 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
                 "provider_key": "scrapecreators",
                 "platform": "facebook",
                 "target_type": "page_id",
-                "account_external_id": "196765077044445",
-                "source_key": "scrapecreators:facebook:page_id:196765077044445",
-                "content_types": ["ad"],
+                "account_external_id": "1378368079150250",
+                "source_key": "scrapecreators:facebook:page_id:1378368079150250",
+                "content_types": ["post"],
             },
             [
                 {
-                    "results": [
+                    "posts": [
                         {
-                            "ad_id": "ad-123",
-                            "url": "https://facebook.com/ad/123",
-                            "ad_text": "Zero monthly fees.",
-                            "start_date": "2026-04-18T09:00:00+00:00",
-                            "page_name": "unibank",
-                            "ad_cta_type": "Learn More",
-                            "display_format": "image",
-                            "region_name": "Armenia",
-                            "like_count": 5,
-                            "comment_count": 2,
-                            "share_count": 1,
-                            "impression_count": 20,
+                            "id": "1204545088344463",
+                            "text": "I've had such a blast doing the challenge this year!",
+                            "url": "https://www.facebook.com/reel/486651220706068/",
+                            "permalink": "https://www.facebook.com/reel/486651220706068/",
+                            "author": {"name": "Pace Morby", "id": "100063669491743"},
+                            "reactionCount": 133,
+                            "commentCount": 12,
+                            "publishTime": "2025-09-01T00:38:58.000Z",
                         }
                     ]
                 }
@@ -79,23 +75,113 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
         activity = activities[0]
         self.assertTrue(activity["activity_uid"].startswith("social:"))
         self.assertEqual(activity["provider_key"], "scrapecreators")
-        self.assertEqual(activity["source_key"], "scrapecreators:facebook:page_id:196765077044445")
-        self.assertEqual(activity["source_kind"], "ad")
+        self.assertEqual(activity["source_key"], "scrapecreators:facebook:page_id:1378368079150250")
+        self.assertEqual(activity["source_kind"], "post")
+        self.assertEqual(activity["provider_item_id"], "1204545088344463")
+        self.assertEqual(activity["author_handle"], "Pace Morby")
         self.assertEqual(
             activity["engagement_metrics"],
             {
-                "likes": 5,
-                "comments": 2,
-                "shares": 1,
+                "likes": 0,
+                "comments": 12,
+                "shares": 0,
                 "views": 0,
                 "plays": 0,
-                "impressions": 20,
-                "reactions": 0,
+                "impressions": 0,
+                "reactions": 133,
             },
         )
         self.assertEqual(activity["provider_context"]["provider"], "scrapecreators")
         self.assertEqual(activity["provider_context"]["target_type"], "page_id")
-        self.assertEqual(activity["provider_payload"]["ad_id"], "ad-123")
+        self.assertEqual(activity["provider_payload"]["id"], "1204545088344463")
+
+    def test_collect_source_expands_bounded_facebook_comments(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+        source = {
+            "id": "source-1",
+            "entity_id": "entity-1",
+            "provider_key": "scrapecreators",
+            "platform": "facebook",
+            "target_type": "page_id",
+            "account_external_id": "1378368079150250",
+            "source_key": "scrapecreators:facebook:page_id:1378368079150250",
+            "content_types": ["post"],
+            "provider_metadata": {
+                "include_comments": True,
+                "max_post_pages": 1,
+                "max_posts": 1,
+                "max_comment_pages_per_post": 1,
+                "max_comments_per_post": 10,
+                "use_feedback_id_for_comments": True,
+            },
+        }
+        comments = [
+            {
+                "id": f"comment-{index}",
+                "text": f"Comment {index}",
+                "created_at": "2025-09-01T00:38:58.000Z",
+                "reply_count": index,
+                "reaction_count": index + 1,
+                "author": {"name": f"User {index}"},
+            }
+            for index in range(12)
+        ]
+
+        with patch.object(
+            client,
+            "fetch_facebook_profile_posts",
+            return_value={
+                "success": True,
+                "posts": [
+                    {
+                        "id": "1204545088344463",
+                        "text": "Primary post",
+                        "url": "https://www.facebook.com/reel/486651220706068/",
+                        "author": {"name": "Page Name", "id": "1378368079150250"},
+                        "reactionCount": 133,
+                        "commentCount": 12,
+                        "publishTime": "2025-09-01T00:38:58.000Z",
+                    }
+                ],
+                "has_next_page": True,
+                "cursor": "post-cursor-2",
+            },
+        ), patch.object(
+            client,
+            "fetch_facebook_post",
+            return_value={
+                "success": True,
+                "post_id": "1204545088344463",
+                "feedback_id": "ZmVlZGJhY2s6MTIwNDU0NTA4ODM0NDQ2Mw==",
+                "comment_count": 12,
+                "reaction_count": 133,
+                "creation_time": "2025-09-01T00:38:58.000Z",
+                "url": "https://www.facebook.com/reel/486651220706068/",
+                "description": "Primary post",
+            },
+        ) as post_detail_mock, patch.object(
+            client,
+            "fetch_facebook_post_comments",
+            return_value={
+                "success": True,
+                "comments": comments,
+                "has_next_page": True,
+                "cursor": "comment-cursor-2",
+            },
+        ) as comments_mock:
+            activities = client.collect_source(source, max_pages=3, page_size=50)
+
+        self.assertEqual(len(activities), 11)
+        self.assertEqual(activities[0]["source_kind"], "post")
+        self.assertEqual(activities[1]["source_kind"], "comment")
+        self.assertEqual(activities[1]["parent_provider_item_id"], activities[0]["provider_item_id"])
+        self.assertEqual(activities[1]["parent_activity_uid"], activities[0]["activity_uid"])
+        self.assertEqual(activities[1]["provider_context"]["feedback_id"], "ZmVlZGJhY2s6MTIwNDU0NTA4ODM0NDQ2Mw==")
+        self.assertEqual(activities[1]["engagement_metrics"]["comments"], 0)
+        self.assertEqual(activities[1]["engagement_metrics"]["reactions"], 1)
+        self.assertEqual(activities[-1]["provider_item_id"], "comment-9")
+        post_detail_mock.assert_called_once()
+        comments_mock.assert_called_once()
 
 
 if __name__ == "__main__":

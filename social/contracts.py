@@ -19,7 +19,7 @@ DEFAULT_TARGET_TYPE_BY_PLATFORM = {
 }
 
 DEFAULT_CONTENT_TYPES_BY_PLATFORM = {
-    "facebook": ["ad"],
+    "facebook": ["post"],
     "instagram": ["post"],
     "google": ["ad"],
     "tiktok": ["video"],
@@ -194,13 +194,13 @@ def build_activity_uid(
 def normalize_engagement_metrics(raw: dict[str, Any] | None) -> dict[str, int]:
     payload = raw if isinstance(raw, dict) else {}
     metrics = {
-        "likes": payload.get("likes", payload.get("like_count")),
-        "comments": payload.get("comments", payload.get("comment_count")),
-        "shares": payload.get("shares", payload.get("share_count")),
-        "views": payload.get("views", payload.get("view_count")),
+        "likes": payload.get("likes", payload.get("like_count", payload.get("likeCount"))),
+        "comments": payload.get("comments", payload.get("comment_count", payload.get("commentCount", payload.get("reply_count")))),
+        "shares": payload.get("shares", payload.get("share_count", payload.get("shareCount"))),
+        "views": payload.get("views", payload.get("view_count", payload.get("viewCount"))),
         "plays": payload.get("plays", payload.get("play_count")),
-        "impressions": payload.get("impressions", payload.get("impression_count")),
-        "reactions": payload.get("reactions", payload.get("reaction_count")),
+        "impressions": payload.get("impressions", payload.get("impression_count", payload.get("impressionCount"))),
+        "reactions": payload.get("reactions", payload.get("reaction_count", payload.get("reactionCount"))),
     }
     normalized: dict[str, int] = {}
     for key, value in metrics.items():

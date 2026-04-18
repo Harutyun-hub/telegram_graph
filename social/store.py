@@ -359,7 +359,7 @@ class SocialStore:
                             target_type="page_id",
                             identifier=identifier,
                         ),
-                        "content_types": ["ad"],
+                        "content_types": ["post"],
                         "import_source": "companies_seed",
                         "metadata": {"seeded_from": "companies.facebook_page_id"},
                         "provider_metadata": {},
@@ -955,7 +955,7 @@ class SocialStore:
                     columns=(
                         "id,activity_uid,text_content,ingest_status,analysis_status,graph_status,"
                         "first_seen_at,analysis_version,graph_projection_version,provider_key,"
-                        "platform,source_key,provider_item_id,source_kind"
+                        "platform,source_key,provider_item_id,source_kind,parent_provider_item_id,parent_activity_uid"
                     ),
                     filters=(("in", "activity_uid", candidate_uids),),
                 )
@@ -971,7 +971,7 @@ class SocialStore:
                 columns=(
                     "id,activity_uid,text_content,ingest_status,analysis_status,graph_status,"
                     "first_seen_at,analysis_version,graph_projection_version,provider_key,"
-                    "platform,source_key,provider_item_id,source_kind"
+                    "platform,source_key,provider_item_id,source_kind,parent_provider_item_id,parent_activity_uid"
                 ),
                 filters=(
                     ("eq", "provider_key", normalize_provider_key(activity.get("provider_key") or DEFAULT_PROVIDER_KEY)),
@@ -1056,6 +1056,8 @@ class SocialStore:
                     "platform": normalized_platform,
                     "source_kind": source_kind,
                     "provider_item_id": provider_item_id,
+                    "parent_provider_item_id": _clean_optional(activity.get("parent_provider_item_id")),
+                    "parent_activity_uid": _clean_optional(activity.get("parent_activity_uid")),
                     "source_url": _trimmed(activity.get("source_url")) or uid,
                     "text_content": text_content,
                     "published_at": activity.get("published_at"),

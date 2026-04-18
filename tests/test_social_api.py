@@ -21,7 +21,7 @@ class _FakeSocialStore:
                 "account_external_id": "196765077044445",
                 "account_handle": None,
                 "domain": None,
-                "content_types": ["ad"],
+                "content_types": ["post"],
                 "is_active": True,
                 "health_status": "healthy",
             }
@@ -78,9 +78,9 @@ class _FakeSocialStore:
         items = [
             {
                 "id": "activity-1",
-                "activity_uid": "facebook:ad:123",
+                "activity_uid": "facebook:post:123",
                 "platform": "facebook",
-                "source_kind": "ad",
+                "source_kind": "post",
                 "source_url": "https://facebook.com/ad/123",
                 "text_content": "Zero monthly fees.",
                 "published_at": "2026-03-28T09:00:00+00:00",
@@ -535,7 +535,7 @@ class SocialApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["count"], 1)
-        self.assertEqual(payload["items"][0]["activity_uid"], "facebook:ad:123")
+        self.assertEqual(payload["items"][0]["activity_uid"], "facebook:post:123")
 
 
 if __name__ == "__main__":

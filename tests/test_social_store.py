@@ -125,7 +125,7 @@ class _ActivityUpsertStore(SocialStore):
                     "platform": "facebook",
                     "source_key": "scrapecreators:facebook:page_id:196765077044445",
                     "provider_item_id": "ad-123",
-                    "source_kind": "ad",
+                    "source_kind": "post",
                 }
             ]
         return []
@@ -139,7 +139,7 @@ class _ActivityUpsertStore(SocialStore):
             ("eq", "platform"): "facebook",
             ("eq", "source_key"): "scrapecreators:facebook:page_id:196765077044445",
             ("eq", "provider_item_id"): "ad-123",
-            ("eq", "source_kind"): "ad",
+            ("eq", "source_kind"): "post",
         }
         received = {(op, column): value for op, column, value in (filters or ())}
         if received == expected:
@@ -150,7 +150,7 @@ class _ActivityUpsertStore(SocialStore):
                 "platform": "facebook",
                 "source_key": "scrapecreators:facebook:page_id:196765077044445",
                 "provider_item_id": "ad-123",
-                "source_kind": "ad",
+                "source_kind": "post",
                 "text_content": "Old text",
                 "analysis_status": "analyzed",
                 "graph_status": "synced",
@@ -190,7 +190,7 @@ class SocialStoreTests(unittest.TestCase):
         self.assertEqual(entity_id, "entity-1")
         self.assertEqual(sources[0]["provider_key"], "scrapecreators")
         self.assertEqual(sources[0]["target_type"], "page_id")
-        self.assertEqual(sources[0]["content_types"], ["ad"])
+        self.assertEqual(sources[0]["content_types"], ["post"])
 
     def test_upsert_activities_reuses_legacy_uid_for_matching_identity(self) -> None:
         store = _ActivityUpsertStore()
@@ -203,8 +203,10 @@ class SocialStoreTests(unittest.TestCase):
                     "provider_key": "scrapecreators",
                     "source_key": "scrapecreators:facebook:page_id:196765077044445",
                     "platform": "facebook",
-                    "source_kind": "ad",
+                    "source_kind": "post",
                     "provider_item_id": "ad-123",
+                    "parent_provider_item_id": None,
+                    "parent_activity_uid": None,
                     "source_url": "https://facebook.com/ad/123",
                     "text_content": "Zero monthly fees.",
                     "provider_context": {"provider": "scrapecreators"},
@@ -220,6 +222,36 @@ class SocialStoreTests(unittest.TestCase):
         self.assertEqual(store.client.payloads[0]["activity_uid"], "facebook:ad:legacy-123")
         self.assertEqual(store.client.payloads[0]["provider_key"], "scrapecreators")
         self.assertEqual(store.client.payloads[0]["source_key"], "scrapecreators:facebook:page_id:196765077044445")
+
+    def test_upsert_activities_persists_parent_linkage(self) -> None:
+        store = _ActivityUpsertStore()
+        store.upsert_activities(
+            [
+                {
+                    "entity_id": "entity-1",
+                    "account_id": "source-1",
+                    "activity_uid": "social:comment-uid",
+                    "provider_key": "scrapecreators",
+                    "source_key": "scrapecreators:facebook:page_id:196765077044445",
+                    "platform": "facebook",
+                    "source_kind": "comment",
+                    "provider_item_id": "comment-123",
+                    "parent_provider_item_id": "post-123",
+                    "parent_activity_uid": "social:post-123",
+                    "source_url": "https://facebook.com/post/123",
+                    "text_content": "How do I apply?",
+                    "provider_context": {"provider": "scrapecreators"},
+                    "provider_payload": {"id": "comment-123"},
+                    "engagement_metrics": {"reactions": 2},
+                    "assets": [],
+                    "ingest_status": "normalized",
+                    "normalization_version": "social-v2",
+                }
+            ]
+        )
+
+        self.assertEqual(store.client.payloads[0]["parent_provider_item_id"], "post-123")
+        self.assertEqual(store.client.payloads[0]["parent_activity_uid"], "social:post-123")
 
 
 if __name__ == "__main__":

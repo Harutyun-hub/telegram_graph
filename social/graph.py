@@ -80,6 +80,7 @@ class SocialGraphWriter:
             "text_content": activity.get("text_content"),
             "published_at": activity.get("published_at"),
             "author_handle": activity.get("author_handle"),
+            "parent_activity_uid": activity.get("parent_activity_uid"),
             "cta_type": activity.get("cta_type"),
             "content_format": activity.get("content_format"),
             "region_name": activity.get("region_name"),
@@ -116,6 +117,11 @@ class SocialGraphWriter:
             END
 
         MERGE (entity)-[:HAS_ACTIVITY]->(activity)
+
+        FOREACH (_ IN CASE WHEN $parent_activity_uid IS NULL OR $parent_activity_uid = '' THEN [] ELSE [1] END |
+          MERGE (parent:SocialActivity {uid: $parent_activity_uid})
+          MERGE (activity)-[:COMMENTS_ON]->(parent)
+        )
 
         MERGE (platform:Platform {name: $platform})
         MERGE (entity)-[:USES_PLATFORM]->(platform)
