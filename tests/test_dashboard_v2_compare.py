@@ -13,6 +13,7 @@ from api.dashboard_v2_compare import (
     SOURCE_TRUTH_VALIDATION_MODE,
     WARNING_REASON_OLD_PATH_UNAVAILABLE,
     _conversation_trends_source_summary,
+    _topic_lifecycle_source_summary,
     _summarize_widget,
     run_dashboard_v2_compare,
 )
@@ -338,6 +339,21 @@ class DashboardV2CompareTests(unittest.TestCase):
 
         with patch("api.dashboard_v2_compare.strategic.get_trend_lines", return_value=raw_rows):
             summary = _conversation_trends_source_summary(ctx, {})
+
+        self.assertTrue(summary["present"])
+        self.assertEqual(summary["itemCount"], 2)
+        self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
+
+    def test_topic_lifecycle_source_summary_uses_cached_trend_lines_contract(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-17", "2026-04-15")
+        raw_rows = [
+            {"topic": "Road And Transit", "bucket": "2026-04-14", "posts": 5},
+            {"topic": "Road And Transit", "bucket": "2026-04-15", "posts": 6},
+            {"topic": "Water Security", "bucket": "2026-03-20", "posts": 3},
+            {"topic": "Water Security", "bucket": "2026-04-14", "posts": 1},
+        ]
+
+        summary = _topic_lifecycle_source_summary(ctx, {"conversation_trend_rows": raw_rows})
 
         self.assertTrue(summary["present"])
         self.assertEqual(summary["itemCount"], 2)

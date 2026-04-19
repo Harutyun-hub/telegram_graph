@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from api.dashboard_dates import DashboardDateContext
-from api.queries import pulse
+from api.queries import comparative, pulse, strategic
 from api.dashboard_v2_registry import (
     FACT_FAMILIES,
     FULL_DASHBOARD_REQUIRED_FACT_FAMILIES,
@@ -23,7 +23,7 @@ from api.dashboard_v2_store import (
 )
 
 
-DASHBOARD_V2_ARTIFACT_VERSION = 2
+DASHBOARD_V2_ARTIFACT_VERSION = 3
 DASHBOARD_V2_FACT_VERSION = 2
 _MEMORY_EXACT_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -119,6 +119,7 @@ def _identity_key(item: Any, *, fallback_prefix: str, index: int) -> str:
     if isinstance(item, dict):
         for key in (
             "id",
+            "metricKey",
             "topic",
             "sourceTopic",
             "name",
@@ -235,7 +236,31 @@ def _merge_lifecycle(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
     return sorted(lifecycle_rows.values(), key=_lifecycle_sort_key)
 
 
-def _merge_community_brief(values: list[tuple[date, Any]], snapshot: dict[str, Any], materialized_at: str | None) -> dict[str, Any]:
+def _merge_community_brief(
+    values: list[tuple[date, Any]],
+    snapshot: dict[str, Any],
+    materialized_at: str | None,
+    *,
+    ctx: DashboardDateContext | None = None,
+) -> dict[str, Any]:
+    latest: dict[str, Any] = {}
+    for _fact_date, raw_value in values:
+        item = _as_dict(raw_value)
+        if item:
+            latest = item
+    if latest and ctx is not None:
+        try:
+            rebuilt = pulse.rebuild_community_brief_for_snapshot(
+                ctx,
+                existing_brief=latest,
+                fallback_topic_rows=[item for item in _as_list(snapshot.get("trendingTopics"))[:5] if isinstance(item, dict)],
+            )
+        except Exception:
+            rebuilt = None
+        if isinstance(rebuilt, dict) and rebuilt:
+            rebuilt = dict(rebuilt)
+            rebuilt["updatedMinutesAgo"] = 0 if materialized_at else int(rebuilt.get("updatedMinutesAgo", 0) or 0)
+            return rebuilt
     messages = 0.0
     posts = 0.0
     comments = 0.0
@@ -290,6 +315,144 @@ def _merge_community_brief(values: list[tuple[date, Any]], snapshot: dict[str, A
         "mainBrief": brief_text,
         "expandedBrief": expanded,
     }
+
+
+def _merge_trending_topics(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for _fact_date, raw_value in values:
+        for item in _as_list(raw_value):
+            if not isinstance(item, dict):
+                continue
+            topic_key = _as_str(item.get("sourceTopic") or item.get("topic") or item.get("name"))
+            if not topic_key:
+                continue
+            identity = topic_key.lower()
+            merged[identity] = _merge_item_dict(merged.get(identity, {}), item)
+    rows = list(merged.values())
+    rows.sort(
+        key=lambda row: (
+            int(bool(row.get("trendReliable"))),
+            _as_float(row.get("currentMentions", row.get("mentions"))),
+            _as_float(row.get("distinctChannels")),
+            _as_float(row.get("distinctUsers")),
+            _as_float(row.get("evidenceCount")),
+            _as_str(row.get("latestAt")),
+            _as_str(row.get("sourceTopic") or row.get("topic") or row.get("name")).lower(),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _merge_trend_lines(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for _fact_date, raw_value in values:
+        for item in _as_list(raw_value):
+            if not isinstance(item, dict):
+                continue
+            topic_key = _as_str(item.get("topic") or item.get("label") or item.get("key"))
+            if not topic_key:
+                continue
+            bucket = _as_str(item.get("bucket"))
+            if not bucket:
+                year = int(_as_float(item.get("year"), 0))
+                week = int(_as_float(item.get("week"), 0))
+                if year > 0 and week > 0:
+                    bucket = f"{year}-W{week:02d}"
+            if not bucket:
+                continue
+            identity = f"{topic_key.lower()}|{bucket}"
+            merged[identity] = _merge_item_dict(merged.get(identity, {}), item)
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            _as_str(row.get("topic") or row.get("label") or row.get("key")).lower(),
+            _as_str(row.get("bucket")),
+        ),
+    )
+
+
+_WEEKLY_SHIFT_ORDER = [
+    "community_health_score",
+    "active_members",
+    "new_voices",
+    "posts",
+    "comments",
+    "questions_asked",
+    "positive_sentiment",
+    "churn_signals",
+]
+
+
+def _merge_weekly_shifts(values: list[tuple[date, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for _fact_date, raw_value in values:
+        for item in _as_list(raw_value):
+            if not isinstance(item, dict):
+                continue
+            metric_key = _as_str(item.get("metricKey") or item.get("metric"))
+            if not metric_key:
+                continue
+            merged[metric_key] = _merge_item_dict(merged.get(metric_key, {}), item)
+    order_index = {metric_key: index for index, metric_key in enumerate(_WEEKLY_SHIFT_ORDER)}
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            order_index.get(_as_str(row.get("metricKey") or row.get("metric")), len(order_index)),
+            _as_str(row.get("metricKey") or row.get("metric")),
+        ),
+    )
+
+
+def _rebuild_topic_lifecycle_from_trend_lines(*, ctx: DashboardDateContext, trend_lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    per_topic: dict[str, dict[str, float]] = {}
+    current_start = ctx.from_date
+    previous_start = ctx.previous_start_at.date()
+    previous_end = ctx.previous_end_at.date()
+    for row in trend_lines:
+        if not isinstance(row, dict):
+            continue
+        topic = _as_str(row.get("topic"))
+        bucket_text = _as_str(row.get("bucket"))
+        if not topic or not bucket_text:
+            continue
+        try:
+            bucket_day = date.fromisoformat(bucket_text)
+        except Exception:
+            continue
+        posts = _as_float(row.get("posts"))
+        summary = per_topic.setdefault(topic, {"total": 0.0, "recent": 0.0, "previous": 0.0})
+        summary["total"] += posts
+        if current_start <= bucket_day <= ctx.to_date:
+            summary["recent"] += posts
+        elif previous_start <= bucket_day <= previous_end:
+            summary["previous"] += posts
+    lifecycle_rows: list[dict[str, Any]] = []
+    for topic, summary in per_topic.items():
+        total_signals = int(round(summary["total"]))
+        recent_signals = int(round(summary["recent"]))
+        previous_signals = int(round(summary["previous"]))
+        rolling_growth_pct = round(100.0 * (float(recent_signals - previous_signals) / float(previous_signals + 3)), 1)
+        if total_signals < 4 or recent_signals == 0:
+            stage = "declining"
+        elif recent_signals >= previous_signals and (
+            rolling_growth_pct >= 10
+            or (recent_signals - previous_signals) >= 3
+            or (previous_signals == 0 and recent_signals >= 4)
+        ):
+            stage = "growing"
+        else:
+            stage = "declining"
+        lifecycle_rows.append(
+            {
+                "topic": topic,
+                "stage": stage,
+                "weeklyCurrent": recent_signals,
+                "weeklyPrev": previous_signals,
+                "weeklyDelta": recent_signals - previous_signals,
+            }
+        )
+    return _merge_lifecycle([(ctx.from_date, lifecycle_rows)])
 
 
 def _merge_community_health(
@@ -366,11 +529,19 @@ def _assemble_field(
     ctx: DashboardDateContext | None = None,
 ) -> Any:
     if field_name == "communityBrief":
-        return _merge_community_brief(values, snapshot, materialized_at)
+        return _merge_community_brief(values, snapshot, materialized_at, ctx=ctx)
     if field_name == "communityHealth":
         return _merge_community_health(values, ctx=ctx)
+    if field_name == "trendingTopics":
+        return _merge_trending_topics(values)
+    if field_name == "trendLines":
+        return _merge_trend_lines(values)
+    if field_name == "trendData":
+        return _merge_trend_lines(values)
     if field_name == "lifecycleStages":
         return _merge_lifecycle(values)
+    if field_name == "weeklyShifts":
+        return _merge_weekly_shifts(values)
     if field_name == "newVsReturningVoiceWidget":
         return _merge_new_vs_returning(values)
     if field_name == "moodConfig":
@@ -422,6 +593,33 @@ def assemble_exact_fact_snapshot(
     field_values = _collect_field_values(rows_by_family)
     for field_name, values in field_values.items():
         snapshot[field_name] = _assemble_field(field_name, values, snapshot, materialized_at, ctx=ctx)
+    try:
+        pulse_snapshot = pulse.get_pulse_snapshot(ctx)
+        if isinstance(pulse_snapshot, dict):
+            snapshot["communityHealth"] = dict(pulse_snapshot.get("communityHealth") or snapshot.get("communityHealth") or {})
+            snapshot["trendingTopics"] = list(_as_list(pulse_snapshot.get("trendingTopics")) or _as_list(snapshot.get("trendingTopics")))
+            snapshot["trendingNewTopics"] = list(_as_list(pulse_snapshot.get("trendingNewTopics")) or _as_list(snapshot.get("trendingNewTopics")))
+            snapshot["communityBrief"] = pulse.rebuild_community_brief_for_snapshot(
+                ctx,
+                existing_brief=_as_dict(snapshot.get("communityBrief")),
+                fallback_topic_rows=[item for item in _as_list(snapshot.get("trendingTopics"))[:5] if isinstance(item, dict)],
+            )
+    except Exception:
+        pass
+    try:
+        trend_lines = strategic.get_trend_lines(ctx)
+        if isinstance(trend_lines, list):
+            snapshot["trendLines"] = list(trend_lines)
+            snapshot["trendData"] = list(trend_lines)
+            snapshot["lifecycleStages"] = _rebuild_topic_lifecycle_from_trend_lines(ctx=ctx, trend_lines=trend_lines)
+    except Exception:
+        pass
+    try:
+        weekly_shifts = comparative.get_weekly_shifts(ctx)
+        if isinstance(weekly_shifts, list):
+            snapshot["weeklyShifts"] = list(weekly_shifts)
+    except Exception:
+        pass
     if not snapshot.get("trendingNewTopics"):
         snapshot["trendingNewTopics"] = [
             item for item in _as_list(snapshot.get("trendingTopics")) if isinstance(item, dict) and _as_float(item.get("trend")) > 0

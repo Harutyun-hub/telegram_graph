@@ -275,6 +275,47 @@ class DashboardV2AssemblerTests(unittest.TestCase):
         self.assertEqual(result.snapshot["communityHealth"]["weekAgoScore"], 41)
         self.assertEqual(result.snapshot["communityHealth"]["components"], rebuilt_health["components"])
 
+    def test_assembler_rebuilds_selected_window_widget_contracts_from_query_layer(self) -> None:
+        store = _AssemblerStore()
+        store.rows_by_family["content"] = [
+            _make_fact_row("2026-04-14", {"communityBrief": {"messagesAnalyzed": 99, "postsAnalyzedInWindow": 50}})
+        ]
+        store.rows_by_family["topics"] = [
+            _make_fact_row(
+                "2026-04-14",
+                {
+                    "trendingTopics": [{"topic": "Stale Topic", "currentMentions": 3}],
+                    "trendLines": [{"topic": "Stale Topic", "bucket": "2026-04-14", "posts": 3}],
+                    "lifecycleStages": [{"topic": "Stale Topic", "stage": "declining", "weeklyCurrent": 1, "weeklyDelta": -1}],
+                },
+            )
+        ]
+        store.rows_by_family["comparative"] = [
+            _make_fact_row("2026-04-14", {"weeklyShifts": [{"metricKey": "comments", "current": 1, "previous": 2}]})
+        ]
+
+        pulse_snapshot = {
+            "communityHealth": {"currentScore": 45, "weekAgoScore": 41, "history": [], "components": []},
+            "trendingTopics": [{"topic": "Road And Transit", "currentMentions": 12}],
+            "trendingNewTopics": [{"topic": "Water Security", "currentMentions": 6}],
+        }
+        rebuilt_brief = {"messagesAnalyzed": 14, "postsAnalyzedInWindow": 5, "commentScopesAnalyzedInWindow": 9, "totalAnalysesInWindow": 14}
+        rebuilt_trend_lines = [{"topic": "Road And Transit", "bucket": "2026-04-15", "posts": 4}]
+        rebuilt_weekly_shifts = [{"metricKey": "posts", "current": 12, "previous": 9}]
+
+        with patch("api.dashboard_v2_assembler.pulse.get_pulse_snapshot", return_value=pulse_snapshot), \
+             patch("api.dashboard_v2_assembler.pulse.rebuild_community_brief_for_snapshot", return_value=rebuilt_brief), \
+             patch("api.dashboard_v2_assembler.strategic.get_trend_lines", return_value=rebuilt_trend_lines), \
+             patch("api.dashboard_v2_assembler.comparative.get_weekly_shifts", return_value=rebuilt_weekly_shifts):
+            result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-14", "2026-04-15"))
+
+        self.assertEqual(result.snapshot["communityBrief"], rebuilt_brief)
+        self.assertEqual(result.snapshot["trendingTopics"], pulse_snapshot["trendingTopics"])
+        self.assertEqual(result.snapshot["trendingNewTopics"], pulse_snapshot["trendingNewTopics"])
+        self.assertEqual(result.snapshot["trendLines"], rebuilt_trend_lines)
+        self.assertEqual(result.snapshot["trendData"], rebuilt_trend_lines)
+        self.assertEqual(result.snapshot["weeklyShifts"], rebuilt_weekly_shifts)
+
     def test_same_key_last_known_good_requires_exact_range_match(self) -> None:
         store = _AssemblerStore()
         store.range_artifact = {
@@ -427,16 +468,17 @@ class DashboardV2AssemblerTests(unittest.TestCase):
         )
         self.assertEqual(result.snapshot["lifecycleStages"][0]["stage"], "growing")
 
-    def test_request_path_does_not_call_legacy_query_modules(self) -> None:
+    def test_request_path_uses_selected_window_query_rebuilds_without_aggregator(self) -> None:
         store = _AssemblerStore()
         store.rows_by_family["content"] = [
             _make_fact_row("2026-04-18", {"communityBrief": {"messagesAnalyzed": 5, "postsAnalyzedInWindow": 2}})
         ]
 
         with patch("api.aggregator.get_dashboard_data", side_effect=AssertionError("legacy path not allowed")), \
-             patch("api.queries.pulse.get_community_brief", side_effect=AssertionError("legacy pulse not allowed")), \
-             patch("api.queries.strategic.get_trend_lines", side_effect=AssertionError("legacy strategic not allowed")), \
-             patch("api.queries.comparative.get_weekly_shifts", side_effect=AssertionError("legacy comparative not allowed")):
+             patch("api.dashboard_v2_assembler.pulse.get_pulse_snapshot", return_value={"communityHealth": {}, "trendingTopics": [], "trendingNewTopics": []}), \
+             patch("api.dashboard_v2_assembler.pulse.rebuild_community_brief_for_snapshot", return_value={"messagesAnalyzed": 5}), \
+             patch("api.dashboard_v2_assembler.strategic.get_trend_lines", return_value=[]), \
+             patch("api.dashboard_v2_assembler.comparative.get_weekly_shifts", return_value=[]):
             result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-18", "2026-04-18"))
 
         self.assertEqual(result.cache_source, "assembled")

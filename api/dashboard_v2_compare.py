@@ -586,6 +586,57 @@ def _topic_lifecycle_rank_rows(ctx: DashboardDateContext, cache: dict[str, Any])
     return ranked
 
 
+def _topic_lifecycle_rows_from_trend_lines(ctx: DashboardDateContext, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    per_topic: dict[str, dict[str, float]] = {}
+    current_start = ctx.from_date
+    previous_start = ctx.previous_start_at.date()
+    previous_end = ctx.previous_end_at.date()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        topic = _normalized_topic_name(row)
+        bucket = str(row.get("bucket") or "").strip()
+        if not _widget_topic_allowed(topic) or not bucket:
+            continue
+        try:
+            bucket_day = date.fromisoformat(bucket)
+        except Exception:
+            continue
+        posts = float(row.get("posts") or row.get("current") or row.get("mentions") or 0.0)
+        summary = per_topic.setdefault(topic, {"total": 0.0, "recent": 0.0, "previous": 0.0})
+        summary["total"] += posts
+        if current_start <= bucket_day <= ctx.to_date:
+            summary["recent"] += posts
+        elif previous_start <= bucket_day <= previous_end:
+            summary["previous"] += posts
+    lifecycle_rows: list[dict[str, Any]] = []
+    for topic, summary in per_topic.items():
+        total_signals = int(round(summary["total"]))
+        recent_signals = int(round(summary["recent"]))
+        previous_signals = int(round(summary["previous"]))
+        rolling_growth_pct = round(100.0 * (float(recent_signals - previous_signals) / float(previous_signals + 3)), 1)
+        if total_signals < 4 or recent_signals == 0:
+            stage = "declining"
+        elif recent_signals >= previous_signals and (
+            rolling_growth_pct >= 10
+            or (recent_signals - previous_signals) >= 3
+            or (previous_signals == 0 and recent_signals >= 4)
+        ):
+            stage = "growing"
+        else:
+            stage = "declining"
+        lifecycle_rows.append(
+            {
+                "topic": topic,
+                "stage": stage,
+                "weeklyCurrent": recent_signals,
+                "weeklyPrev": previous_signals,
+                "weeklyDelta": recent_signals - previous_signals,
+            }
+        )
+    return lifecycle_rows
+
+
 def _topic_window_rows(
     ctx: DashboardDateContext,
     cache: dict[str, Any],
@@ -649,7 +700,11 @@ def _conversation_trends_source_summary(ctx: DashboardDateContext, cache: dict[s
 def _topic_lifecycle_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
     rows = cache.get("topic_lifecycle_rows")
     if not isinstance(rows, list):
-        rows = strategic.get_lifecycle_stages(ctx)
+        trend_rows = cache.get("conversation_trend_rows")
+        if not isinstance(trend_rows, list):
+            trend_rows = strategic.get_trend_lines(ctx)
+            cache["conversation_trend_rows"] = trend_rows
+        rows = _topic_lifecycle_rows_from_trend_lines(ctx, trend_rows)
         cache["topic_lifecycle_rows"] = rows
     return _summarize_widget("topic_lifecycle", rows)
 
