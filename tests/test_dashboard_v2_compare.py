@@ -13,6 +13,7 @@ from api.dashboard_v2_compare import (
     SOURCE_TRUTH_VALIDATION_MODE,
     WARNING_REASON_OLD_PATH_UNAVAILABLE,
     _conversation_trends_source_summary,
+    _summarize_widget,
     run_dashboard_v2_compare,
 )
 from api.dashboard_v2_registry import ALL_WIDGET_IDS
@@ -338,6 +339,32 @@ class DashboardV2CompareTests(unittest.TestCase):
             summary = _conversation_trends_source_summary(ctx, {})
 
         self.assertTrue(summary["present"])
+        self.assertEqual(summary["itemCount"], 2)
+        self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
+
+    def test_summarize_widget_aggregates_conversation_trend_topics(self) -> None:
+        summary = _summarize_widget(
+            "conversation_trends",
+            {
+                "trendLines": [
+                    {"topic": "Road And Transit", "posts": 3},
+                    {"topic": "Water Security", "posts": 2},
+                    {"topic": "Road And Transit", "posts": 5},
+                ]
+            },
+        )
+        self.assertEqual(summary["itemCount"], 2)
+        self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
+
+    def test_summarize_widget_aggregates_sentiment_topic_totals(self) -> None:
+        summary = _summarize_widget(
+            "sentiment_by_topic",
+            [
+                {"topic": "Road And Transit", "count": 3},
+                {"topic": "Water Security", "count": 2},
+                {"topic": "Road And Transit", "count": 4},
+            ],
+        )
         self.assertEqual(summary["itemCount"], 2)
         self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
 

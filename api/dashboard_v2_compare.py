@@ -80,6 +80,159 @@ def _extract_snapshot_widget(snapshot: dict[str, Any], widget_id: str) -> Any:
     }
 
 
+def _normalized_topic_name(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in ("topic", "sourceTopic", "name", "label", "key"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _summarize_trending_topics_payload(payload: Any) -> dict[str, Any]:
+    items = payload if isinstance(payload, list) else _as_dict(payload).get("trendingTopics")
+    rows = list(items or []) if isinstance(items, list) else []
+    if not rows:
+        return {"present": False, "itemCount": 0, "nonEmptyFields": [], "topItems": []}
+    scores: dict[str, tuple[float, float, float, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        topic = _normalized_topic_name(row)
+        if not topic:
+            continue
+        current = float(row.get("currentMentions") or row.get("mentions") or 0.0)
+        channels = float(row.get("distinctChannels") or 0.0)
+        users = float(row.get("distinctUsers") or 0.0)
+        latest = str(row.get("latestAt") or "")
+        prev = scores.get(topic)
+        candidate = (current, channels, users, latest)
+        if prev is None or candidate > prev:
+            scores[topic] = candidate
+    ordered = [
+        topic
+        for topic, _score in sorted(
+            scores.items(),
+            key=lambda item: (item[1][0], item[1][1], item[1][2], item[1][3], item[0]),
+            reverse=True,
+        )
+    ]
+    return {
+        "present": bool(ordered),
+        "itemCount": len(ordered),
+        "nonEmptyFields": ["trendingTopics"] if ordered else [],
+        "topItems": ordered[:5],
+    }
+
+
+def _summarize_conversation_trends_payload(payload: Any) -> dict[str, Any]:
+    items = payload if isinstance(payload, list) else _as_dict(payload).get("trendLines")
+    rows = list(items or []) if isinstance(items, list) else []
+    if not rows:
+        return {"present": False, "itemCount": 0, "nonEmptyFields": [], "topItems": []}
+    counts: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        topic = _normalized_topic_name(row)
+        if not topic:
+            continue
+        counts[topic] = counts.get(topic, 0.0) + float(row.get("posts") or row.get("current") or row.get("mentions") or 0.0)
+    ordered = [topic for topic, _ in sorted(counts.items(), key=lambda item: (item[1], item[0]), reverse=True)]
+    return {
+        "present": bool(ordered),
+        "itemCount": len(ordered),
+        "nonEmptyFields": ["trendLines"] if ordered else [],
+        "topItems": ordered[:5],
+    }
+
+
+def _summarize_topic_lifecycle_payload(payload: Any) -> dict[str, Any]:
+    rows = list(payload or []) if isinstance(payload, list) else list(_as_dict(payload).get("lifecycleStages") or [])
+    normalized: list[dict[str, Any]] = []
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("topics"), list):
+            stage_name = str(entry.get("stage") or "").strip()
+            for topic in entry.get("topics") or []:
+                if not isinstance(topic, dict):
+                    continue
+                merged = dict(topic)
+                if stage_name and not str(merged.get("stage") or "").strip():
+                    merged["stage"] = stage_name
+                normalized.append(merged)
+            continue
+        normalized.append(dict(entry))
+    if not normalized:
+        return {"present": False, "itemCount": 0, "nonEmptyFields": [], "topItems": []}
+    stage_rank = {"growing": 1, "emerging": 2, "stable": 3, "declining": 4}
+    seen: dict[str, dict[str, Any]] = {}
+    for item in normalized:
+        topic = _normalized_topic_name(item)
+        if not topic:
+            continue
+        current = float(item.get("weeklyCurrent") or item.get("volume") or 0.0)
+        confidence = float(item.get("stageConfidence") or 0.0)
+        existing = seen.get(topic)
+        candidate = {
+            "topic": topic,
+            "stage": str(item.get("stage") or "").strip().lower(),
+            "weeklyCurrent": current,
+            "stageConfidence": confidence,
+        }
+        if existing is None or (
+            stage_rank.get(candidate["stage"], 99),
+            -candidate["weeklyCurrent"],
+            -candidate["stageConfidence"],
+        ) < (
+            stage_rank.get(existing["stage"], 99),
+            -existing["weeklyCurrent"],
+            -existing["stageConfidence"],
+        ):
+            seen[topic] = candidate
+    ordered = [
+        item["topic"]
+        for item in sorted(
+            seen.values(),
+            key=lambda item: (
+                stage_rank.get(item["stage"], 99),
+                -item["weeklyCurrent"],
+                -item["stageConfidence"],
+                item["topic"],
+            ),
+        )
+    ]
+    return {
+        "present": bool(ordered),
+        "itemCount": len(ordered),
+        "nonEmptyFields": ["lifecycleStages"] if ordered else [],
+        "topItems": ordered[:5],
+    }
+
+
+def _summarize_sentiment_by_topic_payload(payload: Any) -> dict[str, Any]:
+    rows = list(payload or []) if isinstance(payload, list) else list(_as_dict(payload).get("sentimentByTopic") or [])
+    if not rows:
+        return {"present": False, "itemCount": 0, "nonEmptyFields": [], "topItems": []}
+    counts: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        topic = _normalized_topic_name(row)
+        if not topic:
+            continue
+        counts[topic] = counts.get(topic, 0.0) + float(row.get("count") or row.get("positive") or row.get("value") or 0.0)
+    ordered = [topic for topic, _ in sorted(counts.items(), key=lambda item: (item[1], item[0]), reverse=True)]
+    return {
+        "present": bool(ordered),
+        "itemCount": len(ordered),
+        "nonEmptyFields": ["sentimentByTopic"] if ordered else [],
+        "topItems": ordered[:5],
+    }
+
+
 def _non_empty_fields(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return []
@@ -144,6 +297,14 @@ def _summarize_widget(widget_id: str, payload: Any) -> dict[str, Any]:
             "nonEmptyFields": [],
             "topItems": [],
         }
+    if widget_id == "trending_topics_feed":
+        return _summarize_trending_topics_payload(payload)
+    if widget_id == "conversation_trends":
+        return _summarize_conversation_trends_payload(payload)
+    if widget_id == "topic_lifecycle":
+        return _summarize_topic_lifecycle_payload(payload)
+    if widget_id == "sentiment_by_topic":
+        return _summarize_sentiment_by_topic_payload(payload)
     summary = {
         "present": True,
         "itemCount": _count_payload_items(payload),
@@ -380,12 +541,18 @@ def _topic_lifecycle_rank_rows(ctx: DashboardDateContext, cache: dict[str, Any])
     return ranked
 
 
-def _topic_window_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> list[dict[str, Any]]:
-    cached = cache.get("topic_window_rows")
+def _topic_window_rows(
+    ctx: DashboardDateContext,
+    cache: dict[str, Any],
+    *,
+    evidence_limit: int = 1,
+) -> list[dict[str, Any]]:
+    cache_key = f"topic_window_rows:{max(1, int(evidence_limit))}"
+    cached = cache.get(cache_key)
     if isinstance(cached, list):
         return cached
-    rows = pulse._query_topic_widget_rows(ctx, evidence_limit=1)
-    cache["topic_window_rows"] = rows
+    rows = pulse._query_topic_widget_rows(ctx, evidence_limit=max(1, int(evidence_limit)))
+    cache[cache_key] = rows
     return rows
 
 
@@ -416,7 +583,7 @@ def _community_health_source_summary(ctx: DashboardDateContext, cache: dict[str,
 
 
 def _trending_topics_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    rows = _topic_window_rows(ctx, cache)
+    rows = _topic_window_rows(ctx, cache, evidence_limit=max(2, int(pulse._TRENDING_MIN_EVIDENCE)))
     eligible = [
         row
         for row in rows
@@ -436,24 +603,20 @@ def _trending_topics_source_summary(ctx: DashboardDateContext, cache: dict[str, 
         ),
         reverse=True,
     )
-    topic_names = [str(row.get("sourceTopic") or row.get("name") or "").strip() for row in eligible]
-    return _summary_from_topics(field_name="trendingTopics", topic_names=topic_names)
+    return _summarize_widget("trending_topics_feed", eligible)
 
 
 def _conversation_trends_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
     topic_rows = _simple_topic_rank_rows(ctx, cache)
-    return _summary_from_topics(
-        field_name="trendLines",
-        topic_names=[str(row.get("topic") or "").strip() for row in topic_rows],
+    return _summarize_widget(
+        "conversation_trends",
+        {"trendLines": [{"topic": row.get("topic"), "posts": row.get("mentions")} for row in topic_rows]},
     )
 
 
 def _topic_lifecycle_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
     ranked = _topic_lifecycle_rank_rows(ctx, cache)
-    return _summary_from_topics(
-        field_name="lifecycleStages",
-        topic_names=[str(item.get("topic") or "").strip() for item in ranked],
-    )
+    return _summarize_widget("topic_lifecycle", ranked)
 
 
 def _sentiment_by_topic_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
@@ -491,9 +654,9 @@ def _sentiment_by_topic_source_summary(ctx: DashboardDateContext, cache: dict[st
             "canonical_topics": list(pulse._CANONICAL_TOPIC_NAMES),
         },
     )
-    summary = _summary_from_topics(
-        field_name="sentimentByTopic",
-        topic_names=[str(row.get("topic") or "").strip() for row in rows],
+    summary = _summarize_widget(
+        "sentiment_by_topic",
+        [{"topic": row.get("topic"), "count": row.get("count")} for row in rows],
     )
     cache["sentiment_topic_summary"] = summary
     return summary
