@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -243,12 +244,18 @@ def _validate_source_truth_widget(
     widget_id: str,
     ctx: DashboardDateContext,
     v2_summary: dict[str, Any],
+    timeout_seconds: float,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     validation = _new_validation(SOURCE_TRUTH_VALIDATION_MODE)
+    if timeout_seconds <= 0:
+        validation["semanticStatus"] = "fail"
+        validation["blockingReasons"] = [BLOCKING_REASON_SOURCE_TRUTH_TIMEOUT]
+        validation["error"] = "source-truth validation budget exhausted before execution"
+        return None, _summarize_widget(widget_id, None), validation
     builder = _direct_truth_builders()[widget_id]
     result = _execute_with_timeout(
         label=f"source-truth-{widget_id}",
-        timeout_seconds=float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS),
+        timeout_seconds=float(timeout_seconds),
         fn=lambda: builder(ctx),
     )
     if result["status"] == "timeout":
@@ -474,6 +481,8 @@ def run_dashboard_v2_compare(
     direct_truth_payloads: dict[str, Any] = {}
     direct_truth_failures = 0
     readiness_cache: dict[tuple[str, ...], dict[str, Any]] = {}
+    source_truth_budget_seconds = float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TOTAL_TIMEOUT_SECONDS)
+    source_truth_deadline = time.monotonic() + max(0.0, source_truth_budget_seconds)
     for widget_id in ALL_WIDGET_IDS:
         raw_v2_payload = _extract_snapshot_widget(v2_snapshot, widget_id)
         v2_payload_summary = _summarize_widget(widget_id, raw_v2_payload)
@@ -496,10 +505,15 @@ def run_dashboard_v2_compare(
             continue
 
         if widget_id in DIRECT_SOURCE_TRUTH_WIDGET_IDS:
+            remaining_budget = max(0.0, source_truth_deadline - time.monotonic())
             direct_payload, direct_summary, validation = _validate_source_truth_widget(
                 widget_id=widget_id,
                 ctx=ctx,
                 v2_summary=v2_payload_summary,
+                timeout_seconds=min(
+                    float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS),
+                    remaining_budget,
+                ),
             )
             if validation["semanticStatus"] == "fail":
                 direct_truth_failures += 1
@@ -533,6 +547,8 @@ def run_dashboard_v2_compare(
         "widgetCount": len(DIRECT_SOURCE_TRUTH_WIDGET_IDS),
         "sourceDateSemantics": True,
         "widgetIds": list(DIRECT_SOURCE_TRUTH_WIDGET_IDS),
+        "timeoutSecondsPerWidget": float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS),
+        "timeoutSecondsTotal": float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TOTAL_TIMEOUT_SECONDS),
         "status": "failed" if direct_truth_failures else "ready" if v2_status == "ready" else "skipped",
     }
     validation_summary = _build_validation_summary(

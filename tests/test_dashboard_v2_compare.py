@@ -228,6 +228,33 @@ class DashboardV2CompareTests(unittest.TestCase):
         self.assertEqual(result["semanticStatus"], "failed")
         self.assertFalse(result["semanticGateReady"])
 
+    def test_compare_marks_remaining_source_truth_widgets_timed_out_when_total_budget_is_exhausted(self) -> None:
+        store = _CompareReadyWindowStore()
+        ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
+        payloads = _direct_truth_payloads()
+        call_count = {"source_truth": 0}
+
+        def _fake_execute(*, label: str, timeout_seconds: float, fn):
+            del timeout_seconds, fn
+            if label == "old-path":
+                return {"status": "ok", "value": _old_snapshot()}
+            call_count["source_truth"] += 1
+            if call_count["source_truth"] == 1:
+                return {"status": "ok", "value": payloads["community_brief"]}
+            raise AssertionError("source-truth execution should stop once the total budget is exhausted")
+
+        monotonic_values = iter([0.0, 0.0, 61.0, 61.0, 61.0, 61.0, 61.0, 61.0])
+
+        with patch("api.dashboard_v2_compare._execute_with_timeout", side_effect=_fake_execute), \
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
+             patch("api.dashboard_v2_compare.time.monotonic", side_effect=lambda: next(monotonic_values)):
+            result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
+
+        self.assertEqual(result["widgetDiffs"]["community_health_score"]["validation"]["blockingReasons"], [BLOCKING_REASON_SOURCE_TRUTH_TIMEOUT])
+        self.assertEqual(result["widgetDiffs"]["week_over_week_shifts"]["validation"]["blockingReasons"], [BLOCKING_REASON_SOURCE_TRUTH_TIMEOUT])
+        self.assertEqual(result["semanticStatus"], "failed")
+        self.assertFalse(result["semanticGateReady"])
+
     def test_compare_keeps_old_path_failure_non_blocking(self) -> None:
         store = _CompareReadyWindowStore()
         ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
