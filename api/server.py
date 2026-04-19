@@ -89,7 +89,11 @@ from api.admin_runtime import (
 from api import db
 from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_coordinator import get_runtime_coordinator
-from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError, assemble_dashboard_v2_exact
+from api.dashboard_v2_assembler import (
+    DashboardV2FactsNotReadyError,
+    assemble_dashboard_v2_exact,
+    clear_dashboard_v2_exact_cache,
+)
 from api.dashboard_v2_compare import run_dashboard_v2_compare
 from api.dashboard_v2_materializer import (
     DASHBOARD_V2_FACT_VERSION,
@@ -5235,6 +5239,7 @@ async def compare_dashboard_v2(
 async def clear_cache():
     """Invalidate the in-memory dashboard cache."""
     invalidate_cache()
+    clear_dashboard_v2_exact_cache()
     graph_dashboard.invalidate_graph_cache()
     question_briefs.invalidate_question_briefs_cache()
     behavioral_briefs.invalidate_behavioral_briefs_cache()

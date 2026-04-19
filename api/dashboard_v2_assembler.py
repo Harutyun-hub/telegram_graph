@@ -23,7 +23,7 @@ from api.dashboard_v2_store import (
 )
 
 
-DASHBOARD_V2_ARTIFACT_VERSION = 1
+DASHBOARD_V2_ARTIFACT_VERSION = 2
 DASHBOARD_V2_FACT_VERSION = 2
 _MEMORY_EXACT_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -509,6 +509,10 @@ def _cache_put(cache_key: str, payload: dict[str, Any]) -> None:
     _MEMORY_EXACT_CACHE[cache_key] = dict(payload)
 
 
+def clear_dashboard_v2_exact_cache() -> None:
+    _MEMORY_EXACT_CACHE.clear()
+
+
 def _artifact_matches_exact_context(artifact: dict[str, Any] | None, ctx: DashboardDateContext) -> bool:
     return bool(
         artifact
@@ -516,6 +520,7 @@ def _artifact_matches_exact_context(artifact: dict[str, Any] | None, ctx: Dashbo
         and getattr(artifact.get("from_date"), "isoformat", lambda: str(artifact.get("from_date")))() == ctx.from_date.isoformat()
         and getattr(artifact.get("to_date"), "isoformat", lambda: str(artifact.get("to_date")))() == ctx.to_date.isoformat()
         and str(artifact.get("range_mode") or "") == "exact"
+        and int(artifact.get("artifact_version") or 0) == DASHBOARD_V2_ARTIFACT_VERSION
     )
 
 

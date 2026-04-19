@@ -11,6 +11,7 @@ from api.dashboard_v2_assembler import (
     DashboardV2FactsNotReadyError,
     _MEMORY_EXACT_CACHE,
     assemble_dashboard_v2_exact,
+    clear_dashboard_v2_exact_cache,
 )
 from api.dashboard_v2_registry import FACT_FAMILIES
 from api.dashboard_v2_secondary import build_request_time_secondary_snapshot
@@ -150,6 +151,11 @@ def _make_fact_row(fact_date: str, widget_payloads: dict) -> dict:
 class DashboardV2AssemblerTests(unittest.TestCase):
     def setUp(self) -> None:
         _MEMORY_EXACT_CACHE.clear()
+
+    def test_clear_dashboard_v2_exact_cache_clears_memory_entries(self) -> None:
+        _MEMORY_EXACT_CACHE["demo"] = {"cache_key": "demo"}
+        clear_dashboard_v2_exact_cache()
+        self.assertEqual(_MEMORY_EXACT_CACHE, {})
 
     def test_assembler_rejects_range_when_v2_facts_are_not_ready(self) -> None:
         store = _AssemblerStore()
