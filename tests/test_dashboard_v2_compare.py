@@ -133,7 +133,7 @@ def _old_snapshot() -> dict[str, object]:
     return {
         "communityBrief": {"messagesAnalyzed": 12, "postsAnalyzedInWindow": 4},
         "trendingTopics": [{"topic": "Road And Transit", "mentions": 10}],
-        "trendLines": [{"topic": "Road And Transit", "points": [1, 2, 3]}],
+        "trendLines": [{"topic": "Road And Transit", "bucket": "2026-04-15", "posts": 3}],
     }
 
 
@@ -145,12 +145,12 @@ def _v2_result() -> DashboardV2AssemblyResult:
             "trendingTopics": [{"topic": "Road And Transit", "mentions": 11}],
             "trendingNewTopics": [],
             "topicBubbles": [],
-            "trendLines": [{"topic": "Road And Transit", "points": [2, 3, 4]}],
+            "trendLines": [{"topic": "Road And Transit", "bucket": "2026-04-15", "posts": 4}],
             "trendData": [],
             "questionCategories": [],
             "questionBriefs": [],
             "qaGap": {},
-            "lifecycleStages": [{"topic": "Road And Transit", "stage": "growing"}],
+            "lifecycleStages": [{"topic": "Road And Transit", "stage": "growing", "weeklyCurrent": 4, "weeklyDelta": 2}],
             "problemBriefs": [],
             "serviceGapBriefs": [],
             "problems": [],
@@ -331,38 +331,62 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_conversation_trends_source_summary_normalizes_raw_rows(self) -> None:
         ctx = build_dashboard_date_context("2026-03-17", "2026-04-15")
         raw_rows = [
-            {"topic": "Road And Transit", "mentions": 8},
-            {"topic": "Water Security", "mentions": 2},
+            {"topic": "Road And Transit", "bucket": "2026-04-01", "posts": 3},
+            {"topic": "Road And Transit", "bucket": "2026-04-02", "posts": 5},
+            {"topic": "Water Security", "bucket": "2026-04-01", "posts": 2},
         ]
 
-        with patch("api.dashboard_v2_compare._simple_topic_rank_rows", return_value=raw_rows):
+        with patch("api.dashboard_v2_compare.strategic.get_trend_lines", return_value=raw_rows):
             summary = _conversation_trends_source_summary(ctx, {})
 
         self.assertTrue(summary["present"])
         self.assertEqual(summary["itemCount"], 2)
         self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
 
+    def test_summarize_widget_trending_topics_matches_widget_subset_contract(self) -> None:
+        rows = [
+            {"topic": f"Topic {i}", "currentMentions": 20 - i, "distinctChannels": 3, "distinctUsers": 4}
+            for i in range(15)
+        ]
+        summary = _summarize_widget("trending_topics_feed", {"trendingTopics": rows})
+
+        self.assertEqual(summary["itemCount"], 12)
+        self.assertEqual(summary["topItems"], ["Topic 0", "Topic 1", "Topic 2", "Topic 3", "Topic 4"])
+
     def test_summarize_widget_aggregates_conversation_trend_topics(self) -> None:
         summary = _summarize_widget(
             "conversation_trends",
             {
                 "trendLines": [
-                    {"topic": "Road And Transit", "posts": 3},
-                    {"topic": "Water Security", "posts": 2},
-                    {"topic": "Road And Transit", "posts": 5},
+                    {"topic": "Topic A", "bucket": "2026-04-01", "posts": 1},
+                    {"topic": "Topic B", "bucket": "2026-04-01", "posts": 2},
+                    {"topic": "Topic A", "bucket": "2026-04-02", "posts": 5},
+                    {"topic": "Topic C", "bucket": "2026-04-02", "posts": 4},
                 ]
             },
         )
-        self.assertEqual(summary["itemCount"], 2)
-        self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
+        self.assertEqual(summary["itemCount"], 3)
+        self.assertEqual(summary["topItems"], ["Topic A", "Topic C", "Topic B"])
+
+    def test_summarize_widget_lifecycle_matches_stage_subset_contract(self) -> None:
+        summary = _summarize_widget(
+            "topic_lifecycle",
+            [
+                {"topic": "Growth 1", "stage": "growing", "weeklyCurrent": 10, "weeklyDelta": 4},
+                {"topic": "Growth 2", "stage": "emerging", "weeklyCurrent": 8, "weeklyDelta": 3},
+                {"topic": "Decline 1", "stage": "declining", "weeklyCurrent": 9, "weeklyDelta": -1},
+            ],
+        )
+        self.assertEqual(summary["itemCount"], 3)
+        self.assertEqual(summary["topItems"], ["Growth 1", "Growth 2", "Decline 1"])
 
     def test_summarize_widget_aggregates_sentiment_topic_totals(self) -> None:
         summary = _summarize_widget(
             "sentiment_by_topic",
             [
-                {"topic": "Road And Transit", "count": 3},
-                {"topic": "Water Security", "count": 2},
-                {"topic": "Road And Transit", "count": 4},
+                {"topic": "Road And Transit", "sentiment": "Positive", "count": 3},
+                {"topic": "Water Security", "sentiment": "Positive", "count": 2},
+                {"topic": "Road And Transit", "sentiment": "Negative", "count": 4},
             ],
         )
         self.assertEqual(summary["itemCount"], 2)
