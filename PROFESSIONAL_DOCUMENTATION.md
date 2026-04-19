@@ -1,326 +1,561 @@
-# Radar Obshchiny Professional Documentation
+# Radar Obshchiny Canonical System Documentation
 
-Current-state system and product documentation for the Radar Obshchiny Telegram intelligence platform.
+Current-state technical documentation for the Radar Obshchiny platform.
 
-- Last Updated: 2026-03-19
-- Deployment Line: GitHub `main`
-- Deployment Shape: Railway-compatible frontend + backend split
-- Release Focus: dashboard analytics integrity and AI-only service-gap detection
+- Canonical status: authoritative current-state system document
+- Audience: backend engineers, frontend engineers, operators, technical leads
+- Last reviewed: 2026-04-19
 
-## 1. Product Summary
+## 1. Executive Summary
 
-Radar Obshchiny is a production-oriented intelligence platform for monitoring Telegram communities, enriching messages with AI, syncing structured information into Neo4j, and serving dashboard analytics through a FastAPI + React stack.
+Radar Obshchiny is a Telegram intelligence platform that collects Telegram channel data, enriches it with AI, syncs analytics into a graph model, and serves a protected web application for dashboard analytics, detail pages, operator workflows, and social intelligence surfaces.
 
-The platform is designed for:
+Today, the system is deployed as a split runtime:
 
-- community monitoring
-- topic and trend analysis
-- behavioral insight generation
-- graph-driven audience and conversation analysis
-- operational decision support for moderators and community managers
+- `frontend`: React + Vite application served behind a static/proxy layer
+- `web`: FastAPI application that serves APIs, orchestrates reads, exposes admin/operator endpoints, and hosts helper integrations
+- `worker`: background runtime responsible for Telegram-connected and scheduled background processing
+- supporting infrastructure: Supabase/Postgres, Neo4j, Redis, OpenAI, and optional OpenClaw integrations
 
-## 2. System Architecture
+The system is designed to solve three problems at once:
+
+- collect and normalize Telegram community activity
+- transform raw activity into explainable intelligence and briefs
+- serve that intelligence through a stable, authenticated product surface without coupling every user request to raw-source processing
+
+This document covers the current shipped platform only. It does not treat experimental branches, incomplete rewrites, legacy design briefs, or abandoned documentation structures as part of the production architecture.
+
+## 2. Architecture Principles and Decisions
+
+### Separation of concerns
+
+The platform deliberately separates:
+
+- operational persistence from analytics modeling
+- request-path serving from background processing
+- frontend rendering from backend orchestration
+- product APIs from operator-only control paths
+
+That separation keeps the request path more stable and makes failures easier to localize.
+
+### Why the platform uses Supabase plus Neo4j
+
+The system uses two primary data backends because they solve different problems well:
+
+- Supabase/Postgres is the operational system of record for scraped content, AI outputs, runtime state, queues, admin configuration, and persisted payloads
+- Neo4j is the analytics graph used for relationship-heavy and topic/network-style queries
+
+This is preferable to forcing one database to do both jobs poorly. Operational writes, queue state, and configuration need relational durability. Topic/network analytics benefit from a graph model.
+
+### Why the platform uses worker/background processing
+
+Heavy work is intentionally moved out of the user request path wherever possible:
+
+- Telegram scraping
+- AI enrichment
+- graph synchronization
+- scheduled materializations and brief refreshes
+
+This adds operational complexity, but it improves serving reliability and isolates user-facing APIs from raw ingestion latency and external provider instability.
+
+### Why the platform does not rely on purely live-query serving
+
+A purely live-query architecture would be simpler at first, but it would make the product fragile under load and tightly couple every dashboard request to the slowest dependency in the chain. The current architecture accepts more background machinery in exchange for:
+
+- more predictable response behavior
+- clearer failure domains
+- better operator control
+- safer retries and repair workflows
+
+## 3. System Boundaries and Ownership
+
+### Scraping boundary
+
+Owned by:
+
+- `scraper/`
+- worker runtime
+
+Responsibilities:
+
+- connect to Telegram
+- discover and prepare sources
+- scrape posts and comments
+- persist raw content into Supabase-backed storage
+
+This layer owns Telegram connectivity. The web service must not take on Telegram runtime responsibilities in the hardened deployment shape.
+
+### AI enrichment boundary
+
+Owned by:
+
+- `processor/`
+- `api/behavioral_briefs.py`
+- `api/question_briefs.py`
+- `api/opportunity_briefs.py`
+- `api/topic_overviews.py`
+
+Responsibilities:
+
+- classify and enrich messages
+- generate structured AI outputs
+- generate brief-style derived artifacts
+
+This layer transforms content into higher-value intelligence. It does not own frontend presentation contracts.
+
+### Operational persistence boundary
+
+Owned by:
+
+- `buffer/`
+- Supabase/Postgres
+- runtime/admin configuration helpers
+
+Responsibilities:
+
+- store raw messages and comments
+- store AI outputs
+- store scheduler/runtime state
+- store admin configuration and derived artifacts
+- support operator-triggered maintenance and queue workflows
+
+Supabase/Postgres is the authoritative operational store.
+
+### Graph analytics boundary
+
+Owned by:
+
+- `ingester/`
+- `api/queries/*`
+- Neo4j
+
+Responsibilities:
+
+- synchronize graph-friendly entities and relationships
+- serve graph-heavy analytics queries
+- support topic, audience, network, and strategic-style read models
+
+Neo4j is authoritative for graph-derived analytics, not for raw operational history.
+
+### API serving boundary
+
+Owned by:
+
+- `api/server.py`
+- `api/aggregator.py`
+- API-facing service modules under `api/`
+
+Responsibilities:
+
+- authenticate and authorize requests
+- compose dashboard and detail responses
+- expose health, freshness, admin, KB, and helper endpoints
+- separate analytics routes from operator-only routes
+
+This is the primary request-path orchestration layer.
+
+### Frontend rendering boundary
+
+Owned by:
+
+- `frontend/src/app/`
+
+Responsibilities:
+
+- protect routes behind authenticated shells
+- render dashboard, detail, admin, graph, social, and helper UI
+- normalize backend payloads into stable widget contracts
+
+The frontend owns presentation, interaction, and route composition. It does not own analytics truth.
+
+### Social and operator surfaces
+
+Owned by:
+
+- `social/`
+- social endpoints in `api/server.py`
+- social pages and services in `frontend/src/app/pages/` and `frontend/src/app/services/`
+
+Responsibilities:
+
+- provide operator-only social intelligence workflows
+- expose social evidence, topics, timelines, competitors, ads, and runtime operations
+
+These surfaces are intentionally distinct from the main Telegram dashboard contract.
+
+### Helper integrations
+
+Owned by:
+
+- `api/ai_helper.py`
+- KB endpoints in `api/server.py`
+- optional OpenClaw gateway/bridge configuration
+
+Responsibilities:
+
+- power the web AI assistant
+- support KB ingestion and retrieval flows
+
+These integrations are part of the product, but they are not part of the core dashboard read path.
+
+## 4. Runtime Topology
+
+### Current production-oriented topology
+
+- `frontend`
+  - static/proxy deployment for the React application
+- `web`
+  - FastAPI app served by `uvicorn api.server:app`
+- `worker`
+  - dedicated background runtime served by `python -m api.worker`
+- `redis`
+  - runtime coordination and cache support
+- `supabase`
+  - operational storage
+- `neo4j`
+  - analytics graph
+- external providers
+  - Telegram API
+  - OpenAI
+  - optional OpenClaw gateway or bridge
+
+### Request path
+
+The main request path is:
 
 ```mermaid
 graph LR
-    TG[Telegram Channels and Comments] --> SC[Scraper / Telethon]
-    SC --> SB[Supabase]
-    SB --> AI[AI Processing]
-    AI --> SB
-    SB --> NG[Neo4j Sync]
-    NG --> N4J[Neo4j]
-    N4J --> API[FastAPI API Layer]
-    API --> FE[React Dashboard]
+    Browser["Browser"] --> Frontend["Frontend / Caddy proxy"]
+    Frontend --> Web["FastAPI web service"]
+    Web --> Redis["Redis / runtime coordination"]
+    Web --> Postgres["Supabase / Postgres"]
+    Web --> Neo4j["Neo4j analytics graph"]
+    Web --> OpenClaw["OpenClaw helper integration"]
 ```
 
-### Core Runtime Roles
+The request path is responsible for:
 
-- `scraper/`
-  - extracts Telegram posts and comments
-  - manages source tracking and collection cadence
-- `buffer/`
-  - stores and reads operational data in Supabase
-  - persists runtime snapshots and helper state
-- `processor/`
-  - runs message-level AI extraction for intent, sentiment, and topics
-- `ingester/`
-  - writes normalized graph structures into Neo4j
-- `api/`
-  - exposes dashboard, graph, and admin endpoints
-  - aggregates tiered widget payloads for the frontend
-- `frontend/`
-  - renders the dashboard and graph experiences
+- authenticated API access
+- dashboard/detail rendering data
+- admin/operator read and control endpoints
+- helper and KB APIs
 
-## 3. Data Model and Pipeline Semantics
+It should not be responsible for Telegram scraping or worker-only scheduled processing.
 
-### Operational Source of Truth
+### Background path
 
-Supabase is the operational system of record for:
+The background path is:
 
-- raw scraped content
-- AI analysis outputs
-- runtime snapshots
-- scheduler state
-- proposal/review flows
-- materialized brief payloads
+```mermaid
+graph LR
+    Telegram["Telegram API"] --> Worker["Worker runtime"]
+    Worker --> Postgres["Supabase / Postgres"]
+    Worker --> OpenAI["OpenAI"]
+    Worker --> Neo4j["Neo4j"]
+    Worker --> Redis["Redis / coordination"]
+```
 
-Neo4j is the analytics graph used for:
+The background path is responsible for:
 
-- topic analytics
-- network analysis
-- graph exploration
-- dashboard query acceleration
+- scraping Telegram sources
+- scheduling and running AI enrichment
+- graph synchronization
+- scheduled brief refreshes
+- long-running runtime maintenance work
 
-### Message-Level Analytics Rule
+### Environment split
 
-The platform now uses strict direct-message semantics:
+The hardened deployment contract is:
 
-- one tagged post = one topic mention
-- one tagged comment = one topic mention
-- comment-derived topics are not copied onto the parent post
-- message counts are computed from direct `TAGGED` relationships only
+- `APP_ROLE=web` on the web service
+- `APP_ROLE=worker` on the worker service
+- Redis configured in locked environments
+- staging forced into web-only behavior unless explicitly carved out otherwise
 
-This rule is the basis for current strategic analytics.
+This split matters because it prevents accidental duplication of background writers and keeps Telegram-connected logic out of the request-serving runtime.
 
-### Graph Analytics Retention
+## 5. Critical Data Flows
 
-Neo4j dashboard analytics are intentionally limited to a clean 15-day window.
+### Telegram ingestion flow
 
-Current implications:
+1. Worker-owned scraper connects to Telegram
+2. Sources are prepared and scraped
+3. Raw posts and comments are persisted into Supabase-backed storage
+4. Runtime state and scrape progress are tracked in operational storage
 
-- topic trend and landscape metrics operate on the last 15 days
-- long-range historical trend behavior is intentionally reduced until clean history accumulates
-- strategic widgets favor accuracy of recent data over polluted legacy history
+### AI enrichment flow
 
-## 4. Dashboard Tier Definitions
+1. Unprocessed content is discovered from operational storage
+2. AI enrichment jobs analyze messages and posts
+3. Structured outputs are persisted back to operational storage
+4. Derived artifacts and briefs are refreshed on their own schedules
 
-The dashboard is assembled in `api/aggregator.py` using tiered query groups. The most important production tiers are:
+### Graph sync and analytics flow
 
-- Pulse
-  - fast community pulse and current momentum
-- Strategic
-  - topic-level intelligence inside the 15-day graph window
-- Behavioral
-  - problem and service-gap briefs, satisfaction, mood, urgency
-- Network
-  - channels, voices, and relationship-oriented views
+1. Processed operational data is transformed into graph-friendly bundles
+2. Bundles are synchronized into Neo4j
+3. Query modules under `api/queries/` read from Neo4j to support dashboard and detail surfaces
 
-### Reliability Model
+### Dashboard request flow
 
-The aggregator uses:
+1. Frontend calls `/api/*` through the configured proxy/base URL
+2. FastAPI authenticates the caller
+3. Dashboard context and freshness state are resolved
+4. Aggregation and query modules compose the response
+5. Frontend normalizes payloads through `dashboardAdapter` and renders widgets
 
-- cache-first reads
-- stale-while-revalidate behavior
-- bounded parallel execution
-- per-tier fallback protection
-- preservation of healthy cached snapshots when critical tiers fail
+### Social/operator flow
 
-Strategic widgets are isolated so one failed query does not blank the full section.
+1. Authenticated operator session calls operator-only social endpoints
+2. Backend enforces operator access
+3. Social store/runtime services return social-specific summaries, evidence, and operational actions
+4. Frontend social pages render those results separately from the main dashboard contract
 
-## 5. Widget Semantics
+### Helper and KB flow
 
-### Community Climate
+1. Authenticated user calls AI helper or KB endpoints
+2. Backend mediates access and keeps provider credentials server-side
+3. OpenClaw and KB operations run behind backend APIs
+4. Frontend receives only product-safe responses, not provider credentials
 
-Community Climate is an explainable index, not a raw count metric.
+## 6. Data Model and Source-of-Truth Policy
 
-It combines:
+### Supabase / Postgres
 
-- constructive intent share
-- inverse negative pressure
-- topic diversity
-- conversation depth
+Supabase/Postgres is the operational system of record for:
 
-It compares the latest 24 hours against the previous 24 hours.
+- scraped Telegram content
+- AI enrichment outputs
+- scheduler/runtime state
+- admin configuration
+- persisted artifacts and helper state
+- operational queues and recovery state
 
-### Trending Now
+If a question is about what content was ingested, what was processed, what job ran, or what config is currently active, Supabase/Postgres is the first source of truth.
 
-Trending Now shows evidence-backed top topics from the last 24 hours.
+### Neo4j
 
-- counts direct post + comment mentions
-- compares current 24h vs previous 24h
-- includes message snippets when available
+Neo4j is the analytics graph. It is authoritative for graph-modeled relationships and the analytics computed from them, including:
 
-### Topic Landscape
+- topic relationships
+- audience and network relationships
+- graph-oriented dashboard queries
 
-Topic Landscape shows topic prominence inside the 15-day graph window.
+It is not the canonical operational ledger for the pipeline.
 
-- tile size = direct post + comment mentions in the retention window
-- growth = recent 7-day slice vs the preceding slice in that retention window
-- noisy or invalid topic labels are excluded
+### Redis
 
-### Conversation Trends
+Redis is an operational coordination layer, not a primary data store. It is used for:
 
-Conversation Trends shows daily direct-message counts per topic within the 15-day window.
+- runtime coordination
+- health checks that require coordination guarantees
+- selected cache/runtime support in locked environments
 
-- buckets are daily
-- top lines are chosen from the strongest recent topics
-- data reflects direct message tagging only
+If Redis is down in locked environments, parts of the hardened runtime contract should be treated as degraded.
 
-### Topic Lifecycle
+### Derived versus canonical data
 
-Topic Lifecycle currently functions as a short-window momentum view, not a full lifecycle model.
+The platform stores both canonical and derived data:
 
-Current behavior:
+- canonical
+  - raw Telegram content
+  - operational state
+  - configuration
+- derived
+  - AI analyses
+  - graph projections
+  - brief payloads
+  - dashboard summaries
 
-- groups topics into `growing` and `declining`
-- uses recent vs preceding activity inside the 15-day window
-- is best interpreted as momentum classification rather than true lifecycle staging
+Derived data can be rebuilt. Canonical operational history and configuration must be preserved.
 
-### Service Gap Detector
+### Evidence and source references
 
-Service Gap Detector is now AI-only.
+The platform is built to serve explainable outputs, not dead aggregates. Widgets and briefs are expected to retain a path back to supporting source evidence. The product should present derived intelligence while keeping a traceable connection to underlying messages, comments, or evidence items when supported by the surface.
 
-The widget shows service-gap bars only when grounded AI service cards exist.
+## 7. Product Surfaces and Contracts
 
-Current rules:
+### Main dashboard
 
-- service gaps are derived from concrete service/help requests hidden in posts and related comments
-- the model must infer a real actionable service need from evidence
-- abstract dissatisfaction, slogans, political complaints, and topic names alone are rejected
-- there is no production fallback that converts generic topic dissatisfaction into service-gap bars
-- if no grounded service cards exist, the widget shows a soft `No service gap detected.` state
+The main dashboard is the primary protected application surface and is rendered at `/`. It depends on:
 
-### Problem Tracker
+- `DataContext`
+- `DashboardDateRangeContext`
+- backend `/api/dashboard`
+- `dashboardAdapter` normalization
 
-Problem Tracker remains AI-grounded with evidence-backed cards built from negative, urgent, and distress-heavy signals.
+This is the main analytics entrypoint for the Telegram intelligence product.
 
-## 6. AI Systems
+### Detail pages
 
-### Behavioral Briefs
+Current first-class detail routes include:
 
-Behavioral briefs cover:
+- `/topics`
+- `/channels`
+- `/audience`
+- `/sources`
+- `/settings`
 
-- problem cards
-- service-gap cards
-- urgency cards
+These surfaces extend the dashboard into deeper inspection and management flows.
 
-Current default model:
+### Graph surface
 
-- `BEHAVIORAL_BRIEFS_MODEL = gpt-5.4-mini`
+The graph route exists at `/graph`. It remains part of the product surface, but the frontend service layer treats graph rendering as a specialized boundary. In practice, this means:
 
-Current prompt/version behavior:
+- the graph page is part of the app shell
+- graph rendering is handled by a dedicated graph dashboard component
+- graph-specific behavior should not be documented as identical to the standard dashboard widget pipeline
 
-- `BEHAVIORAL_BRIEFS_PROMPT_VERSION = behavior-v2`
-- fingerprinting includes prompt version and model name
-- changed prompts/models invalidate prior cluster fingerprints naturally
+### Admin surface
 
-### Service-Gap AI Contract
+The admin route exists at `/admin`. It is used for configuration and management workflows backed by admin configuration state and operator-capable endpoints.
 
-The service-gap AI prompt is intentionally strict.
+### Social surface
 
-It must:
+Current social routes include:
 
-- use only supplied evidence
-- infer concrete service/help needs from evidence
-- reject abstract or non-service discussion
-- abstain when grounding is weak
-- select evidence IDs that actually support the service card
+- `/social`
+- `/social/topics`
+- `/social/ops`
 
-Deterministic service-card fallback is intentionally disabled for production behavior.
+These are operator-oriented social intelligence surfaces with their own endpoint family and rendering contracts. They are not a thin alias for the Telegram dashboard.
 
-### Other AI Systems
+### Agent and helper surface
 
-Current defaults:
+The app includes an AI helper/agent surface and backend helper endpoints. This is part of the product experience, but it is not a substitute for the main dashboard APIs.
 
-- `OPENAI_MODEL = gpt-5.4-mini`
-- `QUESTION_BRIEFS_MODEL = gpt-5.4-mini`
-- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5.4-mini`
-- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5.4-mini`
-- `BEHAVIORAL_BRIEFS_MODEL = gpt-5.4-mini`
+### Authentication model
 
-## 7. Railway Deployment Compatibility
+At a high level:
 
-This release is intended to remain compatible with the current Railway deployment line on GitHub `main`.
+- frontend routes are protected by the app auth shell
+- Supabase browser auth is preferred when configured
+- simple auth fallback exists for environments without browser Supabase auth
+- backend analytics endpoints are guarded by analytics access rules
+- operator-only endpoints require stronger operator access checks
 
-### Unchanged Deployment Contract
+The exact wire-level auth details live in code and operational docs, but the contract is simple: product routes are authenticated, and operator routes are more restricted than normal analytics reads.
 
-- no change to frontend Caddy routing
-- no new Railway manifest or Procfile requirement
-- no service split introduced by this release
-- backend remains compatible with the current FastAPI/uvicorn deployment model
+## 8. Operational Invariants
 
-### Frontend Proxy Contract
+These are system rules that must remain true for safe operation.
 
-The frontend uses `frontend/Caddyfile` to:
+### Worker owns background jobs
 
-- serve the Vite build output
-- reverse proxy `/api/*` to the backend service using `BACKEND_URL`
+Worker-owned jobs must not drift into the web runtime in the hardened deployment shape. Telegram-connected and scheduled processing belong to the worker role.
 
-That contract is unchanged in this release.
+### Web remains request-serving first
 
-### Railway Environment Notes
+The web service exists to serve APIs and product interactions. It may expose operator controls, but it must not become a second uncontrolled worker.
 
-The following defaults changed in code/config examples:
+### Staging is constrained on purpose
 
-- `OPENAI_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_TRIAGE_MODEL = gpt-5-nano`
-- `QUESTION_BRIEFS_SYNTHESIS_MODEL = gpt-5-nano`
-- `BEHAVIORAL_BRIEFS_MODEL = gpt-5-nano`
-- `BEHAVIORAL_BRIEFS_PROMPT_VERSION = behavior-v2`
+Staging/testing environments are intentionally constrained to avoid accidental writes and duplicate background behavior. Do not treat staging like an unconstrained clone of production.
 
-Compatibility note:
+### Redis is required in locked environments
 
-- if Railway does not set these vars explicitly, the new defaults apply automatically
-- if Railway already pins any of these values, update the Railway env settings manually to match the release
+Locked environments rely on Redis-backed coordination. Missing Redis in staging or production should be treated as a serious runtime contract violation.
 
-## 8. Testing and QA
+### Auth boundaries must remain explicit
 
-### Required Automated Checks
+Operator-only routes, analytics routes, KB routes, and helper routes have different access models. Do not flatten these access boundaries for convenience.
+
+### Supabase is the operational ledger
+
+Do not move runtime truth into caches or graphs. Redis and Neo4j support the platform; they do not replace the operational source of truth.
+
+### Cache and rebuild behavior must remain observable
+
+When cache invalidation or runtime refresh behavior changes, the system must continue to expose enough health and freshness information for operators to reason about what is stale, what is warming, and what failed.
+
+### Compatibility paths are not the target architecture
+
+Compatibility-only paths such as historical single-service behavior may still exist in code, but they must not be mistaken for the preferred production topology.
+
+## 9. Developer Onboarding
+
+### Where to start
+
+A new developer should start in this order:
+
+1. this document
+2. `README.md`
+3. `docs/production_runbook.md`
+4. code entrypoints:
+   - `api/server.py`
+   - `api/worker.py`
+   - `config.py`
+   - `frontend/src/app/routes.tsx`
+
+### Local development
+
+Backend:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 -m compileall api buffer ingester processor scripts tests
-npm --prefix frontend run build
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+venv/bin/python -m uvicorn api.server:app --reload --port 8001
 ```
 
-### Release QA Focus
+Frontend:
 
-For the current release, QA should confirm:
+```bash
+cd frontend
+npm ci
+npm run dev
+```
 
-- Topic Landscape, Conversation Trends, Trending Now, and Topic Lifecycle all reflect direct-message mention semantics
-- strategic widgets remain populated independently when one strategic query fails
-- Service Gap Detector never renders fallback-derived bars
-- empty service-gap state is soft and non-erroring
-- no deployment files or proxy contracts changed for Railway
+### How to test
 
-## 9. Maintenance and Recovery Scripts
+Backend tests are driven through `pytest`/`unittest` coverage in `tests/`.
 
-The release includes maintenance scripts that support the analytics model:
+Frontend tests and build validation are driven through:
 
-- `scripts/reset_topic_analytics_window.py`
-  - rebuilds the clean analytics window
-- `scripts/validate_topic_mentions.py`
-  - validates mention counts against direct message totals
-- `scripts/remove_redundant_general_topic_links.py`
-  - cleans redundant topic taxonomy links that could later create category duplication
+```bash
+cd frontend
+npm run test
+npm run build
+```
 
-These scripts are operational tools and should be used deliberately in production environments.
+For release confidence and environment validation, use the smoke and runbook procedures rather than treating local tests as sufficient.
 
-## 10. Known Product Limits
+### Repository orientation
 
-- Topic Lifecycle is not yet a full lifecycle model.
-- The strategic window is intentionally short while clean history rebuilds.
-- Service-gap detection can correctly produce no result when grounded service evidence is insufficient.
-- Railway parity depends on deployed AI env vars not pinning older model values than the current code defaults.
+Major directories:
 
-## 11. Release Notes for the Current Mainline
+- `api/`
+  - FastAPI app, aggregation, endpoint orchestration, helper and admin logic
+- `scraper/`
+  - Telegram scraping and source preparation
+- `processor/`
+  - AI enrichment logic
+- `ingester/`
+  - graph synchronization
+- `buffer/`
+  - operational persistence helpers
+- `social/`
+  - social intelligence runtime and storage
+- `frontend/`
+  - React application
+- `scripts/`
+  - maintenance, validation, and smoke tooling
+- `tests/`
+  - backend regression coverage
 
-### Included in This Release
+### Additional docs worth reading
 
-- direct-message mention counting correction
-- strategic widget consistency improvements
-- 15-day clean graph analytics behavior
-- AI-only service-gap detection
-- removal of misleading service-gap fallback bars
-- documentation rewritten to current-state behavior
+- `docs/production_runbook.md`
+- `CONTRIBUTING.md`
+- targeted testing or handover docs only when working in those specific areas
 
-### Explicitly Not Included
+## 10. Known Compatibility Paths and Historical Notes
 
-- Telegram session/export tooling work
-- unrelated network/admin/source management changes
-- unrelated recovery or QR helper scripts
+- `main.py` remains in the repository as a legacy orchestration path, but it is not the canonical hardened deployment entrypoint
+- historical `APP_ROLE=all` behavior still exists for compatibility, but the preferred runtime shape is split `web` plus `worker`
+- older architecture and API docs in this repository predate the current documentation cleanup and should be treated as historical or reference material unless they explicitly point back to this document
+- previous design briefs, migration notes, and handover docs remain useful as context for their specific topics, but they are not authoritative descriptions of the system as a whole
 
----
+## Canonical Documentation Rule
 
-This document is intended to describe the actual shipped system behavior on the current mainline, not an aspirational roadmap. Update it whenever product semantics, deployment behavior, or operational truth changes.
+If another high-level document conflicts with this file about current architecture, runtime shape, ownership, or source-of-truth policy, this file wins unless a newer explicitly canonical replacement says otherwise.
