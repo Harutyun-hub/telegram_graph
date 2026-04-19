@@ -430,14 +430,30 @@ class DashboardV2ApiTests(unittest.TestCase):
             materialized_at="2026-04-18T11:00:00+00:00",
             stale_fact_families=[],
         )
-        direct_truth_builders = {
-            "community_brief": lambda ctx: {"messagesAnalyzed": 9, "postsAnalyzedInWindow": 4, "commentScopesAnalyzedInWindow": 5, "totalAnalysesInWindow": 9},
-            "community_health_score": lambda ctx: {"currentScore": 55, "components": [{"name": "trust"}]},
-            "trending_topics_feed": lambda ctx: [{"topic": "Road And Transit", "mentions": 11}],
-            "conversation_trends": lambda ctx: [{"topic": "Road And Transit"}],
-            "topic_lifecycle": lambda ctx: [{"topic": "Road And Transit", "stage": "growing"}],
-            "sentiment_by_topic": lambda ctx: [{"topic": "Road And Transit", "positive": 60}],
-            "week_over_week_shifts": lambda ctx: [{"label": "Volume", "delta": 7}],
+        source_truth_summary_builders = {
+            "community_brief": lambda ctx, cache: {
+                "present": True,
+                "itemCount": 12,
+                "nonEmptyFields": ["messagesAnalyzed", "postsAnalyzedInWindow", "commentScopesAnalyzedInWindow", "totalAnalysesInWindow"],
+                "topItems": [],
+                "messagesAnalyzed": 9,
+                "postsAnalyzedInWindow": 4,
+                "commentScopesAnalyzedInWindow": 5,
+                "totalAnalysesInWindow": 9,
+            },
+            "community_health_score": lambda ctx, cache: {
+                "present": True,
+                "itemCount": 1,
+                "nonEmptyFields": ["components", "currentScore"],
+                "topItems": [],
+                "currentScore": 55,
+                "componentCount": 1,
+            },
+            "trending_topics_feed": lambda ctx, cache: {"present": True, "itemCount": 1, "nonEmptyFields": ["trendingTopics"], "topItems": ["Road And Transit"]},
+            "conversation_trends": lambda ctx, cache: {"present": True, "itemCount": 1, "nonEmptyFields": ["trendLines"], "topItems": ["Road And Transit"]},
+            "topic_lifecycle": lambda ctx, cache: {"present": True, "itemCount": 1, "nonEmptyFields": ["lifecycleStages"], "topItems": ["Road And Transit"]},
+            "sentiment_by_topic": lambda ctx, cache: {"present": True, "itemCount": 1, "nonEmptyFields": [], "topItems": ["Road And Transit"]},
+            "week_over_week_shifts": lambda ctx, cache: {"present": True, "itemCount": 1, "nonEmptyFields": [], "topItems": ["Volume"]},
         }
 
         with patch.object(server.config, "ADMIN_API_KEY", ""), \
@@ -445,7 +461,7 @@ class DashboardV2ApiTests(unittest.TestCase):
              patch.object(server, "get_dashboard_v2_store", return_value=store), \
              patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=v2_result), \
              patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", side_effect=RuntimeError("legacy unavailable")), \
-             patch("api.dashboard_v2_compare._direct_truth_builders", return_value=direct_truth_builders):
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=source_truth_summary_builders):
             response = self.client.post("/api/dashboard-v2/compare?from_date=2026-03-17&to_date=2026-04-15")
 
         self.assertEqual(response.status_code, 200)

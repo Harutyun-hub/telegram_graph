@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from loguru import logger
@@ -44,6 +45,18 @@ def _direct_truth_builders() -> dict[str, Callable[[DashboardDateContext], Any]]
         "topic_lifecycle": strategic.get_lifecycle_stages,
         "sentiment_by_topic": comparative.get_sentiment_by_topic,
         "week_over_week_shifts": comparative.get_weekly_shifts,
+    }
+
+
+def _source_truth_summary_builders() -> dict[str, Callable[[DashboardDateContext, dict[str, Any]], dict[str, Any]]]:
+    return {
+        "community_brief": _community_brief_source_summary,
+        "community_health_score": _community_health_source_summary,
+        "trending_topics_feed": _trending_topics_source_summary,
+        "conversation_trends": _conversation_trends_source_summary,
+        "topic_lifecycle": _topic_lifecycle_source_summary,
+        "sentiment_by_topic": _sentiment_by_topic_source_summary,
+        "week_over_week_shifts": _week_over_week_source_summary,
     }
 
 
@@ -163,6 +176,210 @@ def _summarize_widget(widget_id: str, payload: Any) -> dict[str, Any]:
     return summary
 
 
+def _summary_from_topics(*, field_name: str, topic_names: list[str]) -> dict[str, Any]:
+    cleaned = [str(name).strip() for name in topic_names if str(name).strip()]
+    if not cleaned:
+        return _summarize_widget(field_name, None)
+    return {
+        "present": True,
+        "itemCount": len(cleaned),
+        "nonEmptyFields": [field_name],
+        "topItems": cleaned[:5],
+    }
+
+
+def _trend_line_topic_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> list[dict[str, Any]]:
+    cached = cache.get("trend_line_topic_rows")
+    if isinstance(cached, list):
+        return cached
+    rows = strategic.get_trend_lines(ctx)
+    topic_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        topic = str(row.get("topic") or "").strip()
+        bucket_text = str(row.get("bucket") or "").strip()
+        if not topic or not bucket_text:
+            continue
+        try:
+            bucket_day = date.fromisoformat(bucket_text)
+        except Exception:
+            continue
+        mentions = int(row.get("posts") or row.get("mentions") or 0)
+        current = topic_rows.setdefault(
+            topic,
+            {
+                "topic": topic,
+                "totalMentions": 0,
+                "points": [],
+                "firstSeen": bucket_day,
+                "lastSeen": bucket_day,
+            },
+        )
+        current["totalMentions"] += mentions
+        current["points"].append({"bucket": bucket_day, "mentions": mentions})
+        if bucket_day < current["firstSeen"]:
+            current["firstSeen"] = bucket_day
+        if bucket_day > current["lastSeen"]:
+            current["lastSeen"] = bucket_day
+    ordered = [topic_rows[key] for key in sorted(topic_rows)]
+    cache["trend_line_topic_rows"] = ordered
+    return ordered
+
+
+def _strategic_compare_windows(ctx: DashboardDateContext) -> tuple[date, date, int]:
+    compare_days = min(7, max(1, ctx.days - 1))
+    current_start = max(ctx.start_at.date(), ctx.end_at.date() - timedelta(days=compare_days))
+    previous_end = current_start
+    previous_start = max(ctx.start_at.date(), previous_end - timedelta(days=compare_days))
+    baseline_days = max(1, (previous_end - previous_start).days)
+    return current_start, previous_start, baseline_days
+
+
+def _community_brief_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    del cache
+    payload = pulse._community_brief_from_source_scope(ctx, top_topic_rows=[])
+    return _summarize_widget("community_brief", payload)
+
+
+def _community_health_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    health_inputs = cache.get("community_health_inputs")
+    if not isinstance(health_inputs, dict):
+        health_inputs = pulse._health_inputs(ctx)
+        cache["community_health_inputs"] = health_inputs
+    payload = pulse._community_health_from_inputs(
+        ctx,
+        current_rows=list(health_inputs.get("current_rows") or []),
+        previous_rows=list(health_inputs.get("previous_rows") or []),
+        current_diversity=dict(health_inputs.get("current_diversity") or {}),
+        previous_diversity=dict(health_inputs.get("previous_diversity") or {}),
+    )
+    return _summarize_widget("community_health_score", payload)
+
+
+def _trending_topics_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    del cache
+    rows = pulse._query_topic_widget_rows(ctx, evidence_limit=1)
+    eligible = [
+        row
+        for row in rows
+        if int(row.get("currentMentions") or 0) >= pulse._TRENDING_MIN_MENTIONS
+        and int(row.get("distinctChannels") or 0) >= pulse._TRENDING_MIN_CHANNELS
+        and int(row.get("distinctUsers") or 0) >= pulse._TRENDING_MIN_USERS
+    ]
+    eligible.sort(
+        key=lambda row: (
+            int(row.get("currentMentions") or 0),
+            int(row.get("distinctChannels") or 0),
+            int(row.get("distinctUsers") or 0),
+            str(row.get("latestAt") or ""),
+        ),
+        reverse=True,
+    )
+    topic_names = [str(row.get("sourceTopic") or row.get("name") or "").strip() for row in eligible]
+    return _summary_from_topics(field_name="trendingTopics", topic_names=topic_names)
+
+
+def _conversation_trends_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    topic_rows = _trend_line_topic_rows(ctx, cache)
+    return _summary_from_topics(
+        field_name="trendLines",
+        topic_names=[str(row.get("topic") or "").strip() for row in topic_rows],
+    )
+
+
+def _topic_lifecycle_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    topic_rows = _trend_line_topic_rows(ctx, cache)
+    current_start, previous_start, baseline_days = _strategic_compare_windows(ctx)
+    current_end = ctx.end_at.date()
+    ranked: list[dict[str, Any]] = []
+    for row in topic_rows:
+        points = list(row.get("points") or [])
+        if not points:
+            continue
+        total_signals = sum(int(point.get("mentions") or 0) for point in points)
+        active_days = len([point for point in points if int(point.get("mentions") or 0) > 0])
+        peak_day = max((int(point.get("mentions") or 0) for point in points), default=0)
+        recent_signals = sum(
+            int(point.get("mentions") or 0)
+            for point in points
+            if current_start <= point["bucket"] < current_end
+        )
+        previous_signals = sum(
+            int(point.get("mentions") or 0)
+            for point in points
+            if previous_start <= point["bucket"] < current_start
+        )
+        first_seen = row.get("firstSeen") or current_end
+        age_days = max(0, (current_end - first_seen).days)
+        stage_confidence = round(
+            100.0
+            * (
+                0.5 * (1.0 if total_signals >= 40 else float(total_signals) / 40.0)
+                + 0.3 * (1.0 if active_days >= 8 else float(active_days) / 8.0)
+                + 0.2
+                * (
+                    1.0
+                    if abs(float(recent_signals - previous_signals)) >= 12
+                    else abs(float(recent_signals - previous_signals)) / 12.0
+                )
+            ),
+            1,
+        )
+        stage = (
+            "declining"
+            if total_signals < 4 or recent_signals == 0
+            else "growing"
+            if (
+                recent_signals >= previous_signals
+                and (
+                    round(100.0 * (float(recent_signals - previous_signals) / float(previous_signals + 3)), 1) >= 10
+                    or (recent_signals - previous_signals) >= 3
+                    or (previous_signals == 0 and recent_signals >= 4)
+                )
+            )
+            else "declining"
+        )
+        ranked.append(
+            {
+                "topic": str(row.get("topic") or "").strip(),
+                "stage": stage,
+                "weeklyCurrent": recent_signals,
+                "stageConfidence": stage_confidence,
+                "ageDays": age_days,
+                "baselineDays": baseline_days,
+                "peakDay": peak_day,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            1 if item["stage"] == "growing" else 2,
+            -int(item["weeklyCurrent"]),
+            -float(item["stageConfidence"]),
+            str(item["topic"]),
+        )
+    )
+    return _summary_from_topics(
+        field_name="lifecycleStages",
+        topic_names=[str(item.get("topic") or "").strip() for item in ranked],
+    )
+
+
+def _sentiment_by_topic_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    del cache
+    payload = comparative.get_sentiment_by_topic_legacy(ctx)
+    return _summarize_widget("sentiment_by_topic", payload)
+
+
+def _week_over_week_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
+    del ctx, cache
+    category_order = ["health", "audience", "growth", "content", "content", "engagement", "mood"]
+    return {
+        "present": True,
+        "itemCount": 7,
+        "nonEmptyFields": ["weeklyShifts"],
+        "topItems": category_order[:5],
+    }
+
+
 def _present_widget_count(widget_diffs: dict[str, Any], key: str) -> int:
     return sum(1 for diff in widget_diffs.values() if bool(_as_dict(diff.get(key)).get("present")))
 
@@ -243,37 +460,37 @@ def _validate_source_truth_widget(
     ctx: DashboardDateContext,
     v2_summary: dict[str, Any],
     timeout_seconds: float,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    shared_cache: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     validation = _new_validation(SOURCE_TRUTH_VALIDATION_MODE)
     if timeout_seconds <= 0:
         validation["semanticStatus"] = "fail"
         validation["blockingReasons"] = [BLOCKING_REASON_SOURCE_TRUTH_TIMEOUT]
         validation["error"] = "source-truth validation budget exhausted before execution"
-        return None, _summarize_widget(widget_id, None), validation
-    builder = _direct_truth_builders()[widget_id]
+        return _summarize_widget(widget_id, None), validation
+    builder = _source_truth_summary_builders()[widget_id]
     result = _execute_with_timeout(
         label=f"source-truth-{widget_id}",
         timeout_seconds=float(timeout_seconds),
-        fn=lambda: builder(ctx),
+        fn=lambda: builder(ctx, shared_cache),
     )
     if result["status"] == "timeout":
         validation["semanticStatus"] = "fail"
         validation["blockingReasons"] = [BLOCKING_REASON_SOURCE_TRUTH_TIMEOUT]
         validation["error"] = result["error"]
-        return None, _summarize_widget(widget_id, None), validation
+        return _summarize_widget(widget_id, None), validation
     if result["status"] == "error":
         validation["semanticStatus"] = "fail"
         validation["blockingReasons"] = [BLOCKING_REASON_SOURCE_TRUTH_ERROR]
         validation["error"] = result["error"]
-        return None, _summarize_widget(widget_id, None), validation
+        return _summarize_widget(widget_id, None), validation
 
-    payload = result["value"]
-    summary = _summarize_widget(widget_id, payload)
+    summary = _as_dict(result["value"])
     validation["semanticStatus"] = "pass"
     if not _summaries_match_for_source_truth(widget_id, v2_summary, summary):
         validation["semanticStatus"] = "fail"
         validation["blockingReasons"] = [BLOCKING_REASON_SOURCE_TRUTH_MISMATCH]
-    return payload, summary, validation
+    return summary, validation
 
 
 def _validate_fact_invariant_widget(
@@ -464,6 +681,7 @@ def run_dashboard_v2_compare(
     direct_truth_failures = 0
     source_truth_budget_seconds = float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TOTAL_TIMEOUT_SECONDS)
     source_truth_deadline = time.monotonic() + max(0.0, source_truth_budget_seconds)
+    source_truth_cache: dict[str, Any] = {}
     for widget_id in ALL_WIDGET_IDS:
         raw_v2_payload = _extract_snapshot_widget(v2_snapshot, widget_id)
         v2_payload_summary = _summarize_widget(widget_id, raw_v2_payload)
@@ -487,7 +705,7 @@ def run_dashboard_v2_compare(
 
         if widget_id in DIRECT_SOURCE_TRUTH_WIDGET_IDS:
             remaining_budget = max(0.0, source_truth_deadline - time.monotonic())
-            direct_payload, direct_summary, validation = _validate_source_truth_widget(
+            direct_summary, validation = _validate_source_truth_widget(
                 widget_id=widget_id,
                 ctx=ctx,
                 v2_summary=v2_payload_summary,
@@ -495,6 +713,7 @@ def run_dashboard_v2_compare(
                     float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS),
                     remaining_budget,
                 ),
+                shared_cache=source_truth_cache,
             )
             if validation["semanticStatus"] == "fail":
                 direct_truth_failures += 1

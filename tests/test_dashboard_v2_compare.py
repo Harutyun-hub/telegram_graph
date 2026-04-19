@@ -12,6 +12,7 @@ from api.dashboard_v2_compare import (
     FACT_INVARIANT_VALIDATION_MODE,
     SOURCE_TRUTH_VALIDATION_MODE,
     WARNING_REASON_OLD_PATH_UNAVAILABLE,
+    _conversation_trends_source_summary,
     run_dashboard_v2_compare,
 )
 from api.dashboard_v2_registry import ALL_WIDGET_IDS
@@ -74,15 +75,56 @@ class _CompareReadyWindowStore(_CompareStore):
         }
 
 
-def _direct_truth_payloads() -> dict[str, object]:
+def _direct_truth_summaries() -> dict[str, dict[str, object]]:
     return {
-        "community_brief": {"messagesAnalyzed": 14, "postsAnalyzedInWindow": 5, "commentScopesAnalyzedInWindow": 9, "totalAnalysesInWindow": 14},
-        "community_health_score": {"currentScore": 55, "components": [{"name": "trust"}]},
-        "trending_topics_feed": [{"topic": "Road And Transit", "mentions": 11}],
-        "conversation_trends": [{"topic": "Road And Transit"}],
-        "topic_lifecycle": [{"topic": "Road And Transit", "stage": "growing"}],
-        "sentiment_by_topic": [{"topic": "Road And Transit", "positive": 60}],
-        "week_over_week_shifts": [{"label": "Volume", "delta": 7}],
+        "community_brief": {
+            "present": True,
+            "itemCount": 12,
+            "nonEmptyFields": ["messagesAnalyzed", "postsAnalyzedInWindow", "commentScopesAnalyzedInWindow", "totalAnalysesInWindow"],
+            "topItems": [],
+            "messagesAnalyzed": 14,
+            "postsAnalyzedInWindow": 5,
+            "commentScopesAnalyzedInWindow": 9,
+            "totalAnalysesInWindow": 14,
+        },
+        "community_health_score": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": ["components", "currentScore"],
+            "topItems": [],
+            "currentScore": 55,
+            "componentCount": 1,
+        },
+        "trending_topics_feed": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": ["trendingTopics"],
+            "topItems": ["Road And Transit"],
+        },
+        "conversation_trends": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": ["trendLines"],
+            "topItems": ["Road And Transit"],
+        },
+        "topic_lifecycle": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": ["lifecycleStages"],
+            "topItems": ["Road And Transit"],
+        },
+        "sentiment_by_topic": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": [],
+            "topItems": ["Road And Transit"],
+        },
+        "week_over_week_shifts": {
+            "present": True,
+            "itemCount": 1,
+            "nonEmptyFields": [],
+            "topItems": ["Volume"],
+        },
     }
 
 
@@ -158,9 +200,11 @@ def _v2_result() -> DashboardV2AssemblyResult:
     )
 
 
-def _direct_truth_builders(payloads: dict[str, object] | None = None) -> dict[str, object]:
-    payload_map = payloads or _direct_truth_payloads()
-    return {widget_id: (lambda ctx, value=value: value) for widget_id, value in payload_map.items()}
+def _source_truth_summary_builders(
+    summaries: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    summary_map = summaries or _direct_truth_summaries()
+    return {widget_id: (lambda ctx, cache, value=value: value) for widget_id, value in summary_map.items()}
 
 
 class DashboardV2CompareTests(unittest.TestCase):
@@ -170,7 +214,7 @@ class DashboardV2CompareTests(unittest.TestCase):
 
         with patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", return_value=_old_snapshot()), \
              patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()) as assemble_mock, \
-             patch("api.dashboard_v2_compare._direct_truth_builders", return_value=_direct_truth_builders()):
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=_source_truth_summary_builders()):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
         self.assertEqual(result["compareId"], "compare-1")
@@ -188,13 +232,13 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_compare_returns_structured_failure_when_source_truth_validator_errors(self) -> None:
         store = _CompareReadyWindowStore()
         ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
-        payloads = _direct_truth_payloads()
-        builders = _direct_truth_builders(payloads)
-        builders["community_brief"] = lambda ctx: (_ for _ in ()).throw(RuntimeError("neo4j overloaded"))
+        summaries = _direct_truth_summaries()
+        builders = _source_truth_summary_builders(summaries)
+        builders["community_brief"] = lambda ctx, cache: (_ for _ in ()).throw(RuntimeError("neo4j overloaded"))
 
         with patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", return_value=_old_snapshot()), \
              patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
-             patch("api.dashboard_v2_compare._direct_truth_builders", return_value=builders):
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=builders):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
         validation = result["widgetDiffs"]["community_brief"]["validation"]
@@ -207,7 +251,7 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_compare_returns_structured_failure_when_source_truth_validator_times_out(self) -> None:
         store = _CompareReadyWindowStore()
         ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
-        payloads = _direct_truth_payloads()
+        summaries = _direct_truth_summaries()
         old_snapshot = _old_snapshot()
 
         def _fake_execute(*, label: str, timeout_seconds: float, fn):
@@ -217,10 +261,11 @@ class DashboardV2CompareTests(unittest.TestCase):
             if label == "source-truth-community_brief":
                 return {"status": "timeout", "error": "source-truth-community_brief timed out after 20.0s"}
             widget_id = label.replace("source-truth-", "").replace("-", "_")
-            return {"status": "ok", "value": payloads[widget_id]}
+            return {"status": "ok", "value": summaries[widget_id]}
 
         with patch("api.dashboard_v2_compare._execute_with_timeout", side_effect=_fake_execute), \
-             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()):
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=_source_truth_summary_builders(summaries)):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
         validation = result["widgetDiffs"]["community_brief"]["validation"]
@@ -231,7 +276,7 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_compare_marks_remaining_source_truth_widgets_timed_out_when_total_budget_is_exhausted(self) -> None:
         store = _CompareReadyWindowStore()
         ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
-        payloads = _direct_truth_payloads()
+        summaries = _direct_truth_summaries()
         call_count = {"source_truth": 0}
 
         def _fake_execute(*, label: str, timeout_seconds: float, fn):
@@ -240,13 +285,14 @@ class DashboardV2CompareTests(unittest.TestCase):
                 return {"status": "ok", "value": _old_snapshot()}
             call_count["source_truth"] += 1
             if call_count["source_truth"] == 1:
-                return {"status": "ok", "value": payloads["community_brief"]}
+                return {"status": "ok", "value": summaries["community_brief"]}
             raise AssertionError("source-truth execution should stop once the total budget is exhausted")
 
         monotonic_values = iter([0.0, 0.0, 61.0, 61.0, 61.0, 61.0, 61.0, 61.0])
 
         with patch("api.dashboard_v2_compare._execute_with_timeout", side_effect=_fake_execute), \
              patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=_source_truth_summary_builders(summaries)), \
              patch("api.dashboard_v2_compare.time.monotonic", side_effect=lambda: next(monotonic_values)):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
@@ -258,17 +304,18 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_compare_keeps_old_path_failure_non_blocking(self) -> None:
         store = _CompareReadyWindowStore()
         ctx = build_dashboard_date_context("2026-04-15", "2026-04-15")
-        payloads = _direct_truth_payloads()
+        summaries = _direct_truth_summaries()
 
         def _fake_execute(*, label: str, timeout_seconds: float, fn):
             del timeout_seconds, fn
             if label == "old-path":
                 return {"status": "error", "error": "legacy dashboard unavailable"}
             widget_id = label.replace("source-truth-", "").replace("-", "_")
-            return {"status": "ok", "value": payloads[widget_id]}
+            return {"status": "ok", "value": summaries[widget_id]}
 
         with patch("api.dashboard_v2_compare._execute_with_timeout", side_effect=_fake_execute), \
-             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()):
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
+             patch("api.dashboard_v2_compare._source_truth_summary_builders", return_value=_source_truth_summary_builders(summaries)):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
         self.assertEqual(result["semanticStatus"], "ready")
@@ -279,6 +326,21 @@ class DashboardV2CompareTests(unittest.TestCase):
             [WARNING_REASON_OLD_PATH_UNAVAILABLE],
         )
         self.assertEqual(store.created_runs[0]["old_path_meta"]["status"], "unavailable")
+
+    def test_conversation_trends_source_summary_normalizes_raw_rows(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-17", "2026-04-15")
+        raw_rows = [
+            {"topic": "Road And Transit", "bucket": "2026-04-10", "posts": 3},
+            {"topic": "Road And Transit", "bucket": "2026-04-11", "posts": 5},
+            {"topic": "Water Security", "bucket": "2026-04-10", "posts": 2},
+        ]
+
+        with patch("api.dashboard_v2_compare.strategic.get_trend_lines", return_value=raw_rows):
+            summary = _conversation_trends_source_summary(ctx, {})
+
+        self.assertTrue(summary["present"])
+        self.assertEqual(summary["itemCount"], 2)
+        self.assertEqual(summary["topItems"], ["Road And Transit", "Water Security"])
 
 
 if __name__ == "__main__":
