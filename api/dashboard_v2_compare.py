@@ -413,7 +413,10 @@ def run_dashboard_v2_compare(
             store,
             ctx=ctx,
             allow_stale_exact_last_known_good=False,
-            prefer_cached_exact_artifacts=False,
+            # Compare should reuse a fresh exact artifact when one already exists.
+            # That keeps larger-window validation operationally bounded without
+            # falling back to stale same-key last-known-good artifacts.
+            prefer_cached_exact_artifacts=True,
         )
         v2_snapshot = dict(v2_result.snapshot or {})
         v2_meta = {

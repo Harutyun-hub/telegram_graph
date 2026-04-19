@@ -169,7 +169,7 @@ class DashboardV2CompareTests(unittest.TestCase):
         ctx = build_dashboard_date_context("2026-04-09", "2026-04-15")
 
         with patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", return_value=_old_snapshot()), \
-             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()), \
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=_v2_result()) as assemble_mock, \
              patch("api.dashboard_v2_compare._direct_truth_builders", return_value=_direct_truth_builders()):
             result = run_dashboard_v2_compare(store, from_value=ctx.from_date.isoformat(), to_value=ctx.to_date.isoformat())
 
@@ -182,6 +182,8 @@ class DashboardV2CompareTests(unittest.TestCase):
         self.assertEqual(result["widgetDiffs"]["community_brief"]["validation"]["mode"], SOURCE_TRUTH_VALIDATION_MODE)
         self.assertEqual(result["widgetDiffs"]["question_cloud"]["validation"]["mode"], FACT_INVARIANT_VALIDATION_MODE)
         self.assertEqual(store.created_runs[0]["v2_meta"]["rangeResolutionPath"], "v2_assembled_exact_from_facts")
+        self.assertTrue(assemble_mock.call_args.kwargs["prefer_cached_exact_artifacts"])
+        self.assertFalse(assemble_mock.call_args.kwargs["allow_stale_exact_last_known_good"])
 
     def test_compare_returns_structured_failure_when_source_truth_validator_errors(self) -> None:
         store = _CompareReadyWindowStore()
