@@ -73,6 +73,14 @@ DASH_V2_COMPARE_SAMPLE_DAYS = _env_csv(
     "DASH_V2_COMPARE_SAMPLE_DAYS",
     "1,3,7,30,90,365",
 )
+DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("DASH_V2_COMPARE_SOURCE_TRUTH_TIMEOUT_SECONDS", "20.0")),
+)
+DASH_V2_COMPARE_OLD_PATH_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("DASH_V2_COMPARE_OLD_PATH_TIMEOUT_SECONDS", "10.0")),
+)
 
 
 def should_validate_on_import() -> bool:

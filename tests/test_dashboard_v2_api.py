@@ -16,7 +16,7 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 
 from api import server
 from api.dashboard_dates import build_dashboard_date_context
-from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError
+from api.dashboard_v2_assembler import DashboardV2AssemblyResult, DashboardV2FactsNotReadyError
 
 
 class _RouteStore:
@@ -183,6 +183,44 @@ class _StatusRouteStore:
         }
 
 
+class _CompareRouteStore:
+    def __init__(self) -> None:
+        self.created_runs: list[dict] = []
+
+    def summarize_v2_route_readiness(self, *, min_fact_version: int = 1, lookback_days: int = 400, from_date=None, to_date=None):
+        del min_fact_version, lookback_days
+        return {
+            "coverageStart": from_date.isoformat() if from_date else "2026-03-17",
+            "coverageEnd": to_date.isoformat() if to_date else "2026-04-15",
+            "routeReadyWindowStart": from_date.isoformat() if from_date else "2026-03-17",
+            "routeReadyWindowEnd": to_date.isoformat() if to_date else "2026-04-15",
+            "requestedFrom": from_date.isoformat() if from_date else None,
+            "requestedTo": to_date.isoformat() if to_date else None,
+            "v2RouteReady": True,
+            "missingFamilies": [],
+            "missingDates": [],
+            "degradedFamilies": [],
+            "degradedDates": [],
+        }
+
+    def get_range_readiness(self, *, from_date, to_date, fact_families, min_fact_version: int = 1):
+        del from_date, to_date, fact_families, min_fact_version
+        return {
+            "availabilityStart": "2026-03-17",
+            "availabilityEnd": "2026-04-15",
+            "missingFactFamilies": [],
+            "missingDates": [],
+            "degradedFactFamilies": [],
+            "degradedDates": [],
+            "factFamilies": {},
+            "ready": True,
+        }
+
+    def create_compare_run(self, **kwargs) -> str:
+        self.created_runs.append(dict(kwargs))
+        return "compare-1"
+
+
 class DashboardV2ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -328,6 +366,95 @@ class DashboardV2ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["jobId"], "job-1")
         self.assertEqual(response.json()["result"]["currentSlice"]["factFamily"], "topics")
+
+    def test_dashboard_v2_compare_returns_structured_200_when_old_path_is_unavailable(self) -> None:
+        store = _CompareRouteStore()
+        v2_result = DashboardV2AssemblyResult(
+            snapshot={
+                "communityBrief": {"messagesAnalyzed": 9, "postsAnalyzedInWindow": 4, "commentScopesAnalyzedInWindow": 5, "totalAnalysesInWindow": 9},
+                "communityHealth": {"currentScore": 55, "components": [{"name": "trust"}]},
+                "trendingTopics": [{"topic": "Road And Transit", "mentions": 11}],
+                "trendingNewTopics": [],
+                "trendLines": [{"topic": "Road And Transit", "points": [2, 3, 4]}],
+                "trendData": [],
+                "questionCategories": [],
+                "questionBriefs": [],
+                "qaGap": {},
+                "lifecycleStages": [{"topic": "Road And Transit", "stage": "growing"}],
+                "problemBriefs": [],
+                "serviceGapBriefs": [],
+                "problems": [],
+                "serviceGaps": [],
+                "satisfactionAreas": [],
+                "moodData": [],
+                "moodConfig": {},
+                "urgencySignals": [],
+                "communityChannels": [],
+                "keyVoices": [],
+                "hourlyActivity": [],
+                "weeklyActivity": [],
+                "recommendations": [],
+                "viralTopics": [],
+                "personas": [],
+                "interests": [],
+                "origins": [],
+                "integrationData": [],
+                "integrationLevels": [],
+                "integrationSeriesConfig": [],
+                "emergingInterests": [],
+                "retentionFactors": [],
+                "churnSignals": [],
+                "growthFunnel": [],
+                "decisionStages": [],
+                "newVsReturningVoiceWidget": {},
+                "businessOpportunities": [],
+                "businessOpportunityBriefs": [],
+                "jobSeeking": [],
+                "jobTrends": [],
+                "housingData": [],
+                "housingHotTopics": [],
+                "weeklyShifts": [{"label": "Volume", "delta": 7}],
+                "sentimentByTopic": [{"topic": "Road And Transit", "positive": 60}],
+                "topPosts": [],
+                "contentTypePerformance": [],
+                "vitalityIndicators": {},
+                "topicBubbles": [],
+            },
+            cache_status="assembled_exact_from_facts",
+            cache_source="assembled",
+            range_resolution_path="v2_assembled_exact_from_facts",
+            is_stale=False,
+            fact_version=2,
+            artifact_version=1,
+            fact_watermark="2026-04-18T11:00:00+00:00",
+            materialized_at="2026-04-18T11:00:00+00:00",
+            stale_fact_families=[],
+        )
+        direct_truth_builders = {
+            "community_brief": lambda ctx: {"messagesAnalyzed": 9, "postsAnalyzedInWindow": 4, "commentScopesAnalyzedInWindow": 5, "totalAnalysesInWindow": 9},
+            "community_health_score": lambda ctx: {"currentScore": 55, "components": [{"name": "trust"}]},
+            "trending_topics_feed": lambda ctx: [{"topic": "Road And Transit", "mentions": 11}],
+            "conversation_trends": lambda ctx: [{"topic": "Road And Transit"}],
+            "topic_lifecycle": lambda ctx: [{"topic": "Road And Transit", "stage": "growing"}],
+            "sentiment_by_topic": lambda ctx: [{"topic": "Road And Transit", "positive": 60}],
+            "week_over_week_shifts": lambda ctx: [{"label": "Volume", "delta": 7}],
+        }
+
+        with patch.object(server.config, "ADMIN_API_KEY", ""), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_dashboard_v2_store", return_value=store), \
+             patch("api.dashboard_v2_compare.assemble_dashboard_v2_exact", return_value=v2_result), \
+             patch("api.dashboard_v2_compare.aggregator.get_dashboard_data", side_effect=RuntimeError("legacy unavailable")), \
+             patch("api.dashboard_v2_compare._direct_truth_builders", return_value=direct_truth_builders):
+            response = self.client.post("/api/dashboard-v2/compare?from_date=2026-03-17&to_date=2026-04-15")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["result"]
+        self.assertEqual(payload["semanticStatus"], "ready")
+        self.assertTrue(payload["semanticGateReady"])
+        self.assertEqual(payload["regressionStatus"], "unavailable")
+        self.assertEqual(payload["validationSummary"]["regressionStatus"], "unavailable")
+        self.assertEqual(payload["widgetDiffs"]["community_brief"]["validation"]["warnings"], ["old_path_unavailable"])
 
 
 if __name__ == "__main__":
