@@ -15,8 +15,6 @@ from api.dashboard_v2_registry import (
     ALL_WIDGET_IDS,
     DIRECT_SOURCE_TRUTH_WIDGET_IDS,
     RAW_SNAPSHOT_FIELDS_BY_WIDGET_ID,
-    get_widget_coverage,
-    required_fact_families_for_widgets,
 )
 from api.dashboard_v2_store import DashboardV2Store
 from api.queries import comparative, pulse, strategic
@@ -280,35 +278,20 @@ def _validate_source_truth_widget(
 
 def _validate_fact_invariant_widget(
     *,
-    store: DashboardV2Store,
-    ctx: DashboardDateContext,
     widget_id: str,
     raw_payload: Any,
     v2_summary: dict[str, Any],
-    readiness_cache: dict[tuple[str, ...], dict[str, Any]],
-    min_fact_version: int,
+    exact_readiness: dict[str, Any],
 ) -> dict[str, Any]:
     validation = _new_validation(FACT_INVARIANT_VALIDATION_MODE)
-    coverage = get_widget_coverage(widget_id)
-    fact_families = required_fact_families_for_widgets([widget_id]) or coverage.fact_families
-    cache_key = tuple(fact_families)
-    if cache_key not in readiness_cache:
-        readiness_cache[cache_key] = store.get_range_readiness(
-            from_date=ctx.from_date,
-            to_date=ctx.to_date,
-            fact_families=fact_families,
-            min_fact_version=min_fact_version,
-        )
-    readiness = readiness_cache[cache_key]
-
     blocking_reasons: list[str] = []
-    if not readiness.get("ready"):
+    if not bool(exact_readiness.get("v2RouteReady")):
         blocking_reasons.append(BLOCKING_REASON_FACT_INVARIANT_FAILED)
         validation["readiness"] = {
-            "missingFamilies": list(readiness.get("missingFactFamilies") or []),
-            "missingDates": list(readiness.get("missingDates") or []),
-            "degradedFamilies": list(readiness.get("degradedFactFamilies") or []),
-            "degradedDates": list(readiness.get("degradedDates") or []),
+            "missingFamilies": list(exact_readiness.get("missingFamilies") or []),
+            "missingDates": list(exact_readiness.get("missingDates") or []),
+            "degradedFamilies": list(exact_readiness.get("degradedFamilies") or []),
+            "degradedDates": list(exact_readiness.get("degradedDates") or []),
         }
     if raw_payload is None:
         blocking_reasons.append(BLOCKING_REASON_FACT_INVARIANT_FAILED)
@@ -478,9 +461,7 @@ def run_dashboard_v2_compare(
             )
 
     widget_diffs: dict[str, Any] = {}
-    direct_truth_payloads: dict[str, Any] = {}
     direct_truth_failures = 0
-    readiness_cache: dict[tuple[str, ...], dict[str, Any]] = {}
     source_truth_budget_seconds = float(config.DASH_V2_COMPARE_SOURCE_TRUTH_TOTAL_TIMEOUT_SECONDS)
     source_truth_deadline = time.monotonic() + max(0.0, source_truth_budget_seconds)
     for widget_id in ALL_WIDGET_IDS:
@@ -517,17 +498,13 @@ def run_dashboard_v2_compare(
             )
             if validation["semanticStatus"] == "fail":
                 direct_truth_failures += 1
-            direct_truth_payloads[widget_id] = direct_payload
             widget_diff["directTruth"] = direct_summary
         else:
             validation = _validate_fact_invariant_widget(
-                store=store,
-                ctx=ctx,
                 widget_id=widget_id,
                 raw_payload=raw_v2_payload,
                 v2_summary=v2_payload_summary,
-                readiness_cache=readiness_cache,
-                min_fact_version=2,
+                exact_readiness=exact_readiness,
             )
 
         regression_status, warnings = _build_regression_validation(
