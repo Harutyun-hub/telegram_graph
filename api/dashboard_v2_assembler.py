@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from api.dashboard_dates import DashboardDateContext
+from api.queries import pulse
 from api.dashboard_v2_registry import (
     FACT_FAMILIES,
     FULL_DASHBOARD_REQUIRED_FACT_FAMILIES,
@@ -291,7 +292,33 @@ def _merge_community_brief(values: list[tuple[date, Any]], snapshot: dict[str, A
     }
 
 
-def _merge_community_health(values: list[tuple[date, Any]]) -> dict[str, Any]:
+def _merge_community_health(
+    values: list[tuple[date, Any]],
+    *,
+    ctx: DashboardDateContext | None = None,
+) -> dict[str, Any]:
+    # Exact-window health must be recomputed for the selected range. Averaging
+    # daily snapshot scores drifts from the source-truth formula for multi-day windows.
+    if ctx is not None:
+        try:
+            health_inputs = pulse._health_inputs(ctx)
+            rebuilt = pulse._community_health_from_inputs(
+                ctx,
+                current_rows=list(health_inputs.get("current_rows") or []),
+                previous_rows=list(health_inputs.get("previous_rows") or []),
+                current_diversity=dict(health_inputs.get("current_diversity") or {}),
+                previous_diversity=dict(health_inputs.get("previous_diversity") or {}),
+            )
+            if isinstance(rebuilt, dict) and rebuilt:
+                return {
+                    "currentScore": int(_as_float(rebuilt.get("currentScore", rebuilt.get("score")))),
+                    "weekAgoScore": int(_as_float(rebuilt.get("weekAgoScore", rebuilt.get("previousScore")))),
+                    "history": list(_as_list(rebuilt.get("history"))),
+                    "components": rebuilt.get("components") or {},
+                }
+        except Exception:
+            # Keep the transitional assembler resilient if source-side rebuild fails.
+            pass
     current_scores: list[float] = []
     history: list[dict[str, Any]] = []
     latest_components: Any = {}
@@ -330,11 +357,18 @@ def _merge_mood_config(values: list[tuple[date, Any]]) -> dict[str, Any]:
     return {"sentiments": sentiments}
 
 
-def _assemble_field(field_name: str, values: list[tuple[date, Any]], snapshot: dict[str, Any], materialized_at: str | None) -> Any:
+def _assemble_field(
+    field_name: str,
+    values: list[tuple[date, Any]],
+    snapshot: dict[str, Any],
+    materialized_at: str | None,
+    *,
+    ctx: DashboardDateContext | None = None,
+) -> Any:
     if field_name == "communityBrief":
         return _merge_community_brief(values, snapshot, materialized_at)
     if field_name == "communityHealth":
-        return _merge_community_health(values)
+        return _merge_community_health(values, ctx=ctx)
     if field_name == "lifecycleStages":
         return _merge_lifecycle(values)
     if field_name == "newVsReturningVoiceWidget":
@@ -387,7 +421,7 @@ def assemble_exact_fact_snapshot(
     snapshot = _empty_snapshot()
     field_values = _collect_field_values(rows_by_family)
     for field_name, values in field_values.items():
-        snapshot[field_name] = _assemble_field(field_name, values, snapshot, materialized_at)
+        snapshot[field_name] = _assemble_field(field_name, values, snapshot, materialized_at, ctx=ctx)
     if not snapshot.get("trendingNewTopics"):
         snapshot["trendingNewTopics"] = [
             item for item in _as_list(snapshot.get("trendingTopics")) if isinstance(item, dict) and _as_float(item.get("trend")) > 0

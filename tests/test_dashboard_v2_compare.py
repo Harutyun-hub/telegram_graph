@@ -330,12 +330,11 @@ class DashboardV2CompareTests(unittest.TestCase):
     def test_conversation_trends_source_summary_normalizes_raw_rows(self) -> None:
         ctx = build_dashboard_date_context("2026-03-17", "2026-04-15")
         raw_rows = [
-            {"topic": "Road And Transit", "bucket": "2026-04-10", "posts": 3},
-            {"topic": "Road And Transit", "bucket": "2026-04-11", "posts": 5},
-            {"topic": "Water Security", "bucket": "2026-04-10", "posts": 2},
+            {"topic": "Road And Transit", "mentions": 8},
+            {"topic": "Water Security", "mentions": 2},
         ]
 
-        with patch("api.dashboard_v2_compare.strategic.get_trend_lines", return_value=raw_rows):
+        with patch("api.dashboard_v2_compare._simple_topic_rank_rows", return_value=raw_rows):
             summary = _conversation_trends_source_summary(ctx, {})
 
         self.assertTrue(summary["present"])

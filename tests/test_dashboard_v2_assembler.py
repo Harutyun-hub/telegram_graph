@@ -231,6 +231,44 @@ class DashboardV2AssemblerTests(unittest.TestCase):
         self.assertEqual(store.secondary_upserts[0]["meta_json"]["llmUsed"], False)
         self.assertEqual(store.secondary_upserts[0]["meta_json"]["networkUsed"], False)
 
+    def test_assembler_rebuilds_exact_window_community_health_from_source_formula(self) -> None:
+        store = _AssemblerStore()
+        store.rows_by_family["content"] = [
+            _make_fact_row(
+                "2026-04-14",
+                {
+                    "communityHealth": {
+                        "currentScore": 60,
+                        "components": [{"label": "Constructive Intent", "value": 60}],
+                    }
+                },
+            ),
+            _make_fact_row(
+                "2026-04-15",
+                {
+                    "communityHealth": {
+                        "currentScore": 20,
+                        "components": [{"label": "Constructive Intent", "value": 20}],
+                    }
+                },
+            ),
+        ]
+
+        rebuilt_health = {
+            "score": 45,
+            "previousScore": 41,
+            "history": [{"time": "today", "score": 45}],
+            "components": [{"label": "Constructive Intent", "value": 44}],
+        }
+
+        with patch("api.dashboard_v2_assembler.pulse._health_inputs", return_value={"current_rows": [], "previous_rows": [], "current_diversity": {}, "previous_diversity": {}}), \
+             patch("api.dashboard_v2_assembler.pulse._community_health_from_inputs", return_value=rebuilt_health):
+            result = assemble_dashboard_v2_exact(store, ctx=build_dashboard_date_context("2026-04-14", "2026-04-15"))
+
+        self.assertEqual(result.snapshot["communityHealth"]["currentScore"], 45)
+        self.assertEqual(result.snapshot["communityHealth"]["weekAgoScore"], 41)
+        self.assertEqual(result.snapshot["communityHealth"]["components"], rebuilt_health["components"])
+
     def test_same_key_last_known_good_requires_exact_range_match(self) -> None:
         store = _AssemblerStore()
         store.range_artifact = {

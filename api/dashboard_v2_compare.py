@@ -10,6 +10,7 @@ from loguru import logger
 
 import config
 from api import aggregator
+from api.db import run_query
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api.dashboard_v2_assembler import DashboardV2FactsNotReadyError, assemble_dashboard_v2_exact
 from api.dashboard_v2_registry import (
@@ -113,7 +114,7 @@ def _extract_top_items(payload: Any) -> list[str]:
     results: list[str] = []
     for item in items[:5]:
         if isinstance(item, dict):
-            for key in ("topic", "name", "label", "stage", "category", "item"):
+            for key in ("topic", "name", "metricKey", "label", "stage", "category", "item"):
                 text = str(item.get(key) or "").strip()
                 if text:
                     results.append(text)
@@ -225,18 +226,177 @@ def _trend_line_topic_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> 
     return ordered
 
 
-def _strategic_compare_windows(ctx: DashboardDateContext) -> tuple[date, date, int]:
-    compare_days = min(7, max(1, ctx.days - 1))
-    current_start = max(ctx.start_at.date(), ctx.end_at.date() - timedelta(days=compare_days))
-    previous_end = current_start
-    previous_start = max(ctx.start_at.date(), previous_end - timedelta(days=compare_days))
-    baseline_days = max(1, (previous_end - previous_start).days)
-    return current_start, previous_start, baseline_days
+def _simple_topic_rank_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> list[dict[str, Any]]:
+    cached = cache.get("simple_topic_rank_rows")
+    if isinstance(cached, list):
+        return cached
+    rows = run_query(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+        WHERE coalesce(t.proposed, false) = false
+          AND t.name IN $canonical_topics
+          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+
+        CALL {
+            WITH t
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+            RETURN count(DISTINCT coalesce(p.uuid, 'post:' + elementId(p))) AS hits
+            UNION ALL
+            WITH t
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+            RETURN count(DISTINCT coalesce(c.uuid, 'comment:' + elementId(c))) AS hits
+        }
+        WITH t.name AS topic, sum(hits) AS mentions
+        WHERE mentions > 0
+        RETURN topic, toInteger(mentions) AS mentions
+        ORDER BY mentions DESC, topic ASC
+        LIMIT 25
+        """,
+        {
+            "canonical_topics": list(pulse._CANONICAL_TOPIC_NAMES),
+            "noise": list(pulse._NOISY_TOPIC_NAMES),
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+        },
+    )
+    normalized = [
+        {
+            "topic": str(row.get("topic") or "").strip(),
+            "mentions": int(row.get("mentions") or 0),
+        }
+        for row in rows
+        if str(row.get("topic") or "").strip()
+    ]
+    cache["simple_topic_rank_rows"] = normalized
+    return normalized
+
+
+def _topic_lifecycle_rank_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> list[dict[str, Any]]:
+    cached = cache.get("topic_lifecycle_rank_rows")
+    if isinstance(cached, list):
+        return cached
+    rows = run_query(
+        """
+        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+        WHERE coalesce(t.proposed, false) = false
+          AND t.name IN $canonical_topics
+          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+
+        CALL {
+            WITH t
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+            RETURN count(DISTINCT coalesce(p.uuid, 'post:' + elementId(p))) AS currentHits
+            UNION ALL
+            WITH t
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+            RETURN count(DISTINCT coalesce(c.uuid, 'comment:' + elementId(c))) AS currentHits
+        }
+        CALL {
+            WITH t
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at >= datetime($previous_start)
+              AND p.posted_at < datetime($previous_end)
+            RETURN count(DISTINCT coalesce(p.uuid, 'post:' + elementId(p))) AS previousHits
+            UNION ALL
+            WITH t
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at >= datetime($previous_start)
+              AND c.posted_at < datetime($previous_end)
+            RETURN count(DISTINCT coalesce(c.uuid, 'comment:' + elementId(c))) AS previousHits
+        }
+        WITH t.name AS topic, sum(currentHits) AS currentMentions, sum(previousHits) AS previousMentions
+        RETURN topic, toInteger(currentMentions) AS currentMentions, toInteger(previousMentions) AS previousMentions
+        """,
+        {
+            "canonical_topics": list(pulse._CANONICAL_TOPIC_NAMES),
+            "noise": list(pulse._NOISY_TOPIC_NAMES),
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+            "previous_start": ctx.previous_start_at.isoformat(),
+            "previous_end": ctx.previous_end_at.isoformat(),
+        },
+    )
+    ranked: list[dict[str, Any]] = []
+    for row in rows:
+        topic = str(row.get("topic") or "").strip()
+        if not topic:
+            continue
+        current_mentions = int(row.get("currentMentions") or 0)
+        previous_mentions = int(row.get("previousMentions") or 0)
+        if current_mentions <= 0 and previous_mentions <= 0:
+            continue
+        stage_confidence = round(
+            100.0
+            * (
+                0.7 * (1.0 if current_mentions >= 40 else float(current_mentions) / 40.0)
+                + 0.3
+                * (
+                    1.0
+                    if abs(current_mentions - previous_mentions) >= 12
+                    else abs(float(current_mentions - previous_mentions)) / 12.0
+                )
+            ),
+            1,
+        )
+        stage = (
+            "declining"
+            if current_mentions < 4
+            else "growing"
+            if (
+                current_mentions >= previous_mentions
+                and (
+                    round(100.0 * (float(current_mentions - previous_mentions) / float(previous_mentions + 3)), 1) >= 10
+                    or (current_mentions - previous_mentions) >= 3
+                    or (previous_mentions == 0 and current_mentions >= 4)
+                )
+            )
+            else "declining"
+        )
+        ranked.append(
+            {
+                "topic": topic,
+                "stage": stage,
+                "weeklyCurrent": current_mentions,
+                "stageConfidence": stage_confidence,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            1 if item["stage"] == "growing" else 2,
+            -int(item["weeklyCurrent"]),
+            -float(item["stageConfidence"]),
+            str(item["topic"]),
+        )
+    )
+    cache["topic_lifecycle_rank_rows"] = ranked
+    return ranked
+
+
+def _topic_window_rows(ctx: DashboardDateContext, cache: dict[str, Any]) -> list[dict[str, Any]]:
+    cached = cache.get("topic_window_rows")
+    if isinstance(cached, list):
+        return cached
+    rows = pulse._query_topic_widget_rows(ctx, evidence_limit=1)
+    cache["topic_window_rows"] = rows
+    return rows
 
 
 def _community_brief_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    del cache
-    payload = pulse._community_brief_from_source_scope(ctx, top_topic_rows=[])
+    payload = pulse._community_brief_from_source_scope(
+        ctx,
+        top_topic_rows=[
+            {"sourceTopic": row.get("topic"), "name": row.get("topic")}
+            for row in _simple_topic_rank_rows(ctx, cache)[:5]
+        ],
+    )
     return _summarize_widget("community_brief", payload)
 
 
@@ -256,20 +416,22 @@ def _community_health_source_summary(ctx: DashboardDateContext, cache: dict[str,
 
 
 def _trending_topics_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    del cache
-    rows = pulse._query_topic_widget_rows(ctx, evidence_limit=1)
+    rows = _topic_window_rows(ctx, cache)
     eligible = [
         row
         for row in rows
         if int(row.get("currentMentions") or 0) >= pulse._TRENDING_MIN_MENTIONS
+        and int(row.get("evidenceCount") or 0) >= pulse._TRENDING_MIN_EVIDENCE
         and int(row.get("distinctChannels") or 0) >= pulse._TRENDING_MIN_CHANNELS
         and int(row.get("distinctUsers") or 0) >= pulse._TRENDING_MIN_USERS
     ]
     eligible.sort(
         key=lambda row: (
+            int(bool(row.get("trendReliable"))),
             int(row.get("currentMentions") or 0),
             int(row.get("distinctChannels") or 0),
             int(row.get("distinctUsers") or 0),
+            int(row.get("evidenceCount") or 0),
             str(row.get("latestAt") or ""),
         ),
         reverse=True,
@@ -279,7 +441,7 @@ def _trending_topics_source_summary(ctx: DashboardDateContext, cache: dict[str, 
 
 
 def _conversation_trends_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    topic_rows = _trend_line_topic_rows(ctx, cache)
+    topic_rows = _simple_topic_rank_rows(ctx, cache)
     return _summary_from_topics(
         field_name="trendLines",
         topic_names=[str(row.get("topic") or "").strip() for row in topic_rows],
@@ -287,76 +449,7 @@ def _conversation_trends_source_summary(ctx: DashboardDateContext, cache: dict[s
 
 
 def _topic_lifecycle_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    topic_rows = _trend_line_topic_rows(ctx, cache)
-    current_start, previous_start, baseline_days = _strategic_compare_windows(ctx)
-    current_end = ctx.end_at.date()
-    ranked: list[dict[str, Any]] = []
-    for row in topic_rows:
-        points = list(row.get("points") or [])
-        if not points:
-            continue
-        total_signals = sum(int(point.get("mentions") or 0) for point in points)
-        active_days = len([point for point in points if int(point.get("mentions") or 0) > 0])
-        peak_day = max((int(point.get("mentions") or 0) for point in points), default=0)
-        recent_signals = sum(
-            int(point.get("mentions") or 0)
-            for point in points
-            if current_start <= point["bucket"] < current_end
-        )
-        previous_signals = sum(
-            int(point.get("mentions") or 0)
-            for point in points
-            if previous_start <= point["bucket"] < current_start
-        )
-        first_seen = row.get("firstSeen") or current_end
-        age_days = max(0, (current_end - first_seen).days)
-        stage_confidence = round(
-            100.0
-            * (
-                0.5 * (1.0 if total_signals >= 40 else float(total_signals) / 40.0)
-                + 0.3 * (1.0 if active_days >= 8 else float(active_days) / 8.0)
-                + 0.2
-                * (
-                    1.0
-                    if abs(float(recent_signals - previous_signals)) >= 12
-                    else abs(float(recent_signals - previous_signals)) / 12.0
-                )
-            ),
-            1,
-        )
-        stage = (
-            "declining"
-            if total_signals < 4 or recent_signals == 0
-            else "growing"
-            if (
-                recent_signals >= previous_signals
-                and (
-                    round(100.0 * (float(recent_signals - previous_signals) / float(previous_signals + 3)), 1) >= 10
-                    or (recent_signals - previous_signals) >= 3
-                    or (previous_signals == 0 and recent_signals >= 4)
-                )
-            )
-            else "declining"
-        )
-        ranked.append(
-            {
-                "topic": str(row.get("topic") or "").strip(),
-                "stage": stage,
-                "weeklyCurrent": recent_signals,
-                "stageConfidence": stage_confidence,
-                "ageDays": age_days,
-                "baselineDays": baseline_days,
-                "peakDay": peak_day,
-            }
-        )
-    ranked.sort(
-        key=lambda item: (
-            1 if item["stage"] == "growing" else 2,
-            -int(item["weeklyCurrent"]),
-            -float(item["stageConfidence"]),
-            str(item["topic"]),
-        )
-    )
+    ranked = _topic_lifecycle_rank_rows(ctx, cache)
     return _summary_from_topics(
         field_name="lifecycleStages",
         topic_names=[str(item.get("topic") or "").strip() for item in ranked],
@@ -364,20 +457,65 @@ def _topic_lifecycle_source_summary(ctx: DashboardDateContext, cache: dict[str, 
 
 
 def _sentiment_by_topic_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    del cache
-    payload = comparative.get_sentiment_by_topic_legacy(ctx)
-    return _summarize_widget("sentiment_by_topic", payload)
+    cached = cache.get("sentiment_topic_summary")
+    if isinstance(cached, dict):
+        return cached
+    rows = run_query(
+        """
+        CALL () {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)
+            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+              AND t.name IN $canonical_topics
+            RETURN trim(coalesce(t.name, '')) AS topic,
+                   count(DISTINCT p) AS score
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)
+            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+              AND t.name IN $canonical_topics
+            RETURN trim(coalesce(t.name, '')) AS topic,
+                   count(DISTINCT c) AS score
+        }
+        WITH topic, sum(score) AS score
+        WHERE topic <> ''
+        RETURN topic, toInteger(sum(score)) AS count
+        ORDER BY count DESC, topic ASC
+        LIMIT 15
+        """,
+        {
+            "start": ctx.start_at.isoformat(),
+            "end": ctx.end_at.isoformat(),
+            "canonical_topics": list(pulse._CANONICAL_TOPIC_NAMES),
+        },
+    )
+    summary = _summary_from_topics(
+        field_name="sentimentByTopic",
+        topic_names=[str(row.get("topic") or "").strip() for row in rows],
+    )
+    cache["sentiment_topic_summary"] = summary
+    return summary
 
 
 def _week_over_week_source_summary(ctx: DashboardDateContext, cache: dict[str, Any]) -> dict[str, Any]:
-    del ctx, cache
-    category_order = ["health", "audience", "growth", "content", "content", "engagement", "mood"]
-    return {
-        "present": True,
-        "itemCount": 7,
-        "nonEmptyFields": ["weeklyShifts"],
-        "topItems": category_order[:5],
+    cached = cache.get("week_over_week_summary")
+    if isinstance(cached, dict):
+        return cached
+    metric_keys = [
+        str(item.get("metricKey") or "").strip()
+        for item in comparative.get_weekly_shifts(ctx)
+        if str(item.get("metricKey") or "").strip()
+    ]
+    summary = {
+        "present": bool(metric_keys),
+        "itemCount": len(metric_keys),
+        "nonEmptyFields": ["weeklyShifts"] if metric_keys else [],
+        "topItems": metric_keys[:5],
     }
+    cache["week_over_week_summary"] = summary
+    return summary
 
 
 def _present_widget_count(widget_diffs: dict[str, Any], key: str) -> int:
@@ -446,6 +584,11 @@ def _summaries_match_for_source_truth(widget_id: str, v2_summary: dict[str, Any]
             if v2_summary.get(key) != direct_summary.get(key):
                 return False
         return True
+    if widget_id in {"trending_topics_feed", "conversation_trends", "topic_lifecycle", "sentiment_by_topic", "week_over_week_shifts"}:
+        direct_top_items = list(direct_summary.get("topItems") or [])
+        if not direct_top_items:
+            return bool(v2_summary.get("present")) == bool(direct_summary.get("present"))
+        return list(v2_summary.get("topItems") or []) == direct_top_items
     if v2_summary.get("itemCount") != direct_summary.get("itemCount"):
         return False
     direct_top_items = list(direct_summary.get("topItems") or [])
