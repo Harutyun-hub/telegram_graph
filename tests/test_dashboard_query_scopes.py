@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from api.dashboard_dates import build_dashboard_date_context
-from api.queries import behavioral, comparative, network, predictive, strategic
+from api.queries import actionable, behavioral, comparative, network, predictive, pulse, strategic
 
 
 class NetworkQueryScopeTests(unittest.TestCase):
@@ -154,6 +154,45 @@ class BehavioralQueryScopeTests(unittest.TestCase):
                 self.assertIn("t.name = topic", query)
             else:
                 self.assertIn("t.name IN $topic_names", query)
+
+
+class PulseQueryScopeTests(unittest.TestCase):
+    def test_topic_diversity_score_uses_window_scoped_aggregate_query(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        with patch.object(pulse, "run_query", return_value=[]) as run_query_mock:
+            payload = pulse._topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
+
+        self.assertEqual(payload["score"], 0)
+        run_query_mock.assert_called_once()
+        query = run_query_mock.call_args.args[0]
+        params = run_query_mock.call_args.args[1]
+        self.assertIn("MATCH (p:Post)-[:TAGGED]->(t:Topic)", query)
+        self.assertIn("MATCH (c:Comment)-[:TAGGED]->(t:Topic)", query)
+        self.assertIn("datetime($start)", query)
+        self.assertIn("datetime($end)", query)
+        self.assertEqual(params["start"], ctx.start_at.isoformat())
+        self.assertEqual(params["end"], ctx.end_at.isoformat())
+
+
+class ActionableQueryScopeTests(unittest.TestCase):
+    def test_business_opportunities_use_window_scoped_interest_aggregation(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        with patch.object(actionable, "run_query", return_value=[]) as run_query_mock:
+            rows = actionable.get_business_opportunities(ctx)
+
+        self.assertEqual(rows, [])
+        run_query_mock.assert_called_once()
+        query = run_query_mock.call_args.args[0]
+        params = run_query_mock.call_args.args[1]
+        self.assertIn("MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)", query)
+        self.assertIn("datetime($previous_start)", query)
+        self.assertIn("datetime($previous_end)", query)
+        self.assertIn("datetime($start)", query)
+        self.assertIn("datetime($end)", query)
+        self.assertEqual(params["start"], ctx.start_at.isoformat())
+        self.assertEqual(params["end"], ctx.end_at.isoformat())
+        self.assertEqual(params["previous_start"], ctx.previous_start_at.isoformat())
+        self.assertEqual(params["previous_end"], ctx.previous_end_at.isoformat())
 
 
 if __name__ == "__main__":

@@ -420,24 +420,24 @@ def _analysis_volume(rows: list[dict]) -> dict:
 def _topic_diversity_score(*, start: datetime, end: datetime) -> dict:
     rows = run_query(
         """
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-        WHERE coalesce(t.proposed,false) = false
-          AND NOT toLower(trim(coalesce(t.name,''))) IN $noise
-        CALL {
-            WITH t
-            OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-            RETURN count(p) AS postMentions
+        CALL () {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT p) AS mentions
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT c) AS mentions
         }
-        CALL {
-            WITH t
-            OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
-            RETURN count(c) AS commentMentions
-        }
-        WITH t, (postMentions + commentMentions) AS mentions
+        WITH topic, sum(mentions) AS mentions
         WHERE mentions > 0
-        RETURN t.name AS topic, mentions
+        RETURN topic, mentions
         ORDER BY mentions DESC
         LIMIT 50
         """,

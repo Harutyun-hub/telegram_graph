@@ -487,40 +487,34 @@ def _attach_work_signal_evidence(rows: list[dict], ctx: DashboardDateContext) ->
 def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
     """Business opportunity signals among users active in the selected window."""
     return run_query("""
-        MATCH (b:BusinessOpportunity)
+        MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
+        MATCH (u)-[i:INTERESTED_IN]->(t:Topic)
         WHERE b.type IS NOT NULL
-        WITH DISTINCT b.type AS type, b.description AS description
-        CALL {
-            WITH type
-            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
-            WHERE EXISTS {
-                MATCH (u)-[i:INTERESTED_IN]->(:Topic)
-                WHERE i.last_seen >= datetime($start)
+          AND i.last_seen >= datetime($previous_start)
+          AND i.last_seen < datetime($end)
+        WITH b.type AS type,
+             head(collect(DISTINCT b.description)) AS description,
+             count(DISTINCT CASE
+                 WHEN i.last_seen >= datetime($start)
                   AND i.last_seen < datetime($end)
-            }
-            RETURN count(DISTINCT u) AS signals
-        }
-        CALL {
-            WITH type
-            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
-            WHERE EXISTS {
-                MATCH (u)-[i:INTERESTED_IN]->(:Topic)
-                WHERE i.last_seen >= datetime($previous_start)
+                 THEN u
+             END) AS signals,
+             count(DISTINCT CASE
+                 WHEN i.last_seen >= datetime($previous_start)
                   AND i.last_seen < datetime($previous_end)
-            }
-            RETURN count(DISTINCT u) AS previousSignals
-        }
-        CALL {
-            WITH type
-            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
-            MATCH (u)-[i:INTERESTED_IN]->(t:Topic)
-            WHERE i.last_seen >= datetime($start)
-              AND i.last_seen < datetime($end)
-            RETURN collect(DISTINCT t.name)[..5] AS relatedTopics
-        }
-        WITH type, description, signals, previousSignals, relatedTopics
+                 THEN u
+             END) AS previousSignals,
+             collect(DISTINCT CASE
+                 WHEN i.last_seen >= datetime($start)
+                  AND i.last_seen < datetime($end)
+                 THEN t.name
+             END) AS relatedTopicPool
         WHERE signals > 0 OR previousSignals > 0
-        RETURN type, description, signals, previousSignals, relatedTopics
+        RETURN type,
+               description,
+               signals,
+               previousSignals,
+               [topic IN relatedTopicPool WHERE topic IS NOT NULL][..5] AS relatedTopics
         ORDER BY signals DESC
     """, {
         "start": ctx.start_at.isoformat(),

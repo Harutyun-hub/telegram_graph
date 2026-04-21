@@ -68,7 +68,7 @@ def _window_topic_names(ctx: DashboardDateContext, *, limit: int = _TOPIC_SCOPE_
     params.update({"noise": _NOISY_TOPIC_KEYS, "topic_limit": max(1, int(limit))})
     rows = run_query(
         """
-        CALL {
+        CALL () {
             MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -115,41 +115,45 @@ def get_problems(ctx: DashboardDateContext) -> list[dict]:
         return []
     return run_query(
         """
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
-        WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-          AND coalesce(t.proposed, false) = false
-          AND t.name IN $topic_names
-
         CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
               AND s.label IN $negative_labels
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND t.name IN $topic_names
             OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
+            RETURN t.name AS topic,
+                   cat.name AS category,
+                   coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
                    p.posted_at AS ts,
                    left(trim(coalesce(p.text, '')), 180) AS txt,
                    s.label AS primaryLabel,
                    collect(DISTINCT tag.name) AS tagNames
             UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
               AND s.label IN $negative_labels
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND t.name IN $topic_names
             OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
+            RETURN t.name AS topic,
+                   cat.name AS category,
+                   coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
                    c.posted_at AS ts,
                    left(trim(coalesce(c.text, '')), 180) AS txt,
                    s.label AS primaryLabel,
                    collect(DISTINCT tag.name) AS tagNames
         }
 
-        WITH t, cat, msgId, ts, txt, primaryLabel,
+        WITH topic, category, msgId, ts, txt, primaryLabel,
              CASE WHEN any(tag IN tagNames WHERE tag IN $distress_tags) THEN 1 ELSE 0 END AS distressHit
-        WITH t, cat,
+        WITH topic, category,
              count(DISTINCT msgId) AS affectedSignals,
              count(DISTINCT CASE WHEN primaryLabel = 'Urgent' THEN msgId END) AS urgentSignals,
              count(DISTINCT CASE WHEN distressHit = 1 THEN msgId END) AS distressSignals,
@@ -158,11 +162,11 @@ def get_problems(ctx: DashboardDateContext) -> list[dict]:
                                    AND ts < datetime($previous_end) THEN msgId END) AS affectedPrevWeek,
              collect(CASE WHEN txt <> '' THEN txt END)[0] AS sampleText
         WHERE affectedSignals >= 3
-        WITH t, cat, affectedSignals, urgentSignals, distressSignals, affectedThisWeek, affectedPrevWeek,
+        WITH topic, category, affectedSignals, urgentSignals, distressSignals, affectedThisWeek, affectedPrevWeek,
              coalesce(sampleText, '') AS sampleText,
              (affectedThisWeek + affectedPrevWeek) AS trendSupport
-        RETURN t.name AS topic,
-               cat.name AS category,
+        RETURN topic,
+               category,
                affectedSignals AS affectedUsers,
                affectedThisWeek,
                affectedPrevWeek,
@@ -622,15 +626,13 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
         return []
     return run_query(
         """
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-        WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-          AND coalesce(t.proposed, false) = false
-          AND t.name IN $topic_names
-        CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
+        CALL () {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($end)
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND coalesce(t.proposed, false) = false
+              AND t.name IN $topic_names
             OPTIONAL MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
             WITH t.name AS topic,
                  coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
@@ -651,9 +653,12 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
             WHERE resolvedLabel IS NOT NULL
             RETURN topic, msgId, ts, resolvedLabel AS label
             UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($end)
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND coalesce(t.proposed, false) = false
+              AND t.name IN $topic_names
             OPTIONAL MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
             WITH t.name AS topic,
                  coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,

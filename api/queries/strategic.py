@@ -55,7 +55,7 @@ def _window_topic_names(ctx: DashboardDateContext, *, limit: int = TOPIC_SCOPE_L
     params = _strategic_window_params(ctx)
     params.update({"noise": _NOISE_TOPICS, "topic_limit": max(1, int(limit))})
     rows = run_query("""
-        CALL {
+        CALL () {
             MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
@@ -217,54 +217,58 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
     if not params["topic_names"]:
         return []
     return run_query("""
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
-        WHERE coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-          AND t.name IN $topic_names
-
-        CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
+        CALL () {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
-            RETURN 'post:' + coalesce(p.uuid, elementId(p)) AS msg_key,
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+              AND t.name IN $topic_names
+            RETURN t.name AS topic,
+                   cat.name AS category,
+                   'post:' + coalesce(p.uuid, elementId(p)) AS msg_key,
                    coalesce(p.uuid, 'post:' + elementId(p)) AS sample_id,
                    trim(p.text) AS txt,
                    p.posted_at AS ts
             UNION
-            MATCH (c:Comment)-[:TAGGED]->(t)
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
-            RETURN 'comment:' + coalesce(c.uuid, elementId(c)) AS msg_key,
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+              AND t.name IN $topic_names
+            RETURN t.name AS topic,
+                   cat.name AS category,
+                   'comment:' + coalesce(c.uuid, elementId(c)) AS msg_key,
                    coalesce(c.uuid, 'comment:' + elementId(c)) AS sample_id,
                    trim(c.text) AS txt,
                    c.posted_at AS ts
         }
-        WITH t, cat, msg_key, sample_id, txt, ts,
+        WITH topic, category, msg_key, sample_id, txt, ts,
              toLower(replace(replace(replace(replace(txt, '\n', ' '), '\r', ' '), '  ', ' '), '**', '')) AS normalized
-        ORDER BY ts DESC
-        WITH t, cat, collect({
+        ORDER BY topic, ts DESC
+        WITH topic, category, collect({
              msg_key: msg_key,
              sample_id: sample_id,
              txt: txt,
              ts: ts,
              normalized: normalized
         }) AS question_rows
-        WITH t, cat, question_rows, head(question_rows) AS latest_question
+        WITH topic, category, question_rows, head(question_rows) AS latest_question
         UNWIND question_rows AS row
-        WITH t, cat, latest_question, row.normalized AS normalized,
+        WITH topic, category, latest_question, row.normalized AS normalized,
              count(DISTINCT row.msg_key) AS asks_per_form,
              max(row.ts) AS last_seen,
              head(collect(row.txt)) AS sample_question,
              head(collect(row.sample_id)) AS sample_question_id
         ORDER BY asks_per_form DESC, last_seen DESC
-        WITH t, cat, latest_question,
+        WITH topic, category, latest_question,
              collect({
                  form: normalized,
                  asks: asks_per_form,
@@ -275,22 +279,22 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
              sum(asks_per_form) AS times_asked
         WHERE times_asked > 0
 
-        CALL {
-            WITH t
-            OPTIONAL MATCH (u:User)-[:EXHIBITS]->(:Intent {name: 'Information Seeking'})
-            WHERE EXISTS { MATCH (u)-[:INTERESTED_IN]->(t) }
+        CALL (topic) {
+            MATCH (u:User)-[:INTERESTED_IN]->(:Topic {name: topic})
+            OPTIONAL MATCH (u)-[:EXHIBITS]->(intent:Intent {name: 'Information Seeking'})
+            WITH topic, u, max(CASE WHEN intent IS NOT NULL THEN 1 ELSE 0 END) AS is_info_seeker
+            WHERE is_info_seeker = 1
             OPTIONAL MATCH (:User)-[r:REPLIED_TO_USER]->(u)
-            RETURN
-                count(DISTINCT u) AS intent_seekers,
-                count(DISTINCT CASE
-                    WHEN r.last_seen >= datetime($previous_start) THEN u
-                END) AS responded_intent_seekers
+            RETURN count(DISTINCT u) AS intent_seekers,
+                   count(DISTINCT CASE
+                       WHEN r.last_seen >= datetime($previous_start) THEN u
+                   END) AS responded_intent_seekers
         }
 
-        WITH t, cat, forms, times_asked, latest_question, intent_seekers, responded_intent_seekers
+        WITH topic, category, forms, times_asked, latest_question, intent_seekers, responded_intent_seekers
 
-        WITH cat.name AS category,
-             t.name AS topic,
+        WITH category,
+             topic,
              times_asked,
              forms,
              latest_question,
@@ -472,28 +476,29 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
     if not params["topic_names"]:
         return []
     return run_query("""
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-        WHERE coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
-          AND t.name IN $topic_names
-
-        CALL {
-            WITH t
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
+        CALL () {
+            CALL () {
+                MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
-                RETURN p.posted_at AS ts,
+                  AND coalesce(t.proposed, false) = false
+                  AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+                  AND t.name IN $topic_names
+                RETURN t.name AS topic,
+                       p.posted_at AS ts,
                        toString(date(p.posted_at)) AS bucket
                 UNION ALL
-                MATCH (c:Comment)-[:TAGGED]->(t)
+                MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
                 WHERE c.posted_at >= datetime($start)
                   AND c.posted_at < datetime($end)
-                RETURN c.posted_at AS ts,
+                  AND coalesce(t.proposed, false) = false
+                  AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+                  AND t.name IN $topic_names
+                RETURN t.name AS topic,
+                       c.posted_at AS ts,
                        toString(date(c.posted_at)) AS bucket
             }
-            WITH bucket,
+            WITH topic, bucket,
                  count(*) AS signalsPerBucket,
                  min(ts) AS bucketFirstSeen,
                  max(ts) AS bucketLastSeen,
@@ -504,10 +509,11 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
                  END) AS recentSignalsPerBucket,
                  count(CASE
                      WHEN ts >= datetime($previous_start)
-                      AND ts < datetime($previous_end)
+                     AND ts < datetime($previous_end)
                      THEN 1
                  END) AS previousSignalsPerBucket
-            RETURN sum(signalsPerBucket) AS totalSignals,
+            RETURN topic,
+                   sum(signalsPerBucket) AS totalSignals,
                    count(bucket) AS activeDays,
                    max(signalsPerBucket) AS peakDay,
                    min(bucketFirstSeen) AS firstSeen,
@@ -515,7 +521,7 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
                    sum(recentSignalsPerBucket) AS recentSignals,
                    sum(previousSignalsPerBucket) AS previousSignals
         }
-        WITH t.name AS topic,
+        WITH topic,
              totalSignals,
              activeDays,
              peakDay,
