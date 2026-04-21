@@ -826,6 +826,58 @@ def get_dashboard_data(
     return snapshot
 
 
+def build_dashboard_snapshot_once(
+    ctx: DashboardDateContext,
+    *,
+    cache_status: str = "refresh_success_uncached",
+) -> tuple[dict, DashboardCacheMeta]:
+    data, tier_times, elapsed, mode = _build_snapshot_with_timeout(ctx)
+    meta = _snapshot_meta(
+        tier_times=tier_times,
+        elapsed=elapsed,
+        mode=mode,
+        cache_status=cache_status,
+        is_stale=False,
+        refresh_failure_count=0,
+    )
+    return data, meta
+
+
+def peek_dashboard_snapshot(
+    ctx: Optional[DashboardDateContext] = None,
+) -> tuple[dict | None, DashboardCacheMeta | None, str]:
+    resolved_ctx = ctx or _default_dashboard_context()
+    cache_key = resolved_ctx.cache_key
+    now = time.time()
+
+    with _cache_lock:
+        entry = _cache_entries.get(cache_key)
+
+    if entry is None:
+        return None, None, "missing"
+
+    snapshot = entry[1]
+    meta = dict(entry[2])
+    if _is_cache_valid(cache_key, now) and not _should_bypass_cached_snapshot(snapshot, meta):
+        return snapshot, _with_refresh_state(cache_key, meta), "fresh"
+
+    if _can_serve_stale(entry, now):
+        stale_meta = dict(meta)
+        stale_meta["isStale"] = True
+        stale_meta.setdefault("cacheStatus", "memory_stale")
+        return snapshot, _with_refresh_state(
+            cache_key,
+            stale_meta,
+            stale_age_seconds=_cache_entry_age_seconds(entry, now),
+        ), "stale"
+
+    return None, _with_refresh_state(cache_key, meta), "expired"
+
+
+def refresh_dashboard_snapshot_async(ctx: DashboardDateContext) -> bool:
+    return bool(_ensure_background_refresh(ctx.cache_key, ctx))
+
+
 # ── Detail page queries (independent cache) ──────────────────────────────────
 
 def _get_cached_detail_value(

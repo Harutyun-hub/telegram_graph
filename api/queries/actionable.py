@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import threading
 
+from api.dashboard_perf import paginate_supabase_query
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 from buffer.supabase_writer import SupabaseWriter
@@ -89,6 +91,7 @@ _GAP_HINTS = [
 _EXCLUDED_OPPORTUNITY_TYPES = ["Hiring", "Investment_Interest", "Real_Estate", "Import_Export"]
 _SUPABASE_PAGE_SIZE = 200
 _work_signal_snapshot_cache: dict[str, dict] = {}
+_work_signal_snapshot_cache_lock = threading.Lock()
 
 
 def _get_supabase_writer() -> SupabaseWriter:
@@ -116,23 +119,12 @@ def _parse_iso_datetime(value: object) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _paginate(query_factory) -> list[dict]:
-    rows: list[dict] = []
-    offset = 0
-    total_count: int | None = None
-    while True:
-        response = query_factory(offset, offset + _SUPABASE_PAGE_SIZE - 1).execute()
-        batch = response.data or []
-        if total_count is None:
-            raw_count = getattr(response, "count", None)
-            total_count = int(raw_count) if raw_count is not None else None
-        if not batch:
-            break
-        rows.extend(batch)
-        if total_count is not None and len(rows) >= total_count:
-            break
-        offset += len(batch)
-    return rows
+def _paginate(query_factory, *, label: str) -> list[dict]:
+    return paginate_supabase_query(
+        query_factory,
+        label=label,
+        page_size=_SUPABASE_PAGE_SIZE,
+    )
 
 
 def _fetch_batch_analyses_between(start_iso: str, end_iso: str) -> list[dict]:
@@ -144,7 +136,8 @@ def _fetch_batch_analyses_between(start_iso: str, end_iso: str) -> list[dict]:
         .gte("created_at", start_iso)
         .lt("created_at", end_iso)
         .order("created_at", desc=False)
-        .range(from_idx, to_idx)
+        .range(from_idx, to_idx),
+        label="actionable.fetch_batch_analyses_between",
     )
 
 
@@ -247,14 +240,16 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
 
 
 def _get_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
-    cached = _work_signal_snapshot_cache.get(ctx.cache_key)
+    with _work_signal_snapshot_cache_lock:
+        cached = _work_signal_snapshot_cache.get(ctx.cache_key)
     if cached is not None:
         return cached
 
     snapshot = _build_work_signal_snapshot(ctx)
-    if len(_work_signal_snapshot_cache) >= 32:
-        _work_signal_snapshot_cache.pop(next(iter(_work_signal_snapshot_cache)))
-    _work_signal_snapshot_cache[ctx.cache_key] = snapshot
+    with _work_signal_snapshot_cache_lock:
+        if len(_work_signal_snapshot_cache) >= 32:
+            _work_signal_snapshot_cache.pop(next(iter(_work_signal_snapshot_cache)))
+        _work_signal_snapshot_cache[ctx.cache_key] = snapshot
     return snapshot
 
 

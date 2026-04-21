@@ -1,4 +1,4 @@
-.PHONY: setup-backend setup-frontend run-api run-frontend lint-backend test-backend test-frontend build-frontend smoke-check qa qa-backend qa-frontend
+.PHONY: setup-backend setup-frontend run-api run-frontend lint-backend test-backend test-frontend build-frontend smoke-check qa qa-backend qa-frontend dashboard-lab-baseline
 
 setup-backend:
 	python3 -m venv venv
@@ -51,5 +51,8 @@ qa-frontend:
 
 smoke-check:
 	venv/bin/python scripts/run_smoke_checks.py --wait-ready
+
+dashboard-lab-baseline:
+	venv/bin/python scripts/original_dashboard_lab.py baseline --base-url $(BASE_URL) --analytics-token $(ANALYTICS_TOKEN) --admin-token $(ADMIN_TOKEN)
 
 qa: qa-backend qa-frontend

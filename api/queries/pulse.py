@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any
 
+from api.dashboard_perf import execute_supabase_query
 from api.db import run_query, run_single
 from api.dashboard_dates import DashboardDateContext
 from buffer.supabase_writer import SupabaseWriter
@@ -165,16 +166,18 @@ def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 1200
         while len(rows) < max_rows:
             upper = offset + page_size - 1
             resp = (
-                writer.client.table("ai_analysis")
-                .select(
-                    "content_type,content_id,channel_id,telegram_user_id,"
-                    "primary_intent,sentiment_score,created_at"
+                execute_supabase_query(
+                    writer.client.table("ai_analysis")
+                    .select(
+                        "content_type,content_id,channel_id,telegram_user_id,"
+                        "primary_intent,sentiment_score,created_at"
+                    )
+                    .gte("created_at", start.isoformat())
+                    .lt("created_at", end.isoformat())
+                    .order("created_at", desc=False)
+                    .range(offset, upper),
+                    label="pulse.fetch_analysis_rows",
                 )
-                .gte("created_at", start.isoformat())
-                .lt("created_at", end.isoformat())
-                .order("created_at", desc=False)
-                .range(offset, upper)
-                .execute()
             )
             chunk = resp.data or []
             if not chunk:
@@ -879,7 +882,10 @@ def get_trending_widget_diagnostics(ctx: DashboardDateContext) -> dict[str, Any]
 
 def _latest_analysis_minutes_ago() -> int:
     try:
-        resp = _supabase().client.table("ai_analysis").select("created_at").order("created_at", desc=True).limit(1).execute()
+        resp = execute_supabase_query(
+            _supabase().client.table("ai_analysis").select("created_at").order("created_at", desc=True).limit(1),
+            label="pulse.latest_analysis_minutes_ago",
+        )
         row = (resp.data or [None])[0]
         dt = _parse_dt((row or {}).get("created_at"))
         if not dt:

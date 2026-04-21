@@ -69,6 +69,7 @@ from api.aggregator import (
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
     invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async
 )
+from api.dashboard_perf import capture_dashboard_profile, summarize_dashboard_profile
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
 from api import freshness as freshness_runtime
@@ -87,18 +88,97 @@ from api.admin_runtime import (
 from api import db
 from api.ai_helper import AIHelperError, OpenClawAiHelperProvider, get_default_ai_helper_provider
 from api.runtime_coordinator import get_runtime_coordinator
-from api.source_resolution import (
-    build_pending_source_payload,
-    enqueue_missing_peer_ref_backfill,
-    ensure_resolution_job,
-)
 from buffer.supabase_writer import SupabaseWriter
-from api.scraper_scheduler import ScraperSchedulerService
 from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
-from social.store import SocialStore
-from social.runtime import SocialRuntimeService
 from utils.taxonomy import TAXONOMY_DOMAINS
+
+try:
+    from api.scraper_scheduler import ScraperSchedulerService
+except ImportError:  # pragma: no cover - original dashboard lab keeps worker-only runtime optional
+    class ScraperSchedulerService:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def startup(self) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+        def status(self) -> dict[str, Any]:
+            return {"available": False, "reason": "scheduler_module_missing"}
+
+        async def start(self) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+        async def stop(self) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+        async def set_interval(self, _interval_minutes: int) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+        async def run_once(self) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+        async def run_catchup_once(self) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+        async def run_source_resolution_once(self) -> dict[str, Any]:
+            return {"ok": False, "reason": "scheduler_module_missing"}
+
+
+try:
+    from api.source_resolution import (
+        build_pending_source_payload,
+        enqueue_missing_peer_ref_backfill,
+        ensure_resolution_job,
+    )
+except ImportError:  # pragma: no cover - older branches may not carry source-resolution helpers
+    def build_pending_source_payload(
+        *,
+        channel_title: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retry_after_at: datetime | None = None,
+        attempt_count: int | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "source_type": "pending",
+            "resolution_status": "pending",
+            "channel_title": channel_title,
+            "last_resolution_error": error_message,
+            "resolution_error_code": error_code,
+            "resolution_retry_after_at": retry_after_at.isoformat() if retry_after_at is not None else None,
+        }
+        if attempt_count is not None:
+            payload["resolution_attempt_count"] = int(attempt_count)
+        return payload
+
+    def enqueue_missing_peer_ref_backfill(*_args, **_kwargs) -> int:
+        return 0
+
+    def ensure_resolution_job(*_args, **_kwargs) -> None:
+        return None
+
+
+try:
+    from social.store import SocialStore
+    from social.runtime import SocialRuntimeService
+except ImportError:  # pragma: no cover - original dashboard lab can run without social extras
+    class SocialStore:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    class SocialRuntimeService:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            return None
+
+        def status(self) -> dict[str, Any]:
+            return {"available": False, "reason": "social_module_missing"}
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
@@ -195,6 +275,12 @@ _HISTORICAL_FASTPATH_SKIP_TIERS = {
         "network,comparative,predictive",
     ).split(",")
     if item.strip()
+}
+_DASH_REQUEST_PROFILE_ENABLED = str(os.getenv("DASH_REQUEST_PROFILE_ENABLED", "false")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
 }
 _orjson_dashboard_enabled = ORJSONResponse is not None
 _orjson_dashboard_verified = ORJSONResponse is None
@@ -415,6 +501,28 @@ def _record_query_timing(request: Request, started_at: float, *, cache_status: O
         request.state.cache_status = cache_status
 
 
+def _dashboard_request_profile_enabled(request: Request | None = None) -> bool:
+    if _DASH_REQUEST_PROFILE_ENABLED:
+        return True
+    if request is None:
+        return False
+    return str(request.headers.get("X-Dashboard-Profile", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_dashboard_response_payload_with_profile(
+    from_date: Optional[str],
+    to_date: Optional[str],
+    *,
+    profile_enabled: bool,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not profile_enabled:
+        return _build_dashboard_response_payload(from_date, to_date), None
+
+    with capture_dashboard_profile("api.dashboard") as profile:
+        payload = _build_dashboard_response_payload(from_date, to_date)
+    return payload, summarize_dashboard_profile(profile, top_n=10)
+
+
 def _is_ai_chat_path(path: str) -> bool:
     value = str(path or "")
     return value.startswith("/api/ai-helper/") or value.startswith("/api/ai/chat")
@@ -486,11 +594,32 @@ async def request_metrics_middleware(request: Request, call_next):
                 value = dashboard_meta.get(src_key)
                 if value not in (None, "", []):
                     payload[dst_key] = value
+        dashboard_profile = getattr(request.state, "dashboard_profile", None)
+        if isinstance(dashboard_profile, dict):
+            neo4j_profile = dashboard_profile.get("neo4j") if isinstance(dashboard_profile.get("neo4j"), dict) else {}
+            supabase_profile = dashboard_profile.get("supabase") if isinstance(dashboard_profile.get("supabase"), dict) else {}
+            payload["dashboard_profile"] = {
+                "elapsedMs": dashboard_profile.get("elapsedMs"),
+                "neo4jQueryCount": neo4j_profile.get("queryCount"),
+                "neo4jTotalMs": neo4j_profile.get("totalMs"),
+                "supabaseQueryCount": supabase_profile.get("queryCount"),
+                "supabaseTotalMs": supabase_profile.get("totalMs"),
+                "topNeo4j": list(neo4j_profile.get("slowest") or [])[:3],
+                "topSupabase": list(supabase_profile.get("slowest") or [])[:3],
+            }
         logger.info(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 
 
 class AIQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
+
+
+class DashboardWarmRequest(BaseModel):
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+    wait: bool = True
+    force_refresh: bool = False
+    profile: bool = False
 
 
 class AIHelperChatRequest(BaseModel):
@@ -1567,6 +1696,78 @@ def _ensure_background_dashboard_refresh(
     return bool(refresh_dashboard_snapshot_async(ctx))
 
 
+def _resolve_dashboard_warm_context(
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> tuple[Any, dict[str, Any], str, str | None]:
+    if from_date and to_date:
+        ctx = build_dashboard_date_context(from_date, to_date)
+        return ctx, {}, ctx.to_date.isoformat(), None
+
+    freshness_resolution = _cached_freshness_resolution(allow_live=True)
+    freshness_snapshot = dict(freshness_resolution.get("snapshot") or {})
+    freshness_source = freshness_resolution.get("source")
+    trusted_end = _trusted_end_date_from_freshness(freshness_snapshot)
+    ctx = _dashboard_context_from_trusted_end(trusted_end)
+    return ctx, freshness_snapshot, trusted_end.isoformat(), freshness_source
+
+
+def _warm_dashboard_range(
+    from_date: Optional[str],
+    to_date: Optional[str],
+    *,
+    wait: bool,
+    force_refresh: bool,
+    include_profile: bool,
+) -> dict[str, Any]:
+    ctx, freshness_snapshot, trusted_end_iso, freshness_source = _resolve_dashboard_warm_context(from_date, to_date)
+    requested_from = from_date or ctx.from_date.isoformat()
+    requested_to = to_date or ctx.to_date.isoformat()
+
+    if not wait:
+        refresh_status = schedule_dashboard_snapshot_refresh(ctx)
+        return {
+            "success": True,
+            "status": "scheduled" if refresh_status.get("started") else "inflight",
+            "cacheKey": ctx.cache_key,
+            "requestedFrom": requested_from,
+            "requestedTo": requested_to,
+            "trustedEndDate": trusted_end_iso,
+            "refreshStatus": refresh_status,
+        }
+
+    profile_summary: dict[str, Any] | None = None
+    if include_profile:
+        with capture_dashboard_profile("api.admin.dashboard.warm") as profile:
+            snapshot, dashboard_meta = get_dashboard_snapshot(ctx, force_refresh=force_refresh)
+        profile_summary = summarize_dashboard_profile(profile, top_n=10)
+    else:
+        snapshot, dashboard_meta = get_dashboard_snapshot(ctx, force_refresh=force_refresh)
+
+    payload = _build_dashboard_api_payload(
+        ctx=ctx,
+        requested_from=requested_from,
+        requested_to=requested_to,
+        trusted_end_date=trusted_end_iso,
+        dashboard_data=snapshot,
+        dashboard_runtime_meta=dashboard_meta,
+        freshness_snapshot=freshness_snapshot,
+        freshness_source=freshness_source,
+    )
+    response: dict[str, Any] = {
+        "success": True,
+        "status": "completed",
+        "cacheKey": ctx.cache_key,
+        "requestedFrom": requested_from,
+        "requestedTo": requested_to,
+        "trustedEndDate": trusted_end_iso,
+        "meta": payload["meta"],
+    }
+    if profile_summary is not None:
+        response["profile"] = profile_summary
+    return response
+
+
 def _newer_snapshot_choice(
     left: tuple[str, dict, dict[str, Any], datetime | None] | None,
     right: tuple[str, dict, dict[str, Any], datetime | None] | None,
@@ -2555,9 +2756,13 @@ async def dashboard(
     try:
         loop = asyncio.get_running_loop()
         query_started_at = time.perf_counter()
-        response = await loop.run_in_executor(
+        response, dashboard_profile = await loop.run_in_executor(
             None,
-            lambda: _build_dashboard_response_payload(from_date, to_date),
+            lambda: _build_dashboard_response_payload_with_profile(
+                from_date,
+                to_date,
+                profile_enabled=_dashboard_request_profile_enabled(request),
+            ),
         )
         _record_query_timing(
             request,
@@ -2565,6 +2770,8 @@ async def dashboard(
             cache_status=str(response.get("meta", {}).get("cacheStatus") or ""),
         )
         request.state.dashboard_meta = response["meta"]
+        if dashboard_profile is not None:
+            request.state.dashboard_profile = dashboard_profile
         return _dashboard_response(response)
     except Exception as e:
         logger.error(f"Dashboard endpoint error: {e}")
@@ -3946,6 +4153,29 @@ async def clear_cache():
     opportunity_briefs.invalidate_opportunity_briefs_cache()
     topic_overviews.invalidate_topic_overviews_cache()
     return {"success": True, "message": "Cache cleared"}
+
+
+@app.post("/api/admin/dashboard/warm", dependencies=[Depends(require_operator_access)])
+async def warm_dashboard(payload: DashboardWarmRequest):
+    """Manually warm or profile the original dashboard path for lab use."""
+    if bool(payload.from_date) != bool(payload.to_date):
+        raise HTTPException(status_code=400, detail="from_date and to_date must be provided together.")
+
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: _warm_dashboard_range(
+                payload.from_date,
+                payload.to_date,
+                wait=payload.wait,
+                force_refresh=payload.force_refresh,
+                include_profile=payload.profile,
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Dashboard warm endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/question-briefs/debug/refresh", dependencies=[Depends(require_debug_endpoint_access)])

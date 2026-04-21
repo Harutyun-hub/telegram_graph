@@ -9,8 +9,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import json
 from statistics import median
+
+from api.dashboard_perf import execute_supabase_query
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
+from buffer.supabase_writer import SupabaseWriter
 
 LOOKBACK_DAYS = 30
 ACTIVITY_LOOKBACK_DAYS = 7
@@ -42,6 +45,8 @@ _WIDGET_TYPE_METADATA_KEYWORDS: dict[str, tuple[str, ...]] = {
     'Lifestyle': ('food', 'restaurant', 'events', 'culture', 'lifestyle', 'travel', 'еда', 'ресторан', 'событ', 'досуг'),
 }
 
+_SUPABASE_WRITER: SupabaseWriter | None = None
+
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     text = str(value or '').strip()
@@ -54,6 +59,13 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _supabase() -> SupabaseWriter:
+    global _SUPABASE_WRITER
+    if _SUPABASE_WRITER is None:
+        _SUPABASE_WRITER = SupabaseWriter()
+    return _SUPABASE_WRITER
 
 
 def _reaction_total(payload: str | None) -> int:
@@ -386,18 +398,17 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
 
     # Fetch usernames from Supabase
     try:
-        from buffer.supabase_writer import SupabaseWriter
-        writer = SupabaseWriter()
-
         # Get user IDs from Neo4j results
         user_ids = [r['userId'] for r in neo4j_results if r.get('userId')]
 
         if user_ids:
             # Fetch usernames from Supabase
-            supabase_users = writer.client.table('telegram_users') \
-                .select('telegram_user_id, username, first_name, last_name') \
-                .in_('telegram_user_id', user_ids) \
-                .execute()
+            supabase_users = execute_supabase_query(
+                _supabase().client.table('telegram_users')
+                .select('telegram_user_id, username, first_name, last_name')
+                .in_('telegram_user_id', user_ids),
+                label="network.get_key_voices.users",
+            )
 
             # Create a lookup dictionary
             user_lookup = {}

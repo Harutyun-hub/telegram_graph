@@ -13,6 +13,7 @@ import time
 from typing import Any, Callable, Dict, TypeVar
 
 import config
+from api.dashboard_perf import record_neo4j_query
 from loguru import logger
 from neo4j import GraphDatabase, ManagedTransaction
 from neo4j.exceptions import ConfigurationError, DriverError, Neo4jError, ServiceUnavailable, SessionExpired
@@ -89,6 +90,16 @@ def _normalized_uri() -> str:
 
 def _error_text(exc: BaseException) -> str:
     return str(exc).strip()
+
+
+def _cypher_fingerprint(cypher: str, *, limit: int = 96) -> str:
+    normalized = " ".join(str(cypher or "").split())
+    if not normalized:
+        return "cypher:empty"
+    snippet = normalized[:limit]
+    if len(normalized) > limit:
+        snippet = f"{snippet}..."
+    return f"cypher:{snippet}"
 
 
 def _is_retryable_driver_error(exc: BaseException) -> bool:
@@ -275,6 +286,19 @@ class Neo4jDriverManager:
                     else:
                         result = session.execute_read(work)
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
+                    row_count = len(result) if isinstance(result, list) else None
+                    record_neo4j_query(
+                        label=op_name,
+                        elapsed_ms=query_ms,
+                        row_count=row_count,
+                        success=True,
+                        metadata={
+                            "driver": driver_key,
+                            "accessMode": access_mode,
+                            "retryCount": retry_count,
+                            "sessionOpenMs": session_open_ms,
+                        },
+                    )
                     if query_ms >= NEO4J_SLOW_QUERY_MS:
                         logger.warning(
                             "Neo4j slow {} | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={}",
@@ -300,6 +324,18 @@ class Neo4jDriverManager:
                 query_ms = 0.0
                 if query_started_at is not None:
                     query_ms = round((time.perf_counter() - query_started_at) * 1000, 2)
+                record_neo4j_query(
+                    label=op_name,
+                    elapsed_ms=query_ms,
+                    success=False,
+                    error=_error_text(exc),
+                    metadata={
+                        "driver": driver_key,
+                        "accessMode": access_mode,
+                        "retryCount": retry_count,
+                        "sessionOpenMs": round(session_open_ms, 2),
+                    },
+                )
                 logger.warning(
                     "Neo4j {} failed | driver={} op={} retry_count={} neo4jSessionOpenMs={} neo4jQueryMs={} neo4jErrorClass={} error={}",
                     access_mode,
@@ -371,11 +407,12 @@ def run_query(
     op_name: str = "run_query",
 ) -> list[dict]:
     payload = dict(params or {})
+    resolved_op_name = op_name if op_name not in {"run_query", "run_single"} else _cypher_fingerprint(cypher)
 
     def _work(tx: ManagedTransaction) -> list[dict]:
         return [dict(record) for record in tx.run(cypher, payload)]
 
-    return execute_read(_work, driver_key=driver_key, op_name=op_name)
+    return execute_read(_work, driver_key=driver_key, op_name=resolved_op_name)
 
 
 def run_single(
@@ -385,7 +422,8 @@ def run_single(
     driver_key: str = REQUEST_DRIVER_KEY,
     op_name: str = "run_single",
 ) -> dict | None:
-    rows = run_query(cypher, params, driver_key=driver_key, op_name=op_name)
+    resolved_op_name = op_name if op_name != "run_single" else _cypher_fingerprint(cypher)
+    rows = run_query(cypher, params, driver_key=driver_key, op_name=resolved_op_name)
     return rows[0] if rows else None
 
 

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from typing import Any, Iterable
 
+from api.dashboard_perf import paginate_supabase_query
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 from api.db import run_query, run_single
 from api.queries import predictive, pulse
@@ -42,23 +43,12 @@ def _supabase() -> SupabaseWriter:
     return _SUPABASE_WRITER
 
 
-def _paginate(query_factory) -> list[dict]:
-    rows: list[dict] = []
-    offset = 0
-    total_count: int | None = None
-    while True:
-        response = query_factory(offset, offset + _SUPABASE_PAGE_SIZE - 1).execute()
-        batch = response.data or []
-        if total_count is None:
-            raw_count = getattr(response, "count", None)
-            total_count = int(raw_count) if raw_count is not None else None
-        if not batch:
-            break
-        rows.extend(batch)
-        if total_count is not None and len(rows) >= total_count:
-            break
-        offset += len(batch)
-    return rows
+def _paginate(query_factory, *, label: str) -> list[dict]:
+    return paginate_supabase_query(
+        query_factory,
+        label=label,
+        page_size=_SUPABASE_PAGE_SIZE,
+    )
 
 
 def _chunked(values: Iterable[str], size: int = _SUPABASE_IN_FILTER_CHUNK) -> list[list[str]]:
@@ -269,7 +259,8 @@ def _fetch_window_posts(ctx: DashboardDateContext) -> list[dict]:
             .lt("posted_at", ctx.end_at.isoformat())
         )
         .order("posted_at", desc=False)
-        .range(from_idx, to_idx)
+        .range(from_idx, to_idx),
+        label="comparative.fetch_window_posts",
     )
 
 
@@ -281,7 +272,8 @@ def _fetch_window_comments(ctx: DashboardDateContext) -> list[dict]:
         .lt("posted_at", ctx.end_at.isoformat())
         .not_.is_("telegram_user_id", "null")
         .order("posted_at", desc=False)
-        .range(from_idx, to_idx)
+        .range(from_idx, to_idx),
+        label="comparative.fetch_window_comments",
     )
 
 
@@ -297,7 +289,8 @@ def _fetch_post_analyses(post_ids: list[str]) -> dict[str, dict]:
             .eq("content_type", "post")
             .in_("content_id", ids)
             .order("created_at", desc=True)
-            .range(from_idx, to_idx)
+            .range(from_idx, to_idx),
+            label="comparative.fetch_post_analyses",
         )
         for row in rows:
             post_id = str(row.get("content_id") or "").strip()
@@ -321,7 +314,8 @@ def _fetch_batch_analyses(post_ids: list[str]) -> dict[tuple[str, str, str], dic
             .not_.is_("telegram_user_id", "null")
             .in_("content_id", ids)
             .order("created_at", desc=True)
-            .range(from_idx, to_idx)
+            .range(from_idx, to_idx),
+            label="comparative.fetch_batch_analyses",
         )
         for row in rows:
             post_id = str(row.get("content_id") or "").strip()
@@ -839,26 +833,43 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
 
 def get_vitality_indicators() -> dict:
     """Composite community health indicators."""
-    total_users = (run_single("MATCH (u:User) RETURN count(u) AS n") or {}).get("n", 0)
-    active_users = (run_single("""
-        MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
-        RETURN count(u) AS n
-    """) or {}).get("n", 0)
-    total_topics = (run_single("""
-        MATCH (p:Post)-[:TAGGED]->(t:Topic)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(DISTINCT t) AS n
-    """) or {}).get("n", 0)
-    total_posts = (run_single("""
-        MATCH (p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(p) AS n
-    """) or {}).get("n", 0)
-    total_comments = (run_single("""
-        MATCH (c:Comment)-[:REPLIES_TO]->(p:Post)
-        WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN count(c) AS n
-    """) or {}).get("n", 0)
+    active_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    stats = run_single(
+        """
+        CALL {
+            MATCH (u:User)
+            RETURN count(u) AS totalUsers
+        }
+        CALL {
+            MATCH (u:User)
+            WHERE u.last_seen > datetime($active_cutoff)
+            RETURN count(u) AS activeUsers7d
+        }
+        CALL {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)
+            WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+            RETURN count(DISTINCT t) AS totalTopics
+        }
+        CALL {
+            MATCH (p:Post)
+            WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+            RETURN count(p) AS totalPosts
+        }
+        CALL {
+            MATCH (c:Comment)-[:REPLIES_TO]->(p:Post)
+            WHERE coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+            RETURN count(c) AS totalComments
+        }
+        RETURN totalUsers, activeUsers7d, totalTopics, totalPosts, totalComments
+        """,
+        {"active_cutoff": active_cutoff},
+        op_name="comparative.get_vitality_indicators",
+    ) or {}
+    total_users = int(stats.get("totalUsers") or 0)
+    active_users = int(stats.get("activeUsers7d") or 0)
+    total_topics = int(stats.get("totalTopics") or 0)
+    total_posts = int(stats.get("totalPosts") or 0)
+    total_comments = int(stats.get("totalComments") or 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {
