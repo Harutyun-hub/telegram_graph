@@ -478,7 +478,7 @@ def _tier_strategic(_ctx: DashboardDateContext) -> dict:
         "topicBubbles": _safe("topicBubbles", lambda: strategic.get_topic_bubbles(_ctx), fallback["topicBubbles"]),
         "trendLines": trend_lines,
         "trendData": trend_lines,
-        "heatmap": _safe("heatmap", strategic.get_heatmap, fallback["heatmap"]),
+        "heatmap": _safe("heatmap", lambda: strategic.get_heatmap(_ctx), fallback["heatmap"]),
         "questionCategories": _safe("questionCategories", lambda: strategic.get_question_categories(_ctx), fallback["questionCategories"]),
         "questionBriefs": _safe("questionBriefs", question_briefs.get_question_briefs, fallback["questionBriefs"]),
         "lifecycleStages": _safe("lifecycleStages", lambda: strategic.get_lifecycle_stages(_ctx), fallback["lifecycleStages"]),

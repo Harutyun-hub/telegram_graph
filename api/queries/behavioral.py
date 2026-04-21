@@ -4,11 +4,17 @@ behavioral.py — Tier 3: Problems & Satisfaction (pain point monitoring)
 Provides: problems, serviceGaps, satisfactionAreas, moodData, urgencySignals
 """
 from __future__ import annotations
+import threading
+import time
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
 
 _NOISY_TOPIC_KEYS = ["", "null", "unknown", "none", "n/a", "na"]
+_TOPIC_SCOPE_LIMIT = 20
+_TOPIC_SCOPE_TTL_SECONDS = 120.0
+_TOPIC_SCOPE_CACHE: dict[tuple[str, int], tuple[float, list[str]]] = {}
+_TOPIC_SCOPE_LOCK = threading.Lock()
 _NEGATIVE_SENTIMENTS = ["Negative", "Urgent", "Sarcastic"]
 _DISTRESS_TAGS = ["Anxious", "Frustrated", "Angry", "Exhausted", "Grief", "Distrustful", "Confused"]
 _SERVICE_REQUEST_HINTS = [
@@ -47,13 +53,72 @@ def _window_params(ctx: DashboardDateContext) -> dict[str, object]:
     }
 
 
+def _window_topic_names(ctx: DashboardDateContext, *, limit: int = _TOPIC_SCOPE_LIMIT) -> list[str]:
+    cache_key = (ctx.cache_key, int(limit))
+    now = time.time()
+    with _TOPIC_SCOPE_LOCK:
+        cached = _TOPIC_SCOPE_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _TOPIC_SCOPE_TTL_SECONDS:
+            return list(cached[1])
+        stale_keys = [key for key, (ts, _value) in _TOPIC_SCOPE_CACHE.items() if (now - ts) >= _TOPIC_SCOPE_TTL_SECONDS]
+        for stale_key in stale_keys:
+            _TOPIC_SCOPE_CACHE.pop(stale_key, None)
+
+    params = _window_params(ctx)
+    params.update({"noise": _NOISY_TOPIC_KEYS, "topic_limit": max(1, int(limit))})
+    rows = run_query(
+        """
+        CALL {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT p) AS mentions
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT c) AS mentions
+        }
+        WITH topic, sum(mentions) AS totalMentions
+        WHERE totalMentions > 0
+        RETURN topic
+        ORDER BY totalMentions DESC, topic ASC
+        LIMIT $topic_limit
+        """,
+        params,
+    )
+    topic_names = [str(row.get("topic") or "").strip() for row in rows if str(row.get("topic") or "").strip()]
+    with _TOPIC_SCOPE_LOCK:
+        _TOPIC_SCOPE_CACHE[cache_key] = (time.time(), list(topic_names))
+    return topic_names
+
+
+def _bounded_window_params(ctx: DashboardDateContext, *, limit: int = _TOPIC_SCOPE_LIMIT) -> dict[str, object]:
+    params = _window_params(ctx)
+    params.update({"topic_names": _window_topic_names(ctx, limit=limit)})
+    return params
+
+
 def get_problems(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level problem signals from message-level sentiment evidence."""
+    params = {
+        "noise": _NOISY_TOPIC_KEYS,
+        "negative_labels": _NEGATIVE_SENTIMENTS,
+        "distress_tags": _DISTRESS_TAGS,
+        **_bounded_window_params(ctx),
+    }
+    if not params["topic_names"]:
+        return []
     return run_query(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
+          AND t.name IN $topic_names
 
         CALL {
             WITH t
@@ -119,22 +184,26 @@ def get_problems(ctx: DashboardDateContext) -> list[dict]:
         ORDER BY (urgentSignals * 3 + distressSignals * 2 + affectedSignals) DESC
         LIMIT 20
         """,
-        {
-            "noise": _NOISY_TOPIC_KEYS,
-            "negative_labels": _NEGATIVE_SENTIMENTS,
-            "distress_tags": _DISTRESS_TAGS,
-            **_window_params(ctx),
-        },
+        params,
     )
 
 
 def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
     """Topics with strong demand and high dissatisfaction from message-level evidence."""
+    params = {
+        "noise": _NOISY_TOPIC_KEYS,
+        "negative_labels": _NEGATIVE_SENTIMENTS,
+        "distress_tags": _DISTRESS_TAGS,
+        **_bounded_window_params(ctx),
+    }
+    if not params["topic_names"]:
+        return []
     return run_query(
         """
         MATCH (t:Topic)
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
+          AND t.name IN $topic_names
 
         CALL {
             WITH t
@@ -221,12 +290,7 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
         ORDER BY dissatisfactionPct DESC, demand DESC
         LIMIT 15
         """,
-        {
-            "noise": _NOISY_TOPIC_KEYS,
-            "negative_labels": _NEGATIVE_SENTIMENTS,
-            "distress_tags": _DISTRESS_TAGS,
-            **_window_params(ctx),
-        },
+        params,
     )
 
 
@@ -557,11 +621,15 @@ def get_service_gap_brief_candidates(
 
 def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
     """Confidence-weighted satisfaction scores per Topic from message-level sentiment."""
+    params = {"noise": _NOISY_TOPIC_KEYS, **_bounded_window_params(ctx)}
+    if not params["topic_names"]:
+        return []
     return run_query(
         """
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
           AND coalesce(t.proposed, false) = false
+          AND t.name IN $topic_names
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
@@ -683,7 +751,7 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
         RETURN category, pos, neg, neu, volume, currentVolume, previousVolume, satisfactionPct, trendPct
         ORDER BY volume DESC
         """,
-        {"noise": _NOISY_TOPIC_KEYS, **_window_params(ctx)},
+        params,
     )
 
 

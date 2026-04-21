@@ -5,6 +5,8 @@ Provides: topicBubbles, trendLines, heatmap, questionCategories,
 questionBriefCandidates, lifecycleStages
 """
 from __future__ import annotations
+import threading
+import time
 from datetime import timedelta
 
 import config
@@ -15,6 +17,11 @@ from api.db import run_query
 RETENTION_DAYS = max(8, int(getattr(config, "GRAPH_ANALYTICS_RETENTION_DAYS", 15)))
 COMPARE_DAYS = 7
 LIFECYCLE_BASELINE_DAYS = max(1, RETENTION_DAYS - COMPARE_DAYS)
+TOPIC_SCOPE_LIMIT = 24
+TOPIC_SCOPE_TTL_SECONDS = 120.0
+_NOISE_TOPICS = ["", "null", "unknown", "none", "n/a", "na"]
+_TOPIC_SCOPE_CACHE: dict[tuple[str, int], tuple[float, list[str]]] = {}
+_TOPIC_SCOPE_LOCK = threading.Lock()
 
 def _strategic_window_params(ctx: DashboardDateContext) -> dict[str, object]:
     compare_days = min(COMPARE_DAYS, max(1, ctx.days - 1))
@@ -34,12 +41,64 @@ def _strategic_window_params(ctx: DashboardDateContext) -> dict[str, object]:
     }
 
 
+def _window_topic_names(ctx: DashboardDateContext, *, limit: int = TOPIC_SCOPE_LIMIT) -> list[str]:
+    cache_key = (ctx.cache_key, int(limit))
+    now = time.time()
+    with _TOPIC_SCOPE_LOCK:
+        cached = _TOPIC_SCOPE_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < TOPIC_SCOPE_TTL_SECONDS:
+            return list(cached[1])
+        stale_keys = [key for key, (ts, _value) in _TOPIC_SCOPE_CACHE.items() if (now - ts) >= TOPIC_SCOPE_TTL_SECONDS]
+        for stale_key in stale_keys:
+            _TOPIC_SCOPE_CACHE.pop(stale_key, None)
+
+    params = _strategic_window_params(ctx)
+    params.update({"noise": _NOISE_TOPICS, "topic_limit": max(1, int(limit))})
+    rows = run_query("""
+        CALL {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT p) AS mentions
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+            RETURN t.name AS topic, count(DISTINCT c) AS mentions
+        }
+        WITH topic, sum(mentions) AS totalMentions
+        WHERE totalMentions > 0
+        RETURN topic
+        ORDER BY totalMentions DESC, topic ASC
+        LIMIT $topic_limit
+    """, params)
+    topic_names = [str(row.get("topic") or "").strip() for row in rows if str(row.get("topic") or "").strip()]
+    with _TOPIC_SCOPE_LOCK:
+        _TOPIC_SCOPE_CACHE[cache_key] = (time.time(), list(topic_names))
+    return topic_names
+
+
+def _bounded_window_params(ctx: DashboardDateContext, *, limit: int = TOPIC_SCOPE_LIMIT) -> dict[str, object]:
+    topic_names = _window_topic_names(ctx, limit=limit)
+    params = _strategic_window_params(ctx)
+    params.update({"noise": _NOISE_TOPICS, "topic_names": topic_names})
+    return params
+
+
 def get_topic_bubbles(ctx: DashboardDateContext) -> list[dict]:
     """Topic bubble chart: recent topic prominence + reliable short-term growth."""
+    params = _bounded_window_params(ctx)
+    if not params["topic_names"]:
+        return []
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+          AND t.name IN $topic_names
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
@@ -97,55 +156,71 @@ def get_topic_bubbles(ctx: DashboardDateContext) -> list[dict]:
                     ELSE round(100.0 * (mentions7d - mentionsPrev7d) / (mentionsPrev7d + 3), 1)
                 END AS growth7dPct
         ORDER BY mentionCount DESC
-    """, _strategic_window_params(ctx))
+        LIMIT 40
+    """, params)
 
 
 def get_trend_lines(ctx: DashboardDateContext) -> list[dict]:
     """Daily conversation counts (posts + comments) per topic for the clean retention window."""
+    params = _bounded_window_params(ctx, limit=12)
+    if not params["topic_names"]:
+        return []
     return run_query("""
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-        WHERE coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
         CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
-            WITH toString(date(p.posted_at)) AS bucket,
-                 count(DISTINCT p) AS c
-            RETURN bucket, c
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND t.name IN $topic_names
+            RETURN t.name AS topic,
+                   toString(date(p.posted_at)) AS bucket,
+                   count(DISTINCT p) AS mentions
             UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
-            WITH toString(date(c.posted_at)) AS bucket,
-                 count(DISTINCT c) AS c
-            RETURN bucket, c
+              AND coalesce(t.proposed, false) = false
+              AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+              AND t.name IN $topic_names
+            RETURN t.name AS topic,
+                   toString(date(c.posted_at)) AS bucket,
+                   count(DISTINCT c) AS mentions
         }
-        WITH t.name AS topic, bucket, sum(c) AS mentions
-        WHERE mentions > 0
-        RETURN topic, bucket, mentions AS posts
+        WITH topic, bucket, sum(mentions) AS posts
+        WHERE posts > 0
+        RETURN topic, bucket, posts
         ORDER BY topic, bucket
-    """, _strategic_window_params(ctx))
+    """, params)
 
 
-def get_heatmap() -> list[dict]:
+def get_heatmap(ctx: DashboardDateContext) -> list[dict]:
     """Content type × topic matrix (media_type distribution per topic)."""
+    params = _bounded_window_params(ctx, limit=12)
+    if not params["topic_names"]:
+        return []
     return run_query("""
         MATCH (p:Post)-[:TAGGED]->(t:Topic)
+        WHERE p.posted_at >= datetime($start)
+          AND p.posted_at < datetime($end)
+          AND t.name IN $topic_names
         WITH t.name AS topic, coalesce(p.media_type, 'text') AS mediaType,
              count(p) AS count
         RETURN topic, mediaType, count
         ORDER BY topic, count DESC
-    """)
+    """, params)
 
 
 def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
     """Real question messages by topic with deduplication and response proxy."""
+    params = _bounded_window_params(ctx, limit=18)
+    if not params["topic_names"]:
+        return []
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+          AND t.name IN $topic_names
 
         CALL {
             WITH t
@@ -268,7 +343,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
             coalesce(latest_sample, forms[0].sample) AS sampleQuestion,
             coalesce(latest_sample_id, forms[0].sample_id) AS sampleQuestionId
         ORDER BY seekers DESC, category, topic
-    """, _strategic_window_params(ctx))
+        LIMIT 32
+    """, params)
 
 
 def get_question_brief_candidates(
@@ -412,10 +488,14 @@ def get_question_brief_candidates(
 
 def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
     """Topic lifecycle using direct-message signals inside the clean retention window."""
+    params = _bounded_window_params(ctx, limit=18)
+    if not params["topic_names"]:
+        return []
     return run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN ['', 'null', 'unknown', 'none', 'n/a', 'na']
+          AND t.name IN $topic_names
 
         CALL {
             WITH t
@@ -551,4 +631,5 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
             END,
             weeklyCurrent DESC,
             stageConfidence DESC
-    """, _strategic_window_params(ctx))
+        LIMIT 24
+    """, params)
