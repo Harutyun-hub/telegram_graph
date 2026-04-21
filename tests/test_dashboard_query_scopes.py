@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from api.dashboard_dates import build_dashboard_date_context
-from api.queries import comparative, network
+from api.queries import comparative, network, predictive
 
 
 class NetworkQueryScopeTests(unittest.TestCase):
@@ -56,6 +56,34 @@ class ComparativeQueryScopeTests(unittest.TestCase):
         self.assertIn("datetime($end)", query)
         self.assertEqual(params["start"], ctx.start_at.isoformat())
         self.assertEqual(params["end"], ctx.end_at.isoformat())
+
+
+class PredictiveQueryShapeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        predictive._QUERY_CACHE.clear()
+
+    def test_retention_and_churn_queries_drop_id_materialization(self) -> None:
+        with patch.object(predictive, "run_query", return_value=[]) as run_query_mock:
+            predictive.get_retention_factors(self.ctx)
+            predictive.get_churn_signals(self.ctx)
+
+        self.assertEqual(run_query_mock.call_count, 2)
+        for call in run_query_mock.call_args_list:
+            query = call.args[0]
+            self.assertNotIn("collect(DISTINCT id(u))", query)
+            self.assertNotIn("WHERE id(u)", query)
+            self.assertIn("EXISTS {", query)
+            self.assertIn("datetime($start)", query)
+            self.assertIn("datetime($end)", query)
+
+    def test_predictive_query_cache_reuses_window_result(self) -> None:
+        with patch.object(predictive, "run_query", return_value=[{"topic": "Work"}]) as run_query_mock:
+            first = predictive.get_churn_signals(self.ctx)
+            second = predictive.get_churn_signals(self.ctx)
+
+        self.assertEqual(first, second)
+        run_query_mock.assert_called_once()
 
 
 if __name__ == "__main__":

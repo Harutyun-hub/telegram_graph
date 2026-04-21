@@ -135,6 +135,8 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 _row_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _row_cache_lock = threading.Lock()
+_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_health_cache_lock = threading.Lock()
 
 
 def _fetch_analysis_rows_cached(
@@ -756,6 +758,15 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     - discussion diversity,
     - conversation depth.
     """
+    now = time.monotonic()
+    with _health_cache_lock:
+        stale_keys = [cache_key for cache_key, (ts, _payload) in _health_cache.items() if (now - ts) >= 30.0]
+        for stale_key in stale_keys:
+            _health_cache.pop(stale_key, None)
+        cached = _health_cache.get(ctx.cache_key)
+        if cached is not None:
+            return cached[1]
+
     current_rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
     previous_rows = _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
@@ -833,7 +844,7 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     elif delta <= -2:
         trend = "down"
 
-    return {
+    payload = {
         "score": current_score,
         "trend": trend,
         "previousScore": previous_score,
@@ -848,6 +859,9 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
         "dominantTopicSharePct": round(current_diversity["dominant_share"] * 100.0, 1),
         "windowDays": ctx.days,
     }
+    with _health_cache_lock:
+        _health_cache[ctx.cache_key] = (now, payload)
+    return payload
 
 
 def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:

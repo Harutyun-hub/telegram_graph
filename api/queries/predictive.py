@@ -7,6 +7,8 @@ Provides: emergingInterests, retentionFactors, churnSignals, growthFunnel,
 from __future__ import annotations
 import math
 from datetime import datetime, timedelta, timezone
+import threading
+import time
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 
@@ -19,6 +21,9 @@ EMERGING_COMPARE_DAYS = 7
 FUNNEL_DEDUP_FLOOR = 0.45
 FUNNEL_READER_VIEW_PERCENTILE = 0.75
 FUNNEL_LEADER_SCORE_PERCENTILE = 0.90
+_QUERY_CACHE_TTL_SECONDS = 30.0
+_QUERY_CACHE: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_QUERY_CACHE_LOCK = threading.Lock()
 FUNNEL_ASK_HINTS = [
     "need help",
     "looking for",
@@ -44,6 +49,22 @@ FUNNEL_ASK_HINTS = [
     "нужна",
     "нужно",
 ]
+
+
+def _cached_rows(kind: str, ctx: DashboardDateContext, builder) -> list[dict]:
+    key = (kind, ctx.cache_key)
+    now = time.monotonic()
+    with _QUERY_CACHE_LOCK:
+        stale_keys = [cache_key for cache_key, (ts, _rows) in _QUERY_CACHE.items() if (now - ts) >= _QUERY_CACHE_TTL_SECONDS]
+        for stale_key in stale_keys:
+            _QUERY_CACHE.pop(stale_key, None)
+        cached = _QUERY_CACHE.get(key)
+        if cached is not None:
+            return cached[1]
+    rows = builder()
+    with _QUERY_CACHE_LOCK:
+        _QUERY_CACHE[key] = (now, rows)
+    return rows
 
 
 def _predictive_window_params(ctx: DashboardDateContext) -> dict[str, object]:
@@ -319,48 +340,55 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
 
 def get_retention_factors(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level continuity factors among previously active members."""
-    return run_query("""
+    return _cached_rows("retention_factors", ctx, lambda: run_query("""
         CALL {
             MATCH (u:User)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($previous_end)
-            WITH u, count(c) AS previousComments
+            WITH u, count(DISTINCT c) AS previousComments
             WHERE previousComments >= $min_comments
-            RETURN collect(DISTINCT id(u)) AS previousUserIds,
-                   count(DISTINCT u) AS previousActiveUsers
+            WITH u,
+                 EXISTS {
+                     MATCH (u)-[:WROTE]->(c2:Comment)
+                     WHERE c2.posted_at >= datetime($start)
+                       AND c2.posted_at < datetime($end)
+                     WITH count(DISTINCT c2) AS currentComments
+                     WHERE currentComments >= $min_comments
+                     RETURN 1
+                 } AS retained
+            RETURN count(DISTINCT u) AS previousActiveUsers,
+                   count(DISTINCT CASE WHEN retained THEN u END) AS retainedActiveUsers
         }
-        CALL {
-            MATCH (u:User)-[:WROTE]->(c:Comment)
-            WHERE c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-            WITH u, count(c) AS currentComments
-            WHERE currentComments >= $min_comments
-            RETURN collect(DISTINCT id(u)) AS currentUserIds
-        }
-        WITH previousUserIds,
-             previousActiveUsers,
-             [userId IN previousUserIds WHERE userId IN currentUserIds] AS retainedUserIds
-        WITH previousUserIds,
-             previousActiveUsers,
-             retainedUserIds,
-             size(retainedUserIds) AS retainedActiveUsers,
-             CASE
-                 WHEN previousActiveUsers = 0 THEN 0.0
-                 ELSE 100.0 * size(retainedUserIds) / previousActiveUsers
-             END AS baselineContinuityPct
-        UNWIND previousUserIds AS previousUserId
-        MATCH (u:User)-[:WROTE]->(c:Comment)-[:TAGGED]->(t:Topic)
-        WHERE id(u) = previousUserId
-          AND c.posted_at >= datetime($previous_start)
+        MATCH (u:User)-[:WROTE]->(c:Comment)
+        WHERE c.posted_at >= datetime($previous_start)
           AND c.posted_at < datetime($previous_end)
+        WITH u, previousActiveUsers, retainedActiveUsers, count(DISTINCT c) AS previousComments
+        WHERE previousComments >= $min_comments
+        WITH u,
+             previousActiveUsers,
+             retainedActiveUsers,
+             EXISTS {
+                 MATCH (u)-[:WROTE]->(c2:Comment)
+                 WHERE c2.posted_at >= datetime($start)
+                   AND c2.posted_at < datetime($end)
+                 WITH count(DISTINCT c2) AS currentComments
+                 WHERE currentComments >= $min_comments
+                 RETURN 1
+             } AS retained
+        MATCH (u)-[:WROTE]->(topicComment:Comment)-[:TAGGED]->(t:Topic)
+        WHERE topicComment.posted_at >= datetime($previous_start)
+          AND topicComment.posted_at < datetime($previous_end)
           AND coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         WITH t.name AS topic,
-             count(DISTINCT previousUserId) AS previousUsers,
-             count(DISTINCT CASE WHEN previousUserId IN retainedUserIds THEN previousUserId END) AS retainedUsers,
+             count(DISTINCT u) AS previousUsers,
+             count(DISTINCT CASE WHEN retained THEN u END) AS retainedUsers,
              previousActiveUsers,
              retainedActiveUsers,
-             baselineContinuityPct
+             CASE
+                 WHEN previousActiveUsers = 0 THEN 0.0
+                 ELSE 100.0 * retainedActiveUsers / previousActiveUsers
+             END AS baselineContinuityPct
         WHERE previousUsers >= $min_topic_support
         WITH topic,
              previousUsers,
@@ -408,53 +436,60 @@ def get_retention_factors(ctx: DashboardDateContext) -> list[dict]:
         "min_comments": MIN_ACTIVE_COMMENTS,
         "min_topic_support": MIN_TOPIC_SUPPORT,
         "prior_strength": SMOOTHING_PRIOR,
-    })
+    }, op_name="predictive.retention_factors"))
 
 
 def get_churn_signals(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level drop-off risk among previously active members."""
-    return run_query("""
+    return _cached_rows("churn_signals", ctx, lambda: run_query("""
         CALL {
             MATCH (u:User)-[:WROTE]->(c:Comment)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($previous_end)
-            WITH u, count(c) AS previousComments
+            WITH u, count(DISTINCT c) AS previousComments
             WHERE previousComments >= $min_comments
-            RETURN collect(DISTINCT id(u)) AS previousUserIds,
-                   count(DISTINCT u) AS previousActiveUsers
+            WITH u,
+                 EXISTS {
+                     MATCH (u)-[:WROTE]->(c2:Comment)
+                     WHERE c2.posted_at >= datetime($start)
+                       AND c2.posted_at < datetime($end)
+                     WITH count(DISTINCT c2) AS currentComments
+                     WHERE currentComments >= $min_comments
+                     RETURN 1
+                 } AS retained
+            RETURN count(DISTINCT u) AS previousActiveUsers,
+                   count(DISTINCT CASE WHEN NOT retained THEN u END) AS droppedActiveUsers
         }
-        CALL {
-            MATCH (u:User)-[:WROTE]->(c:Comment)
-            WHERE c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-            WITH u, count(c) AS currentComments
-            WHERE currentComments >= $min_comments
-            RETURN collect(DISTINCT id(u)) AS currentUserIds
-        }
-        WITH previousUserIds,
-             previousActiveUsers,
-             [userId IN previousUserIds WHERE NOT userId IN currentUserIds] AS droppedUserIds
-        WITH previousUserIds,
-             previousActiveUsers,
-             droppedUserIds,
-             size(droppedUserIds) AS droppedActiveUsers,
-             CASE
-                 WHEN previousActiveUsers = 0 THEN 0.0
-                 ELSE 100.0 * size(droppedUserIds) / previousActiveUsers
-             END AS baselineDropoffPct
-        UNWIND previousUserIds AS previousUserId
-        MATCH (u:User)-[:WROTE]->(c:Comment)-[:TAGGED]->(t:Topic)
-        WHERE id(u) = previousUserId
-          AND c.posted_at >= datetime($previous_start)
+        MATCH (u:User)-[:WROTE]->(c:Comment)
+        WHERE c.posted_at >= datetime($previous_start)
           AND c.posted_at < datetime($previous_end)
+        WITH u, previousActiveUsers, droppedActiveUsers, count(DISTINCT c) AS previousComments
+        WHERE previousComments >= $min_comments
+        WITH u,
+             previousActiveUsers,
+             droppedActiveUsers,
+             NOT EXISTS {
+                 MATCH (u)-[:WROTE]->(c2:Comment)
+                 WHERE c2.posted_at >= datetime($start)
+                   AND c2.posted_at < datetime($end)
+                 WITH count(DISTINCT c2) AS currentComments
+                 WHERE currentComments >= $min_comments
+                 RETURN 1
+             } AS dropped
+        MATCH (u)-[:WROTE]->(topicComment:Comment)-[:TAGGED]->(t:Topic)
+        WHERE topicComment.posted_at >= datetime($previous_start)
+          AND topicComment.posted_at < datetime($previous_end)
           AND coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
         WITH t.name AS topic,
-             count(DISTINCT previousUserId) AS previousUsers,
-             count(DISTINCT CASE WHEN previousUserId IN droppedUserIds THEN previousUserId END) AS lostUsers,
+             count(DISTINCT u) AS previousUsers,
+             count(DISTINCT CASE WHEN dropped THEN u END) AS lostUsers,
              previousActiveUsers,
              droppedActiveUsers,
-             baselineDropoffPct
+             CASE
+                 WHEN previousActiveUsers = 0 THEN 0.0
+                 ELSE 100.0 * droppedActiveUsers / previousActiveUsers
+             END AS baselineDropoffPct
         WHERE previousUsers >= $min_topic_support
           AND lostUsers > 0
         WITH topic,
@@ -503,7 +538,7 @@ def get_churn_signals(ctx: DashboardDateContext) -> list[dict]:
         "min_comments": MIN_ACTIVE_COMMENTS,
         "min_topic_support": MIN_TOPIC_SUPPORT,
         "prior_strength": SMOOTHING_PRIOR,
-    })
+    }, op_name="predictive.churn_signals"))
 
 
 def get_growth_funnel(ctx: DashboardDateContext) -> list[dict]:
