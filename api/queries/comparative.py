@@ -34,9 +34,9 @@ _SENTIMENT_CANON = {
 _NEGATIVE_SENTIMENTS = {"Negative", "Urgent", "Sarcastic"}
 _NOISY_TOPIC_KEYS = {"", "null", "unknown", "none", "n/a", "na"}
 _TOPICS_PAGE_GROUP_KEYS = {"Living", "Work", "Family", "Finance", "Lifestyle", "Integration", "Admin"}
-# The v1 topic detail/evidence path is retired because it is not valid on the
-# current Neo4j runtime. Keep the selector unconditional so stale env flags
-# cannot silently reactivate the broken query path in staging or production.
+# The v1 topic detail/evidence path is not valid on the current Neo4j runtime
+# used by staging, so keep the working v2 path active until both environments
+# share one proven query family again.
 USE_TOPIC_QUERY_V2 = True
 _GLOBAL_COUNTS_TTL_SECONDS = 300.0
 _GLOBAL_COUNTS_CACHE: tuple[float, dict[str, int]] | None = None
@@ -1163,7 +1163,7 @@ def get_topic_overview_candidates(
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
+        CALL {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1835,9 +1835,8 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL {
-            CALL {
-                WITH t
+        CALL (t) {
+            CALL (t) {
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
@@ -1860,7 +1859,6 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
                     isQuestion: p.text IS NOT NULL AND trim(p.text) <> '' AND p.text CONTAINS '?'
                 } AS event
                 UNION ALL
-                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($start)
                   AND c.posted_at < datetime($end)
@@ -1888,15 +1886,13 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL {
-            CALL {
-                WITH t
+        CALL (t) {
+            CALL (t) {
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($previous_start)
                   AND p.posted_at < datetime($previous_end)
                 RETURN 1 AS hit
                 UNION ALL
-                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($previous_start)
                   AND c.posted_at < datetime($previous_end)
@@ -2028,7 +2024,7 @@ def get_topic_evidence_page_v2(
     safe_page = max(0, int(page))
     safe_size = max(1, min(int(size), 50))
     skip = safe_page * safe_size
-    end = skip + safe_size
+    page_end = skip + safe_size
     questions_only = (view or "all").strip().lower() == "questions"
     rows = run_query("""
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -2036,9 +2032,8 @@ def get_topic_evidence_page_v2(
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL {
-            CALL {
-                WITH t
+        CALL (t) {
+            CALL (t) {
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
@@ -2056,7 +2051,6 @@ def get_topic_evidence_page_v2(
                     isQuestion: p.text IS NOT NULL AND trim(p.text) <> '' AND p.text CONTAINS '?'
                 } AS event
                 UNION ALL
-                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($start)
                   AND c.posted_at < datetime($end)
@@ -2102,7 +2096,7 @@ def get_topic_evidence_page_v2(
                    replies: row.replies
                }]) AS sampleEvidence,
                size(filteredRows) AS total,
-               [row IN filteredRows[$skip..$end] | {
+               [row IN filteredRows[$skip..$page_end] | {
                    id: row.id,
                    type: row.type,
                    author: row.author,
@@ -2129,7 +2123,7 @@ def get_topic_evidence_page_v2(
         "category": category or "",
         "questions_only": questions_only,
         "skip": skip,
-        "end": end,
+        "page_end": page_end,
         "focus_id": (focus_id or "").strip(),
         "noise": sorted(_NOISY_TOPIC_KEYS),
     })
@@ -2152,7 +2146,7 @@ def get_topic_evidence_page_v2(
         "total": total,
         "page": safe_page,
         "size": safe_size,
-        "hasMore": end < total,
+        "hasMore": page_end < total,
         "focusedItem": row.get("focusedItem"),
     }
 

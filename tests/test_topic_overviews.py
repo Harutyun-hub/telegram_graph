@@ -189,61 +189,7 @@ class TopicOverviewTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(load_mock.call_count, 1)
 
-    def test_build_topic_overview_fallback_uses_detail_payload(self) -> None:
-        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
-        detail_payload = {
-            "name": "Topic One",
-            "sourceTopic": "Topic One",
-            "category": "Government & Leadership",
-            "mentionCount": 18,
-            "previousMentions": 9,
-            "growth7dPct": 100,
-            "distinctUsers": 6,
-            "distinctChannels": 3,
-            "topChannels": ["Channel A", "Channel B"],
-            "sentimentPositive": 12,
-            "sentimentNeutral": 20,
-            "sentimentNegative": 68,
-            "evidence": [
-                {
-                    "id": "ev-1",
-                    "type": "message",
-                    "author": "author-1",
-                    "channel": "Channel A",
-                    "text": "Topic evidence one",
-                    "timestamp": "2026-03-24T11:00:00Z",
-                    "reactions": 4,
-                    "replies": 1,
-                }
-            ],
-            "questionEvidence": [
-                {
-                    "id": "q-1",
-                    "type": "reply",
-                    "author": "author-2",
-                    "channel": "Channel A",
-                    "text": "What changed?",
-                    "timestamp": "2026-03-24T10:00:00Z",
-                    "reactions": 0,
-                    "replies": 0,
-                }
-            ],
-        }
-
-        overview = topic_overviews.build_topic_overview_fallback(detail_payload, ctx)
-
-        self.assertIsNotNone(overview)
-        assert overview is not None
-        self.assertEqual(overview["status"], "fallback")
-        self.assertEqual(overview["windowStart"], ctx.from_date.isoformat())
-        self.assertEqual(overview["windowEnd"], ctx.to_date.isoformat())
-        self.assertEqual(overview["topic"], "Topic One")
-
-
 class TopicQueryPathTests(unittest.TestCase):
-    def test_topic_detail_defaults_to_v2_path(self) -> None:
-        self.assertTrue(comparative.USE_TOPIC_QUERY_V2)
-
     def test_candidate_mapping_uses_safe_string_conversion(self) -> None:
         ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
         row = {
@@ -411,10 +357,10 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIn("overview", body)
-        self.assertEqual(body["overview"]["status"], "fallback")
+        self.assertIsNone(body["overview"])
         get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
 
-    def test_topic_detail_uses_fallback_when_materialized_overview_errors(self) -> None:
+    def test_topic_detail_tolerates_materialized_overview_errors(self) -> None:
         payload = {
             "name": "Topic One",
             "sourceTopic": "Topic One",
@@ -452,7 +398,7 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["overview"]["status"], "fallback")
+        self.assertIsNone(body["overview"])
 
 
 if __name__ == "__main__":
