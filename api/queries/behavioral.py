@@ -200,81 +200,77 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
         return []
     return run_query(
         """
-        MATCH (t:Topic)
-        WHERE NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-          AND coalesce(t.proposed, false) = false
-          AND t.name IN $topic_names
-
+        UNWIND $topic_names AS topic
         CALL {
-            WITH t
-            OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
-            WHERE i.last_seen >= datetime($start)
+            WITH topic
+            MATCH (u:User)-[i:INTERESTED_IN]->(t:Topic)
+            WHERE t.name = topic
+              AND i.last_seen >= datetime($previous_start)
               AND i.last_seen < datetime($end)
-            RETURN count(DISTINCT u) AS demand,
-                   count(DISTINCT CASE WHEN i.last_seen >= datetime($start) AND i.last_seen < datetime($end) THEN u END) AS demandThisWeek,
-                   0 AS demandPrevWeek
+            RETURN
+                count(DISTINCT CASE
+                    WHEN i.last_seen >= datetime($start)
+                     AND i.last_seen < datetime($end)
+                    THEN u
+                END) AS demandThisWeek,
+                count(DISTINCT CASE
+                    WHEN i.last_seen >= datetime($previous_start)
+                     AND i.last_seen < datetime($previous_end)
+                    THEN u
+                END) AS demandPrevWeek
         }
-
         CALL {
-            WITH t
-            OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
-            WHERE i.last_seen >= datetime($previous_start)
-              AND i.last_seen < datetime($previous_end)
-            RETURN count(DISTINCT u) AS demandPrevWindow
-        }
-
-        CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
-            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WITH topic
+            MATCH (p:Post)-[:TAGGED]->(t:Topic {name: topic})-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
-            RETURN s.label AS label, count(*) AS cnt
-            UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
-            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-            RETURN s.label AS label, count(*) AS cnt
+            OPTIONAL MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+            OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH coalesce(p.uuid, 'post:' + elementId(p)) AS messageId,
+                 max(CASE WHEN s.label IN $negative_labels THEN 1 ELSE 0 END) AS isNegative,
+                 max(CASE WHEN s.label = 'Positive' THEN 1 ELSE 0 END) AS isPositive,
+                 max(CASE WHEN s.label IN ['Neutral', 'Mixed'] THEN 1 ELSE 0 END) AS isNeutral,
+                 max(CASE WHEN tag.name IN $distress_tags THEN 1 ELSE 0 END) AS hasDistress
+            RETURN
+                sum(isNegative) AS postNegCount,
+                sum(isPositive) AS postPosCount,
+                sum(isNeutral) AS postNeutralCount,
+                sum(hasDistress) AS postDistressTagCount
         }
-
         CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-            MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WHERE p.posted_at >= datetime($start)
-              AND p.posted_at < datetime($end)
-              AND tag.name IN $distress_tags
-            RETURN count(*) AS distressCnt
-            UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-            MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH topic
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic {name: topic})-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
-              AND tag.name IN $distress_tags
-            RETURN count(*) AS distressCnt
+            OPTIONAL MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+            OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
+            WITH coalesce(c.uuid, 'comment:' + elementId(c)) AS messageId,
+                 max(CASE WHEN s.label IN $negative_labels THEN 1 ELSE 0 END) AS isNegative,
+                 max(CASE WHEN s.label = 'Positive' THEN 1 ELSE 0 END) AS isPositive,
+                 max(CASE WHEN s.label IN ['Neutral', 'Mixed'] THEN 1 ELSE 0 END) AS isNeutral,
+                 max(CASE WHEN tag.name IN $distress_tags THEN 1 ELSE 0 END) AS hasDistress
+            RETURN
+                sum(isNegative) AS commentNegCount,
+                sum(isPositive) AS commentPosCount,
+                sum(isNeutral) AS commentNeutralCount,
+                sum(hasDistress) AS commentDistressTagCount
         }
-
-        WITH t.name AS topic,
-             demand,
-             demandThisWeek,
-             demandPrevWindow AS demandPrevWeek,
-             sum(CASE WHEN label IN $negative_labels THEN cnt ELSE 0 END) AS negCount,
-             sum(CASE WHEN label = 'Positive' THEN cnt ELSE 0 END) AS posCount,
-             sum(CASE WHEN label IN ['Neutral', 'Mixed'] THEN cnt ELSE 0 END) AS neutralCount,
-             sum(distressCnt) AS distressTagCount
-        WHERE demand > 3
 
         WITH topic,
-             demand,
              demandThisWeek,
              demandPrevWeek,
-             negCount,
-             posCount,
-             neutralCount,
-             distressTagCount,
-             (negCount + posCount + neutralCount) AS sentimentEvidence
+             (demandThisWeek + demandPrevWeek) AS demand,
+             (coalesce(postNegCount, 0) + coalesce(commentNegCount, 0)) AS negCount,
+             (coalesce(postPosCount, 0) + coalesce(commentPosCount, 0)) AS posCount,
+             (coalesce(postNeutralCount, 0) + coalesce(commentNeutralCount, 0)) AS neutralCount,
+             (coalesce(postDistressTagCount, 0) + coalesce(commentDistressTagCount, 0)) AS distressTagCount,
+             (
+                coalesce(postNegCount, 0) + coalesce(commentNegCount, 0) +
+                coalesce(postPosCount, 0) + coalesce(commentPosCount, 0) +
+                coalesce(postNeutralCount, 0) + coalesce(commentNeutralCount, 0)
+             ) AS sentimentEvidence
         WHERE sentimentEvidence > 0
+          AND (demandThisWeek + demandPrevWeek) > 3
         RETURN topic,
                demand,
                negCount,
@@ -635,56 +631,50 @@ def get_satisfaction_areas(ctx: DashboardDateContext) -> list[dict]:
             MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($end)
-            CALL {
-                WITH p
-                MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-                WITH s.label AS sentiment,
-                     coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
-                     CASE s.label
-                        WHEN 'Urgent' THEN 6
-                        WHEN 'Negative' THEN 5
-                        WHEN 'Sarcastic' THEN 4
-                        WHEN 'Mixed' THEN 3
-                        WHEN 'Positive' THEN 2
-                        WHEN 'Neutral' THEN 1
-                        ELSE 0
-                     END AS precedence
-                ORDER BY signalTs DESC, precedence DESC
-                RETURN head(collect(sentiment)) AS label
-            }
-            WITH p, label
-            WHERE label IS NOT NULL
-            RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
-                   p.posted_at AS ts,
-                   label
+            OPTIONAL MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+            WITH t.name AS topic,
+                 coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
+                 p.posted_at AS ts,
+                 s.label AS label,
+                 coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
+                 CASE s.label
+                    WHEN 'Urgent' THEN 6
+                    WHEN 'Negative' THEN 5
+                    WHEN 'Sarcastic' THEN 4
+                    WHEN 'Mixed' THEN 3
+                    WHEN 'Positive' THEN 2
+                    WHEN 'Neutral' THEN 1
+                    ELSE 0
+                 END AS precedence
+            ORDER BY msgId, signalTs DESC, precedence DESC
+            WITH topic, msgId, ts, collect(label)[0] AS resolvedLabel
+            WHERE resolvedLabel IS NOT NULL
+            RETURN topic, msgId, ts, resolvedLabel AS label
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($end)
-            CALL {
-                WITH c
-                MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-                WITH s.label AS sentiment,
-                     coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
-                     CASE s.label
-                        WHEN 'Urgent' THEN 6
-                        WHEN 'Negative' THEN 5
-                        WHEN 'Sarcastic' THEN 4
-                        WHEN 'Mixed' THEN 3
-                        WHEN 'Positive' THEN 2
-                        WHEN 'Neutral' THEN 1
-                        ELSE 0
-                     END AS precedence
-                ORDER BY signalTs DESC, precedence DESC
-                RETURN head(collect(sentiment)) AS label
-            }
-            WITH c, label
-            WHERE label IS NOT NULL
-            RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
-                   c.posted_at AS ts,
-                   label
+            OPTIONAL MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
+            WITH t.name AS topic,
+                 coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
+                 c.posted_at AS ts,
+                 s.label AS label,
+                 coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
+                 CASE s.label
+                    WHEN 'Urgent' THEN 6
+                    WHEN 'Negative' THEN 5
+                    WHEN 'Sarcastic' THEN 4
+                    WHEN 'Mixed' THEN 3
+                    WHEN 'Positive' THEN 2
+                    WHEN 'Neutral' THEN 1
+                    ELSE 0
+                 END AS precedence
+            ORDER BY msgId, signalTs DESC, precedence DESC
+            WITH topic, msgId, ts, collect(label)[0] AS resolvedLabel
+            WHERE resolvedLabel IS NOT NULL
+            RETURN topic, msgId, ts, resolvedLabel AS label
         }
-        WITH t.name AS category,
+        WITH topic AS category,
              count(DISTINCT CASE WHEN label = 'Positive' THEN msgId END) AS pos,
              count(DISTINCT CASE WHEN label IN ['Negative', 'Urgent', 'Sarcastic'] THEN msgId END) AS neg,
              count(DISTINCT CASE WHEN label IN ['Neutral', 'Mixed'] THEN msgId END) AS neu,
@@ -763,31 +753,27 @@ def get_mood_data(ctx: DashboardDateContext) -> list[dict]:
             MATCH (p:Post)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
-            CALL {
-                WITH p
-                MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-                WITH s.label AS sentiment,
-                     coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
-                     CASE s.label
-                        WHEN 'Urgent' THEN 6
-                        WHEN 'Negative' THEN 5
-                        WHEN 'Sarcastic' THEN 4
-                        WHEN 'Mixed' THEN 3
-                        WHEN 'Positive' THEN 2
-                        WHEN 'Neutral' THEN 1
-                        ELSE 0
-                     END AS precedence
-                ORDER BY signalTs DESC, precedence DESC
-                RETURN head(collect(sentiment)) AS sentiment
-            }
+            OPTIONAL MATCH (p)-[hs:HAS_SENTIMENT]->(s:Sentiment)
             OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH toString(date(p.posted_at)) AS bucket,
-                 sentiment,
+            WITH coalesce(p.uuid, 'post:' + elementId(p)) AS msgId,
+                 toString(date(p.posted_at)) AS bucket,
+                 s.label AS sentiment,
+                 coalesce(hs.last_seen, hs.first_seen, p.posted_at) AS signalTs,
+                 CASE s.label
+                    WHEN 'Urgent' THEN 6
+                    WHEN 'Negative' THEN 5
+                    WHEN 'Sarcastic' THEN 4
+                    WHEN 'Mixed' THEN 3
+                    WHEN 'Positive' THEN 2
+                    WHEN 'Neutral' THEN 1
+                    ELSE 0
+                 END AS precedence,
                  collect(DISTINCT tag.name) AS tags
+            ORDER BY msgId, signalTs DESC, precedence DESC
+            WITH msgId, bucket,
+                 head(collect(sentiment)) AS sentiment,
+                 [tagName IN reduce(allTags = [], tagSet IN collect(tags) | allTags + tagSet) WHERE tagName IS NOT NULL] AS tags
             WHERE sentiment IS NOT NULL
-            WITH bucket,
-                 sentiment,
-                 [tagName IN tags WHERE tagName IS NOT NULL] AS tags
             WITH bucket,
                  sentiment,
                  tags,
@@ -840,31 +826,27 @@ def get_mood_data(ctx: DashboardDateContext) -> list[dict]:
             MATCH (c:Comment)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
-            CALL {
-                WITH c
-                MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
-                WITH s.label AS sentiment,
-                     coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
-                     CASE s.label
-                        WHEN 'Urgent' THEN 6
-                        WHEN 'Negative' THEN 5
-                        WHEN 'Sarcastic' THEN 4
-                        WHEN 'Mixed' THEN 3
-                        WHEN 'Positive' THEN 2
-                        WHEN 'Neutral' THEN 1
-                        ELSE 0
-                     END AS precedence
-                ORDER BY signalTs DESC, precedence DESC
-                RETURN head(collect(sentiment)) AS sentiment
-            }
+            OPTIONAL MATCH (c)-[hs:HAS_SENTIMENT]->(s:Sentiment)
             OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH toString(date(c.posted_at)) AS bucket,
-                 sentiment,
+            WITH coalesce(c.uuid, 'comment:' + elementId(c)) AS msgId,
+                 toString(date(c.posted_at)) AS bucket,
+                 s.label AS sentiment,
+                 coalesce(hs.last_seen, hs.first_seen, c.posted_at) AS signalTs,
+                 CASE s.label
+                    WHEN 'Urgent' THEN 6
+                    WHEN 'Negative' THEN 5
+                    WHEN 'Sarcastic' THEN 4
+                    WHEN 'Mixed' THEN 3
+                    WHEN 'Positive' THEN 2
+                    WHEN 'Neutral' THEN 1
+                    ELSE 0
+                 END AS precedence,
                  collect(DISTINCT tag.name) AS tags
+            ORDER BY msgId, signalTs DESC, precedence DESC
+            WITH msgId, bucket,
+                 head(collect(sentiment)) AS sentiment,
+                 [tagName IN reduce(allTags = [], tagSet IN collect(tags) | allTags + tagSet) WHERE tagName IS NOT NULL] AS tags
             WHERE sentiment IS NOT NULL
-            WITH bucket,
-                 sentiment,
-                 [tagName IN tags WHERE tagName IS NOT NULL] AS tags
             WITH bucket,
                  sentiment,
                  tags,

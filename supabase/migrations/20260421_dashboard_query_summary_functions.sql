@@ -22,8 +22,8 @@ WITH base AS (
     lower(trim(coalesce(primary_intent, ''))) AS intent_text,
     coalesce(sentiment_score, 0.0) AS sentiment_score,
     lower(trim(coalesce(content_type, ''))) AS content_type,
-    nullif(trim(coalesce(content_id, '')), '') AS content_id_text,
-    nullif(trim(coalesce(channel_id, '')), '') AS channel_id_text,
+    nullif(trim(coalesce(content_id::text, '')), '') AS content_id_text,
+    nullif(trim(coalesce(channel_id::text, '')), '') AS channel_id_text,
     nullif(trim(coalesce(telegram_user_id::text, '')), '') AS user_id_text
   FROM public.ai_analysis
   WHERE created_at >= p_start

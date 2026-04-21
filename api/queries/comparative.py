@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import os
+import threading
+import time
 from typing import Any, Iterable
 
 from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
@@ -33,6 +35,9 @@ _NEGATIVE_SENTIMENTS = {"Negative", "Urgent", "Sarcastic"}
 _NOISY_TOPIC_KEYS = {"", "null", "unknown", "none", "n/a", "na"}
 _TOPICS_PAGE_GROUP_KEYS = {"Living", "Work", "Family", "Finance", "Lifestyle", "Integration", "Admin"}
 USE_TOPIC_QUERY_V2 = os.getenv("TOPIC_QUERY_V2", "false").strip().lower() == "true"
+_GLOBAL_COUNTS_TTL_SECONDS = 300.0
+_GLOBAL_COUNTS_CACHE: tuple[float, dict[str, int]] | None = None
+_GLOBAL_COUNTS_LOCK = threading.Lock()
 
 
 def _supabase() -> SupabaseWriter:
@@ -376,6 +381,32 @@ def _safe_pct(numerator: int, denominator: int) -> int:
     if denominator <= 0:
         return 0
     return int(round((float(numerator) / float(denominator)) * 100.0))
+
+
+def _global_graph_counts() -> dict[str, int]:
+    global _GLOBAL_COUNTS_CACHE
+    now = time.monotonic()
+    with _GLOBAL_COUNTS_LOCK:
+        if _GLOBAL_COUNTS_CACHE is not None and (now - _GLOBAL_COUNTS_CACHE[0]) < _GLOBAL_COUNTS_TTL_SECONDS:
+            return dict(_GLOBAL_COUNTS_CACHE[1])
+    counts = run_single("""
+        CALL {
+            MATCH (u:User)
+            RETURN count(u) AS totalUsers
+        }
+        CALL {
+            MATCH (t:Topic)
+            RETURN count(t) AS totalTopics
+        }
+        RETURN totalUsers, totalTopics
+    """) or {}
+    payload = {
+        "totalUsers": _safe_int(counts.get("totalUsers")),
+        "totalTopics": _safe_int(counts.get("totalTopics")),
+    }
+    with _GLOBAL_COUNTS_LOCK:
+        _GLOBAL_COUNTS_CACHE = (time.monotonic(), payload)
+    return dict(payload)
 
 
 def _weekly_metric_row(
@@ -835,15 +866,8 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
 
 def get_vitality_indicators(ctx: DashboardDateContext) -> dict:
     """Composite community health indicators."""
+    global_counts = _global_graph_counts()
     stats = run_single("""
-        CALL {
-            MATCH (u:User)
-            RETURN count(u) AS totalUsers
-        }
-        CALL {
-            MATCH (t:Topic)
-            RETURN count(t) AS totalTopics
-        }
         CALL {
             CALL {
                 MATCH (u:User)-[:WROTE]->(c:Comment)
@@ -870,14 +894,14 @@ def get_vitality_indicators(ctx: DashboardDateContext) -> dict:
               AND c.posted_at < datetime($end)
             RETURN count(c) AS totalComments
         }
-        RETURN totalUsers, activeUsers, totalTopics, totalPosts, totalComments
+        RETURN activeUsers, totalPosts, totalComments
     """, {
         "start": ctx.start_at.isoformat(),
         "end": ctx.end_at.isoformat(),
     }, op_name="comparative.vitality_indicators") or {}
-    total_users = stats.get("totalUsers", 0)
+    total_users = global_counts.get("totalUsers", 0)
     active_users = stats.get("activeUsers", 0)
-    total_topics = stats.get("totalTopics", 0)
+    total_topics = global_counts.get("totalTopics", 0)
     total_posts = stats.get("totalPosts", 0)
     total_comments = stats.get("totalComments", 0)
     avg_comments = total_comments / max(total_posts, 1)

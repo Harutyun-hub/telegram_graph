@@ -245,6 +245,23 @@ def _dominant_signal_rows(
     return rows
 
 
+def _signal_rows_from_counts(counts_by_user: dict[str, Counter]) -> list[dict]:
+    rows: list[dict] = []
+    for user_id, signal_counts in counts_by_user.items():
+        for signal_type, signal_count in signal_counts.items():
+            if signal_type not in _WORK_SIGNAL_TYPES or signal_count <= 0:
+                continue
+            rows.append(
+                {
+                    "userId": user_id,
+                    "signalType": signal_type,
+                    "signalCount": int(signal_count),
+                }
+            )
+    rows.sort(key=lambda row: (-int(row.get("signalCount", 0)), str(row.get("signalType") or ""), str(row.get("userId") or "")))
+    return rows
+
+
 def _window_for_timestamp(ts: datetime, ctx: DashboardDateContext) -> str | None:
     if ctx.start_at <= ts < ctx.end_at:
         return "current"
@@ -253,7 +270,7 @@ def _window_for_timestamp(ts: datetime, ctx: DashboardDateContext) -> str | None
     return None
 
 
-def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
+def _build_work_signal_rows(ctx: DashboardDateContext) -> dict[str, list[dict]]:
     rpc_rows = _fetch_work_signal_rows(ctx)
     if rpc_rows:
         current_rows = [
@@ -264,6 +281,8 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
             }
             for row in rpc_rows
             if str(row.get("window_key") or "") == "current"
+            and str(row.get("user_id") or "").strip()
+            and str(row.get("signal_type") or "").strip() in _WORK_SIGNAL_TYPES
         ]
         previous_rows = [
             {
@@ -273,6 +292,8 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
             }
             for row in rpc_rows
             if str(row.get("window_key") or "") == "previous"
+            and str(row.get("user_id") or "").strip()
+            and str(row.get("signal_type") or "").strip() in _WORK_SIGNAL_TYPES
         ]
         current_rows.sort(key=lambda row: (-int(row.get("signalCount", 0)), str(row.get("signalType") or ""), str(row.get("userId") or "")))
         previous_rows.sort(key=lambda row: (-int(row.get("signalCount", 0)), str(row.get("signalType") or ""), str(row.get("userId") or "")))
@@ -281,7 +302,7 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
         end_iso = ctx.end_at.isoformat()
         analyses = _fetch_batch_analyses_between(start_iso, end_iso)
         if not analyses:
-            return {"jobSeeking": [], "jobTrends": []}
+            return {"current": [], "previous": []}
 
         current_counts: dict[str, Counter] = defaultdict(Counter)
         current_latest: dict[str, dict[str, datetime]] = defaultdict(dict)
@@ -310,11 +331,26 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
             if prev_latest is None or signal_ts > prev_latest:
                 bucket_latest[user_id][signal_type] = signal_ts
 
-        current_rows = _dominant_signal_rows(current_counts, current_latest)
-        previous_rows = _dominant_signal_rows(previous_counts, previous_latest)
+        current_rows = _signal_rows_from_counts(current_counts)
+        previous_rows = _signal_rows_from_counts(previous_counts)
 
-    current_by_type = Counter(str(row.get("signalType") or "") for row in current_rows)
-    previous_by_type = Counter(str(row.get("signalType") or "") for row in previous_rows)
+    return {"current": current_rows, "previous": previous_rows}
+
+
+def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
+    raw_rows = _build_work_signal_rows(ctx)
+    current_rows = list(raw_rows.get("current") or [])
+    previous_rows = list(raw_rows.get("previous") or [])
+    current_by_type = Counter(
+        str(row.get("signalType") or "")
+        for row in current_rows
+        if str(row.get("signalType") or "").strip()
+    )
+    previous_by_type = Counter(
+        str(row.get("signalType") or "")
+        for row in previous_rows
+        if str(row.get("signalType") or "").strip()
+    )
 
     trend_rows = [
         {
@@ -326,7 +362,12 @@ def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
         if current_by_type.get(signal_type, 0) > 0 or previous_by_type.get(signal_type, 0) > 0
     ]
     trend_rows.sort(key=lambda row: (-int(row["currentUsers"]), str(row["topic"])))
-    return {"jobSeeking": current_rows, "jobTrends": trend_rows}
+    return {
+        "jobSeeking": current_rows,
+        "jobTrends": trend_rows,
+        "currentSignalRows": current_rows,
+        "previousSignalRows": previous_rows,
+    }
 
 
 def _get_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
@@ -446,24 +487,39 @@ def _attach_work_signal_evidence(rows: list[dict], ctx: DashboardDateContext) ->
 def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
     """Business opportunity signals among users active in the selected window."""
     return run_query("""
-        MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
-        WHERE EXISTS {
-            MATCH (u)-[i:INTERESTED_IN]->(:Topic)
+        MATCH (b:BusinessOpportunity)
+        WHERE b.type IS NOT NULL
+        WITH DISTINCT b.type AS type, b.description AS description
+        CALL {
+            WITH type
+            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
+            WHERE EXISTS {
+                MATCH (u)-[i:INTERESTED_IN]->(:Topic)
+                WHERE i.last_seen >= datetime($start)
+                  AND i.last_seen < datetime($end)
+            }
+            RETURN count(DISTINCT u) AS signals
+        }
+        CALL {
+            WITH type
+            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
+            WHERE EXISTS {
+                MATCH (u)-[i:INTERESTED_IN]->(:Topic)
+                WHERE i.last_seen >= datetime($previous_start)
+                  AND i.last_seen < datetime($previous_end)
+            }
+            RETURN count(DISTINCT u) AS previousSignals
+        }
+        CALL {
+            WITH type
+            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(:BusinessOpportunity {type: type})
+            MATCH (u)-[i:INTERESTED_IN]->(t:Topic)
             WHERE i.last_seen >= datetime($start)
               AND i.last_seen < datetime($end)
+            RETURN collect(DISTINCT t.name)[..5] AS relatedTopics
         }
-        WITH b.type AS type, b.description AS description,
-             count(DISTINCT u) AS signals
-        OPTIONAL MATCH (u2:User)-[:SIGNALS_OPPORTUNITY]->(b2:BusinessOpportunity {type: type})
-        WHERE EXISTS {
-            MATCH (u2)-[i2:INTERESTED_IN]->(:Topic)
-            WHERE i2.last_seen >= datetime($previous_start)
-              AND i2.last_seen < datetime($previous_end)
-        }
-        OPTIONAL MATCH (u)-[:INTERESTED_IN]->(t:Topic)
-        WITH type, description, signals,
-             count(DISTINCT u2) AS previousSignals,
-             collect(DISTINCT t.name)[..5] AS relatedTopics
+        WITH type, description, signals, previousSignals, relatedTopics
+        WHERE signals > 0 OR previousSignals > 0
         RETURN type, description, signals, previousSignals, relatedTopics
         ORDER BY signals DESC
     """, {
@@ -659,56 +715,40 @@ def get_business_opportunity_brief_candidates(
 
 def get_job_seeking(ctx: DashboardDateContext) -> list[dict]:
     """Current-window work-intent rows with real graph evidence."""
-    return _attach_work_signal_evidence(run_query("""
-        MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
-        WHERE b.type IN ['Job_Seeking', 'Hiring', 'Partnership_Request']
-          AND EXISTS {
-              MATCH (u)-[i:INTERESTED_IN]->(:Topic)
-              WHERE i.last_seen >= datetime($start)
-                AND i.last_seen < datetime($end)
-          }
-        WITH u.telegram_user_id AS userId,
-             b.type AS signalType,
-             u.inferred_age_bracket AS age,
-             u.community_role AS role,
-             u.financial_distress_level AS distress
-        RETURN userId, signalType, age, role, distress
-        ORDER BY signalType
-    """, {
-        "start": ctx.start_at.isoformat(),
-        "end": ctx.end_at.isoformat(),
-    }), ctx)
+    base_rows = list(_get_work_signal_snapshot(ctx).get("currentSignalRows") or [])
+    if not base_rows:
+        return []
+    user_ids = sorted({str(row.get("userId") or "").strip() for row in base_rows if str(row.get("userId") or "").strip()})
+    user_profiles = {}
+    if user_ids:
+        profile_rows = run_query("""
+            UNWIND $user_ids AS userId
+            MATCH (u:User)
+            WHERE toString(u.telegram_user_id) = userId
+            RETURN userId,
+                   u.inferred_age_bracket AS age,
+                   u.community_role AS role,
+                   u.financial_distress_level AS distress
+        """, {"user_ids": user_ids})
+        user_profiles = {
+            str(row.get("userId") or "").strip(): {
+                "age": row.get("age"),
+                "role": row.get("role"),
+                "distress": row.get("distress"),
+            }
+            for row in profile_rows
+            if str(row.get("userId") or "").strip()
+        }
+    enriched_rows = []
+    for row in base_rows:
+        profile = user_profiles.get(str(row.get("userId") or "").strip(), {})
+        enriched_rows.append({**row, **profile})
+    return _attach_work_signal_evidence(enriched_rows, ctx)
 
 
 def get_job_trends(ctx: DashboardDateContext) -> list[dict]:
     """Selected-window work-intent trends from the graph."""
-    return run_query("""
-        MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity)
-        WHERE b.type IN ['Job_Seeking', 'Hiring', 'Partnership_Request']
-          AND EXISTS {
-              MATCH (u)-[cur:INTERESTED_IN]->(:Topic)
-              WHERE cur.last_seen >= datetime($start)
-                AND cur.last_seen < datetime($end)
-          }
-        WITH b.type AS topic, count(DISTINCT u) AS currentUsers
-        CALL {
-            WITH topic
-            MATCH (u:User)-[:SIGNALS_OPPORTUNITY]->(b:BusinessOpportunity {type: topic})
-            WHERE EXISTS {
-                MATCH (u)-[prev:INTERESTED_IN]->(:Topic)
-                WHERE prev.last_seen >= datetime($previous_start)
-                  AND prev.last_seen < datetime($previous_end)
-            }
-            RETURN count(DISTINCT u) AS previousUsers
-        }
-        RETURN topic, currentUsers, previousUsers
-        ORDER BY currentUsers DESC, topic ASC
-    """, {
-        "start": ctx.start_at.isoformat(),
-        "end": ctx.end_at.isoformat(),
-        "previous_start": ctx.previous_start_at.isoformat(),
-        "previous_end": ctx.previous_end_at.isoformat(),
-    })
+    return list(_get_work_signal_snapshot(ctx).get("jobTrends") or [])
 
 
 def get_housing_data() -> list[dict]:

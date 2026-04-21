@@ -24,6 +24,7 @@ FUNNEL_LEADER_SCORE_PERCENTILE = 0.90
 _QUERY_CACHE_TTL_SECONDS = 30.0
 _QUERY_CACHE: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _QUERY_CACHE_LOCK = threading.Lock()
+_QUERY_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 FUNNEL_ASK_HINTS = [
     "need help",
     "looking for",
@@ -54,6 +55,8 @@ FUNNEL_ASK_HINTS = [
 def _cached_rows(kind: str, ctx: DashboardDateContext, builder) -> list[dict]:
     key = (kind, ctx.cache_key)
     now = time.monotonic()
+    wait_event: threading.Event | None = None
+    should_build = False
     with _QUERY_CACHE_LOCK:
         stale_keys = [cache_key for cache_key, (ts, _rows) in _QUERY_CACHE.items() if (now - ts) >= _QUERY_CACHE_TTL_SECONDS]
         for stale_key in stale_keys:
@@ -61,10 +64,28 @@ def _cached_rows(kind: str, ctx: DashboardDateContext, builder) -> list[dict]:
         cached = _QUERY_CACHE.get(key)
         if cached is not None:
             return cached[1]
-    rows = builder()
-    with _QUERY_CACHE_LOCK:
-        _QUERY_CACHE[key] = (now, rows)
-    return rows
+        wait_event = _QUERY_INFLIGHT.get(key)
+        if wait_event is None:
+            wait_event = threading.Event()
+            _QUERY_INFLIGHT[key] = wait_event
+            should_build = True
+    if not should_build:
+        assert wait_event is not None
+        wait_event.wait(timeout=_QUERY_CACHE_TTL_SECONDS)
+        with _QUERY_CACHE_LOCK:
+            cached = _QUERY_CACHE.get(key)
+            if cached is not None:
+                return cached[1]
+    try:
+        rows = builder()
+        with _QUERY_CACHE_LOCK:
+            _QUERY_CACHE[key] = (time.monotonic(), rows)
+        return rows
+    finally:
+        with _QUERY_CACHE_LOCK:
+            inflight = _QUERY_INFLIGHT.pop(key, None)
+        if inflight is not None:
+            inflight.set()
 
 
 def _predictive_window_params(ctx: DashboardDateContext) -> dict[str, object]:
@@ -80,6 +101,71 @@ def _predictive_window_params(ctx: DashboardDateContext) -> dict[str, object]:
         "previous_start": previous_start.isoformat(),
         "previous_end": previous_end.isoformat(),
     }
+
+
+def _retention_topic_stats(ctx: DashboardDateContext) -> list[dict]:
+    """Per-topic previous-window cohort stats reused by retention and churn widgets."""
+    return _cached_rows("retention_topic_stats", ctx, lambda: run_query("""
+        CALL {
+            MATCH (u:User)-[:WROTE]->(c:Comment)
+            WHERE c.posted_at >= datetime($previous_start)
+              AND c.posted_at < datetime($previous_end)
+            WITH u, count(DISTINCT c) AS previousComments
+            WHERE previousComments >= $min_comments
+            OPTIONAL MATCH (u)-[:WROTE]->(c2:Comment)
+            WHERE c2.posted_at >= datetime($start)
+              AND c2.posted_at < datetime($end)
+            WITH u, count(DISTINCT c2) AS currentComments
+            RETURN collect({
+                user: u,
+                retained: currentComments >= $min_comments
+            }) AS cohort,
+            count(DISTINCT u) AS previousActiveUsers,
+            count(DISTINCT CASE WHEN currentComments >= $min_comments THEN u END) AS retainedActiveUsers
+        }
+        UNWIND cohort AS member
+        WITH member.user AS u,
+             member.retained AS retained,
+             previousActiveUsers,
+             retainedActiveUsers,
+             (previousActiveUsers - retainedActiveUsers) AS droppedActiveUsers
+        MATCH (u)-[:WROTE]->(topicComment:Comment)-[:TAGGED]->(t:Topic)
+        WHERE topicComment.posted_at >= datetime($previous_start)
+          AND topicComment.posted_at < datetime($previous_end)
+          AND coalesce(t.proposed, false) = false
+          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+        WITH t.name AS topic,
+             count(DISTINCT u) AS previousUsers,
+             count(DISTINCT CASE WHEN retained THEN u END) AS retainedUsers,
+             previousActiveUsers,
+             retainedActiveUsers,
+             droppedActiveUsers
+        WHERE previousUsers >= $min_topic_support
+        RETURN topic,
+               previousUsers,
+               retainedUsers,
+               (previousUsers - retainedUsers) AS lostUsers,
+               previousActiveUsers,
+               retainedActiveUsers,
+               droppedActiveUsers,
+               CASE
+                   WHEN previousActiveUsers = 0 THEN 0.0
+                   ELSE 100.0 * retainedActiveUsers / previousActiveUsers
+               END AS baselineContinuityPct,
+               CASE
+                   WHEN previousActiveUsers = 0 THEN 0.0
+                   ELSE 100.0 * droppedActiveUsers / previousActiveUsers
+               END AS baselineDropoffPct
+        ORDER BY previousUsers DESC, topic ASC
+    """, {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+        "previous_start": ctx.previous_start_at.isoformat(),
+        "previous_end": ctx.previous_end_at.isoformat(),
+        "noise": NOISY_TOPIC_VALUES,
+        "min_comments": MIN_ACTIVE_COMMENTS,
+        "min_topic_support": MIN_TOPIC_SUPPORT,
+    }, op_name="predictive.retention_topic_stats"))
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -340,205 +426,60 @@ def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
 
 def get_retention_factors(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level continuity factors among previously active members."""
-    return _cached_rows("retention_factors", ctx, lambda: run_query("""
-        CALL {
-            MATCH (u:User)-[:WROTE]->(c:Comment)
-            WHERE c.posted_at >= datetime($previous_start)
-              AND c.posted_at < datetime($previous_end)
-            WITH u, count(DISTINCT c) AS previousComments
-            WHERE previousComments >= $min_comments
-            WITH u,
-                 EXISTS {
-                     MATCH (u)-[:WROTE]->(c2:Comment)
-                     WHERE c2.posted_at >= datetime($start)
-                       AND c2.posted_at < datetime($end)
-                     WITH count(DISTINCT c2) AS currentComments
-                     WHERE currentComments >= $min_comments
-                     RETURN 1
-                 } AS retained
-            RETURN count(DISTINCT u) AS previousActiveUsers,
-                   count(DISTINCT CASE WHEN retained THEN u END) AS retainedActiveUsers
-        }
-        MATCH (u:User)-[:WROTE]->(c:Comment)
-        WHERE c.posted_at >= datetime($previous_start)
-          AND c.posted_at < datetime($previous_end)
-        WITH u, previousActiveUsers, retainedActiveUsers, count(DISTINCT c) AS previousComments
-        WHERE previousComments >= $min_comments
-        WITH u,
-             previousActiveUsers,
-             retainedActiveUsers,
-             EXISTS {
-                 MATCH (u)-[:WROTE]->(c2:Comment)
-                 WHERE c2.posted_at >= datetime($start)
-                   AND c2.posted_at < datetime($end)
-                 WITH count(DISTINCT c2) AS currentComments
-                 WHERE currentComments >= $min_comments
-                 RETURN 1
-             } AS retained
-        MATCH (u)-[:WROTE]->(topicComment:Comment)-[:TAGGED]->(t:Topic)
-        WHERE topicComment.posted_at >= datetime($previous_start)
-          AND topicComment.posted_at < datetime($previous_end)
-          AND coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        WITH t.name AS topic,
-             count(DISTINCT u) AS previousUsers,
-             count(DISTINCT CASE WHEN retained THEN u END) AS retainedUsers,
-             previousActiveUsers,
-             retainedActiveUsers,
-             CASE
-                 WHEN previousActiveUsers = 0 THEN 0.0
-                 ELSE 100.0 * retainedActiveUsers / previousActiveUsers
-             END AS baselineContinuityPct
-        WHERE previousUsers >= $min_topic_support
-        WITH topic,
-             previousUsers,
-             retainedUsers,
-             previousActiveUsers,
-             retainedActiveUsers,
-             baselineContinuityPct,
-             100.0 * (retainedUsers + ($prior_strength * baselineContinuityPct / 100.0)) / (previousUsers + $prior_strength) AS smoothedContinuityPct,
-             100.0 * previousUsers / previousActiveUsers AS topicSharePct
-        WITH topic,
-             previousUsers,
-             retainedUsers,
-             previousActiveUsers,
-             retainedActiveUsers,
-             round(baselineContinuityPct, 1) AS baselineContinuityPctRounded,
-             round(smoothedContinuityPct, 1) AS continuityPctRounded,
-             round(topicSharePct, 1) AS topicSharePctRounded
-        WITH topic,
-             previousUsers,
-             retainedUsers,
-             previousActiveUsers,
-             retainedActiveUsers,
-             baselineContinuityPctRounded AS baselineContinuityPct,
-             continuityPctRounded AS continuityPct,
-             round(continuityPctRounded - baselineContinuityPctRounded, 1) AS liftPct,
-             topicSharePctRounded AS topicSharePct
-        WHERE continuityPct > baselineContinuityPct
-        RETURN topic,
-               previousUsers,
-               retainedUsers,
-               previousActiveUsers,
-               retainedActiveUsers,
-               baselineContinuityPct,
-               continuityPct,
-               liftPct,
-               topicSharePct
-        ORDER BY liftPct DESC, previousUsers DESC, topic ASC
-        LIMIT 8
-    """, {
-        "start": ctx.start_at.isoformat(),
-        "end": ctx.end_at.isoformat(),
-        "previous_start": ctx.previous_start_at.isoformat(),
-        "previous_end": ctx.previous_end_at.isoformat(),
-        "noise": NOISY_TOPIC_VALUES,
-        "min_comments": MIN_ACTIVE_COMMENTS,
-        "min_topic_support": MIN_TOPIC_SUPPORT,
-        "prior_strength": SMOOTHING_PRIOR,
-    }, op_name="predictive.retention_factors"))
+    rows = _retention_topic_stats(ctx)
+    enriched: list[dict] = []
+    for row in rows:
+        previous_active = int(row.get("previousActiveUsers") or 0)
+        previous_users = int(row.get("previousUsers") or 0)
+        retained_users = int(row.get("retainedUsers") or 0)
+        retained_active = int(row.get("retainedActiveUsers") or 0)
+        baseline = float(row.get("baselineContinuityPct") or 0.0)
+        continuity = 100.0 * (retained_users + (SMOOTHING_PRIOR * baseline / 100.0)) / (previous_users + SMOOTHING_PRIOR)
+        lift = continuity - baseline
+        if continuity <= baseline:
+            continue
+        enriched.append({
+            "topic": row.get("topic"),
+            "previousUsers": previous_users,
+            "retainedUsers": retained_users,
+            "previousActiveUsers": previous_active,
+            "retainedActiveUsers": retained_active,
+            "baselineContinuityPct": round(baseline, 1),
+            "continuityPct": round(continuity, 1),
+            "liftPct": round(lift, 1),
+            "topicSharePct": round(100.0 * previous_users / previous_active, 1) if previous_active > 0 else 0.0,
+        })
+    enriched.sort(key=lambda item: (-float(item["liftPct"]), -int(item["previousUsers"]), str(item["topic"] or "")))
+    return enriched[:8]
 
 
 def get_churn_signals(ctx: DashboardDateContext) -> list[dict]:
     """Topic-level drop-off risk among previously active members."""
-    return _cached_rows("churn_signals", ctx, lambda: run_query("""
-        CALL {
-            MATCH (u:User)-[:WROTE]->(c:Comment)
-            WHERE c.posted_at >= datetime($previous_start)
-              AND c.posted_at < datetime($previous_end)
-            WITH u, count(DISTINCT c) AS previousComments
-            WHERE previousComments >= $min_comments
-            WITH u,
-                 EXISTS {
-                     MATCH (u)-[:WROTE]->(c2:Comment)
-                     WHERE c2.posted_at >= datetime($start)
-                       AND c2.posted_at < datetime($end)
-                     WITH count(DISTINCT c2) AS currentComments
-                     WHERE currentComments >= $min_comments
-                     RETURN 1
-                 } AS retained
-            RETURN count(DISTINCT u) AS previousActiveUsers,
-                   count(DISTINCT CASE WHEN NOT retained THEN u END) AS droppedActiveUsers
-        }
-        MATCH (u:User)-[:WROTE]->(c:Comment)
-        WHERE c.posted_at >= datetime($previous_start)
-          AND c.posted_at < datetime($previous_end)
-        WITH u, previousActiveUsers, droppedActiveUsers, count(DISTINCT c) AS previousComments
-        WHERE previousComments >= $min_comments
-        WITH u,
-             previousActiveUsers,
-             droppedActiveUsers,
-             NOT EXISTS {
-                 MATCH (u)-[:WROTE]->(c2:Comment)
-                 WHERE c2.posted_at >= datetime($start)
-                   AND c2.posted_at < datetime($end)
-                 WITH count(DISTINCT c2) AS currentComments
-                 WHERE currentComments >= $min_comments
-                 RETURN 1
-             } AS dropped
-        MATCH (u)-[:WROTE]->(topicComment:Comment)-[:TAGGED]->(t:Topic)
-        WHERE topicComment.posted_at >= datetime($previous_start)
-          AND topicComment.posted_at < datetime($previous_end)
-          AND coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        WITH t.name AS topic,
-             count(DISTINCT u) AS previousUsers,
-             count(DISTINCT CASE WHEN dropped THEN u END) AS lostUsers,
-             previousActiveUsers,
-             droppedActiveUsers,
-             CASE
-                 WHEN previousActiveUsers = 0 THEN 0.0
-                 ELSE 100.0 * droppedActiveUsers / previousActiveUsers
-             END AS baselineDropoffPct
-        WHERE previousUsers >= $min_topic_support
-          AND lostUsers > 0
-        WITH topic,
-             previousUsers,
-             lostUsers,
-             previousActiveUsers,
-             droppedActiveUsers,
-             baselineDropoffPct,
-             100.0 * (lostUsers + ($prior_strength * baselineDropoffPct / 100.0)) / (previousUsers + $prior_strength) AS smoothedDropoffPct,
-             100.0 * previousUsers / previousActiveUsers AS topicSharePct
-        WITH topic,
-             previousUsers,
-             lostUsers,
-             previousActiveUsers,
-             droppedActiveUsers,
-             round(baselineDropoffPct, 1) AS baselineDropoffPctRounded,
-             round(smoothedDropoffPct, 1) AS dropoffPctRounded,
-             round(topicSharePct, 1) AS topicSharePctRounded
-        WITH topic,
-             previousUsers,
-             lostUsers,
-             previousActiveUsers,
-             droppedActiveUsers,
-             baselineDropoffPctRounded AS baselineDropoffPct,
-             dropoffPctRounded AS dropoffPct,
-             round(dropoffPctRounded - baselineDropoffPctRounded, 1) AS excessRiskPct,
-             topicSharePctRounded AS topicSharePct
-        WHERE excessRiskPct > 0
-        RETURN topic,
-               lostUsers,
-               previousUsers,
-               previousActiveUsers,
-               droppedActiveUsers,
-               baselineDropoffPct,
-               dropoffPct,
-               excessRiskPct,
-               topicSharePct
-        ORDER BY excessRiskPct DESC, lostUsers DESC, topic ASC
-        LIMIT 10
-    """, {
-        "start": ctx.start_at.isoformat(),
-        "end": ctx.end_at.isoformat(),
-        "previous_start": ctx.previous_start_at.isoformat(),
-        "previous_end": ctx.previous_end_at.isoformat(),
-        "noise": NOISY_TOPIC_VALUES,
-        "min_comments": MIN_ACTIVE_COMMENTS,
-        "min_topic_support": MIN_TOPIC_SUPPORT,
-        "prior_strength": SMOOTHING_PRIOR,
-    }, op_name="predictive.churn_signals"))
+    rows = _retention_topic_stats(ctx)
+    enriched: list[dict] = []
+    for row in rows:
+        previous_active = int(row.get("previousActiveUsers") or 0)
+        previous_users = int(row.get("previousUsers") or 0)
+        lost_users = int(row.get("lostUsers") or 0)
+        dropped_active = int(row.get("droppedActiveUsers") or 0)
+        baseline = float(row.get("baselineDropoffPct") or 0.0)
+        dropoff = 100.0 * (lost_users + (SMOOTHING_PRIOR * baseline / 100.0)) / (previous_users + SMOOTHING_PRIOR)
+        excess = dropoff - baseline
+        if lost_users <= 0 or excess <= 0:
+            continue
+        enriched.append({
+            "topic": row.get("topic"),
+            "lostUsers": lost_users,
+            "previousUsers": previous_users,
+            "previousActiveUsers": previous_active,
+            "droppedActiveUsers": dropped_active,
+            "baselineDropoffPct": round(baseline, 1),
+            "dropoffPct": round(dropoff, 1),
+            "excessRiskPct": round(excess, 1),
+            "topicSharePct": round(100.0 * previous_users / previous_active, 1) if previous_active > 0 else 0.0,
+        })
+    enriched.sort(key=lambda item: (-float(item["excessRiskPct"]), -int(item["lostUsers"]), str(item["topic"] or "")))
+    return enriched[:10]
 
 
 def get_growth_funnel(ctx: DashboardDateContext) -> list[dict]:

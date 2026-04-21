@@ -327,27 +327,29 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
              count(DISTINCT c) AS commentCount,
              count(DISTINCT date(c.posted_at)) AS activeDays
         WHERE commentCount >= 3
+        ORDER BY commentCount DESC, activeDays DESC, toString(u.telegram_user_id) ASC
+        LIMIT 20
 
-        // Get channels where the user has been active in the same recent window
-        OPTIONAL MATCH (u)-[:WROTE]->(c2:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-        WHERE c2.posted_at >= datetime($start) AND c2.posted_at < datetime($end)
-        WITH u, commentCount, activeDays,
-             collect(DISTINCT ch.title)[..5] AS activeChannels
+        CALL {
+            WITH u
+            OPTIONAL MATCH (u)-[:WROTE]->(c2:Comment)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
+            WHERE c2.posted_at >= datetime($start) AND c2.posted_at < datetime($end)
+            RETURN collect(DISTINCT ch.title)[..5] AS activeChannels
+        }
+        CALL {
+            WITH u
+            OPTIONAL MATCH (u)-[:WROTE]->(c3:Comment)-[:TAGGED]->(t:Topic)
+            WHERE c3.posted_at >= datetime($start) AND c3.posted_at < datetime($end)
+            RETURN collect(DISTINCT t.name)[..5] AS userTopics
+        }
+        CALL {
+            WITH u
+            OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
+            WHERE coalesce(r.last_seen, r.first_seen) >= datetime($start)
+              AND coalesce(r.last_seen, r.first_seen) < datetime($end)
+            RETURN count(DISTINCT r) AS replyCount
+        }
 
-        // Get topics from the user's recent comments
-        OPTIONAL MATCH (u)-[:WROTE]->(c3:Comment)-[:TAGGED]->(t:Topic)
-        WHERE c3.posted_at >= datetime($start) AND c3.posted_at < datetime($end)
-        WITH u, commentCount, activeDays, activeChannels,
-             collect(DISTINCT t.name)[..5] AS userTopics
-
-        // Count active reply connections in the same window
-        OPTIONAL MATCH (u)-[r:REPLIED_TO_USER]->()
-        WHERE coalesce(r.last_seen, r.first_seen) >= datetime($start)
-          AND coalesce(r.last_seen, r.first_seen) < datetime($end)
-        WITH u, commentCount, activeDays, activeChannels, userTopics,
-             count(DISTINCT r) AS replyCount
-
-        // Return recent activity profile
         WITH u.telegram_user_id AS userId,
              commentCount,
              replyCount,
@@ -371,7 +373,6 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
                role, style, gender, age,
                topChannels, topics, postsPerWeek, replyRate
         ORDER BY activityScore DESC, commentCount DESC, activeDays DESC
-        LIMIT 20
     """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
     # Fetch usernames from Supabase

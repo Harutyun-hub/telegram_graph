@@ -139,6 +139,7 @@ _summary_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _summary_cache_lock = threading.Lock()
 _health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _health_cache_lock = threading.Lock()
+_health_inflight: dict[str, threading.Event] = {}
 
 
 def _fetch_analysis_rows_cached(
@@ -865,6 +866,8 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
     - conversation depth.
     """
     now = time.monotonic()
+    wait_event: threading.Event | None = None
+    should_build = False
     with _health_cache_lock:
         stale_keys = [cache_key for cache_key, (ts, _payload) in _health_cache.items() if (now - ts) >= 30.0]
         for stale_key in stale_keys:
@@ -872,102 +875,119 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
         cached = _health_cache.get(ctx.cache_key)
         if cached is not None:
             return cached[1]
+        wait_event = _health_inflight.get(ctx.cache_key)
+        if wait_event is None:
+            wait_event = threading.Event()
+            _health_inflight[ctx.cache_key] = wait_event
+            should_build = True
+    if not should_build:
+        assert wait_event is not None
+        wait_event.wait(timeout=30.0)
+        with _health_cache_lock:
+            cached = _health_cache.get(ctx.cache_key)
+            if cached is not None:
+                return cached[1]
+    try:
+        current_summary = _fetch_analysis_summary_cached(start=ctx.start_at, end=ctx.end_at)
+        previous_summary = _fetch_analysis_summary_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
-    current_summary = _fetch_analysis_summary_cached(start=ctx.start_at, end=ctx.end_at)
-    previous_summary = _fetch_analysis_summary_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
+        current_intent = _summary_to_intent_stats(current_summary)
+        previous_intent = _summary_to_intent_stats(previous_summary)
 
-    current_intent = _summary_to_intent_stats(current_summary)
-    previous_intent = _summary_to_intent_stats(previous_summary)
+        current_volume = _summary_to_volume(current_summary)
+        previous_volume = _summary_to_volume(previous_summary)
 
-    current_volume = _summary_to_volume(current_summary)
-    previous_volume = _summary_to_volume(previous_summary)
+        current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
+        previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
-    current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
-    previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
+        current_constructive = int(round(current_intent["positive_share"] * 100.0))
+        previous_constructive = int(round(previous_intent["positive_share"] * 100.0))
 
-    current_constructive = int(round(current_intent["positive_share"] * 100.0))
-    previous_constructive = int(round(previous_intent["positive_share"] * 100.0))
+        current_pressure_inverse = int(round((1.0 - current_intent["negative_share"]) * 100.0))
+        previous_pressure_inverse = int(round((1.0 - previous_intent["negative_share"]) * 100.0))
 
-    current_pressure_inverse = int(round((1.0 - current_intent["negative_share"]) * 100.0))
-    previous_pressure_inverse = int(round((1.0 - previous_intent["negative_share"]) * 100.0))
+        current_depth = _conversation_depth_score(
+            posts_analyzed=current_volume["posts_analyzed"],
+            comment_scopes_analyzed=current_volume["comment_scopes_analyzed"],
+        )
+        previous_depth = _conversation_depth_score(
+            posts_analyzed=previous_volume["posts_analyzed"],
+            comment_scopes_analyzed=previous_volume["comment_scopes_analyzed"],
+        )
 
-    current_depth = _conversation_depth_score(
-        posts_analyzed=current_volume["posts_analyzed"],
-        comment_scopes_analyzed=current_volume["comment_scopes_analyzed"],
-    )
-    previous_depth = _conversation_depth_score(
-        posts_analyzed=previous_volume["posts_analyzed"],
-        comment_scopes_analyzed=previous_volume["comment_scopes_analyzed"],
-    )
+        current_score = int(round(
+            0.35 * current_constructive
+            + 0.30 * current_pressure_inverse
+            + 0.20 * current_diversity["score"]
+            + 0.15 * current_depth
+        ))
+        previous_score = int(round(
+            0.35 * previous_constructive
+            + 0.30 * previous_pressure_inverse
+            + 0.20 * previous_diversity["score"]
+            + 0.15 * previous_depth
+        ))
 
-    current_score = int(round(
-        0.35 * current_constructive
-        + 0.30 * current_pressure_inverse
-        + 0.20 * current_diversity["score"]
-        + 0.15 * current_depth
-    ))
-    previous_score = int(round(
-        0.35 * previous_constructive
-        + 0.30 * previous_pressure_inverse
-        + 0.20 * previous_diversity["score"]
-        + 0.15 * previous_depth
-    ))
+        current_score = int(_clamp(current_score, 0, 100))
+        previous_score = int(_clamp(previous_score, 0, 100))
+        delta = current_score - previous_score
 
-    current_score = int(_clamp(current_score, 0, 100))
-    previous_score = int(_clamp(previous_score, 0, 100))
-    delta = current_score - previous_score
+        components = [
+            {
+                "label": "Constructive Intent",
+                "value": current_constructive,
+                "trend": current_constructive - previous_constructive,
+                "desc": "Share of constructive intent in analyzed messages",
+            },
+            {
+                "label": "Emotional Stability",
+                "value": current_pressure_inverse,
+                "trend": current_pressure_inverse - previous_pressure_inverse,
+                "desc": "Inverse of negative-intent pressure",
+            },
+            {
+                "label": "Discussion Diversity",
+                "value": current_diversity["score"],
+                "trend": current_diversity["score"] - previous_diversity["score"],
+                "desc": "How concentrated discussions are around few topics",
+            },
+            {
+                "label": "Conversation Depth",
+                "value": current_depth,
+                "trend": current_depth - previous_depth,
+                "desc": "Comment-scope depth per analyzed post",
+            },
+        ]
 
-    components = [
-        {
-            "label": "Constructive Intent",
-            "value": current_constructive,
-            "trend": current_constructive - previous_constructive,
-            "desc": "Share of constructive intent in analyzed messages",
-        },
-        {
-            "label": "Emotional Stability",
-            "value": current_pressure_inverse,
-            "trend": current_pressure_inverse - previous_pressure_inverse,
-            "desc": "Inverse of negative-intent pressure",
-        },
-        {
-            "label": "Discussion Diversity",
-            "value": current_diversity["score"],
-            "trend": current_diversity["score"] - previous_diversity["score"],
-            "desc": "How concentrated discussions are around few topics",
-        },
-        {
-            "label": "Conversation Depth",
-            "value": current_depth,
-            "trend": current_depth - previous_depth,
-            "desc": "Comment-scope depth per analyzed post",
-        },
-    ]
+        trend = "flat"
+        if delta >= 2:
+            trend = "up"
+        elif delta <= -2:
+            trend = "down"
 
-    trend = "flat"
-    if delta >= 2:
-        trend = "up"
-    elif delta <= -2:
-        trend = "down"
-
-    payload = {
-        "score": current_score,
-        "trend": trend,
-        "previousScore": previous_score,
-        "windowHours": ctx.days * 24,
-        "components": components,
-        "history": _history_points(current_score, previous_score, "d ago" if ctx.days > 1 else "h ago"),
-        "confidence": {
-            "label": _confidence_label(current_volume["analysis_units"]),
-            "analysisUnits": current_volume["analysis_units"],
-        },
-        "dominantTopic": current_diversity["dominant_topic"],
-        "dominantTopicSharePct": round(current_diversity["dominant_share"] * 100.0, 1),
-        "windowDays": ctx.days,
-    }
-    with _health_cache_lock:
-        _health_cache[ctx.cache_key] = (now, payload)
-    return payload
+        payload = {
+            "score": current_score,
+            "trend": trend,
+            "previousScore": previous_score,
+            "windowHours": ctx.days * 24,
+            "components": components,
+            "history": _history_points(current_score, previous_score, "d ago" if ctx.days > 1 else "h ago"),
+            "confidence": {
+                "label": _confidence_label(current_volume["analysis_units"]),
+                "analysisUnits": current_volume["analysis_units"],
+            },
+            "dominantTopic": current_diversity["dominant_topic"],
+            "dominantTopicSharePct": round(current_diversity["dominant_share"] * 100.0, 1),
+            "windowDays": ctx.days,
+        }
+        with _health_cache_lock:
+            _health_cache[ctx.cache_key] = (time.monotonic(), payload)
+        return payload
+    finally:
+        with _health_cache_lock:
+            inflight = _health_inflight.pop(ctx.cache_key, None)
+        if inflight is not None:
+            inflight.set()
 
 
 def get_trending_topics(ctx: DashboardDateContext, limit: int = 10) -> list[dict]:

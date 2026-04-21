@@ -249,13 +249,22 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
         WITH t, cat, msg_key, sample_id, txt, ts,
              toLower(replace(replace(replace(replace(txt, '\n', ' '), '\r', ' '), '  ', ' '), '**', '')) AS normalized
         ORDER BY ts DESC
-        WITH t, cat, normalized,
-             count(DISTINCT msg_key) AS asks_per_form,
-             max(ts) AS last_seen,
-             head(collect(txt)) AS sample_question,
-             head(collect(sample_id)) AS sample_question_id
+        WITH t, cat, collect({
+             msg_key: msg_key,
+             sample_id: sample_id,
+             txt: txt,
+             ts: ts,
+             normalized: normalized
+        }) AS question_rows
+        WITH t, cat, question_rows, head(question_rows) AS latest_question
+        UNWIND question_rows AS row
+        WITH t, cat, latest_question, row.normalized AS normalized,
+             count(DISTINCT row.msg_key) AS asks_per_form,
+             max(row.ts) AS last_seen,
+             head(collect(row.txt)) AS sample_question,
+             head(collect(row.sample_id)) AS sample_question_id
         ORDER BY asks_per_form DESC, last_seen DESC
-        WITH t, cat,
+        WITH t, cat, latest_question,
              collect({
                  form: normalized,
                  asks: asks_per_form,
@@ -265,34 +274,6 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
              }) AS forms,
              sum(asks_per_form) AS times_asked
         WHERE times_asked > 0
-
-        CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at >= datetime($start)
-              AND p.posted_at < datetime($end)
-              AND p.text IS NOT NULL
-              AND trim(p.text) <> ''
-              AND p.text CONTAINS '?'
-            RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS sample_id,
-                   trim(p.text) AS txt,
-                   p.posted_at AS ts
-            UNION
-            MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-              AND c.text IS NOT NULL
-              AND trim(c.text) <> ''
-              AND c.text CONTAINS '?'
-            RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS sample_id,
-                   trim(c.text) AS txt,
-                   c.posted_at AS ts
-        }
-        WITH t, cat, forms, times_asked, sample_id, txt, ts
-        ORDER BY ts DESC
-        WITH t, cat, forms, times_asked,
-             head(collect(sample_id)) AS latest_sample_id,
-             head(collect(txt)) AS latest_sample
 
         CALL {
             WITH t
@@ -306,14 +287,13 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
                 END) AS responded_intent_seekers
         }
 
-        WITH t, cat, forms, times_asked, latest_sample_id, latest_sample, intent_seekers, responded_intent_seekers
+        WITH t, cat, forms, times_asked, latest_question, intent_seekers, responded_intent_seekers
 
         WITH cat.name AS category,
              t.name AS topic,
              times_asked,
              forms,
-             latest_sample_id,
-             latest_sample,
+             latest_question,
              intent_seekers,
              responded_intent_seekers,
              CASE
@@ -340,8 +320,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
                 END) / toFloat(times_asked), 1)
                 ELSE 0.0
             END AS coveragePct,
-            coalesce(latest_sample, forms[0].sample) AS sampleQuestion,
-            coalesce(latest_sample_id, forms[0].sample_id) AS sampleQuestionId
+            coalesce(latest_question.txt, forms[0].sample) AS sampleQuestion,
+            coalesce(latest_question.sample_id, forms[0].sample_id) AS sampleQuestionId
         ORDER BY seekers DESC, category, topic
         LIMIT 32
     """, params)
@@ -499,61 +479,51 @@ def get_lifecycle_stages(ctx: DashboardDateContext) -> list[dict]:
 
         CALL {
             WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at >= datetime($start)
-              AND p.posted_at < datetime($end)
-            RETURN
-                collect({
-                    id: coalesce(p.uuid, elementId(p)),
-                    day: toString(date(p.posted_at)),
-                    ts: p.posted_at
-                }) AS postRows
-            UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at >= datetime($start)
-              AND c.posted_at < datetime($end)
-            RETURN
-                collect({
-                    id: coalesce(c.uuid, elementId(c)),
-                    day: toString(date(c.posted_at)),
-                    ts: c.posted_at
-                }) AS postRows
+            CALL {
+                WITH t
+                MATCH (p:Post)-[:TAGGED]->(t)
+                WHERE p.posted_at >= datetime($start)
+                  AND p.posted_at < datetime($end)
+                RETURN p.posted_at AS ts,
+                       toString(date(p.posted_at)) AS bucket
+                UNION ALL
+                MATCH (c:Comment)-[:TAGGED]->(t)
+                WHERE c.posted_at >= datetime($start)
+                  AND c.posted_at < datetime($end)
+                RETURN c.posted_at AS ts,
+                       toString(date(c.posted_at)) AS bucket
+            }
+            WITH bucket,
+                 count(*) AS signalsPerBucket,
+                 min(ts) AS bucketFirstSeen,
+                 max(ts) AS bucketLastSeen,
+                 count(CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                     THEN 1
+                 END) AS recentSignalsPerBucket,
+                 count(CASE
+                     WHEN ts >= datetime($previous_start)
+                      AND ts < datetime($previous_end)
+                     THEN 1
+                 END) AS previousSignalsPerBucket
+            RETURN sum(signalsPerBucket) AS totalSignals,
+                   count(bucket) AS activeDays,
+                   max(signalsPerBucket) AS peakDay,
+                   min(bucketFirstSeen) AS firstSeen,
+                   max(bucketLastSeen) AS lastSeen,
+                   sum(recentSignalsPerBucket) AS recentSignals,
+                   sum(previousSignalsPerBucket) AS previousSignals
         }
-        WITH t,
-             reduce(allRows = [], chunk IN collect(postRows) | allRows + chunk) AS rows
-        WHERE size(rows) > 0
-        WITH t, rows,
-             size(rows) AS totalSignals,
-             size([r IN rows WHERE r.ts >= datetime($current_start) AND r.ts < datetime($end) | 1]) AS recentSignals,
-             size([
-                r IN rows
-                WHERE r.ts >= datetime($previous_start)
-                  AND r.ts < datetime($previous_end)
-                | 1
-             ]) AS previousSignals,
-             reduce(minTs = null, r IN rows |
-                CASE
-                    WHEN minTs IS NULL OR r.ts < minTs THEN r.ts
-                    ELSE minTs
-                END
-             ) AS firstSeen,
-             reduce(maxTs = null, r IN rows |
-                CASE
-                    WHEN maxTs IS NULL OR r.ts > maxTs THEN r.ts
-                    ELSE maxTs
-                END
-             ) AS lastSeen
-        UNWIND rows AS row
-        WITH t, totalSignals, recentSignals, previousSignals, firstSeen, lastSeen,
-             row.day AS day, count(*) AS signalsPerDay
         WITH t.name AS topic,
              totalSignals,
-             count(day) AS activeDays,
-             max(signalsPerDay) AS peakDay,
+             activeDays,
+             peakDay,
              firstSeen,
              lastSeen,
              recentSignals,
              previousSignals
+        WHERE totalSignals > 0
         WITH topic, totalSignals, activeDays, peakDay, firstSeen, lastSeen, recentSignals, previousSignals,
              duration.between(coalesce(firstSeen, datetime($end)), datetime($end)).days AS ageDays,
              round(

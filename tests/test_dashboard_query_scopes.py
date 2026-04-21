@@ -68,12 +68,12 @@ class PredictiveQueryShapeTests(unittest.TestCase):
             predictive.get_retention_factors(self.ctx)
             predictive.get_churn_signals(self.ctx)
 
-        self.assertEqual(run_query_mock.call_count, 2)
+        self.assertEqual(run_query_mock.call_count, 1)
         for call in run_query_mock.call_args_list:
             query = call.args[0]
             self.assertNotIn("collect(DISTINCT id(u))", query)
             self.assertNotIn("WHERE id(u)", query)
-            self.assertIn("EXISTS {", query)
+            self.assertIn("count(DISTINCT c)", query)
             self.assertIn("datetime($start)", query)
             self.assertIn("datetime($end)", query)
 
@@ -143,13 +143,17 @@ class BehavioralQueryScopeTests(unittest.TestCase):
             behavioral.get_satisfaction_areas(self.ctx)
 
         self.assertEqual(run_query_mock.call_count, 3)
-        for call in run_query_mock.call_args_list:
+        for index, call in enumerate(run_query_mock.call_args_list):
             query = call.args[0]
             params = call.args[1]
-            self.assertIn("t.name IN $topic_names", query)
             self.assertEqual(params["topic_names"], ["Support", "Work"])
             self.assertEqual(params["start"], self.ctx.start_at.isoformat())
             self.assertEqual(params["end"], self.ctx.end_at.isoformat())
+            if index == 1:
+                self.assertIn("UNWIND $topic_names AS topic", query)
+                self.assertIn("t.name = topic", query)
+            else:
+                self.assertIn("t.name IN $topic_names", query)
 
 
 if __name__ == "__main__":
