@@ -469,6 +469,7 @@ export function QuestionCloud() {
   const { data } = useData();
   const ru = lang === 'ru';
   const questionBriefs = data.questionBriefs[lang] ?? [];
+  const [showAll, setShowAll] = useState(false);
 
   if (!questionBriefs.length) {
     return <EmptyWidget widgetId="question_cloud" title={ru ? 'Самые частые вопросы' : 'Most Asked Questions'} />;
@@ -479,6 +480,7 @@ export function QuestionCloud() {
   const avgConfidence = questionBriefs.length
     ? Math.round((questionBriefs.reduce((sum, b) => sum + (b.confidenceScore || 0), 0) / questionBriefs.length) * 100)
     : 0;
+  const visibleQuestionBriefs = showAll ? questionBriefs : questionBriefs.slice(0, 4);
 
   const statusLabel = (status: string) => {
     if (status === 'needs_guide') return ru ? 'Нужен чёткий гайд' : 'Needs a clear guide';
@@ -513,7 +515,7 @@ export function QuestionCloud() {
         </p>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
-          {questionBriefs.map((brief) => (
+          {visibleQuestionBriefs.map((brief) => (
             <Link
               key={brief.id}
               to={(() => {
@@ -538,7 +540,13 @@ export function QuestionCloud() {
               <p className="text-xs leading-relaxed mt-1.5 opacity-90">{brief.summary}</p>
 
               <div className="text-[11px] mt-2 opacity-85">
-                {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
+                {[
+                  `${brief.demandSignals.messages.toLocaleString()} ${ru ? 'сигналов' : 'signals'}`,
+                  `${brief.demandSignals.uniqueUsers.toLocaleString()} ${ru ? 'людей' : 'people'}`,
+                  brief.demandSignals.channels > 0
+                    ? `${brief.demandSignals.channels.toLocaleString()} ${ru ? 'каналов' : 'channels'}`
+                    : '',
+                ].filter(Boolean).join(' · ')}
               </div>
               <div className="text-[11px] mt-0.5 opacity-85">
                 {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}% · {statusLabel(brief.status)}
@@ -546,6 +554,21 @@ export function QuestionCloud() {
             </Link>
           ))}
         </div>
+
+        {questionBriefs.length > 4 && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setShowAll((prev) => !prev)}
+              className="text-xs text-blue-700 hover:text-blue-800"
+              style={{ fontWeight: 600 }}
+            >
+              {showAll
+                ? (ru ? 'Свернуть' : 'Collapse')
+                : (ru ? `Показать все ${questionBriefs.length}` : `See all ${questionBriefs.length}`)}
+            </button>
+          </div>
+        )}
 
         <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
           <div className="flex items-center gap-1.5">

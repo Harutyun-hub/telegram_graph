@@ -23,7 +23,9 @@ export function ProblemTracker() {
   const { data } = useData();
   const ru = lang === 'ru';
   const [expandedEvidenceKey, setExpandedEvidenceKey] = useState('');
+  const [showAll, setShowAll] = useState(false);
   const problemBriefs = data.problemBriefs?.[lang] ?? [];
+  const visibleProblemBriefs = showAll ? problemBriefs : problemBriefs.slice(0, 4);
 
   if (!problemBriefs.length) return <EmptyWidget widgetId="problem_tracker" title={ru ? 'Трекер проблем' : 'Problem Tracker'} />;
 
@@ -50,7 +52,7 @@ export function ProblemTracker() {
               ? 'AI-карточки проблем: сформулированы простым языком и привязаны к реальным сообщениям.'
               : 'AI problem cards: plain-language statements grounded in real messages.'}
           </p>
-          {problemBriefs.map((brief) => {
+          {visibleProblemBriefs.map((brief) => {
             const sev = severityColors[brief.severity] ?? severityColors.medium;
             const key = `problem-${brief.id}`;
             const expanded = expandedEvidenceKey === key;
@@ -68,21 +70,29 @@ export function ProblemTracker() {
                 </div>
 
                 <div className="text-[11px] mt-2 opacity-85">
-                  {brief.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {brief.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {brief.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
+                  {[
+                    `${brief.demandSignals.messages.toLocaleString()} ${ru ? 'сигналов' : 'signals'}`,
+                    `${brief.demandSignals.uniqueUsers.toLocaleString()} ${ru ? 'людей' : 'people'}`,
+                    brief.demandSignals.channels > 0
+                      ? `${brief.demandSignals.channels.toLocaleString()} ${ru ? 'каналов' : 'channels'}`
+                      : '',
+                  ].filter(Boolean).join(' · ')}
                 </div>
                 <div className="text-[11px] mt-0.5 opacity-85">
                   {ru ? '7д тренд' : '7d trend'}: {brief.demandSignals.trend7dPct > 0 ? '+' : ''}{brief.demandSignals.trend7dPct}%
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setExpandedEvidenceKey(expanded ? '' : key)}
-                  className="mt-2 text-xs text-blue-700 hover:underline"
-                >
-                  {expanded
-                    ? (ru ? 'Скрыть доказательства' : 'Hide evidence')
-                    : `${ru ? 'Доказательства' : 'Evidence'} (${brief.evidence.length})`}
-                </button>
+                {brief.evidence.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedEvidenceKey(expanded ? '' : key)}
+                    className="mt-2 text-xs text-blue-700 hover:underline"
+                  >
+                    {expanded
+                      ? (ru ? 'Скрыть доказательства' : 'Hide evidence')
+                      : `${ru ? 'Доказательства' : 'Evidence'} (${brief.evidence.length})`}
+                  </button>
+                )}
 
                 {expanded && (
                   <div className="mt-2 space-y-2">
@@ -111,6 +121,21 @@ export function ProblemTracker() {
               </div>
             );
           })}
+
+          {problemBriefs.length > 4 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAll((prev) => !prev)}
+                className="text-xs text-blue-700 hover:text-blue-800"
+                style={{ fontWeight: 600 }}
+              >
+                {showAll
+                  ? (ru ? 'Свернуть' : 'Collapse')
+                  : (ru ? `Показать все ${problemBriefs.length}` : `See all ${problemBriefs.length}`)}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

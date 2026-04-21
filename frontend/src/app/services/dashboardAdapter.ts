@@ -141,6 +141,174 @@ function questionSnippet(v: any, maxLen = 160): string {
   return snippet(candidate, maxLen);
 }
 
+function confidenceForSignalCount(count: number): { confidence: 'high' | 'medium' | 'low'; score: number } {
+  if (count >= 20) return { confidence: 'high', score: 0.84 };
+  if (count >= 12) return { confidence: 'high', score: 0.76 };
+  if (count >= 6) return { confidence: 'medium', score: 0.66 };
+  return { confidence: 'low', score: 0.56 };
+}
+
+function buildExactRangeQuestionBriefs(rows: any[], ru = false) {
+  const normalizedRows = asArray(rows).flatMap((row: any) => {
+    const category = asStr(row?.category, 'General');
+    const nestedQuestions = asArray(row?.questions);
+    if (nestedQuestions.length === 0) {
+      return [{ ...row, category }];
+    }
+    return nestedQuestions.map((question: any) => {
+      const seekers = Math.max(0, asNum(question?.count, asNum(question?.seekers, 0)));
+      const coveragePct = clamp(asNum(question?.coveragePct, question?.answered ? 100 : 0), 0, 100);
+      return {
+        category,
+        topic: normalizeTopicLabel(question?.topic || question?.q || ''),
+        seekers,
+        respondedSeekers: Math.round((seekers * coveragePct) / 100),
+        sampleQuestion: asStr(question?.q, ''),
+        sampleQuestionId: asStr(question?.evidenceId, ''),
+        coveragePct,
+      };
+    });
+  });
+
+  const merged = new Map<string, any>();
+  normalizedRows.forEach((row: any) => {
+    const topic = normalizeTopicLabel(row?.topic);
+    if (!topic || NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return;
+    const key = topicKey(topic);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, {
+        topic,
+        category: asStr(row?.category, 'General'),
+        seekers: asNum(row?.seekers, 0),
+        respondedSeekers: asNum(row?.respondedSeekers, 0),
+        sampleQuestion: asStr(row?.sampleQuestion, ''),
+        sampleQuestionId: asStr(row?.sampleQuestionId, ''),
+        coveragePct: clamp(asNum(row?.coveragePct, 0), 0, 100),
+      });
+      return;
+    }
+    const nextSeekers = asNum(existing.seekers, 0) + asNum(row?.seekers, 0);
+    const nextResponded = asNum(existing.respondedSeekers, 0) + asNum(row?.respondedSeekers, 0);
+    merged.set(key, {
+      ...existing,
+      seekers: nextSeekers,
+      respondedSeekers: nextResponded,
+      sampleQuestion: asStr(existing.sampleQuestion) || asStr(row?.sampleQuestion),
+      sampleQuestionId: asStr(existing.sampleQuestionId) || asStr(row?.sampleQuestionId),
+      category: asStr(existing.category || row?.category, 'General'),
+      coveragePct: nextSeekers > 0
+        ? clamp(Math.round((nextResponded / nextSeekers) * 100), 0, 100)
+        : 0,
+    });
+  });
+
+  return Array.from(merged.values())
+    .sort((a, b) => (b.seekers - a.seekers) || a.topic.localeCompare(b.topic))
+    .map((row: any) => {
+      const count = Math.max(0, asNum(row?.seekers, 0));
+      const coveragePct = clamp(asNum(row?.coveragePct, 0), 0, 100);
+      const lowEvidence = count < MIN_SUPPORT_FOR_QA;
+      const status = lowEvidence || coveragePct < 35
+        ? 'needs_guide'
+        : coveragePct >= 70
+          ? 'well_covered'
+          : 'partially_answered';
+      const { confidence, score } = confidenceForSignalCount(count);
+      const sourceTopic = normalizeTopicLabel(row?.topic);
+      const topic = ru ? translateTopicRu(sourceTopic) : sourceTopic;
+      const question = questionSnippet(row?.sampleQuestion, 140)
+        || (ru ? `Что чаще всего спрашивают по теме «${topic}»?` : `What are people asking most about ${topic}?`);
+      const summary = ru
+        ? (
+            status === 'well_covered'
+              ? `В выбранном окне повторяющиеся вопросы по теме ${topic} в основном уже покрыты ответами.`
+              : status === 'partially_answered'
+                ? `В выбранном окне вопросы по теме ${topic} повторяются, но ответы покрывают их только частично.`
+                : `В выбранном окне вопросы по теме ${topic} повторяются, и людям всё ещё нужен более понятный ответ или гайд.`
+          )
+        : (
+            status === 'well_covered'
+              ? `In the selected window, recurring questions about ${topic} are mostly already covered.`
+              : status === 'partially_answered'
+                ? `In the selected window, questions about ${topic} repeat but are only partially covered.`
+                : `In the selected window, questions about ${topic} repeat and still need a clearer answer or guide.`
+          );
+
+      return {
+        id: `question-${topicKey(sourceTopic)}`,
+        topic,
+        sourceTopic,
+        category: translateCategory(asStr(row?.category, 'General'), ru),
+        question,
+        summary,
+        title: question,
+        brief: summary,
+        confidence,
+        confidenceScore: score,
+        status,
+        resolvedPct: lowEvidence ? 0 : coveragePct,
+        demandSignals: {
+          messages: count,
+          uniqueUsers: count,
+          channels: 0,
+          trend7dPct: 0,
+        },
+        sampleEvidenceId: asStr(row?.sampleQuestionId, ''),
+        latestAt: '',
+        evidence: [],
+      };
+    });
+}
+
+function mapProblemSeverity(rawSeverity: any, mentions: number): 'critical' | 'high' | 'medium' | 'low' {
+  const severity = asStr(rawSeverity, '').toLowerCase();
+  if (severity.includes('urgent')) return mentions >= 20 ? 'critical' : 'high';
+  if (mentions >= 20) return 'high';
+  if (mentions >= 10) return 'medium';
+  return 'low';
+}
+
+function buildExactRangeProblemBriefs(rows: any[], ru = false) {
+  return asArray(rows)
+    .map((row: any) => {
+      const sourceTopic = normalizeTopicLabel(row?.topic);
+      if (!sourceTopic || NOISY_TOPIC_KEYS.has(sourceTopic.toLowerCase())) return null;
+      const messages = Math.max(0, asNum(row?.affectedUsers, 0));
+      if (messages <= 0) return null;
+      const topic = ru ? translateTopicRu(sourceTopic) : sourceTopic;
+      const severity = mapProblemSeverity(row?.severity, messages);
+      const confidence = confidenceForSignalCount(messages);
+      const summaryText = snippet(row?.sampleText, 220);
+      const summary = summaryText
+        || (ru
+          ? `В выбранном окне по теме ${topic} заметны устойчивые негативные сигналы.`
+          : `In the selected window, ${topic} shows repeated negative signals.`);
+      return {
+        id: `problem-${topicKey(sourceTopic)}`,
+        topic,
+        sourceTopic,
+        category: translateCategory(asStr(row?.category, 'General'), ru),
+        problem: topic,
+        summary,
+        severity,
+        confidence: confidence.confidence,
+        confidenceScore: confidence.score,
+        demandSignals: {
+          messages,
+          uniqueUsers: messages,
+          channels: 0,
+          trend7dPct: clamp(Math.round(asNum(row?.trendPct, 0)), -MAX_ABS_TREND_PCT, MAX_ABS_TREND_PCT),
+        },
+        sampleEvidenceId: '',
+        latestAt: '',
+        evidence: [],
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => (b.demandSignals.messages - a.demandSignals.messages) || a.sourceTopic.localeCompare(b.sourceTopic));
+}
+
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
@@ -729,8 +897,8 @@ export function adaptDashboardPayload(payload: any): AppData {
         evidence: r.evidence,
       }));
 
-      app.questionBriefs.en = en.slice(0, 8);
-      app.questionBriefs.ru = ruRows.slice(0, 8);
+      app.questionBriefs.en = en;
+      app.questionBriefs.ru = ruRows;
     }
   } catch {
     // Keep mock defaults.
@@ -808,6 +976,15 @@ export function adaptDashboardPayload(payload: any): AppData {
         lowEvidence: !!q.lowEvidence,
       })));
       app.qaGap = { en: enGap, ru: ruGap };
+
+      const exactQuestionBriefsEn = buildExactRangeQuestionBriefs(qRows, false);
+      const exactQuestionBriefsRu = buildExactRangeQuestionBriefs(qRows, true);
+      if (exactQuestionBriefsEn.length > 0) {
+        app.questionBriefs = {
+          en: exactQuestionBriefsEn,
+          ru: exactQuestionBriefsRu,
+        };
+      }
     }
   } catch {
     // Keep mock defaults.
@@ -958,8 +1135,8 @@ export function adaptDashboardPayload(payload: any): AppData {
         evidence: r.evidence,
       }));
 
-      app.problemBriefs.en = en.slice(0, 8);
-      app.problemBriefs.ru = ruRows.slice(0, 8);
+      app.problemBriefs.en = en;
+      app.problemBriefs.ru = ruRows;
     }
   } catch {
     // Keep mock defaults.
@@ -1062,6 +1239,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const topic = normalizeTopicLabel(r.topic);
         if (!topic) return;
         if (NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return;
+        const key = topicKey(topic);
         const weeklyCurrent = asNum(r.affectedThisWeek, 0);
         const weeklyPrevious = asNum(r.affectedPrevWeek, 0);
         const computedTrend = boundedTrend(weeklyCurrent, weeklyPrevious);
@@ -1108,6 +1286,15 @@ export function adaptDashboardPayload(payload: any): AppData {
         })),
       }));
       app.problems = { en, ru };
+
+      const exactProblemBriefsEn = buildExactRangeProblemBriefs(pRows, false);
+      const exactProblemBriefsRu = buildExactRangeProblemBriefs(pRows, true);
+      if (exactProblemBriefsEn.length > 0) {
+        app.problemBriefs = {
+          en: exactProblemBriefsEn,
+          ru: exactProblemBriefsRu,
+        };
+      }
     }
   } catch {
     // Keep mock defaults.
