@@ -105,6 +105,25 @@ class KBApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["collections"]), 1)
 
+    def test_kb_collections_accepts_simple_auth_credentials(self) -> None:
+        fake_store = _FakeStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", ""), \
+             patch.object(server.config, "SIMPLE_AUTH_USERNAME", "Admin"), \
+             patch.object(server.config, "SIMPLE_AUTH_PASSWORD", "secret-pass"), \
+             patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "_kb_components", return_value=(fake_store, object())):
+            response = self.client.get(
+                "/api/kb/collections",
+                headers={"X-Admin-Authorization": "Basic QWRtaW46c2VjcmV0LXBhc3M="},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["collections"][0]["name"], "test")
+
     def test_kb_collections_returns_503_when_dependencies_are_missing(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
