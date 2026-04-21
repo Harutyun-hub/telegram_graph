@@ -211,10 +211,6 @@ def _is_topics_page_row_allowed(row: dict[str, Any]) -> bool:
         return False
     if _safe_int(row.get("evidenceCount")) <= 0:
         return False
-    if not str(row.get("sampleEvidenceId") or "").strip():
-        return False
-    if not str(row.get("sampleQuote") or "").strip():
-        return False
     return True
 
 
@@ -885,30 +881,21 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
-            RETURN count(p) AS postCount
-        }
-        CALL (t) {
+            WITH count(p) AS postCount
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($start)
               AND c.posted_at < datetime($end)
-            RETURN count(c) AS commentCount
-        }
-        CALL (t) {
-            OPTIONAL MATCH (u:User)-[i:INTERESTED_IN]->(t)
-            RETURN count(DISTINCT u) AS userCount,
-                   coalesce(sum(i.count), 0) AS totalInteractions
+            RETURN postCount, count(c) AS commentCount
         }
         CALL (t) {
             OPTIONAL MATCH (p:Post)-[:TAGGED]->(t)
             WHERE p.posted_at >= datetime($previous_start)
               AND p.posted_at < datetime($previous_end)
-            RETURN count(p) AS postsPrev
-        }
-        CALL (t) {
+            WITH count(p) AS postsPrev
             OPTIONAL MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at >= datetime($previous_start)
               AND c.posted_at < datetime($previous_end)
-            RETURN count(c) AS commentsPrev
+            RETURN postsPrev, count(c) AS commentsPrev
         }
         CALL (t) {
             CALL (t) {
@@ -940,15 +927,8 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
                 OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
-                       'message' AS kind,
-                       coalesce(ch.username, ch.title, 'unknown') AS author,
-                       coalesce(ch.title, ch.username, 'unknown') AS channel,
-                       left(coalesce(p.text, ''), 1200) AS text,
-                       toString(p.posted_at) AS timestamp,
-                       coalesce(ch.username, ch.title, 'unknown') AS actorKey,
-                       coalesce(p.views, 0) AS reactions,
-                       coalesce(p.comment_count, 0) AS replies
+                RETURN coalesce(ch.username, ch.title, '') AS actorKey,
+                       coalesce(ch.title, ch.username, '') AS channelKey
                 UNION ALL
                 WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
@@ -956,60 +936,15 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                   AND c.posted_at < datetime($end)
                 OPTIONAL MATCH (u:User)-[:WROTE]->(c)
                 OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
-                       'reply' AS kind,
-                       coalesce(toString(u.telegram_user_id), 'anonymous') AS author,
-                       coalesce(ch.title, ch.username, 'unknown') AS channel,
-                       left(coalesce(c.text, ''), 1200) AS text,
-                       toString(c.posted_at) AS timestamp,
-                       coalesce(toString(u.telegram_user_id), coalesce(ch.username, ch.title, 'anonymous')) AS actorKey,
-                       0 AS reactions,
-                       0 AS replies
+                RETURN coalesce(toString(u.telegram_user_id), '') AS actorKey,
+                       coalesce(ch.title, ch.username, '') AS channelKey
             }
-            WITH evidenceId, kind, author, channel, text, timestamp, actorKey, reactions, replies
-            WHERE text <> ''
-            ORDER BY timestamp DESC, evidenceId DESC
-            WITH collect({
-                id: evidenceId,
-                type: kind,
-                author: author,
-                channel: channel,
-                text: text,
-                timestamp: timestamp,
-                reactions: reactions,
-                replies: replies
-            }) AS evidenceRows,
-            collect(DISTINCT CASE WHEN actorKey <> '' THEN actorKey END) AS actorKeys,
-            collect(DISTINCT CASE WHEN channel <> '' AND channel <> 'unknown' THEN channel END) AS channels
-            RETURN head(evidenceRows) AS sampleEvidence,
-                   size(evidenceRows) AS evidenceCount,
-                   size([actor IN actorKeys WHERE actor IS NOT NULL]) AS distinctUsers,
-                   size([channel IN channels WHERE channel IS NOT NULL]) AS distinctChannels
+            RETURN count(*) AS evidenceCount,
+                   count(DISTINCT CASE WHEN actorKey <> '' THEN actorKey ELSE NULL END) AS distinctUsers,
+                   count(DISTINCT CASE WHEN channelKey <> '' AND channelKey <> 'unknown' THEN channelKey ELSE NULL END) AS distinctChannels
         }
-        CALL (t) {
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
-                WHERE p.posted_at >= datetime($start)
-                  AND p.posted_at < datetime($end)
-                OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN coalesce(ch.title, ch.username, 'unknown') AS channel
-                UNION ALL
-                WITH t
-                MATCH (c:Comment)-[:TAGGED]->(t)
-                WHERE c.posted_at >= datetime($start)
-                  AND c.posted_at < datetime($end)
-                OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN coalesce(ch.title, ch.username, 'unknown') AS channel
-            }
-            WITH channel, count(*) AS mentions
-            WHERE channel <> '' AND channel <> 'unknown'
-            ORDER BY mentions DESC, channel ASC
-            RETURN collect(channel)[..3] AS topChannels
-        }
-        WITH t, cat, postCount, commentCount, userCount, totalInteractions,
-             postsPrev, commentsPrev,
-             sampleEvidence, evidenceCount, distinctUsers, distinctChannels, topChannels,
+        WITH t, cat, postCount, commentCount, postsPrev, commentsPrev,
+             evidenceCount, distinctUsers, distinctChannels,
              coalesce(positiveScore, 0) AS positiveScore,
              coalesce(neutralScore, 0) AS neutralScore,
              coalesce(negativeScore, 0) AS negativeScore,
@@ -1025,11 +960,12 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                mentionCount AS totalInteractions,
                mentionCount AS last7Mentions,
                prevMentions AS prev7Mentions,
-               sampleEvidence,
+               '' AS sampleEvidenceId,
+               '' AS sampleQuote,
                evidenceCount,
                distinctUsers,
                distinctChannels,
-               topChannels,
+               [] AS topChannels,
                CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * positiveScore / sentimentTotal)) ELSE 0 END AS sentimentPositive,
                CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * neutralScore / sentimentTotal)) ELSE 0 END AS sentimentNeutral,
                CASE WHEN sentimentTotal > 0 THEN toInteger(round(100.0 * negativeScore / sentimentTotal)) ELSE 0 END AS sentimentNegative,
@@ -1038,7 +974,7 @@ def get_all_topics(page: int = 0, size: int = 50, ctx: DashboardDateContext | No
                    WHEN mentionCount > 0 THEN 100.0
                    ELSE 0.0
                END AS growth7dPct
-        ORDER BY mentionCount DESC, distinctUsers DESC, evidenceCount DESC, t.name ASC
+        ORDER BY mentionCount DESC, distinctUsers DESC, t.name ASC
     """, {
         **_range_params(resolved_ctx),
         "noise": sorted(_NOISY_TOPIC_KEYS),
