@@ -33,7 +33,16 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         }
 
     def _snapshot(self) -> dict:
-        return {"communityHealth": {"score": 72}}
+        return {
+            "communityHealth": {"score": 72},
+            "communityBrief": {
+                "postsAnalyzed24h": 12,
+                "commentScopesAnalyzed24h": 18,
+                "totalAnalyses24h": 30,
+                "refreshedMinutesAgo": 9,
+                "windowDays": 15,
+            },
+        }
 
     def test_default_dashboard_uses_persisted_alias_before_live_freshness(self) -> None:
         ctx = self._ctx()

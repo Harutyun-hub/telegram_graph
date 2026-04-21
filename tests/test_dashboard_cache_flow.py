@@ -130,6 +130,16 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         runtime_coordinator._LOCAL_LOCKS.clear()
 
     def test_dashboard_exact_stale_snapshot_returns_200_with_truthful_meta(self) -> None:
+        stale_snapshot = {
+            "communityHealth": {"score": 52},
+            "communityBrief": {
+                "postsAnalyzed24h": 10,
+                "commentScopesAnalyzed24h": 15,
+                "totalAnalyses24h": 25,
+                "refreshedMinutesAgo": 4,
+                "windowDays": 7,
+            },
+        }
         stale_meta = {
             "cacheStatus": "memory_stale",
             "cacheSource": "memory",
@@ -153,7 +163,7 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              patch.object(
                  server,
                  "peek_dashboard_snapshot",
-                 return_value=({"communityHealth": {"score": 52}}, stale_meta, "stale"),
+                 return_value=(stale_snapshot, stale_meta, "stale"),
              ), \
              patch.object(
                  server,
@@ -172,6 +182,16 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         schedule_mock.assert_called_once()
 
     def test_dashboard_exact_miss_rebuilds_without_name_error(self) -> None:
+        rebuild_snapshot = {
+            "communityHealth": {"score": 55},
+            "communityBrief": {
+                "postsAnalyzed24h": 11,
+                "commentScopesAnalyzed24h": 17,
+                "totalAnalyses24h": 28,
+                "refreshedMinutesAgo": 6,
+                "windowDays": 7,
+            },
+        }
         rebuild_meta = {
             "cacheStatus": "refresh_success",
             "cacheSource": "rebuild",
@@ -193,7 +213,7 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "get_dashboard_snapshot", return_value=({"communityHealth": {"score": 55}}, rebuild_meta)) as rebuild_mock, \
+             patch.object(server, "get_dashboard_snapshot", return_value=(rebuild_snapshot, rebuild_meta)) as rebuild_mock, \
              patch.object(server, "_should_persist_dashboard_snapshot", return_value=False), \
              patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
@@ -204,6 +224,34 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["cacheStatus"], "refresh_success")
         rebuild_mock.assert_called_once()
         persist_mock.assert_not_called()
+
+    def test_dashboard_placeholder_snapshot_returns_warming_503(self) -> None:
+        placeholder_meta = {
+            "cacheStatus": "refresh_success",
+            "cacheSource": "rebuild",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.4, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 0.4,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(
+                 server,
+                 "_cached_freshness_resolution",
+                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+             ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "get_dashboard_snapshot", return_value=({"communityHealth": {"score": 0}, "communityBrief": {}}, placeholder_meta)):
+            response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("warming this date range", response.text.lower())
 
     def test_dashboard_exact_miss_timeout_returns_warming_503(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
