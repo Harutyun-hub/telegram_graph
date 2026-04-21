@@ -34,7 +34,7 @@ _SENTIMENT_CANON = {
 _NEGATIVE_SENTIMENTS = {"Negative", "Urgent", "Sarcastic"}
 _NOISY_TOPIC_KEYS = {"", "null", "unknown", "none", "n/a", "na"}
 _TOPICS_PAGE_GROUP_KEYS = {"Living", "Work", "Family", "Finance", "Lifestyle", "Integration", "Admin"}
-USE_TOPIC_QUERY_V2 = os.getenv("TOPIC_QUERY_V2", "false").strip().lower() == "true"
+USE_TOPIC_QUERY_V2 = os.getenv("TOPIC_QUERY_V2", "true").strip().lower() != "false"
 _GLOBAL_COUNTS_TTL_SECONDS = 300.0
 _GLOBAL_COUNTS_CACHE: tuple[float, dict[str, int]] | None = None
 _GLOBAL_COUNTS_LOCK = threading.Lock()

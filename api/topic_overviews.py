@@ -945,6 +945,43 @@ def get_topic_overview(topic_name: str, category: str | None = None) -> dict | N
     return copy.deepcopy(item) if isinstance(item, dict) else None
 
 
+def build_topic_overview_fallback(detail_payload: dict | None, ctx: DashboardDateContext) -> dict | None:
+    if not isinstance(detail_payload, dict):
+        return None
+
+    topic = _as_str(detail_payload.get("sourceTopic") or detail_payload.get("name"), "").strip()
+    if not topic:
+        return None
+
+    evidence = detail_payload.get("evidence") if isinstance(detail_payload.get("evidence"), list) else []
+    question_evidence = detail_payload.get("questionEvidence") if isinstance(detail_payload.get("questionEvidence"), list) else []
+    mentions = _as_int(detail_payload.get("mentionCount"), _as_int(detail_payload.get("mentions"), 0))
+
+    if mentions <= 0 and not evidence and not question_evidence:
+        return None
+
+    candidate = {
+        "topic": topic,
+        "category": _as_str(detail_payload.get("category"), "General"),
+        "mentions": mentions,
+        "previousMentions": _as_int(
+            detail_payload.get("previousMentions"),
+            _as_int(detail_payload.get("prev7Mentions"), 0),
+        ),
+        "growth": _as_int(detail_payload.get("growth7dPct"), _as_int(detail_payload.get("growth"), 0)),
+        "distinctUsers": _as_int(detail_payload.get("distinctUsers"), _as_int(detail_payload.get("userCount"), 0)),
+        "distinctChannels": _as_int(detail_payload.get("distinctChannels"), 0),
+        "topChannels": list(detail_payload.get("topChannels") or []),
+        "latestAt": _as_str(detail_payload.get("latestAt"), ""),
+        "sentimentPositive": _as_int(detail_payload.get("sentimentPositive"), 0),
+        "sentimentNeutral": _as_int(detail_payload.get("sentimentNeutral"), 0),
+        "sentimentNegative": _as_int(detail_payload.get("sentimentNegative"), 0),
+        "evidence": list(evidence),
+        "questionEvidence": list(question_evidence),
+    }
+    return _fallback_item(candidate, ctx)
+
+
 def get_category_overview(category_name: str, topics: list[dict[str, Any]] | None = None) -> dict | None:
     clean_category = _as_str(category_name, "").strip()
     topic_rows = [row for row in (topics or []) if isinstance(row, dict) and _as_str(row.get("name"), "").strip()]

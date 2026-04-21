@@ -3052,10 +3052,16 @@ async def topic_detail(
         _record_query_timing(request, query_started_at)
         if payload is None:
             raise HTTPException(status_code=404, detail="Topic not found for the selected window.")
-        overview = topic_overviews.get_topic_overview(
-            str(payload.get("sourceTopic") or payload.get("name") or topic),
-            str(payload.get("category") or category or ""),
-        )
+        overview = None
+        try:
+            overview = topic_overviews.get_topic_overview(
+                str(payload.get("sourceTopic") or payload.get("name") or topic),
+                str(payload.get("category") or category or ""),
+            )
+        except Exception as exc:
+            logger.warning(f"Topic overview lookup failed | topic={topic} category={category or ''} error={exc}")
+        if overview is None:
+            overview = topic_overviews.build_topic_overview_fallback(payload, ctx)
         payload = {**payload, "overview": overview}
         return payload
     except HTTPException:
