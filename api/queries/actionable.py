@@ -547,31 +547,132 @@ def get_business_opportunity_brief_candidates(
             WHERE p.posted_at > datetime() - duration({days: $days})
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
+            WITH p, toLower(trim(p.text)) AS textLower
+            WITH p,
+                 CASE
+                    WHEN p.text CONTAINS '?'
+                      OR any(h IN $demand_hints WHERE textLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS askLike,
+                 CASE
+                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS gapHit
+            RETURN
+                count(CASE WHEN askLike = 1 OR gapHit = 1 THEN 1 END) AS postSignals,
+                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at > datetime() - duration('P7D') THEN 1 END) AS postSignals7d,
+                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at > datetime() - duration('P14D')
+                            AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postSignalsPrev7d,
+                max(CASE WHEN askLike = 1 OR gapHit = 1 THEN p.posted_at END) AS latestPostTs
+        }
+
+        CALL {
+            WITH t
+            MATCH (c:Comment)-[:TAGGED]->(t)
+            WHERE c.posted_at > datetime() - duration({days: $days})
+              AND c.text IS NOT NULL
+              AND trim(c.text) <> ''
+            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+            OPTIONAL MATCH (u)-[:EXHIBITS]->(intent:Intent)
+            OPTIONAL MATCH (u)-[:SIGNALS_OPPORTUNITY]->(bo:BusinessOpportunity)
+            WITH c, p, u,
+                 max(CASE WHEN intent.name IN ['Support / Help', 'Information Seeking'] THEN 1 ELSE 0 END) AS supportIntent,
+                 max(CASE WHEN bo.type IN ['Service_Demand', 'Product_Demand', 'Market_Gap_Observed', 'Business_Idea'] THEN 1 ELSE 0 END) AS opportunityHint,
+                 max(CASE WHEN bo.type IN $excluded_opportunity_types THEN 1 ELSE 0 END) AS excludedOpportunityHint
+            WITH c, p, u, supportIntent, opportunityHint, excludedOpportunityHint,
+                 toLower(trim(c.text)) AS textLower,
+                 toLower(trim(coalesce(p.text, ''))) AS contextLower
+            WITH c,
+                supportIntent,
+                CASE
+                    WHEN c.text CONTAINS '?'
+                      OR any(h IN $demand_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
+                    THEN 1 ELSE 0
+                END AS askLike,
+                CASE
+                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
+                    THEN 1 ELSE 0
+                END AS gapHit,
+                CASE
+                    WHEN textLower CONTAINS 'recommend' OR textLower CONTAINS 'посовет'
+                      OR textLower CONTAINS 'рекоменд'
+                    THEN 1 ELSE 0
+                END AS recommendationHit,
+                CASE
+                    WHEN excludedOpportunityHint = 1 THEN 0
+                    ELSE opportunityHint
+                END AS opportunityHint
+            RETURN
+                count(CASE
+                    WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
+                    THEN 1 END) AS commentSignals,
+                count(CASE
+                    WHEN (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
+                      AND c.posted_at > datetime() - duration('P7D')
+                    THEN 1 END) AS commentSignals7d,
+                count(CASE
+                    WHEN (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
+                      AND c.posted_at > datetime() - duration('P14D')
+                      AND c.posted_at <= datetime() - duration('P7D')
+                    THEN 1 END) AS commentSignalsPrev7d,
+                max(CASE
+                    WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
+                    THEN c.posted_at END) AS latestCommentTs
+        }
+
+        WITH t, cat,
+             (postSignals + commentSignals) AS demandSignals,
+             (postSignals7d + commentSignals7d) AS signals7d,
+             (postSignalsPrev7d + commentSignalsPrev7d) AS signalsPrev7d,
+             CASE
+                 WHEN latestPostTs IS NULL THEN latestCommentTs
+                 WHEN latestCommentTs IS NULL THEN latestPostTs
+                 WHEN latestPostTs >= latestCommentTs THEN latestPostTs
+                 ELSE latestCommentTs
+             END AS latestTs
+        WHERE demandSignals >= 2
+        WITH t, cat, demandSignals, signals7d, signalsPrev7d, latestTs,
+             CASE
+                WHEN (signals7d + signalsPrev7d) < 8 THEN 0
+                ELSE toInteger(round(100.0 * (signals7d - signalsPrev7d) / (signalsPrev7d + 3)))
+             END AS trend7dPct
+        ORDER BY demandSignals DESC, latestTs DESC
+        LIMIT $limit_topics
+
+        CALL {
+            WITH t
+            MATCH (p:Post)-[:TAGGED]->(t)
+            WHERE p.posted_at > datetime() - duration({days: $days})
+              AND p.text IS NOT NULL
+              AND trim(p.text) <> ''
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
             WITH p, ch, toLower(trim(p.text)) AS textLower
+            WITH p, ch,
+                 CASE
+                    WHEN p.text CONTAINS '?'
+                      OR any(h IN $demand_hints WHERE textLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS askLike,
+                 CASE
+                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS gapHit
             RETURN
-                coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
+                coalesce(p.uuid, 'post:' + elementId(p)) AS id,
                 'post' AS kind,
                 left(trim(p.text), 2600) AS text,
                 '' AS parentText,
                 coalesce(ch.title, ch.username, 'unknown') AS channel,
                 '' AS userId,
+                toString(p.posted_at) AS timestamp,
                 p.posted_at AS ts,
-                CASE
-                    WHEN p.text CONTAINS '?'
-                      OR any(h IN $demand_hints WHERE textLower CONTAINS h)
-                    THEN 1 ELSE 0
-                END AS askLike,
-                CASE
-                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h)
-                    THEN 1 ELSE 0
-                END AS gapHit,
+                askLike,
+                gapHit,
                 0 AS supportIntent,
                 0 AS recommendationHit,
                 0 AS opportunityHint
-
             UNION ALL
-
             MATCH (c:Comment)-[:TAGGED]->(t)
             WHERE c.posted_at > datetime() - duration({days: $days})
               AND c.text IS NOT NULL
@@ -583,92 +684,68 @@ def get_business_opportunity_brief_candidates(
             WITH c, p, u, ch,
                  max(CASE WHEN intent.name IN ['Support / Help', 'Information Seeking'] THEN 1 ELSE 0 END) AS supportIntent,
                  max(CASE WHEN bo.type IN ['Service_Demand', 'Product_Demand', 'Market_Gap_Observed', 'Business_Idea'] THEN 1 ELSE 0 END) AS opportunityHint,
-                 max(CASE WHEN bo.type IN $excluded_opportunity_types THEN 1 ELSE 0 END) AS excludedOpportunityHint
-            WITH c, p, u, ch, supportIntent, opportunityHint, excludedOpportunityHint,
+                 max(CASE WHEN bo.type IN $excluded_opportunity_types THEN 1 ELSE 0 END) AS excludedOpportunityHint,
                  toLower(trim(c.text)) AS textLower,
                  toLower(trim(coalesce(p.text, ''))) AS contextLower
+            WITH c, p, u, ch, supportIntent, opportunityHint, excludedOpportunityHint,
+                 CASE
+                    WHEN c.text CONTAINS '?'
+                      OR any(h IN $demand_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS askLike,
+                 CASE
+                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
+                    THEN 1 ELSE 0
+                 END AS gapHit,
+                 CASE
+                    WHEN textLower CONTAINS 'recommend' OR textLower CONTAINS 'посовет'
+                      OR textLower CONTAINS 'рекоменд'
+                    THEN 1 ELSE 0
+                 END AS recommendationHit
             RETURN
-                coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
+                coalesce(c.uuid, 'comment:' + elementId(c)) AS id,
                 'comment' AS kind,
                 left(trim(c.text), 2600) AS text,
                 left(coalesce(p.text, ''), 1200) AS parentText,
                 coalesce(ch.title, ch.username, 'unknown') AS channel,
                 coalesce(toString(u.telegram_user_id), '') AS userId,
+                toString(c.posted_at) AS timestamp,
                 c.posted_at AS ts,
-                CASE
-                    WHEN c.text CONTAINS '?'
-                      OR any(h IN $demand_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
-                    THEN 1 ELSE 0
-                END AS askLike,
-                CASE
-                    WHEN any(h IN $gap_hints WHERE textLower CONTAINS h OR contextLower CONTAINS h)
-                    THEN 1 ELSE 0
-                END AS gapHit,
+                askLike,
+                gapHit,
                 supportIntent,
-                CASE
-                    WHEN textLower CONTAINS 'recommend' OR textLower CONTAINS 'посовет'
-                      OR textLower CONTAINS 'рекоменд'
-                    THEN 1 ELSE 0
-                END AS recommendationHit,
+                recommendationHit,
                 CASE
                     WHEN excludedOpportunityHint = 1 THEN 0
                     ELSE opportunityHint
                 END AS opportunityHint
         }
-
-        WITH t, cat, evidenceId, kind, text, parentText, channel, userId, ts, askLike, gapHit, supportIntent, recommendationHit, opportunityHint
-        WITH t, cat,
+        WITH t, cat, demandSignals, signals7d, signalsPrev7d, trend7dPct, latestTs,
              collect({
-                id: evidenceId,
+                id: id,
                 kind: kind,
                 text: text,
                 parentText: parentText,
                 channel: channel,
                 userId: userId,
-                timestamp: toString(ts),
+                timestamp: timestamp,
                 askLike: askLike,
                 gapHit: gapHit,
                 supportIntent: supportIntent,
                 recommendationHit: recommendationHit,
                 opportunityHint: opportunityHint,
                 ts: ts
-             }) AS rows,
-             count(DISTINCT CASE
-                WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
-                THEN evidenceId END) AS demandSignals,
-             count(DISTINCT CASE
-                WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
-                THEN CASE
-                    WHEN trim(coalesce(userId, '')) <> '' THEN userId
-                    ELSE 'channel:' + toLower(trim(coalesce(channel, 'unknown')))
-                END END) AS uniqueUsers,
-             count(DISTINCT CASE
-                WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
-                THEN toLower(trim(coalesce(channel, 'unknown'))) END) AS channelCount,
-             count(DISTINCT CASE
-                WHEN ts > datetime() - duration('P7D')
-                  AND (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
-                THEN evidenceId END) AS signals7d,
-             count(DISTINCT CASE
-                WHEN ts > datetime() - duration('P14D')
-                  AND ts <= datetime() - duration('P7D')
-                  AND (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
-                THEN evidenceId END) AS signalsPrev7d,
-             max(ts) AS latestTs
-        WHERE demandSignals >= 2
-        WITH t, cat, rows, demandSignals, uniqueUsers, channelCount, signals7d, signalsPrev7d, latestTs,
-             CASE
-                WHEN (signals7d + signalsPrev7d) < 8 THEN 0
-                ELSE toInteger(round(100.0 * (signals7d - signalsPrev7d) / (signalsPrev7d + 3)))
-             END AS trend7dPct
-        ORDER BY demandSignals DESC, uniqueUsers DESC, latestTs DESC
-        LIMIT $limit_topics
-
+             }) AS rows
         UNWIND rows AS row
-        WITH t, cat, demandSignals, uniqueUsers, channelCount, signals7d, signalsPrev7d, trend7dPct, latestTs, row
+        WITH t, cat, demandSignals, signals7d, signalsPrev7d, trend7dPct, latestTs, row
         WHERE row.askLike = 1 OR row.gapHit = 1 OR row.supportIntent = 1 OR row.opportunityHint = 1
         ORDER BY row.ts DESC
-        WITH t, cat, demandSignals, uniqueUsers, channelCount, signals7d, signalsPrev7d, trend7dPct, latestTs,
+        WITH t, cat, demandSignals, signals7d, signalsPrev7d, trend7dPct, latestTs,
+             count(DISTINCT CASE
+                WHEN trim(coalesce(row.userId, '')) <> '' THEN row.userId
+                ELSE 'channel:' + toLower(trim(coalesce(row.channel, 'unknown')))
+             END) AS uniqueUsers,
+             count(DISTINCT toLower(trim(coalesce(row.channel, 'unknown')))) AS channelCount,
              collect({
                 id: row.id,
                 kind: row.kind,

@@ -791,7 +791,53 @@ def _load_snapshot_payload(*, diagnostics: dict | None = None) -> dict:
     return {"problemBriefs": problems, "serviceGapBriefs": services, "urgencyBriefs": urgency}
 
 
+def _should_keep_current_snapshot(
+    current_snapshot: dict,
+    next_payload: dict,
+    metadata: dict | None = None,
+) -> tuple[bool, str]:
+    current_problems = current_snapshot.get("problemBriefs") if isinstance(current_snapshot, dict) else []
+    current_problems = current_problems if isinstance(current_problems, list) else []
+    next_problems = next_payload.get("problemBriefs") if isinstance(next_payload, dict) else []
+    next_problems = next_problems if isinstance(next_problems, list) else []
+    current_count = len(current_problems)
+    next_count = len(next_problems)
+    if current_count > 0 and next_count == 0:
+        return True, "zero_problem_cards_over_non_empty"
+
+    current_meta = current_snapshot.get("meta") if isinstance(current_snapshot, dict) else {}
+    current_meta = current_meta if isinstance(current_meta, dict) else {}
+    next_meta = metadata if isinstance(metadata, dict) else {}
+    current_clusters = _as_int(current_meta.get("activeProblemClusters"), -1)
+    next_clusters = _as_int(next_meta.get("activeProblemClusters"), -1)
+    if (
+        current_count > next_count
+        and current_clusters >= 0
+        and next_clusters >= 0
+        and current_clusters == next_clusters
+    ):
+        return True, "fewer_problem_cards_same_active_clusters"
+    return False, ""
+
+
 def _save_snapshot_payload(payload: dict, metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
+    current_snapshot = _read_latest_runtime_json(
+        _SNAPSHOT_FOLDER,
+        default={"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []},
+    )
+    keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, payload, metadata)
+    if keep_current:
+        current = _load_snapshot_payload(diagnostics=diagnostics)
+        if isinstance(diagnostics, dict):
+            snapshot = diagnostics.setdefault("snapshot", {})
+            snapshot["publishSkipped"] = True
+            snapshot["publishSkipReason"] = keep_reason
+            snapshot["writeSucceeded"] = True
+            snapshot["readbackProblemCards"] = len(current.get("problemBriefs") or [])
+            snapshot["readbackServiceCards"] = len(current.get("serviceGapBriefs") or [])
+            snapshot["readbackUrgencyCards"] = len(current.get("urgencyBriefs") or [])
+        return True
+
     out = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -1625,6 +1671,7 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
     state["serviceClusters"] = next_service_state
     state_saved = _save_state(state)
     snapshot_saved = False
+    published_payload = last_good_payload
     if state_saved:
         snapshot_saved = _save_snapshot_payload(
             payload,
@@ -1638,6 +1685,8 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
             },
             diagnostics=diagnostics,
         )
+        if snapshot_saved:
+            published_payload = _load_snapshot_payload(diagnostics=diagnostics)
     if not state_saved:
         diagnostics["error"] = "Behavioral cards state could not be persisted and verified"
     elif not snapshot_saved:
@@ -1645,10 +1694,10 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
 
     if state_saved and snapshot_saved:
         with _cache_lock:
-            _cached_payload = payload
+            _cached_payload = published_payload
             _cache_ts = time.time()
         diagnostics["exitReason"] = "ok"
-        result_payload = payload
+        result_payload = published_payload
     else:
         diagnostics["exitReason"] = "persistence_verification_failed"
         result_payload = last_good_payload

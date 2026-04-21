@@ -467,7 +467,47 @@ def _load_snapshot_cards(*, diagnostics: dict | None = None, stage: str = "loade
     return parsed
 
 
+def _should_keep_current_snapshot(
+    current_snapshot: dict,
+    next_cards: list[dict],
+    metadata: dict | None = None,
+) -> tuple[bool, str]:
+    current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
+    current_cards = current_cards if isinstance(current_cards, list) else []
+    current_count = len(current_cards)
+    next_count = len(next_cards)
+    if current_count > 0 and next_count == 0:
+        return True, "zero_cards_over_non_empty"
+
+    current_meta = current_snapshot.get("meta") if isinstance(current_snapshot, dict) else {}
+    current_meta = current_meta if isinstance(current_meta, dict) else {}
+    next_meta = metadata if isinstance(metadata, dict) else {}
+    current_clusters = _as_int(current_meta.get("activeClusters"), -1)
+    next_clusters = _as_int(next_meta.get("activeClusters"), -1)
+    if (
+        current_count > next_count
+        and current_clusters >= 0
+        and next_clusters >= 0
+        and current_clusters == next_clusters
+    ):
+        return True, "fewer_cards_same_active_clusters"
+    return False, ""
+
+
 def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
+    current_snapshot = _read_latest_runtime_json(_SNAPSHOT_FOLDER, default={"cards": []})
+    keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, cards, metadata)
+    if keep_current:
+        current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
+        current_cards = current_cards if isinstance(current_cards, list) else []
+        if isinstance(diagnostics, dict):
+            snapshot = diagnostics.setdefault("snapshot", {})
+            snapshot["publishSkipped"] = True
+            snapshot["publishSkipReason"] = keep_reason
+            snapshot["writeSucceeded"] = True
+            snapshot["readbackCards"] = len(current_cards)
+        return True
+
     payload = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -1368,17 +1408,20 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
     state["clusters"] = next_cluster_state
     state_saved = _save_state(state)
     snapshot_saved = False
+    published_cards = last_good_cards
     if state_saved:
         snapshot_saved = _save_snapshot_cards(
-        final_cards,
-        metadata={
-            "activeClusters": len(clusters),
-            "changedClusters": len(changed_clusters),
-            "reusedClusters": len(clusters) - len(changed_clusters),
-            "cards": len(final_cards),
-        },
-        diagnostics=diagnostics,
-    )
+            final_cards,
+            metadata={
+                "activeClusters": len(clusters),
+                "changedClusters": len(changed_clusters),
+                "reusedClusters": len(clusters) - len(changed_clusters),
+                "cards": len(final_cards),
+            },
+            diagnostics=diagnostics,
+        )
+        if snapshot_saved:
+            published_cards = _load_snapshot_cards(diagnostics=diagnostics, stage="publishedCards")
     if not state_saved:
         diagnostics["error"] = "Question cards state could not be persisted and verified"
     elif not snapshot_saved:
@@ -1386,10 +1429,10 @@ def refresh_question_briefs(*, force: bool = False) -> list[dict]:
 
     if state_saved and snapshot_saved:
         with _cache_lock:
-            _cached_cards = final_cards
+            _cached_cards = published_cards
             _cache_ts = time.time()
-        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
-        result_cards = final_cards
+        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if published_cards else "zero_cards_after_materialization")
+        result_cards = published_cards
     else:
         diagnostics["exitReason"] = "persistence_verification_failed"
         result_cards = last_good_cards
