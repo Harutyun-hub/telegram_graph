@@ -189,239 +189,202 @@ def _percentile(values: list[float], q: float) -> float:
 
 def get_emerging_interests(ctx: DashboardDateContext) -> list[dict]:
     """Brand-new topics gathering real discussion in the latest 14-day horizon."""
-    return run_query("""
-        MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
-        WHERE coalesce(t.proposed, false) = false
-          AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL {
-            WITH t
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
+    return _cached_rows(
+        "emerging_interests",
+        ctx,
+        lambda: run_query(
+            """
+            CALL () {
+                MATCH (p:Post)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
                 WHERE p.posted_at >= datetime($lookback_start)
                   AND p.posted_at < datetime($end)
+                  AND coalesce(t.proposed, false) = false
+                  AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
                 OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN p.posted_at AS ts,
+                OPTIONAL MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN t,
+                       p.posted_at AS ts,
                        coalesce(ch.title, ch.username, '') AS channel,
-                       'post' AS kind
+                       'post' AS kind,
+                       toLower(coalesce(s.label, '')) AS label
                 UNION ALL
-                MATCH (c:Comment)-[:TAGGED]->(t)
+                MATCH (c:Comment)-[:TAGGED]->(t:Topic)-[:BELONGS_TO_CATEGORY]->(:TopicCategory)
                 WHERE c.posted_at >= datetime($lookback_start)
                   AND c.posted_at < datetime($end)
+                  AND coalesce(t.proposed, false) = false
+                  AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
                 OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN c.posted_at AS ts,
+                OPTIONAL MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+                RETURN t,
+                       c.posted_at AS ts,
                        coalesce(ch.title, ch.username, '') AS channel,
-                       'comment' AS kind
+                       'comment' AS kind,
+                       toLower(coalesce(s.label, '')) AS label
             }
-            RETURN count(*) AS mentions14d,
-                   min(ts) AS firstSeenWindow,
-                   count(CASE
-                       WHEN ts >= datetime($current_start)
-                        AND ts < datetime($end)
-                       THEN 1
-                   END) AS currentMentions,
-                   count(CASE
-                       WHEN ts >= datetime($current_start)
-                        AND ts < datetime($end)
-                        AND kind = 'post'
-                       THEN 1
-                   END) AS currentPosts,
-                   count(CASE
-                       WHEN ts >= datetime($current_start)
-                        AND ts < datetime($end)
-                        AND kind = 'comment'
-                       THEN 1
-                   END) AS currentComments,
-                   count(CASE
-                       WHEN ts >= datetime($previous_start)
-                        AND ts < datetime($previous_end)
-                       THEN 1
-                   END) AS previousMentions,
-                   count(DISTINCT CASE
-                       WHEN ts >= datetime($current_start)
-                        AND ts < datetime($end)
-                       THEN date(ts)
-                   END) AS currentActiveDays,
-                   count(DISTINCT CASE
-                       WHEN ts >= datetime($current_start)
-                        AND ts < datetime($end)
-                        AND channel <> ''
-                       THEN channel
-                   END) AS currentChannels
-        }
-        WITH t, mentions14d, firstSeenWindow, currentMentions, currentPosts, currentComments,
-             previousMentions, currentActiveDays, currentChannels
-        WHERE mentions14d > 0
-          AND currentMentions >= 3
-          AND currentMentions > previousMentions
-          AND (currentActiveDays >= 2 OR currentComments >= 2 OR currentChannels >= 2)
-        CALL {
-            WITH t
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
-                WHERE p.posted_at IS NOT NULL
-                RETURN p.posted_at AS ts
-                UNION ALL
-                MATCH (c:Comment)-[:TAGGED]->(t)
-                WHERE c.posted_at IS NOT NULL
-                RETURN c.posted_at AS ts
-            }
-            RETURN min(ts) AS firstSeenEver
-        }
-        WITH t,
-             coalesce(firstSeenEver, t.created_at, firstSeenWindow) AS firstSeen,
-             currentMentions,
-             currentPosts,
-             currentComments,
-             previousMentions,
-             currentActiveDays,
-             currentChannels
-        WHERE firstSeen IS NOT NULL
-          AND firstSeen >= datetime($lookback_start)
-        CALL {
-            WITH t
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
-                WHERE p.posted_at >= datetime($lookback_start)
-                  AND p.posted_at < datetime($end)
-                OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN p.posted_at AS ts,
-                       coalesce(ch.title, ch.username, '') AS channel
-                UNION ALL
-                MATCH (c:Comment)-[:TAGGED]->(t)
-                WHERE c.posted_at >= datetime($lookback_start)
-                  AND c.posted_at < datetime($end)
-                OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-                RETURN c.posted_at AS ts,
-                       coalesce(ch.title, ch.username, '') AS channel
-            }
-            WITH ts, channel
-            WHERE channel <> ''
-            ORDER BY ts ASC, channel ASC
-            RETURN head(collect(channel)) AS originChannel
-        }
-        CALL {
-            WITH t
-            CALL {
-                WITH t
-                MATCH (p:Post)-[:TAGGED]->(t)
-                MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-                WHERE p.posted_at >= datetime($current_start)
-                  AND p.posted_at < datetime($end)
-                RETURN toLower(coalesce(s.label, '')) AS label, count(*) AS n
-                UNION ALL
-                MATCH (c:Comment)-[:TAGGED]->(t)
-                MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-                WHERE c.posted_at >= datetime($current_start)
-                  AND c.posted_at < datetime($end)
-                RETURN toLower(coalesce(s.label, '')) AS label, count(*) AS n
-            }
-            WITH label, sum(n) AS n
-            WHERE label <> ''
-            ORDER BY n DESC, label ASC
-            RETURN head(collect(label)) AS dominantSentiment
-        }
-        WITH t.name AS topic,
-             firstSeen,
-             currentMentions,
-             currentPosts,
-             currentComments,
-             previousMentions,
-             currentActiveDays,
-             currentChannels,
-             coalesce(originChannel, 'Community channel') AS originChannel,
-             coalesce(dominantSentiment, 'neutral') AS dominantSentiment,
-             duration.between(firstSeen, datetime($end)).days AS ageDays,
-             (currentMentions + previousMentions) AS growthSupport
-        WITH topic,
-             firstSeen,
-             currentMentions,
-             currentPosts,
-             currentComments,
-             previousMentions,
-             currentActiveDays,
-             currentChannels,
-             originChannel,
-             dominantSentiment,
-             ageDays,
-             growthSupport,
-             CASE
-                 WHEN growthSupport < 4 THEN null
-                 ELSE round(100.0 * (currentMentions - previousMentions) / (previousMentions + 2), 1)
-             END AS momentum,
-             CASE
-                 WHEN 100.0 * toFloat(currentMentions) / 15.0 > 100.0 THEN 100.0
-                 ELSE 100.0 * toFloat(currentMentions) / 15.0
-             END AS volumeScore,
-             CASE
-                 WHEN 100.0 * toFloat(currentChannels) / 4.0 > 100.0 THEN 100.0
-                 ELSE 100.0 * toFloat(currentChannels) / 4.0
-             END AS breadthScore,
-             CASE
-                 WHEN currentMentions <= 0 THEN 0.0
-                 WHEN 100.0 * (
-                     (toFloat(currentComments) / toFloat(currentMentions)) * 0.6 +
-                     (toFloat(currentActiveDays) / 7.0) * 0.4
-                 ) > 100.0 THEN 100.0
-                 ELSE 100.0 * (
-                     (toFloat(currentComments) / toFloat(currentMentions)) * 0.6 +
-                     (toFloat(currentActiveDays) / 7.0) * 0.4
-                 )
-             END AS conversationScore,
-             CASE
-                 WHEN ageDays <= 0 THEN 100.0
-                 WHEN ageDays >= 14 THEN 0.0
-                 ELSE 100.0 * toFloat(14 - ageDays) / 14.0
-             END AS freshnessScore
-        WITH topic,
-             firstSeen,
-             currentMentions,
-             currentPosts,
-             currentComments,
-             previousMentions,
-             currentActiveDays,
-             currentChannels,
-             originChannel,
-             dominantSentiment,
-             ageDays,
-             growthSupport,
-             momentum,
-             round(
-                 0.35 * CASE WHEN coalesce(momentum, 0.0) < 0.0 THEN 0.0 ELSE coalesce(momentum, 0.0) END +
-                 0.25 * volumeScore +
-                 0.15 * breadthScore +
-                 0.15 * conversationScore +
-                 0.10 * freshnessScore,
-                 1
-             ) AS emergenceScore
-        RETURN topic,
-               toString(firstSeen) AS firstSeen,
-               currentMentions AS recentPosts,
-               currentMentions AS totalPosts,
-               currentMentions AS currentPosts,
-               previousMentions AS previousPosts,
-               growthSupport,
-               currentComments,
-               currentActiveDays,
-               currentChannels,
-               ageDays,
-               originChannel,
-               dominantSentiment AS mood,
-               momentum,
-               emergenceScore,
-               CASE
-                   WHEN emergenceScore >= 75 THEN 'high'
-                   WHEN emergenceScore >= 55 THEN 'medium'
-                   ELSE 'low'
-               END AS opportunity
-        ORDER BY emergenceScore DESC, coalesce(momentum, 0) DESC, currentMentions DESC, topic ASC
-        LIMIT 15
-    """, {
-        **_predictive_window_params(ctx),
-        "noise": NOISY_TOPIC_VALUES,
-    })
+            WITH t, ts, channel, kind, label
+            ORDER BY t.name ASC, ts ASC, channel ASC
+            WITH t,
+                 min(ts) AS firstSeenWindow,
+                 count(*) AS mentions14d,
+                 count(CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                     THEN 1
+                 END) AS currentMentions,
+                 count(CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                      AND kind = 'post'
+                     THEN 1
+                 END) AS currentPostsOnly,
+                 count(CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                      AND kind = 'comment'
+                     THEN 1
+                 END) AS currentComments,
+                 count(CASE
+                     WHEN ts >= datetime($previous_start)
+                      AND ts < datetime($previous_end)
+                     THEN 1
+                 END) AS previousMentions,
+                 count(DISTINCT CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                     THEN date(ts)
+                 END) AS currentActiveDays,
+                 count(DISTINCT CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                      AND channel <> ''
+                     THEN channel
+                 END) AS currentChannels,
+                 head([item IN collect(CASE WHEN channel <> '' THEN channel END) WHERE item IS NOT NULL]) AS originChannel,
+                 last([item IN collect(CASE
+                     WHEN ts >= datetime($current_start)
+                      AND ts < datetime($end)
+                      AND label <> ''
+                     THEN label
+                 END) WHERE item IS NOT NULL]) AS latestLabel
+            WITH t,
+                 coalesce(t.created_at, firstSeenWindow) AS firstSeen,
+                 mentions14d,
+                 currentMentions,
+                 currentPostsOnly,
+                 currentComments,
+                 previousMentions,
+                 currentActiveDays,
+                 currentChannels,
+                 coalesce(originChannel, 'Community channel') AS originChannel,
+                 coalesce(latestLabel, 'neutral') AS dominantSentiment
+            WHERE mentions14d > 0
+              AND currentMentions >= 3
+              AND currentMentions > previousMentions
+              AND (currentActiveDays >= 2 OR currentComments >= 2 OR currentChannels >= 2)
+              AND firstSeen IS NOT NULL
+              AND firstSeen >= datetime($lookback_start)
+            WITH t.name AS topic,
+                 firstSeen,
+                 currentMentions,
+                 currentPostsOnly,
+                 currentComments,
+                 previousMentions,
+                 currentActiveDays,
+                 currentChannels,
+                 originChannel,
+                 dominantSentiment,
+                 duration.between(firstSeen, datetime($end)).days AS ageDays,
+                 (currentMentions + previousMentions) AS growthSupport
+            WITH topic,
+                 firstSeen,
+                 currentMentions,
+                 currentPostsOnly,
+                 currentComments,
+                 previousMentions,
+                 currentActiveDays,
+                 currentChannels,
+                 originChannel,
+                 dominantSentiment,
+                 ageDays,
+                 growthSupport,
+                 CASE
+                     WHEN growthSupport < 4 THEN null
+                     ELSE round(100.0 * (currentMentions - previousMentions) / (previousMentions + 2), 1)
+                 END AS momentum,
+                 CASE
+                     WHEN 100.0 * toFloat(currentMentions) / 15.0 > 100.0 THEN 100.0
+                     ELSE 100.0 * toFloat(currentMentions) / 15.0
+                 END AS volumeScore,
+                 CASE
+                     WHEN 100.0 * toFloat(currentChannels) / 4.0 > 100.0 THEN 100.0
+                     ELSE 100.0 * toFloat(currentChannels) / 4.0
+                 END AS breadthScore,
+                 CASE
+                     WHEN currentMentions <= 0 THEN 0.0
+                     WHEN 100.0 * (
+                         (toFloat(currentComments) / toFloat(currentMentions)) * 0.6 +
+                         (toFloat(currentActiveDays) / 7.0) * 0.4
+                     ) > 100.0 THEN 100.0
+                     ELSE 100.0 * (
+                         (toFloat(currentComments) / toFloat(currentMentions)) * 0.6 +
+                         (toFloat(currentActiveDays) / 7.0) * 0.4
+                     )
+                 END AS conversationScore,
+                 CASE
+                     WHEN ageDays <= 0 THEN 100.0
+                     WHEN ageDays >= 14 THEN 0.0
+                     ELSE 100.0 * toFloat(14 - ageDays) / 14.0
+                 END AS freshnessScore
+            WITH topic,
+                 firstSeen,
+                 currentMentions,
+                 currentPostsOnly,
+                 currentComments,
+                 previousMentions,
+                 currentActiveDays,
+                 currentChannels,
+                 originChannel,
+                 dominantSentiment,
+                 ageDays,
+                 growthSupport,
+                 momentum,
+                 round(
+                     0.35 * CASE WHEN coalesce(momentum, 0.0) < 0.0 THEN 0.0 ELSE coalesce(momentum, 0.0) END +
+                     0.25 * volumeScore +
+                     0.15 * breadthScore +
+                     0.15 * conversationScore +
+                     0.10 * freshnessScore,
+                     1
+                 ) AS emergenceScore
+            RETURN topic,
+                   toString(firstSeen) AS firstSeen,
+                   currentMentions AS recentPosts,
+                   currentMentions AS totalPosts,
+                   currentMentions AS currentPosts,
+                   previousMentions AS previousPosts,
+                   growthSupport,
+                   currentComments,
+                   currentActiveDays,
+                   currentChannels,
+                   ageDays,
+                   originChannel,
+                   dominantSentiment AS mood,
+                   momentum,
+                   emergenceScore,
+                   CASE
+                       WHEN emergenceScore >= 75 THEN 'high'
+                       WHEN emergenceScore >= 55 THEN 'medium'
+                       ELSE 'low'
+                   END AS opportunity
+            ORDER BY emergenceScore DESC, coalesce(momentum, 0) DESC, currentMentions DESC, topic ASC
+            LIMIT 15
+            """,
+            {
+                **_predictive_window_params(ctx),
+                "noise": NOISY_TOPIC_VALUES,
+            },
+        ),
+    )
 
 
 def get_retention_factors(ctx: DashboardDateContext) -> list[dict]:

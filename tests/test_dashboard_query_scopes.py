@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import unittest
 from unittest.mock import patch
 
@@ -76,6 +77,24 @@ class PredictiveQueryShapeTests(unittest.TestCase):
             self.assertIn("count(DISTINCT c)", query)
             self.assertIn("datetime($start)", query)
             self.assertIn("datetime($end)", query)
+
+    def test_emerging_interests_use_window_scoped_message_aggregate(self) -> None:
+        with patch.object(predictive, "run_query", return_value=[]) as run_query_mock:
+            rows = predictive.get_emerging_interests(self.ctx)
+
+        self.assertEqual(rows, [])
+        run_query_mock.assert_called_once()
+        query = run_query_mock.call_args.args[0]
+        params = run_query_mock.call_args.args[1]
+        self.assertIn("MATCH (p:Post)-[:TAGGED]->(t:Topic)", query)
+        self.assertIn("MATCH (c:Comment)-[:TAGGED]->(t:Topic)", query)
+        self.assertIn("datetime($lookback_start)", query)
+        self.assertIn("datetime($current_start)", query)
+        self.assertIn("datetime($previous_start)", query)
+        self.assertIn("datetime($previous_end)", query)
+        self.assertEqual(params["start"], self.ctx.start_at.isoformat())
+        self.assertEqual(params["end"], self.ctx.end_at.isoformat())
+        self.assertEqual(params["lookback_start"], max(self.ctx.start_at, self.ctx.end_at - timedelta(days=14)).isoformat())
 
     def test_predictive_query_cache_reuses_window_result(self) -> None:
         with patch.object(predictive, "run_query", return_value=[{"topic": "Work"}]) as run_query_mock:
