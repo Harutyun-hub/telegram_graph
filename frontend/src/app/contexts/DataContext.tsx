@@ -82,8 +82,21 @@ const DataContext = createContext<DataContextValue>({
   refresh: () => {},
 });
 
-function snapshotKeyForRange(from: string, to: string): string {
-  return `radar.dashboard.snapshot.v5:${from}:${to}`;
+export function snapshotKeyForRange(from: string, to: string): string {
+  return `radar.dashboard.snapshot.v6:${from}:${to}`;
+}
+
+export function isSnapshotMetaForRequestedRange(
+  meta: DashboardMeta | null | undefined,
+  from: string,
+  to: string,
+): boolean {
+  const requestedFrom = String(meta?.requestedFrom ?? '').trim();
+  const requestedTo = String(meta?.requestedTo ?? '').trim();
+  if (!requestedFrom || !requestedTo) {
+    return true;
+  }
+  return requestedFrom === from && requestedTo === to;
 }
 
 function loadSnapshot(from: string, to: string): { data: AppData; meta: DashboardMeta | null } | null {
@@ -101,6 +114,7 @@ function loadSnapshot(from: string, to: string): { data: AppData; meta: Dashboar
       && jobItems.length > 0
       && !jobItems.some((item: any) => Array.isArray(item?.evidence) && item.evidence.length > 0);
     if (hasJobDataWithoutEvidence) return null;
+    if (!isSnapshotMetaForRequestedRange(snapshot.meta, from, to)) return null;
     return isPlaceholderDashboardSnapshot(snapshot.data, snapshot.meta) ? null : snapshot;
   } catch {
     return null;

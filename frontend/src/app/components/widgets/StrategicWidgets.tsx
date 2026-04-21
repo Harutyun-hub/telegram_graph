@@ -72,8 +72,6 @@ export function TopicLandscape() {
   const totalMentions = topicBubbles.reduce((sum, t) => sum + (t.value || 0), 0);
   const lowEvidenceGrowth = topicBubbles.filter((t) => !t.growthReliable).length;
 
-  if (!topicBubbles.length) return <EmptyWidget widgetId="topic_landscape" title={ru ? 'Карта тем' : 'Topic Landscape'} />;
-
   const categoryLegend = useMemo(() => {
     const map = new Map<string, { color: string; topics: number; mentions: number }>();
     topicBubbles.forEach((item) => {
@@ -98,6 +96,8 @@ export function TopicLandscape() {
     if (activeCategory === '__all__') return topicBubbles;
     return topicBubbles.filter((item) => item.category === activeCategory);
   }, [topicBubbles, activeCategory]);
+
+  if (!topicBubbles.length) return <EmptyWidget widgetId="topic_landscape" title={ru ? 'Карта тем' : 'Topic Landscape'} />;
 
   const maxValue = Math.max(...visibleTopics.map((t) => t.value || 0), 1);
   const minValue = Math.min(...visibleTopics.map((t) => t.value || 0), maxValue);
