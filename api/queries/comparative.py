@@ -1163,7 +1163,7 @@ def get_topic_overview_candidates(
         MATCH (t:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL {
+        CALL (t) {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1217,7 +1217,7 @@ def get_topic_overview_candidates(
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL {
+        CALL (t) {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1401,7 +1401,7 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
               AND c.posted_at < datetime($previous_end)
             RETURN count(c) AS commentsPrev
         }
-        CALL {
+        CALL (t) {
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
