@@ -1424,9 +1424,78 @@ def _dashboard_context_from_trusted_end(trusted_end: date):
     return build_dashboard_date_context(from_date, trusted_end.isoformat())
 
 
+def _persisted_dashboard_payload(
+    *,
+    ctx,
+    snapshot: dict,
+    meta: dict[str, Any],
+    trusted_end_date: str,
+) -> dict[str, Any]:
+    snapshot_built_at = (
+        _parse_snapshot_date(meta.get("snapshotBuiltAt"))
+        or datetime.now(timezone.utc)
+    )
+    normalized_meta = dict(meta or {})
+    normalized_meta["snapshotBuiltAt"] = snapshot_built_at.isoformat()
+    return {
+        "cacheKey": ctx.cache_key,
+        "from": ctx.from_date.isoformat(),
+        "to": ctx.to_date.isoformat(),
+        "trustedEndDate": str(trusted_end_date or ctx.to_date.isoformat()),
+        "snapshotBuiltAt": snapshot_built_at.isoformat(),
+        "snapshot": dict(snapshot or {}),
+        "meta": normalized_meta,
+    }
+
+
 def _load_persisted_dashboard_snapshot(path: str) -> dict[str, Any]:
-    del path
-    return {"status": "miss", "readMs": 0.0}
+    key = str(path or "").strip()
+    if not key:
+        return {"status": "miss", "readMs": 0.0}
+
+    try:
+        result = get_supabase_writer().read_runtime_json(
+            key,
+            prefer_signed_read=False,
+            timeout_seconds=1.5,
+        )
+        status = str(result.get("status") or "missing")
+        read_ms = float(result.get("elapsed_ms") or 0.0)
+        if status != "ok":
+            if status in {"missing", "timeout", "invalid_path"}:
+                return {"status": "miss", "readMs": read_ms}
+            return {"status": status, "readMs": read_ms}
+
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            return {"status": "invalid_payload", "readMs": read_ms}
+
+        from_value = str(payload.get("from") or "").strip()
+        to_value = str(payload.get("to") or "").strip()
+        snapshot = payload.get("snapshot")
+        meta = payload.get("meta")
+        if not from_value or not to_value or not isinstance(snapshot, dict) or not isinstance(meta, dict):
+            return {"status": "invalid_payload", "readMs": read_ms}
+
+        try:
+            ctx = build_dashboard_date_context(from_value, to_value)
+        except Exception:
+            return {"status": "invalid_payload", "readMs": read_ms}
+
+        snapshot_built_at = _parse_snapshot_date(payload.get("snapshotBuiltAt") or meta.get("snapshotBuiltAt"))
+        trusted_end_date = str(payload.get("trustedEndDate") or ctx.to_date.isoformat())
+        return {
+            "status": "hit",
+            "readMs": read_ms,
+            "snapshot": snapshot,
+            "meta": meta,
+            "ctx": ctx,
+            "snapshotBuiltAt": snapshot_built_at or datetime.now(timezone.utc),
+            "trustedEndDate": trusted_end_date,
+        }
+    except Exception as exc:
+        logger.warning("Persisted dashboard snapshot read failed | path={} error={}", key, exc)
+        return {"status": "miss", "readMs": 0.0}
 
 
 def _load_recent_default_dashboard_snapshot(trusted_end: date) -> dict[str, Any]:
@@ -1583,7 +1652,36 @@ def _persist_dashboard_snapshot_async(
     trusted_end_date: str,
     write_default_alias: bool,
 ) -> None:
-    del ctx, snapshot, meta, trusted_end_date, write_default_alias
+    def _runner() -> None:
+        try:
+            payload = _persisted_dashboard_payload(
+                ctx=ctx,
+                snapshot=snapshot,
+                meta=meta,
+                trusted_end_date=trusted_end_date,
+            )
+            writer = get_supabase_writer()
+            primary_path = _dashboard_snapshot_storage_path(ctx.cache_key)
+            primary_ok = writer.save_runtime_json_fast(primary_path, payload)
+            alias_ok = True
+            if write_default_alias:
+                alias_ok = writer.save_runtime_json_fast(_DASHBOARD_DEFAULT_ALIAS_PATH, payload)
+            if not primary_ok or not alias_ok:
+                logger.warning(
+                    "Persisted dashboard snapshot write incomplete | key={} primary_ok={} alias_ok={}",
+                    ctx.cache_key,
+                    primary_ok,
+                    alias_ok,
+                )
+        except Exception as exc:
+            logger.warning("Persisted dashboard snapshot write failed | key={} error={}", ctx.cache_key, exc)
+
+    thread = threading.Thread(
+        target=_runner,
+        daemon=True,
+        name=f"persist-dashboard-{ctx.cache_key}",
+    )
+    thread.start()
     return None
 
 
@@ -1593,8 +1691,30 @@ def _ensure_background_dashboard_refresh(
     trusted_end_date: str,
     write_default_alias: bool,
 ) -> bool:
-    del trusted_end_date, write_default_alias
-    return bool(refresh_dashboard_snapshot_async(ctx))
+    def _runner() -> None:
+        try:
+            snapshot, meta = get_dashboard_snapshot(ctx, force_refresh=True)
+            if _should_persist_dashboard_snapshot(meta):
+                payload = _persisted_dashboard_payload(
+                    ctx=ctx,
+                    snapshot=snapshot,
+                    meta=meta,
+                    trusted_end_date=trusted_end_date,
+                )
+                writer = get_supabase_writer()
+                writer.save_runtime_json_fast(_dashboard_snapshot_storage_path(ctx.cache_key), payload)
+                if write_default_alias:
+                    writer.save_runtime_json_fast(_DASHBOARD_DEFAULT_ALIAS_PATH, payload)
+        except Exception as exc:
+            logger.warning("Background dashboard refresh failed | key={} error={}", ctx.cache_key, exc)
+
+    thread = threading.Thread(
+        target=_runner,
+        daemon=True,
+        name=f"dashboard-refresh-persist-{ctx.cache_key}",
+    )
+    thread.start()
+    return True
 
 
 def _newer_snapshot_choice(
