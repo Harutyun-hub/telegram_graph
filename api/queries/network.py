@@ -164,53 +164,57 @@ def _dominant_widget_type(rows: list[dict]) -> tuple[str, str]:
 
 def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
     """Active channels ranked by median recent post engagement with sample controls."""
-    post_rows = run_query("""
+    rows = run_query("""
         MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)
-        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
+        WHERE p.posted_at >= datetime($start)
+          AND p.posted_at < datetime($end)
           AND coalesce(ch.source_type, 'channel') = 'channel'
           AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
+        WITH ch,
+             collect({
+                 postedAt: toString(p.posted_at),
+                 views: coalesce(p.views, 0),
+                 forwards: coalesce(p.forwards, 0),
+                 comments: coalesce(p.comment_count, 0),
+                 reactions: coalesce(p.reactions, '')
+             }) AS posts
+        CALL {
+            WITH ch
+            MATCH (ch)<-[:IN_CHANNEL]-(cp:Post)-[:TAGGED]->(t:Topic)
+            WHERE cp.posted_at >= datetime($start)
+              AND cp.posted_at < datetime($end)
+              AND coalesce(cp.entry_kind, 'broadcast_post') = 'broadcast_post'
+            OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
+            WITH coalesce(cat.name, 'General') AS category, count(DISTINCT cp) AS mentions
+            RETURN collect({category: category, mentions: mentions}) AS categories
+        }
+        CALL {
+            WITH ch
+            MATCH (ch)<-[:IN_CHANNEL]-(bp:Post)<-[:REPLIES_TO]-(c:Comment)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+              AND coalesce(bp.entry_kind, 'broadcast_post') = 'broadcast_post'
+            RETURN count(c) AS comments7d
+        }
         RETURN ch.uuid AS channelId,
                ch.username AS username,
                ch.title AS name,
                ch.member_count AS members,
                ch.description AS description,
-               p.uuid AS postId,
-               toString(p.posted_at) AS postedAt,
-               coalesce(p.views, 0) AS views,
-               coalesce(p.forwards, 0) AS forwards,
-               coalesce(p.comment_count, 0) AS comments,
-               coalesce(p.reactions, '') AS reactions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
-
-    category_rows = run_query("""
-        MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)-[:TAGGED]->(t:Topic)
-        WHERE p.posted_at >= datetime($start) AND p.posted_at < datetime($end)
-          AND coalesce(ch.source_type, 'channel') = 'channel'
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        OPTIONAL MATCH (t)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
-        WITH ch, coalesce(cat.name, 'General') AS category, count(DISTINCT p) AS mentions
-        RETURN ch.uuid AS channelId, category, mentions
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
-
-    comment_rows = run_query("""
-        MATCH (ch:Channel)<-[:IN_CHANNEL]-(p:Post)<-[:REPLIES_TO]-(c:Comment)
-        WHERE c.posted_at >= datetime($start) AND c.posted_at < datetime($end)
-          AND coalesce(ch.source_type, 'channel') = 'channel'
-          AND coalesce(p.entry_kind, 'broadcast_post') = 'broadcast_post'
-        RETURN ch.uuid AS channelId, count(c) AS comments7d
-    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
+               posts,
+               categories,
+               comments7d
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.community_channels")
 
     activity_cutoff = ctx.start_at.timestamp()
     channels: dict[str, dict] = {}
-    channel_to_source_key: dict[str, str] = {}
     all_post_rates: list[float] = []
 
-    for row in post_rows:
+    for row in rows:
         channel_id = str(row.get('channelId') or '').strip()
         if not channel_id:
             continue
         source_key = _normalize_source_key(row.get('username'), row.get('name'), channel_id)
-        channel_to_source_key[channel_id] = source_key
 
         entry = channels.setdefault(source_key, {
             'username': row.get('username'),
@@ -225,55 +229,41 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
             'totalForwards30d': 0.0,
             'totalComments30d': 0.0,
             'totalReactions30d': 0.0,
+            'comments7d': int(row.get('comments7d') or 0),
+            'categoryRows': list(row.get('categories') or []),
         })
 
-        views = max(0.0, float(row.get('views') or 0))
-        forwards = max(0.0, float(row.get('forwards') or 0))
-        comments = max(0.0, float(row.get('comments') or 0))
-        reactions = float(_reaction_total(row.get('reactions')))
-        posted_at = _parse_iso_datetime(row.get('postedAt'))
+        for post in list(row.get('posts') or []):
+            views = max(0.0, float(post.get('views') or 0))
+            forwards = max(0.0, float(post.get('forwards') or 0))
+            comments = max(0.0, float(post.get('comments') or 0))
+            reactions = float(_reaction_total(post.get('reactions')))
+            posted_at = _parse_iso_datetime(post.get('postedAt'))
 
-        entry['postCount'] += 1
-        entry['totalViews30d'] += views
-        entry['totalForwards30d'] += forwards
-        entry['totalComments30d'] += comments
-        entry['totalReactions30d'] += reactions
+            entry['postCount'] += 1
+            entry['totalViews30d'] += views
+            entry['totalForwards30d'] += forwards
+            entry['totalComments30d'] += comments
+            entry['totalReactions30d'] += reactions
 
-        if posted_at:
-            if entry['lastPost'] is None or posted_at > entry['lastPost']:
-                entry['lastPost'] = posted_at
-                entry['username'] = row.get('username') or entry.get('username')
-                entry['name'] = row.get('name') or entry.get('name')
-                entry['members'] = row.get('members') or entry.get('members')
-                entry['description'] = row.get('description') or entry.get('description')
-            if posted_at.timestamp() >= activity_cutoff:
-                entry['posts7d'] += 1
-        elif not entry.get('name') and row.get('name'):
-            entry['name'] = row.get('name')
+            if posted_at:
+                if entry['lastPost'] is None or posted_at > entry['lastPost']:
+                    entry['lastPost'] = posted_at
+                    entry['username'] = row.get('username') or entry.get('username')
+                    entry['name'] = row.get('name') or entry.get('name')
+                    entry['members'] = row.get('members') or entry.get('members')
+                    entry['description'] = row.get('description') or entry.get('description')
+                if posted_at.timestamp() >= activity_cutoff:
+                    entry['posts7d'] += 1
+            elif not entry.get('name') and row.get('name'):
+                entry['name'] = row.get('name')
 
-        if views > 0:
-            rate = min((reactions + forwards + comments) / views, 1.0)
-            entry['postRates'].append(rate)
-            all_post_rates.append(rate)
+            if views > 0:
+                rate = min((reactions + forwards + comments) / views, 1.0)
+                entry['postRates'].append(rate)
+                all_post_rates.append(rate)
 
     global_median_rate = _median(all_post_rates)
-    comments7d_by_channel: dict[str, int] = defaultdict(int)
-    for row in comment_rows:
-        channel_id = str(row.get('channelId') or '').strip()
-        source_key = channel_to_source_key.get(channel_id)
-        if not source_key:
-            continue
-        comments7d_by_channel[source_key] += int(row.get('comments7d') or 0)
-
-    categories_by_channel: dict[str, list[dict]] = defaultdict(list)
-    for row in category_rows:
-        channel_id = str(row.get('channelId') or '').strip()
-        if channel_id not in channel_to_source_key:
-            continue
-        categories_by_channel[channel_to_source_key[channel_id]].append({
-            'category': row.get('category'),
-            'mentions': int(row.get('mentions') or 0),
-        })
 
     processed_results: list[dict] = []
     for source_key, channel in channels.items():
@@ -289,10 +279,10 @@ def get_community_channels(ctx: DashboardDateContext) -> list[dict]:
             (channel_median * valid_rate_count) + (global_median_rate * SHRINKAGE_PRIOR_POSTS)
         ) / (valid_rate_count + SHRINKAGE_PRIOR_POSTS)
 
-        widget_type, dominant_category = _dominant_widget_type(categories_by_channel.get(source_key, []))
+        widget_type, dominant_category = _dominant_widget_type(list(channel.get('categoryRows') or []))
         if widget_type == 'General':
             widget_type = _metadata_widget_type(channel.get('name'), channel.get('description'))
-        comments7d = comments7d_by_channel.get(source_key, 0)
+        comments7d = int(channel.get('comments7d') or 0)
         recent_messages = int(channel['posts7d']) + comments7d
 
         avg_views = round(total_views / post_count) if post_count > 0 else 0
@@ -440,50 +430,76 @@ def get_key_voices(ctx: DashboardDateContext) -> list[dict]:
         return neo4j_results
 
 
-def get_hourly_activity() -> list[dict]:
+def get_hourly_activity(ctx: DashboardDateContext) -> list[dict]:
     """Comment distribution by hour of day."""
     return run_query("""
         MATCH (c:Comment)
-        WHERE c.posting_hour IS NOT NULL
+        WHERE c.posted_at >= datetime($start)
+          AND c.posted_at < datetime($end)
+          AND c.posting_hour IS NOT NULL
         WITH c.posting_hour AS hour, count(c) AS count
         RETURN hour, count
         ORDER BY hour
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.hourly_activity")
 
 
-def get_weekly_activity() -> list[dict]:
+def get_weekly_activity(ctx: DashboardDateContext) -> list[dict]:
     """Post count by day of week."""
     return run_query("""
         MATCH (p:Post)
+        WHERE p.posted_at >= datetime($start)
+          AND p.posted_at < datetime($end)
         WITH date(p.posted_at).dayOfWeek AS dow, count(p) AS count
         RETURN dow, count
         ORDER BY dow
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.weekly_activity")
 
 
-def get_recommendations() -> list[dict]:
+def get_recommendations(ctx: DashboardDateContext) -> list[dict]:
     """Users with Support/Help intent — recommenders."""
     return run_query("""
         MATCH (u:User)-[e:EXHIBITS]->(i:Intent {name: 'Support / Help'})
-        MATCH (u)-[:INTERESTED_IN]->(t:Topic)
-        WITH u.telegram_user_id AS userId, e.count AS helpCount,
+        WHERE coalesce(e.last_seen, e.first_seen) >= datetime($start)
+          AND coalesce(e.last_seen, e.first_seen) < datetime($end)
+        OPTIONAL MATCH (u)-[interest:INTERESTED_IN]->(t:Topic)
+        WHERE interest.last_seen >= datetime($start)
+          AND interest.last_seen < datetime($end)
+        WITH u.telegram_user_id AS userId, sum(coalesce(e.count, 1)) AS helpCount,
              collect(t.name)[..3] AS topics
         RETURN userId, helpCount, topics
         ORDER BY helpCount DESC
         LIMIT 15
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.recommendations")
 
 
-def get_viral_topics() -> list[dict]:
+def get_viral_topics(ctx: DashboardDateContext) -> list[dict]:
     """Topics with most co-occurrences — information spread indicators."""
     return run_query("""
-        MATCH (t1:Topic)-[r:CO_OCCURS_WITH]-(t2:Topic)
-        WITH t1.name AS topic, sum(r.count) AS coOccurrences,
-             count(DISTINCT t2) AS connectedTopics
+        CALL {
+            MATCH (p:Post)-[:TAGGED]->(t:Topic)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+            WITH coalesce(p.uuid, 'post:' + elementId(p)) AS contentKey,
+                 collect(DISTINCT t.name) AS topicNames
+            RETURN contentKey, topicNames
+            UNION ALL
+            MATCH (c:Comment)-[:TAGGED]->(t:Topic)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+            WITH coalesce(c.uuid, 'comment:' + elementId(c)) AS contentKey,
+                 collect(DISTINCT t.name) AS topicNames
+            RETURN contentKey, topicNames
+        }
+        WITH contentKey, [name IN topicNames WHERE name IS NOT NULL AND trim(name) <> ''] AS topicNames
+        WHERE size(topicNames) >= 2
+        UNWIND topicNames AS topic
+        UNWIND [name IN topicNames WHERE name <> topic] AS relatedTopic
+        WITH topic, count(DISTINCT contentKey + ':' + relatedTopic) AS coOccurrences,
+             count(DISTINCT relatedTopic) AS connectedTopics
         RETURN topic, coOccurrences, connectedTopics
         ORDER BY coOccurrences DESC
         LIMIT 15
-    """)
+    """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()}, op_name="network.viral_topics")
 
 
 def get_information_velocity(ctx: DashboardDateContext) -> list[dict]:

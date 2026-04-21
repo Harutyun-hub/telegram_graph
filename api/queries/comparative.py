@@ -833,16 +833,53 @@ def get_content_type_performance(ctx: DashboardDateContext) -> list[dict]:
     """, {"start": ctx.start_at.isoformat(), "end": ctx.end_at.isoformat()})
 
 
-def get_vitality_indicators() -> dict:
+def get_vitality_indicators(ctx: DashboardDateContext) -> dict:
     """Composite community health indicators."""
-    total_users = (run_single("MATCH (u:User) RETURN count(u) AS n") or {}).get("n", 0)
-    active_users = (run_single("""
-        MATCH (u:User) WHERE u.last_seen > datetime() - duration('P7D')
-        RETURN count(u) AS n
-    """) or {}).get("n", 0)
-    total_topics = (run_single("MATCH (t:Topic) RETURN count(t) AS n") or {}).get("n", 0)
-    total_posts = (run_single("MATCH (p:Post) RETURN count(p) AS n") or {}).get("n", 0)
-    total_comments = (run_single("MATCH (c:Comment) RETURN count(c) AS n") or {}).get("n", 0)
+    stats = run_single("""
+        CALL {
+            MATCH (u:User)
+            RETURN count(u) AS totalUsers
+        }
+        CALL {
+            MATCH (t:Topic)
+            RETURN count(t) AS totalTopics
+        }
+        CALL {
+            CALL {
+                MATCH (u:User)-[:WROTE]->(c:Comment)
+                WHERE c.posted_at >= datetime($start)
+                  AND c.posted_at < datetime($end)
+                RETURN u AS user
+                UNION
+                MATCH (u:User)-[i:INTERESTED_IN]->(:Topic)
+                WHERE i.last_seen >= datetime($start)
+                  AND i.last_seen < datetime($end)
+                RETURN u AS user
+            }
+            RETURN count(DISTINCT user) AS activeUsers
+        }
+        CALL {
+            MATCH (p:Post)
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
+            RETURN count(p) AS totalPosts
+        }
+        CALL {
+            MATCH (c:Comment)
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
+            RETURN count(c) AS totalComments
+        }
+        RETURN totalUsers, activeUsers, totalTopics, totalPosts, totalComments
+    """, {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+    }, op_name="comparative.vitality_indicators") or {}
+    total_users = stats.get("totalUsers", 0)
+    active_users = stats.get("activeUsers", 0)
+    total_topics = stats.get("totalTopics", 0)
+    total_posts = stats.get("totalPosts", 0)
+    total_comments = stats.get("totalComments", 0)
     avg_comments = total_comments / max(total_posts, 1)
 
     return {

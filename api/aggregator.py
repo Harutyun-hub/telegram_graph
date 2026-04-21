@@ -508,9 +508,9 @@ def _tier_network(ctx: DashboardDateContext) -> dict:
         return {
             "communityChannels": network.get_community_channels(ctx),
             "keyVoices": network.get_key_voices(ctx),
-            "hourlyActivity": network.get_hourly_activity(),
-            "weeklyActivity": network.get_weekly_activity(),
-            "recommendations": network.get_recommendations(),
+            "hourlyActivity": network.get_hourly_activity(ctx),
+            "weeklyActivity": network.get_weekly_activity(ctx),
+            "recommendations": network.get_recommendations(ctx),
             "viralTopics": network.get_information_velocity(ctx),  # Use new temporal tracking
         }
     except Exception as e:
@@ -579,7 +579,7 @@ def _tier_comparative(ctx: DashboardDateContext) -> dict:
             "sentimentByTopic": comparative.get_sentiment_by_topic(ctx),
             "topPosts": comparative.get_top_posts(ctx),
             "contentTypePerformance": comparative.get_content_type_performance(ctx),
-            "vitalityIndicators": comparative.get_vitality_indicators(),
+            "vitalityIndicators": comparative.get_vitality_indicators(ctx),
         }
     except Exception as e:
         logger.error(f"Tier comparative failed: {e}")
