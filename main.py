@@ -15,6 +15,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import config
 config.validate()
 
+# Railway's staging web service starts with `uvicorn main:app`.
+# Re-export the FastAPI app here so the legacy pipeline entrypoint and
+# the web-serving entrypoint can coexist on this branch.
+from api.server import app
+
 from scraper.session_manager  import get_client
 from scraper.channel_scraper  import prepare_source_for_scrape, scrape_channel
 from scraper.comment_scraper  import scrape_comments_for_post
@@ -23,13 +28,23 @@ from processor.intent_extractor import extract_intents, extract_post_intents
 from ingester.neo4j_writer import Neo4jWriter, _collect_topics
 
 # Shared instances
-db      = SupabaseWriter()
-try:
-    neo4j = Neo4jWriter()
-except Exception as e:
-    logger.warning(f"Neo4j unavailable at startup: {e} — sync job will be skipped until it's reachable")
-    neo4j = None
+db      = None
+neo4j   = None
 _client = None   # Telethon client — initialized once in start()
+
+
+def _ensure_pipeline_state():
+    global db, neo4j
+
+    if db is None:
+        db = SupabaseWriter()
+
+    if neo4j is None:
+        try:
+            neo4j = Neo4jWriter()
+        except Exception as e:
+            logger.warning(f"Neo4j unavailable at startup: {e} — sync job will be skipped until it's reachable")
+            neo4j = None
 
 
 # ── Job 1: Telegram Scraper ───────────────────────────────────────────────────
@@ -37,6 +52,7 @@ _client = None   # Telethon client — initialized once in start()
 async def scrape_job():
     """Scrape new posts and comments from all active channels."""
     global _client
+    _ensure_pipeline_state()
     logger.info("═══ SCRAPE JOB STARTED ═══")
 
     channels = db.get_active_channels()
@@ -86,6 +102,7 @@ async def scrape_job():
 
 async def process_job():
     """Send unprocessed comments and posts to the configured extraction model."""
+    _ensure_pipeline_state()
     logger.info("═══ AI PROCESS JOB STARTED ═══")
 
     # Process comments (main behavioral analysis)
@@ -125,6 +142,7 @@ async def neo4j_sync_job():
     logger.info("═══ NEO4J SYNC JOB STARTED ═══")
 
     global neo4j
+    _ensure_pipeline_state()
 
     # Try to (re)connect if neo4j is not available
     if neo4j is None:
@@ -198,6 +216,7 @@ async def neo4j_sync_job():
 async def start():
     global _client
 
+    _ensure_pipeline_state()
     logger.info("🚀 Starting Telegram Intelligence Pipeline...")
 
     # Initialize Telethon client (will prompt for SMS code on first run)
