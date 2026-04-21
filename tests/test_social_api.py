@@ -42,6 +42,7 @@ class _FakeSocialStore:
             }
         ]
         self.updated_payload: dict | None = None
+        self.runtime_settings: dict[str, dict] = {}
 
     def get_overview(self) -> dict:
         return {
@@ -223,8 +224,30 @@ class _FakeSocialStore:
             items = [item for item in items if item["stage"] == stage]
         return items[:limit]
 
+    def save_runtime_setting(self, key: str, value: dict) -> dict:
+        self.runtime_settings[key] = dict(value)
+        return dict(value)
+
+    def get_runtime_setting(self, key: str, default: dict | None = None) -> dict:
+        return dict(self.runtime_settings.get(key, default or {}))
+
 
 class _FakeSocialRuntime:
+    async def start(self) -> dict:
+        payload = self.status()
+        payload.update({"status": "active", "is_active": True})
+        return payload
+
+    async def stop(self) -> dict:
+        payload = self.status()
+        payload.update({"status": "stopped", "is_active": False})
+        return payload
+
+    async def set_interval(self, interval_minutes: int) -> dict:
+        payload = self.status()
+        payload.update({"interval_minutes": interval_minutes})
+        return payload
+
     async def run_once(self) -> dict:
         return {
             "status": "stopped",
@@ -346,6 +369,7 @@ class SocialApiTests(unittest.TestCase):
         fake_runtime = _FakeSocialRuntime()
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
              patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "APP_ROLE", "social-worker"), \
              patch.object(server, "get_social_runtime", return_value=fake_runtime):
             response = self.client.post(
                 "/api/social/runtime/run-once",
@@ -354,6 +378,41 @@ class SocialApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["last_result"]["activities_collected"], 4)
+
+    def test_social_runtime_start_endpoint_exists(self) -> None:
+        fake_runtime = _FakeSocialRuntime()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "APP_ROLE", "social-worker"), \
+             patch.object(server, "get_social_runtime", return_value=fake_runtime):
+            response = self.client.post(
+                "/api/social/runtime/start",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "active")
+
+    def test_social_runtime_run_once_enqueues_control_command_on_passive_web(self) -> None:
+        fake_store = _FakeSocialStore()
+        fake_store.runtime_settings["runtime_snapshot"] = {
+            "status": "active",
+            "is_active": True,
+            "interval_minutes": 360,
+            "running_now": False,
+        }
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/social/runtime/run-once",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake_store.runtime_settings["control_command"]["action"], "run_once")
+        self.assertEqual(response.json()["worker_control"]["status"], "pending")
 
     def test_social_runtime_retry_uses_runtime_service(self) -> None:
         fake_runtime = _FakeSocialRuntime()

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-import threading
 import unittest
 from unittest.mock import patch
 
@@ -151,6 +149,7 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
                  "_cached_freshness_resolution",
                  return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
              ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(
                  server,
                  "peek_dashboard_snapshot",
@@ -172,7 +171,19 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         self.assertFalse(payload["meta"]["refreshSuppressed"])
         schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_returns_fast_warming_without_foreground_rebuild(self) -> None:
+    def test_dashboard_exact_miss_rebuilds_without_name_error(self) -> None:
+        rebuild_meta = {
+            "cacheStatus": "refresh_success",
+            "cacheSource": "rebuild",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 0.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -180,49 +191,35 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
                  "_cached_freshness_resolution",
                  return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
              ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "get_dashboard_snapshot", return_value=({"communityHealth": {"score": 55}}, rebuild_meta)) as rebuild_mock, \
+             patch.object(server, "_should_persist_dashboard_snapshot", return_value=False), \
+             patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
+            response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["cacheSource"], "rebuild")
+        self.assertEqual(payload["meta"]["cacheStatus"], "refresh_success")
+        rebuild_mock.assert_called_once()
+        persist_mock.assert_not_called()
+
+    def test_dashboard_exact_miss_timeout_returns_warming_503(self) -> None:
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
                  server,
-                 "schedule_dashboard_snapshot_refresh",
-                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
-             ) as schedule_mock:
+                 "_cached_freshness_resolution",
+                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+             ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server, "get_dashboard_snapshot", side_effect=TimeoutError("dashboard rebuild timed out")):
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn("warming", response.text.lower())
-        schedule_mock.assert_called_once()
-
-    def test_dashboard_exact_miss_requests_share_single_background_refresh(self) -> None:
-        lock = threading.Lock()
-        refresh_state = {"inflight": False, "starts": 0}
-
-        def fake_schedule(_ctx):
-            with lock:
-                if refresh_state["inflight"]:
-                    return {"started": False, "inflight": True, "suppressed": False, "failureCount": 0}
-                refresh_state["inflight"] = True
-                refresh_state["starts"] += 1
-                return {"started": True, "inflight": False, "suppressed": False, "failureCount": 0}
-
-        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
-             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
-             patch.object(
-                 server,
-                 "_cached_freshness_resolution",
-                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
-             ), \
-             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", side_effect=fake_schedule):
-            with ThreadPoolExecutor(max_workers=6) as executor:
-                responses = list(
-                    executor.map(
-                        lambda _idx: self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06"),
-                        range(6),
-                    )
-                )
-
-        self.assertTrue(all(response.status_code == 503 for response in responses))
-        self.assertEqual(refresh_state["starts"], 1)
+        self.assertIn("warming this date range", response.text.lower())
 
 
 if __name__ == "__main__":

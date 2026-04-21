@@ -92,24 +92,25 @@ class DashboardPersistedCacheTests(unittest.TestCase):
         refresh_mock.assert_called_once()
         prime_mock.assert_called_once()
 
-    def test_missing_snapshot_returns_warming_and_background_refresh_only(self) -> None:
+    def test_missing_snapshot_rebuilds_and_persists_snapshot(self) -> None:
         ctx = self._ctx()
+        rebuild_meta = self._meta(cache_status="refresh_success")
 
         with patch.object(server, "_cached_freshness_resolution", return_value={"snapshot": None, "source": None}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
              patch.object(server, "build_dashboard_date_context", return_value=ctx), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock, \
+             patch.object(server, "get_dashboard_snapshot", return_value=(self._snapshot(), rebuild_meta)) as rebuild_mock, \
+             patch.object(server, "_should_persist_dashboard_snapshot", return_value=True), \
              patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
+            payload = server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
 
-        refresh_mock.assert_called_once_with(ctx)
-        rebuild_mock.assert_not_called()
-        persist_mock.assert_not_called()
+        self.assertEqual(payload["meta"]["cacheSource"], "rebuild")
+        self.assertEqual(payload["meta"]["cacheStatus"], "refresh_success")
+        rebuild_mock.assert_called_once_with(ctx, force_refresh=True)
+        persist_mock.assert_called_once()
 
-    def test_missing_historical_snapshot_returns_warming_without_fastpath_build(self) -> None:
+    def test_missing_historical_snapshot_returns_fastpath_payload(self) -> None:
         ctx = self._ctx()
         fast_meta = self._meta(cache_status="historical_fastpath_uncached")
         fast_meta["degradedTiers"] = ["network", "comparative"]
@@ -121,16 +122,17 @@ class DashboardPersistedCacheTests(unittest.TestCase):
              patch.object(server, "build_dashboard_date_context", return_value=ctx), \
              patch.object(server, "_should_use_historical_fastpath", return_value=True), \
              patch.object(server, "build_dashboard_snapshot_once", return_value=(self._snapshot(), fast_meta)) as fastpath_mock, \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
+             patch.object(server, "_ensure_background_dashboard_refresh", return_value=True) as refresh_mock, \
              patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
+            payload = server._build_dashboard_response_payload("2026-03-08", "2026-03-22")
 
-        fastpath_mock.assert_not_called()
-        refresh_mock.assert_called_once_with(ctx)
+        self.assertEqual(payload["meta"]["cacheSource"], "fastpath")
+        self.assertEqual(payload["meta"]["cacheStatus"], "historical_fastpath_while_revalidate")
+        fastpath_mock.assert_called_once()
+        refresh_mock.assert_called_once()
         rebuild_mock.assert_not_called()
 
-    def test_default_dashboard_does_not_use_recent_persisted_fallback_when_alias_missing(self) -> None:
+    def test_default_dashboard_uses_recent_persisted_fallback_when_alias_missing(self) -> None:
         current_ctx = self._ctx()
         fallback_ctx = SimpleNamespace(
             from_date=datetime(2026, 3, 7, tzinfo=timezone.utc).date(),
@@ -156,22 +158,25 @@ class DashboardPersistedCacheTests(unittest.TestCase):
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 4.5}), \
              patch.object(server, "_load_recent_default_dashboard_snapshot", return_value=fallback), \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
+             patch.object(server, "_ensure_background_dashboard_refresh", return_value=True) as refresh_mock, \
              patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
              patch.object(server, "get_dashboard_snapshot") as rebuild_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload(None, None)
+            payload = server._build_dashboard_response_payload(None, None)
 
-        refresh_mock.assert_called_once_with(current_ctx)
-        prime_mock.assert_not_called()
+        self.assertEqual(payload["meta"]["cacheSource"], "persisted")
+        self.assertEqual(payload["meta"]["cacheStatus"], "persisted_recent_fallback_while_revalidate")
+        self.assertEqual(payload["meta"]["defaultResolutionPath"], "persisted_recent_fallback")
+        refresh_mock.assert_called_once()
+        prime_mock.assert_called_once()
         rebuild_mock.assert_not_called()
 
-    def test_default_dashboard_cold_miss_returns_warming_when_alias_and_recent_fallback_are_missing(self) -> None:
+    def test_default_dashboard_cold_miss_rebuilds_when_alias_and_recent_fallback_are_missing(self) -> None:
         ctx = self._ctx()
         live_freshness = {
             "snapshot": {"generated_at": "2026-03-22T00:00:00+00:00"},
             "source": "live",
         }
+        rebuild_meta = self._meta(cache_status="refresh_success")
 
         with patch.object(server, "_cached_freshness_resolution", side_effect=[
             {"snapshot": None, "source": None},
@@ -185,16 +190,16 @@ class DashboardPersistedCacheTests(unittest.TestCase):
                  {"status": "miss", "readMs": 4.5},
              ]), \
              patch.object(server, "_load_recent_default_dashboard_snapshot", return_value={"status": "miss", "readMs": 6.1}) as fallback_mock, \
-             patch.object(server, "schedule_dashboard_snapshot_refresh", return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0}) as refresh_mock, \
-             patch.object(server, "get_dashboard_snapshot") as rebuild_mock, \
+             patch.object(server, "get_dashboard_snapshot", return_value=(self._snapshot(), rebuild_meta)) as rebuild_mock, \
+             patch.object(server, "_should_persist_dashboard_snapshot", return_value=True), \
              patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
-            with self.assertRaises(server.DashboardWarmingError):
-                server._build_dashboard_response_payload(None, None)
+            payload = server._build_dashboard_response_payload(None, None)
 
         fallback_mock.assert_called_once_with(ctx.to_date)
-        refresh_mock.assert_called_once_with(ctx)
-        rebuild_mock.assert_not_called()
-        persist_mock.assert_not_called()
+        self.assertEqual(payload["meta"]["cacheSource"], "rebuild")
+        self.assertEqual(payload["meta"]["defaultResolutionPath"], "rebuild")
+        rebuild_mock.assert_called_once_with(ctx, force_refresh=True)
+        persist_mock.assert_called_once()
 
 
 if __name__ == "__main__":

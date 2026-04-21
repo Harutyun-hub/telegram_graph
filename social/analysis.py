@@ -109,8 +109,8 @@ class SocialActivityAnalyzer:
                     response=response,
                     started_at=request_started_at,
                     extra={
-                        "attempt": attempt + 1,
-                        "items": len(payload.get("items") or []),
+                        "batch_size": len(payload.get("items") or []),
+                        "max_completion_tokens": max(1200, 800 * max(1, len(payload.get("items") or []))),
                     },
                 )
                 return _trimmed(response.choices[0].message.content)
