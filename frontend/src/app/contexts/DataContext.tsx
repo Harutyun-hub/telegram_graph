@@ -26,6 +26,7 @@ import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboard
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
 import { resolveDisplayedDashboardRange, sameDashboardRange, type DashboardRangeRef } from '../utils/dashboardDisplayRange';
+import { isPlaceholderDashboardSnapshot } from '../utils/dashboardSnapshotValidity';
 import type { DashboardDateRange } from '../utils/dashboardDateRange';
 
 interface DashboardMeta {
@@ -99,7 +100,8 @@ function loadSnapshot(from: string, to: string): { data: AppData; meta: Dashboar
     const hasJobDataWithoutEvidence = Array.isArray(jobItems)
       && jobItems.length > 0
       && !jobItems.some((item: any) => Array.isArray(item?.evidence) && item.evidence.length > 0);
-    return hasJobDataWithoutEvidence ? null : snapshot;
+    if (hasJobDataWithoutEvidence) return null;
+    return isPlaceholderDashboardSnapshot(snapshot.data, snapshot.meta) ? null : snapshot;
   } catch {
     return null;
   }
@@ -107,6 +109,7 @@ function loadSnapshot(from: string, to: string): { data: AppData; meta: Dashboar
 
 function saveSnapshot(from: string, to: string, data: AppData, meta: DashboardMeta | null): void {
   if (typeof window === 'undefined') return;
+  if (isPlaceholderDashboardSnapshot(data, meta)) return;
   try {
     window.sessionStorage.setItem(snapshotKeyForRange(from, to), JSON.stringify({ data, meta }));
   } catch {
