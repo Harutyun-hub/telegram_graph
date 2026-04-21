@@ -125,6 +125,41 @@ class AIHelperEndpointTests(unittest.TestCase):
         self.assertEqual(provider.chat_calls[0][0], "hello")
         self.assertEqual(provider.chat_calls[0][1], "web_12345678")
 
+    def test_chat_accepts_frontend_proxy_token_in_production(self) -> None:
+        provider = _FakeProvider()
+        with patch.object(server.config, "IS_STAGING", False), \
+             patch.object(server.config, "IS_PRODUCTION", True), \
+             patch.object(server.config, "AI_HELPER_ADMIN_SUPABASE_USER_ID", "admin-user"), \
+             patch.object(server.config, "AI_HELPER_ADMIN_EMAIL", ""), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server, "get_ai_helper_provider", return_value=provider):
+            response = self.client.post(
+                "/api/ai-helper/chat",
+                json={"message": "hello", "sessionId": "web_12345678"},
+                headers={"Authorization": "Bearer frontend-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"]["text"], "Echo: hello")
+        self.assertEqual(provider.chat_calls[0][0], "hello")
+        self.assertEqual(provider.chat_calls[0][1], "web_12345678")
+
+    def test_chat_accepts_simple_auth_operator_header(self) -> None:
+        provider = _FakeProvider()
+        with patch.object(server.config, "SIMPLE_AUTH_USERNAME", "Admin"), \
+             patch.object(server.config, "SIMPLE_AUTH_PASSWORD", "secret-pass"), \
+             patch.object(server, "get_ai_helper_provider", return_value=provider):
+            response = self.client.post(
+                "/api/ai/chat",
+                json={"message": "hello", "sessionId": "web_12345678"},
+                headers={"X-Admin-Authorization": "Basic QWRtaW46c2VjcmV0LXBhc3M="},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"]["text"], "Echo: hello")
+        self.assertEqual(provider.chat_calls[0][0], "hello")
+        self.assertEqual(provider.chat_calls[0][1], "web_12345678")
+
     def test_chat_prefers_supabase_validation_when_supabase_token_present(self) -> None:
         class _FailingWriter:
             def __init__(self) -> None:

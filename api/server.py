@@ -1139,14 +1139,13 @@ async def require_admin_user(
 
     if (
         allow_frontend_proxy_token
-        and config.IS_STAGING
         and not supabase_token
         and auth_token
         and config.ANALYTICS_API_KEY_FRONTEND
         and hmac.compare_digest(auth_token, config.ANALYTICS_API_KEY_FRONTEND)
     ):
-        logger.info("AI helper auth satisfied via staging frontend proxy token")
-        return {"id": "staging-frontend-proxy", "email": "", "auth": "frontend_proxy"}
+        logger.info("AI helper auth satisfied via trusted frontend proxy token")
+        return {"id": "frontend-proxy", "email": "", "auth": "frontend_proxy"}
 
     try:
         loop = asyncio.get_running_loop()
@@ -1189,8 +1188,30 @@ async def require_admin_user(
 
 async def require_ai_helper_access(
     x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, str]:
+    if x_supabase_authorization or x_admin_authorization:
+        try:
+            return await require_operator_access(
+                x_supabase_authorization=x_supabase_authorization,
+                x_admin_authorization=x_admin_authorization,
+                authorization=authorization,
+            )
+        except HTTPException as exc:
+            detail = str(getattr(exc, "detail", "") or "").strip()
+            status_code = int(getattr(exc, "status_code", 401) or 401)
+            code = "auth_invalid"
+            if status_code == 403:
+                code = "admin_only"
+            elif status_code == 401 and detail.startswith("Sign in as the configured admin"):
+                code = "auth_required"
+            raise AIHelperError(
+                status_code=status_code,
+                code=code,
+                message=detail or "Unable to authorize the AI helper request.",
+                retryable=False,
+            ) from exc
     return await require_admin_user(
         x_supabase_authorization=x_supabase_authorization,
         authorization=authorization,
