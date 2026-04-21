@@ -37,9 +37,11 @@ IS_LOCKED_ENV = IS_PRODUCTION or IS_STAGING
 
 def _normalize_app_role_for_validation(value=None) -> str:
     role = str(os.getenv("APP_ROLE") if value is None else value or "").strip().lower()
-    if role not in {"web", "worker", "all"}:
+    if role not in {"web", "worker", "social-worker", "all"}:
         role = "all"
     if IS_STAGING:
+        if role == "social-worker" and _env_bool("ALLOW_STAGING_SOCIAL_WORKER", False):
+            return "social-worker"
         return "web"
     return role
 
@@ -61,6 +63,10 @@ def has_telegram_login_credentials() -> bool:
 
 def needs_telegram_runtime_credentials() -> bool:
     return _normalize_app_role_for_validation() in {"worker", "all"}
+
+
+def needs_social_runtime_credentials() -> bool:
+    return _normalize_app_role_for_validation() in {"social-worker", "all"}
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
@@ -101,6 +107,7 @@ ANALYTICS_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ANALYTICS_RATE_LIMIT_MAX_REQU
 ANALYTICS_RATE_LIMIT_TRUST_PROXY = _env_bool("ANALYTICS_RATE_LIMIT_TRUST_PROXY", True)
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+ALLOW_STAGING_SOCIAL_WORKER = _env_bool("ALLOW_STAGING_SOCIAL_WORKER", False)
 SIMPLE_AUTH_USERNAME = os.getenv("SIMPLE_AUTH_USERNAME", "").strip()
 SIMPLE_AUTH_PASSWORD = os.getenv("SIMPLE_AUTH_PASSWORD", "").strip()
 ENABLE_DEBUG_ENDPOINTS = _env_bool("ENABLE_DEBUG_ENDPOINTS", not IS_LOCKED_ENV)
@@ -360,6 +367,7 @@ SOCIAL_ANALYSIS_PROMPT_VERSION = os.getenv("SOCIAL_ANALYSIS_PROMPT_VERSION", "so
 SOCIAL_GRAPH_PROJECTION_VERSION = os.getenv("SOCIAL_GRAPH_PROJECTION_VERSION", "social-graph-v1").strip() or "social-graph-v1"
 SOCIAL_TIKTOK_ENABLED = _env_bool("SOCIAL_TIKTOK_ENABLED", False)
 SOCIAL_RUNTIME_ENABLED = _env_bool("SOCIAL_RUNTIME_ENABLED", True)
+SOCIAL_CONTROL_POLL_SECONDS = max(2, int(os.getenv("SOCIAL_CONTROL_POLL_SECONDS", "5")))
 SOCIAL_ACTIVITY_RETENTION_DAYS = max(30, int(os.getenv("SOCIAL_ACTIVITY_RETENTION_DAYS", "365")))
 SOCIAL_PAYLOAD_RETENTION_DAYS = max(7, int(os.getenv("SOCIAL_PAYLOAD_RETENTION_DAYS", "90")))
 SOCIAL_STAGE_CLAIM_LIMIT = max(1, int(os.getenv("SOCIAL_STAGE_CLAIM_LIMIT", "120")))
@@ -378,6 +386,17 @@ def validate():
             missing.append("TELEGRAM_API_ID")
         if not TELEGRAM_API_HASH:
             missing.append("TELEGRAM_API_HASH")
+    if needs_social_runtime_credentials():
+        if not SOCIAL_SUPABASE_URL:
+            missing.append("SOCIAL_SUPABASE_URL/SUPABASE_URL")
+        if not SOCIAL_SUPABASE_SERVICE_ROLE_KEY:
+            missing.append("SOCIAL_SUPABASE_SERVICE_ROLE_KEY/SUPABASE_SERVICE_ROLE_KEY")
+        if not SOCIAL_NEO4J_URI:
+            missing.append("SOCIAL_NEO4J_URI/NEO4J_URI")
+        if not SOCIAL_NEO4J_PASSWORD:
+            missing.append("SOCIAL_NEO4J_PASSWORD/NEO4J_PASSWORD")
+        if not SCRAPECREATORS_API_KEY:
+            missing.append("SCRAPECREATORS_API_KEY")
     if not SUPABASE_URL:           missing.append("SUPABASE_URL")
     if not SUPABASE_SERVICE_ROLE_KEY: missing.append("SUPABASE_SERVICE_ROLE_KEY")
     if not NEO4J_URI:              missing.append("NEO4J_URI")

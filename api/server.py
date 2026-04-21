@@ -63,11 +63,10 @@ else:  # pragma: no cover - exercised when orjson isn't installed locally
 from api import aggregator as dashboard_aggregator
 from api.aggregator import (
     CRITICAL_TIERS as DASHBOARD_CRITICAL_TIERS,
-    build_dashboard_snapshot_once,
-    get_dashboard_data, get_dashboard_snapshot, get_topics_page, get_channels_page,
+    get_dashboard_data, get_topics_page, get_channels_page,
     get_audience_page, get_topic_detail, get_channel_detail, get_audience_detail,
     get_topic_evidence_page, get_channel_posts_page, get_audience_messages_page,
-    invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async
+    invalidate_cache, peek_dashboard_snapshot, refresh_dashboard_snapshot_async,
 )
 from api.dashboard_dates import build_dashboard_date_context
 from api.queries import graph_dashboard, pulse
@@ -104,7 +103,7 @@ from utils.taxonomy import TAXONOMY_DOMAINS
 
 def _normalize_app_role(value: str | None) -> str:
     role = str(value or "").strip().lower()
-    if role in {"web", "worker", "all"}:
+    if role in {"web", "worker", "social-worker", "all"}:
         return role
     # Preserve the historical single-service deployment shape by default.
     return "all"
@@ -112,6 +111,10 @@ def _normalize_app_role(value: str | None) -> str:
 
 def _should_run_background_jobs(role: str | None = None) -> bool:
     return _normalize_app_role(APP_ROLE if role is None else role) in {"worker", "all"}
+
+
+def _should_run_social_background_jobs(role: str | None = None) -> bool:
+    return _normalize_app_role(APP_ROLE if role is None else role) in {"social-worker", "all"}
 
 
 def _should_run_topic_overviews_materializer() -> bool:
@@ -159,8 +162,49 @@ def _enqueue_worker_scheduler_control(action: str, *, interval_minutes: int | No
     return status
 
 
+def _enqueue_social_runtime_control(
+    action: str,
+    *,
+    interval_minutes: int | None = None,
+    stage: str | None = None,
+    scope_key: str | None = None,
+    activity_uids: list[str] | None = None,
+) -> dict[str, Any]:
+    command = {
+        "request_id": str(uuid.uuid4()),
+        "action": str(action or "").strip().lower(),
+        "status": "pending",
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "requested_by_role": _normalize_app_role(APP_ROLE),
+    }
+    if interval_minutes is not None:
+        command["interval_minutes"] = max(15, int(interval_minutes))
+    if stage:
+        command["stage"] = str(stage).strip().lower()
+    if scope_key:
+        command["scope_key"] = str(scope_key).strip()
+    if activity_uids:
+        command["activity_uids"] = [str(item).strip() for item in activity_uids if str(item).strip()]
+
+    get_social_store().save_runtime_setting("control_command", command)
+    status = dict(get_current_social_runtime_status() or {})
+    status["worker_control"] = {
+        "request_id": command["request_id"],
+        "action": command["action"],
+        "status": "pending",
+        "requested_at": command["requested_at"],
+    }
+    if interval_minutes is not None:
+        status["interval_minutes"] = max(15, int(interval_minutes))
+    return status
+
+
 def _apply_testing_release_invariants(role: str, warmers_enabled: bool) -> tuple[str, bool]:
     if config.IS_STAGING:
+        if role == "social-worker" and config.ALLOW_STAGING_SOCIAL_WORKER:
+            if warmers_enabled:
+                logger.warning("Staging/testing social worker forced to RUN_STARTUP_WARMERS=false")
+            return "social-worker", False
         if role != "web":
             logger.warning("Staging/testing environment forced to APP_ROLE=web (was {})", role)
         if warmers_enabled:
@@ -253,22 +297,15 @@ async def app_lifespan(_app: FastAPI):
     elif config.REDIS_URL and not runtime_coordinator.ping():
         logger.warning("Redis runtime coordinator is configured but unavailable; falling back to local coordination")
 
+    background_started = False
     if _should_run_background_jobs():
+        background_started = True
         scheduler_started_at = time.perf_counter()
         scheduler = get_scraper_scheduler()
         startup_phases["schedulerInitMs"] = round((time.perf_counter() - scheduler_started_at) * 1000, 2)
         scheduler_boot_at = time.perf_counter()
         await scheduler.startup()
         startup_phases["schedulerStartupMs"] = round((time.perf_counter() - scheduler_boot_at) * 1000, 2)
-
-        if config.SOCIAL_RUNTIME_ENABLED:
-            social_runtime_started_at = time.perf_counter()
-            try:
-                social_scheduler = get_social_runtime()
-                await social_scheduler.startup()
-                startup_phases["socialRuntimeStartupMs"] = round((time.perf_counter() - social_runtime_started_at) * 1000, 2)
-            except Exception as exc:
-                logger.warning(f"Social runtime startup skipped due to error: {exc}")
 
         cards_scheduler_started_at = time.perf_counter()
         _start_question_cards_scheduler()
@@ -289,7 +326,13 @@ async def app_lifespan(_app: FastAPI):
             if _should_run_topic_overviews_materializer() and config.TOPIC_OVERVIEWS_REFRESH_ON_STARTUP:
                 asyncio.create_task(_materialize_topic_overviews_once(force=False))
             startup_phases["warmersEnqueuedMs"] = round((time.perf_counter() - warmers_started_at) * 1000, 2)
-    else:
+    if _should_run_social_background_jobs() and config.SOCIAL_RUNTIME_ENABLED:
+        background_started = True
+        social_runtime_started_at = time.perf_counter()
+        social_scheduler = get_social_runtime()
+        await social_scheduler.startup()
+        startup_phases["socialRuntimeStartupMs"] = round((time.perf_counter() - social_runtime_started_at) * 1000, 2)
+    if not background_started:
         logger.info("Web-only runtime ready | background jobs disabled")
 
     startup_phases["totalStartupMs"] = round((time.perf_counter() - startup_started_at) * 1000, 2)
@@ -545,6 +588,10 @@ class SocialRuntimeRetryRequest(BaseModel):
     scope_key: str = Field(..., min_length=1, max_length=512)
 
 
+class SocialRuntimeUpdateRequest(BaseModel):
+    interval_minutes: int = Field(..., ge=15, le=1440)
+
+
 class SocialRuntimeReplayRequest(BaseModel):
     stage: str = Field(default="analysis", min_length=1, max_length=32)
     activity_uids: List[str] = Field(..., min_length=1)
@@ -707,25 +754,52 @@ def get_social_runtime() -> SocialRuntimeService:
     return social_runtime_service
 
 
+def _default_social_runtime_status() -> dict[str, Any]:
+    return {
+        "status": "stopped",
+        "is_active": False,
+        "interval_minutes": 360,
+        "running_now": False,
+        "last_run_started_at": None,
+        "last_run_finished_at": None,
+        "last_success_at": None,
+        "next_run_at": None,
+        "last_error": None,
+        "last_result": None,
+        "run_history": [],
+        "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
+        "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
+        "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
+        "worker_id": None,
+    }
+
+
+_last_shared_social_status: dict[str, Any] | None = None
+_last_shared_social_status_ts: datetime | None = None
+
+
 def get_current_social_runtime_status() -> dict[str, Any]:
+    global _last_shared_social_status, _last_shared_social_status_ts
+    if not _should_run_social_background_jobs():
+        now = datetime.now(timezone.utc)
+        try:
+            shared = get_social_store().get_runtime_setting("runtime_snapshot", {})
+        except Exception as exc:
+            logger.warning(f"Shared social runtime snapshot read failed on passive web: {exc}")
+            shared = {}
+        if shared:
+            _last_shared_social_status = dict(shared)
+            _last_shared_social_status_ts = now
+            return dict(shared)
+        if (
+            _last_shared_social_status
+            and _last_shared_social_status_ts
+            and (now - _last_shared_social_status_ts).total_seconds() <= 10
+        ):
+            return dict(_last_shared_social_status)
+        return _default_social_runtime_status()
     if social_runtime_service is None:
-        return {
-            "status": "stopped",
-            "is_active": False,
-            "interval_minutes": 360,
-            "running_now": False,
-            "last_run_started_at": None,
-            "last_run_finished_at": None,
-            "last_success_at": None,
-            "next_run_at": None,
-            "last_error": None,
-            "last_result": None,
-            "run_history": [],
-            "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
-            "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
-            "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
-            "worker_id": None,
-        }
+        return _default_social_runtime_status()
     return social_runtime_service.status()
 
 
@@ -3139,9 +3213,54 @@ async def get_social_runtime_status():
     return get_current_social_runtime_status()
 
 
+@app.post("/api/social/runtime/start", dependencies=[Depends(require_operator_access)])
+async def start_social_runtime():
+    try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_social_runtime_control("start"))
+        return await get_social_runtime().start()
+    except Exception as e:
+        logger.error(f"Social runtime start error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/runtime/stop", dependencies=[Depends(require_operator_access)])
+async def stop_social_runtime():
+    try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_social_runtime_control("stop"))
+        return await get_social_runtime().stop()
+    except Exception as e:
+        logger.error(f"Social runtime stop error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/social/runtime", dependencies=[Depends(require_operator_access)])
+async def update_social_runtime(payload: SocialRuntimeUpdateRequest):
+    try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: _enqueue_social_runtime_control(
+                    "set_interval",
+                    interval_minutes=payload.interval_minutes,
+                ),
+            )
+        return await get_social_runtime().set_interval(payload.interval_minutes)
+    except Exception as e:
+        logger.error(f"Social runtime update error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/social/runtime/run-once", dependencies=[Depends(require_operator_access)])
 async def run_social_runtime_once():
     try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, lambda: _enqueue_social_runtime_control("run_once"))
         return await get_social_runtime().run_once()
     except Exception as e:
         logger.error(f"Social runtime run-once error: {e}")
@@ -3169,6 +3288,16 @@ async def list_social_runtime_failures(
 @app.post("/api/social/runtime/retry", dependencies=[Depends(require_operator_access)])
 async def retry_social_runtime_failure(payload: SocialRuntimeRetryRequest):
     try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: _enqueue_social_runtime_control(
+                    "retry",
+                    stage=payload.stage,
+                    scope_key=payload.scope_key,
+                ),
+            )
         return await get_social_runtime().retry_failure(stage=payload.stage, scope_key=payload.scope_key)
     except ValueError as exc:
         status_code = 404 if "not found" in str(exc).lower() or "no active failure" in str(exc).lower() else 400
@@ -3183,6 +3312,16 @@ async def retry_social_runtime_failure(payload: SocialRuntimeRetryRequest):
 @app.post("/api/social/runtime/replay", dependencies=[Depends(require_operator_access)])
 async def replay_social_runtime_items(payload: SocialRuntimeReplayRequest):
     try:
+        if not _should_run_social_background_jobs():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: _enqueue_social_runtime_control(
+                    "replay",
+                    stage=payload.stage,
+                    activity_uids=payload.activity_uids,
+                ),
+            )
         return await get_social_runtime().replay_activities(
             stage=payload.stage,
             activity_uids=payload.activity_uids,

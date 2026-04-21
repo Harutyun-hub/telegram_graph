@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from api import server
+from api import social_worker
 from api import worker
 from api.scraper_scheduler import ScraperSchedulerService
 
@@ -37,6 +38,14 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
             role, warmers = server._apply_testing_release_invariants("all", True)
 
         self.assertEqual(role, "web")
+        self.assertFalse(warmers)
+
+    def test_staging_can_allow_social_worker_defaults(self) -> None:
+        with patch.object(server.config, "IS_STAGING", True), \
+             patch.object(server.config, "ALLOW_STAGING_SOCIAL_WORKER", True):
+            role, warmers = server._apply_testing_release_invariants("social-worker", True)
+
+        self.assertEqual(role, "social-worker")
         self.assertFalse(warmers)
 
     def test_web_role_skips_background_scheduler_startup(self) -> None:
@@ -93,6 +102,36 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         opportunity_scheduler.assert_called_once()
         topic_scheduler.assert_called_once()
 
+    def test_social_worker_role_starts_only_social_runtime(self) -> None:
+        async def enter_lifespan() -> None:
+            async with server.app_lifespan(server.app):
+                return None
+
+        fake_social_runtime = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
+
+        with patch.object(server, "APP_ROLE", "social-worker"), \
+             patch.object(server.config, "IS_LOCKED_ENV", False), \
+             patch.object(server.config, "REDIS_URL", ""), \
+             patch.object(server.config, "SOCIAL_RUNTIME_ENABLED", True), \
+             patch.object(server, "RUN_STARTUP_WARMERS", False), \
+             patch.object(server, "get_runtime_coordinator", return_value=_CoordinatorStub(ping_result=True)), \
+             patch.object(server, "get_scraper_scheduler") as scheduler_factory, \
+             patch.object(server, "get_social_runtime", return_value=fake_social_runtime) as social_factory, \
+             patch.object(server, "_start_question_cards_scheduler") as question_scheduler, \
+             patch.object(server, "_start_behavioral_cards_scheduler") as behavioral_scheduler, \
+             patch.object(server, "_start_opportunity_cards_scheduler") as opportunity_scheduler, \
+             patch.object(server, "_start_topic_overviews_scheduler") as topic_scheduler, \
+             patch.object(server.db, "close"):
+            asyncio.run(enter_lifespan())
+
+        scheduler_factory.assert_not_called()
+        social_factory.assert_called_once()
+        fake_social_runtime.startup.assert_awaited_once()
+        question_scheduler.assert_not_called()
+        behavioral_scheduler.assert_not_called()
+        opportunity_scheduler.assert_not_called()
+        topic_scheduler.assert_not_called()
+
     def test_web_role_reads_shared_scheduler_snapshot(self) -> None:
         shared = {
             "status": "active",
@@ -119,6 +158,30 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertEqual(payload["status"], "active")
         self.assertEqual(payload["next_run_at"], "2026-04-11T10:15:00+00:00")
         self.assertTrue(payload["running_now"])
+
+    def test_web_role_reads_shared_social_runtime_snapshot(self) -> None:
+        shared = {
+            "status": "active",
+            "is_active": True,
+            "interval_minutes": 360,
+            "running_now": True,
+            "last_run_started_at": "2026-04-11T10:00:00+00:00",
+            "last_run_finished_at": None,
+            "last_success_at": "2026-04-11T09:45:00+00:00",
+            "next_run_at": "2026-04-11T16:00:00+00:00",
+            "last_error": None,
+            "last_result": {"activities_collected": 11},
+            "worker_id": "social-worker-1",
+        }
+        store = SimpleNamespace(get_runtime_setting=lambda key, default=None: dict(shared) if key == "runtime_snapshot" else default)
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "social_runtime_service", None), \
+             patch.object(server, "get_social_store", return_value=store):
+            payload = server.get_current_social_runtime_status()
+
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(payload["worker_id"], "social-worker-1")
 
     def test_web_role_scheduler_status_falls_back_to_default_when_shared_read_fails(self) -> None:
         writer = SimpleNamespace(
@@ -207,6 +270,35 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
         self.assertEqual(saved["action"], "set_interval")
         self.assertEqual(saved["interval_minutes"], 30)
         self.assertEqual(payload["interval_minutes"], 30)
+
+    def test_web_social_run_once_enqueues_social_worker_control_command(self) -> None:
+        saved: dict[str, object] = {}
+
+        store = SimpleNamespace(
+            save_runtime_setting=lambda key, value: saved.update({"key": key, **value}) or value,
+            get_runtime_setting=lambda key, default=None: {
+                "status": "active",
+                "is_active": True,
+                "interval_minutes": 360,
+                "running_now": False,
+            } if key == "runtime_snapshot" else (default or {}),
+        )
+
+        with patch.object(server, "APP_ROLE", "web"), \
+             patch.object(server, "get_social_store", return_value=store):
+            payload = asyncio.run(server.run_social_runtime_once())
+
+        self.assertEqual(saved["key"], "control_command")
+        self.assertEqual(saved["action"], "run_once")
+        self.assertEqual(payload["worker_control"]["action"], "run_once")
+
+    def test_social_worker_requires_explicit_staging_opt_in(self) -> None:
+        with patch.object(social_worker.config, "IS_STAGING", True), \
+             patch.object(social_worker.config, "ALLOW_STAGING_SOCIAL_WORKER", False):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(social_worker.run_social_worker())
+
+        self.assertIn("ALLOW_STAGING_SOCIAL_WORKER", str(ctx.exception))
 
     def test_app_lifespan_requires_healthy_redis_in_locked_env(self) -> None:
         async def enter_lifespan() -> None:

@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from social.runtime import SocialRuntimeService
+
+
+class _StoreStub:
+    def __init__(self) -> None:
+        self.settings = {
+            "scheduler": {"is_active": False, "interval_minutes": 360},
+        }
+
+    def get_runtime_setting(self, key: str, default: dict) -> dict:
+        return dict(self.settings.get(key, default))
+
+    def save_runtime_setting(self, key: str, value: dict) -> dict:
+        self.settings[key] = dict(value)
+        return dict(value)
+
+    def create_ingest_run(self, **kwargs):
+        return {"id": "run-1", **kwargs}
+
+    def finish_ingest_run(self, *args, **kwargs):
+        return None
+
+    def record_failure(self, **kwargs):
+        return {"is_dead_letter": False, **kwargs}
+
+    def mark_activity_failure(self, **kwargs):
+        return None
+
+    def mark_graph_synced(self, **kwargs):
+        return None
+
+    def save_analysis(self, **kwargs):
+        return kwargs
+
+    def clear_failure(self, **kwargs):
+        return None
+
+    def get_failure(self, **kwargs):
+        return None
+
+    def prepare_activity_replay(self, *args, **kwargs):
+        return []
+
+    def get_account_by_scope_key(self, scope_key: str):
+        return {"id": "account-1", "platform": "facebook", "entity_id": "entity-1", "source_key": scope_key}
+
+    def mark_account_collect_success(self, account_id: str):
+        return account_id
+
+    def mark_account_collect_failure(self, account_id: str, **kwargs):
+        return {"id": account_id, **kwargs}
+
+    def list_active_accounts(self, enabled_platforms):
+        return []
+
+    def list_pending_analysis(self, limit: int):
+        return []
+
+    def list_pending_graph(self, limit: int):
+        return []
+
+    def upsert_activities(self, items):
+        return items
+
+
+class SocialRuntimeTests(unittest.TestCase):
+    def test_set_interval_persists_scheduler_state(self) -> None:
+        async def scenario() -> None:
+            service = SocialRuntimeService(_StoreStub())
+            status = await service.set_interval(420)
+            self.assertEqual(status["interval_minutes"], 420)
+            self.assertEqual(service.store.get_runtime_setting("scheduler", {})["interval_minutes"], 420)
+
+        asyncio.run(scenario())
+
+    def test_control_cycle_processes_pending_run_once_command(self) -> None:
+        async def scenario() -> None:
+            store = _StoreStub()
+            store.settings["control_command"] = {
+                "request_id": "cmd-1",
+                "action": "run_once",
+                "status": "pending",
+                "requested_at": "2026-04-21T10:00:00+00:00",
+            }
+            service = SocialRuntimeService(store)
+
+            run_cycle_mock = AsyncMock()
+
+            with patch.object(service, "_run_cycle", run_cycle_mock), \
+                 patch.object(service, "status", return_value={"status": "active", "running_now": False}):
+                await service._run_control_cycle()
+
+            self.assertEqual(store.settings["control_command"]["status"], "completed")
+            self.assertEqual(store.settings["control_command"]["runtime_status"]["status"], "active")
+            run_cycle_mock.assert_awaited_once_with()
+
+        asyncio.run(scenario())
+
+
+if __name__ == "__main__":
+    unittest.main()

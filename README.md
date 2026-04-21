@@ -1,6 +1,6 @@
 # Radar Obshchiny
 
-Radar Obshchiny is a Telegram intelligence platform with a React frontend, a FastAPI web service, a dedicated worker runtime, Supabase/Postgres for operational data, Neo4j for analytics, and protected operator/social surfaces.
+Radar Obshchiny is a Telegram intelligence platform with a React frontend, a FastAPI web service, dedicated Telegram and social worker runtimes, Supabase/Postgres for operational data, Neo4j for analytics, and protected operator/social surfaces.
 
 ## Canonical Documentation
 
@@ -17,7 +17,9 @@ If another high-level document conflicts with the canonical document, prefer `PR
 ## Current Stack
 
 - Backend: FastAPI, Python, APScheduler
-- Background runtime: `python -m api.worker`
+- Background runtimes:
+  - Telegram/runtime worker: `python -m api.worker`
+  - Social/runtime worker: `python -m api.social_worker`
 - Operational store: Supabase/Postgres
 - Analytics graph: Neo4j
 - Coordination/runtime support: Redis
@@ -77,11 +79,15 @@ The frontend uses `/api` as its default API base in development and production-c
 
 - Backend app: `api/server.py`
 - Worker runtime: `api/worker.py`
+- Social worker runtime: `api/social_worker.py`
 - Frontend router: `frontend/src/app/routes.tsx`
 - Runtime configuration: `config.py`
 
 ## Development Notes
 
-- The preferred deployment shape is `frontend` + `web` + `worker`
+- The preferred deployment shape is `frontend` + `web` + `worker` + `social-worker`
+- `web` is passive for social runtime and reads shared social runtime state from the social operational store
+- `worker` owns Telegram/background jobs only
+- `social-worker` owns social collect, analysis, and graph sync only
 - Use the runbook for environment split, rollout, and rollback guidance
 - Use the canonical document for architecture, ownership, and source-of-truth rules

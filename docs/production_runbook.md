@@ -4,6 +4,7 @@
 - `frontend`: existing Railway static/proxy deployment
 - `web`: `uvicorn api.server:app --host 0.0.0.0 --port $PORT`
 - `worker`: `python -m api.worker`
+- `social-worker`: `python -m api.social_worker`
 - `redis`: managed Redis required in staging and production
 
 ## Canonical Stage 1 Environment Split
@@ -26,6 +27,7 @@ Must not be present on `web`:
 - any `TELEGRAM_*` runtime credentials
 - worker-only scraper throughput variables
 - worker-only background feature toggles
+- `ALLOW_STAGING_SOCIAL_WORKER`
 
 Recommended web-only hardening:
 - `RUN_STARTUP_WARMERS=false`
@@ -67,6 +69,38 @@ Operational rule:
 - only the worker may touch Telegram
 - the web service stays Telegram-blind and passive
 
+### Social worker service
+Required:
+- `APP_ROLE=social-worker`
+- `SOCIAL_RUNTIME_ENABLED=true`
+- `SOCIAL_SUPABASE_URL`
+- `SOCIAL_SUPABASE_SERVICE_ROLE_KEY`
+- `SOCIAL_DATABASE_URL` if direct Postgres leasing is enabled
+- `SOCIAL_NEO4J_URI`
+- `SOCIAL_NEO4J_USERNAME`
+- `SOCIAL_NEO4J_PASSWORD`
+- `SOCIAL_NEO4J_DATABASE`
+- `OPENAI_API_KEY`
+- `SCRAPECREATORS_API_KEY`
+- `REDIS_URL`
+
+Canonical social-worker flags and limits:
+- `RUN_STARTUP_WARMERS=false`
+- `SOCIAL_CONTROL_POLL_SECONDS=5`
+- `ALLOW_STAGING_SOCIAL_WORKER=true` only during approved staging validation windows
+
+Must not be present on `social-worker`:
+- `TELEGRAM_API_ID`
+- `TELEGRAM_API_HASH`
+- `TELEGRAM_PHONE`
+- `TELEGRAM_SESSION_STRING`
+- Telegram-only throughput or login flags
+
+Operational rule:
+- only the `social-worker` may run social collect, analysis, replay, retry, and graph sync in production-shaped deployments
+- `web` serves social status and queues control commands through `social_runtime_settings`
+- social data must continue to flow only through the social operational store and the separate social graph
+
 ## GitHub Environments and Required Checks
 - Create GitHub environments named `staging` and `production`.
 - Store these environment secrets in both where applicable:
@@ -90,6 +124,7 @@ Operational rule:
 - Seed staging from a sanitized production-derived export
 - Remove or hash user identifiers and any sensitive content before loading staging data
 - Keep the staging worker manual-only for this milestone
+- Keep the staging social-worker disabled by default; enable it only for explicit validation windows with `ALLOW_STAGING_SOCIAL_WORKER=true`
 
 ## Release Flow
 1. Merge only after CI is green.
@@ -100,14 +135,20 @@ Operational rule:
    - `/api/topics`
    - `/api/freshness`
    - `/api/scraper/scheduler` with `ADMIN_API_KEY`
+   - `/api/social/runtime/status` with `ADMIN_API_KEY`
 4. Run a short worker soak in staging and confirm:
    - no duplicate cycle execution
    - no escalating error rate
    - no freshness regression
-5. Approve production deployment.
-6. Deploy production.
-7. Run post-deploy smoke/warmup workflow.
-8. Tag the release and record the rollback target.
+5. Run a short social-worker soak in staging and confirm:
+   - `web` stays passive for social runtime
+   - `social-worker` persists a shared runtime snapshot
+   - `run-once` issued through web is consumed by `social-worker`
+   - no duplicate activity rows or graph writes on rerun
+6. Approve production deployment.
+7. Deploy production.
+8. Run post-deploy smoke/warmup workflow.
+9. Tag the release and record the rollback target.
 
 Local/manual smoke command:
 
@@ -142,10 +183,10 @@ python scripts/run_smoke_checks.py --wait-ready --label staging
 - Record for every production deploy:
   - release git tag
   - previous git tag
-  - Railway deploy identifier for `frontend`, `web`, and `worker`
+  - Railway deploy identifier for `frontend`, `web`, `worker`, and `social-worker`
   - any env var changes made during the release
 - Rollback steps:
   1. Re-deploy the previous Railway release for each service.
   2. Revert any env var changes made in the failed release.
   3. If a migration caused data corruption, restore from the latest safe backup and re-run smoke checks.
-  4. Validate `/readyz`, `/api/dashboard`, `/api/freshness`, and one operator route before reopening access.
+  4. Validate `/readyz`, `/api/dashboard`, `/api/freshness`, `/api/social/runtime/status`, and one operator route before reopening access.
