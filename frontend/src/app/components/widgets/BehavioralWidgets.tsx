@@ -199,6 +199,7 @@ export function ServiceGapDetector() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
+  const [showAll, setShowAll] = useState(false);
   const serviceGapBriefs = data.serviceGapBriefs?.[lang] ?? [];
 
   const aiRows: ServiceGapBarRow[] = serviceGapBriefs.map((brief: any) => {
@@ -222,6 +223,7 @@ export function ServiceGapDetector() {
     };
   });
   const hasRenderableRows = aiRows.length > 0;
+  const visibleRows = showAll ? aiRows : aiRows.slice(0, 4);
   const topOpp = [...aiRows]
     .filter((s) => s.growthReliable)
     .sort((a, b) => b.growth - a.growth)[0];
@@ -254,7 +256,7 @@ export function ServiceGapDetector() {
 
       {hasRenderableRows && (
         <div className="space-y-2.5">
-          {aiRows.map((item) => {
+          {visibleRows.map((item) => {
             return (
               <div key={item.id} className="space-y-1.5">
                 <div className="flex items-center gap-3">
@@ -296,6 +298,21 @@ export function ServiceGapDetector() {
               </div>
             );
           })}
+
+          {aiRows.length > 4 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAll((prev) => !prev)}
+                className="text-xs text-blue-700 hover:text-blue-800"
+                style={{ fontWeight: 600 }}
+              >
+                {showAll
+                  ? (ru ? 'Свернуть' : 'Collapse')
+                  : (ru ? `Показать все ${aiRows.length}` : `See all ${aiRows.length}`)}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

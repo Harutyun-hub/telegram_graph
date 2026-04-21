@@ -66,7 +66,7 @@ describe('dashboardAdapter exact-range normalization', () => {
     expect(app.communityBrief.updatedMinutesAgo).toBe(0);
   });
 
-  it('builds exact-range question briefs from question categories instead of reusing stale materialized cards', () => {
+  it('keeps backend question briefs even when question categories are present', () => {
     const app = adaptDashboardPayload({
       meta: {
         requestedFrom: '2026-04-01',
@@ -75,14 +75,15 @@ describe('dashboardAdapter exact-range normalization', () => {
       data: {
         questionBriefs: [
           {
-            id: 'stale-one',
-            topic: 'Old Topic',
-            category: 'General',
-            canonicalQuestionEn: 'Old question',
-            summaryEn: 'Stale summary',
+            id: 'real-one',
+            topic: 'Visa And Residency',
+            category: 'Emigration',
+            canonicalQuestionEn: 'Is there a practical difference between applying for a national visa and a Schengen visa when the only planned destination is Spain?',
+            summaryEn: 'The discussion asks whether applicants should choose a national visa or a Schengen visa when they only plan to travel to Spain.',
             confidence: 'medium',
-            confidenceScore: 0.6,
-            demandSignals: { messages: 99, uniqueUsers: 40, channels: 8, trend7dPct: 10 },
+            confidenceScore: 0.72,
+            demandSignals: { messages: 14, uniqueUsers: 9, channels: 6, trend7dPct: 100 },
+            sampleEvidenceId: 'ev-q1',
           },
         ],
         questionCategories: [
@@ -95,20 +96,16 @@ describe('dashboardAdapter exact-range normalization', () => {
       },
     });
 
-    expect(app.questionBriefs.en).toHaveLength(5);
-    expect(app.questionBriefs.en.map((item) => item.sourceTopic)).toEqual([
-      'Telegram Community',
-      'Job Search',
-      'Healthcare',
-      'Banking',
-      'Schools',
-    ]);
-    expect(app.questionBriefs.en[0]?.question).toContain('How do I report scam channels');
-    expect(app.questionBriefs.en[0]?.demandSignals.messages).toBe(12);
-    expect(app.questionBriefs.en[0]?.demandSignals.channels).toBe(0);
+    expect(app.questionBriefs.en).toHaveLength(1);
+    expect(app.questionBriefs.en[0]?.sourceTopic).toBe('Visa And Residency');
+    expect(app.questionBriefs.en[0]?.question).toContain('national visa');
+    expect(app.questionBriefs.en[0]?.demandSignals.messages).toBe(14);
+    expect(app.questionBriefs.en[0]?.demandSignals.channels).toBe(6);
+    expect(app.questionCategories.en).toHaveLength(5);
+    expect(app.qaGap.en).not.toHaveLength(0);
   });
 
-  it('builds exact-range problem briefs from problem rows instead of reusing stale materialized cards', () => {
+  it('keeps backend problem briefs even when problem aggregates are present', () => {
     const app = adaptDashboardPayload({
       meta: {
         requestedFrom: '2026-04-01',
@@ -117,15 +114,15 @@ describe('dashboardAdapter exact-range normalization', () => {
       data: {
         problemBriefs: [
           {
-            id: 'stale-problem',
-            topic: 'Old Topic',
-            category: 'General',
-            problemEn: 'Old problem',
-            summaryEn: 'Stale summary',
-            severity: 'high',
-            confidence: 'medium',
-            confidenceScore: 0.7,
-            demandSignals: { messages: 50, uniqueUsers: 20, channels: 6, trend7dPct: 5 },
+            id: 'real-problem',
+            topic: 'Church-State Relation',
+            category: 'Religion',
+            problemEn: 'People are reporting pressure on the Church by state authorities in Armenia, including claims of prosecutions of clergy.',
+            summaryEn: 'The evidence points to a church-state conflict in Armenia.',
+            severity: 'critical',
+            confidence: 'high',
+            confidenceScore: 0.95,
+            demandSignals: { messages: 14, uniqueUsers: 8, channels: 4, trend7dPct: 100 },
             evidence: [{ id: 'ev-1', quote: 'Old quote', channel: 'chan', timestamp: '2026-04-01', kind: 'message' }],
           },
         ],
@@ -136,13 +133,11 @@ describe('dashboardAdapter exact-range normalization', () => {
       },
     });
 
-    expect(app.problemBriefs.en).toHaveLength(2);
-    expect(app.problemBriefs.en.map((item) => item.sourceTopic)).toEqual([
-      'Road And Transit',
-      'Visa And Residency',
-    ]);
-    expect(app.problemBriefs.en[0]?.problem).toBe('Road And Transit');
-    expect(app.problemBriefs.en[0]?.summary).toContain('transport is unreliable');
-    expect(app.problemBriefs.en[0]?.evidence).toEqual([]);
+    expect(app.problemBriefs.en).toHaveLength(1);
+    expect(app.problemBriefs.en[0]?.sourceTopic).toBe('Church-State Relation');
+    expect(app.problemBriefs.en[0]?.problem).toContain('pressure on the Church');
+    expect(app.problemBriefs.en[0]?.summary).toContain('church-state conflict');
+    expect(app.problemBriefs.en[0]?.evidence).toHaveLength(1);
+    expect(app.problems.en).toHaveLength(2);
   });
 });
