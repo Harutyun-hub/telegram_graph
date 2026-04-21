@@ -3,7 +3,6 @@ import { Link } from 'react-router';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
-import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 import { WidgetTitle } from '../ui/WidgetTitle';
 
@@ -64,11 +63,11 @@ function topicTileSpec(value: number, minValue: number, maxValue: number) {
 
 export function TopicLandscape() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const topicBubbles = data.topicBubbles[lang] ?? [];
   const [activeCategory, setActiveCategory] = useState<string>('__all__');
+  const rangeDays = displayRange?.days ?? 0;
 
   const totalMentions = topicBubbles.reduce((sum, t) => sum + (t.value || 0), 0);
   const lowEvidenceGrowth = topicBubbles.filter((t) => !t.growthReliable).length;
@@ -115,8 +114,8 @@ export function TopicLandscape() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? `Площадь плитки = число прямых упоминаний в выбранном окне (${range.days} дн.). Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.`
-          : `Tile area = direct message mentions in the selected ${range.days}-day window. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.`}
+          ? `Площадь плитки = число прямых упоминаний в выбранном окне (${rangeDays} дн.). Рост = последние 7 дней к предыдущим 7 дням и показывается только при достаточной статистике.`
+          : `Tile area = direct message mentions in the selected ${rangeDays}-day window. Growth = last 7 days vs previous 7 days, shown only with sufficient evidence.`}
       </p>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -286,8 +285,8 @@ export function TopicLandscape() {
 
       <p className="text-xs text-gray-400 mt-2">
         {ru
-          ? `Основа: ${totalMentions.toLocaleString()} прямых упоминаний в окне ${range.days} дн. по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
-          : `Evidence: ${totalMentions.toLocaleString()} direct mentions in the ${range.days}-day window across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
+          ? `Основа: ${totalMentions.toLocaleString()} прямых упоминаний в окне ${rangeDays} дн. по ${topicBubbles.length} темам. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} тем с недостатком данных для роста.` : ''}`
+          : `Evidence: ${totalMentions.toLocaleString()} direct mentions in the ${rangeDays}-day window across ${topicBubbles.length} topics. ${lowEvidenceGrowth > 0 ? `${lowEvidenceGrowth} topics have insufficient growth evidence.` : ''}`}
       </p>
     </div>
   );
@@ -300,11 +299,11 @@ export function TopicLandscape() {
 
 export function ConversationTrends() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const trendLines = data.trendLines[lang] ?? [];
   const trendData = data.trendData;
+  const rangeDays = displayRange?.days ?? 0;
 
   if (!trendLines.length || !trendData.length) return <EmptyWidget widgetId="conversation_trends" title={ru ? 'Динамика разговоров' : 'Conversation Trends'} />;
 
@@ -321,7 +320,7 @@ export function ConversationTrends() {
         <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">{ru ? `${trendData.length}-дневная траектория` : `${trendData.length}-day trajectory`}</span>
       </div>
       <p className="text-xs text-gray-500 mb-4">
-        {ru ? `Какие темы растут? Что угасает? Траектория строится по выбранному окну (${range.days} дн.).` : `What topics are rising? What's fading? The trajectory follows the selected ${range.days}-day window.`}
+        {ru ? `Какие темы растут? Что угасает? Траектория строится по выбранному окну (${rangeDays} дн.).` : `What topics are rising? What's fading? The trajectory follows the selected ${rangeDays}-day window.`}
       </p>
 
       <ResponsiveContainer width="100%" height={220}>
@@ -683,11 +682,11 @@ export function QuestionAnswerGap() {
 
 export function TopicLifecycle() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const lifecycleStages = data.lifecycleStages[lang] ?? [];
   const [expandedKey, setExpandedKey] = useState('');
+  const rangeDays = displayRange?.days ?? 0;
 
   if (!lifecycleStages.length) return <EmptyWidget widgetId="topic_lifecycle" title={ru ? 'Жизненный цикл тем' : 'Topic Lifecycle'} />;
 
@@ -703,13 +702,13 @@ export function TopicLifecycle() {
       </div>
       <p className="text-xs text-gray-500 mb-4">
         {ru
-          ? `Показывает, где внимание к теме растёт, а где снижается, на основе прямых сигналов сообщений в выбранном окне (${range.days} дн.).`
-          : `Shows where attention is growing and where it is declining, based on direct message signals in the selected ${range.days}-day window.`}
+          ? `Показывает, где внимание к теме растёт, а где снижается, на основе прямых сигналов сообщений в выбранном окне (${rangeDays} дн.).`
+          : `Shows where attention is growing and where it is declining, based on direct message signals in the selected ${rangeDays}-day window.`}
       </p>
       <p className="text-xs text-gray-400 mb-4">
         {ru
-          ? `X/7д — объём обсуждений за последние 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема была активна в текущем окне (${range.days} дн.).`
-          : `X/7d = discussion volume in the last 7 days; Δ = change vs previous 7 days; d = how many days the topic was active in the current ${range.days}-day window.`}
+          ? `X/7д — объём обсуждений за последние 7 дней; Δ — изменение к предыдущим 7 дням; д. — сколько дней тема была активна в текущем окне (${rangeDays} дн.).`
+          : `X/7d = discussion volume in the last 7 days; Δ = change vs previous 7 days; d = how many days the topic was active in the current ${rangeDays}-day window.`}
       </p>
 
       <div className="grid grid-cols-2 gap-1 mb-4">

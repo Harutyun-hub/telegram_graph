@@ -4,7 +4,6 @@ import { Star, TrendingUp, Clock } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
-import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 import { WidgetTitle } from '../ui/WidgetTitle';
 
@@ -108,10 +107,10 @@ export function TopChannels() {
 
 export function KeyVoices() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const keyVoices = data.keyVoices[lang] ?? [];
+  const rangeDays = displayRange?.days ?? 0;
 
   if (!keyVoices.length) return <EmptyWidget widgetId="key_voices" title={ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'} />;
 
@@ -122,7 +121,7 @@ export function KeyVoices() {
           {ru ? 'Ключевые голоса сообщества' : 'Key Community Voices'}
         </WidgetTitle>
         <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
-          {ru ? `Активные комментаторы за ${range.days} дн.` : `Active commenters in the selected ${range.days}-day window`}
+          {ru ? `Активные комментаторы за ${rangeDays} дн.` : `Active commenters in the selected ${rangeDays}-day window`}
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-4">

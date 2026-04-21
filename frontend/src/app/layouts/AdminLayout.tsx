@@ -214,6 +214,7 @@ export function AdminLayout() {
     isRefreshing,
     hasLiveData,
     error,
+    displayRange,
     refresh,
   } = useData();
   const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
@@ -249,6 +250,8 @@ export function AdminLayout() {
     { id: 'last_3_months', label: ru ? 'Последние 3 месяца' : 'Last 3 months' },
     { id: 'last_6_months', label: ru ? 'Последние 6 месяцев' : 'Last 6 months' },
   ];
+  const displayedRangeDays = displayRange?.days ?? range.days;
+  const showsPreviousSnapshot = isRefreshing && displayedRangeDays !== range.days;
 
   useEffect(() => {
     setDraftFrom(range.from);
@@ -702,7 +705,17 @@ export function AdminLayout() {
                             {ru ? 'Обновляем данные панели…' : 'Refreshing dashboard data...'}
                           </p>
                           <p className="text-xs text-slate-500 mt-0.5">
-                            {ru ? 'Предыдущий снимок остаётся на экране, пока новый диапазон загружается.' : 'The previous snapshot stays visible while the new range is loading.'}
+                            {showsPreviousSnapshot
+                              ? (
+                                ru
+                                  ? `На экране пока остаётся снимок за ${displayedRangeDays} дн., пока загружается диапазон ${range.days} дн.`
+                                  : `Showing the current ${displayedRangeDays}-day snapshot while the selected ${range.days}-day range loads.`
+                              )
+                              : (
+                                ru
+                                  ? 'Предыдущий снимок остаётся на экране, пока новый диапазон загружается.'
+                                  : 'The previous snapshot stays visible while the new range is loading.'
+                              )}
                           </p>
                         </div>
                       </div>

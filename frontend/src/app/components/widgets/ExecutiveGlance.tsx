@@ -3,7 +3,6 @@ import { Link } from 'react-router';
 import { TrendingUp, Clock, ChevronRight, MessageCircle, Heart, Zap, BarChart3 } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
-import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 import { WidgetTitle } from '../ui/WidgetTitle';
 
@@ -28,7 +27,6 @@ function getHealthColor(score: number) {
 export function CommunityHealthScore() {
   const { lang } = useLanguage();
   const { data } = useData();
-  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
   const [animatedScore, setAnimatedScore] = useState(0);
   const healthData = data.communityHealth;
@@ -194,12 +192,12 @@ const sentimentEmoji: Record<string, string> = {
 
 export function TrendingTopicsFeed() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const [mode, setMode] = useState<'trending' | 'new'>('trending');
   const trendingTopics = data.trendingTopics[lang] ?? [];
   const trendingNewTopics = data.trendingNewTopics[lang] ?? [];
+  const rangeDays = displayRange?.days ?? 0;
 
   useEffect(() => {
     if (mode === 'new' && trendingNewTopics.length === 0 && trendingTopics.length > 0) {
@@ -252,7 +250,7 @@ export function TrendingTopicsFeed() {
         <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
           {mode === 'new'
             ? (ru ? 'Новые сигналы' : 'Emerging signals')
-            : selectedWindowLabel(range.days, ru)}
+            : selectedWindowLabel(rangeDays, ru)}
         </span>
       </div>
 
@@ -312,11 +310,11 @@ export function TrendingTopicsFeed() {
 
 export function CommunityBrief() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const [expanded, setExpanded] = useState(false);
   const brief = data.communityBrief;
+  const rangeDays = displayRange?.days ?? 0;
 
   return (
     <div className="bg-white rounded-xl border border-sky-200 p-6 relative overflow-hidden"
@@ -351,7 +349,7 @@ export function CommunityBrief() {
           <div className="flex items-center gap-1.5 mb-2">
             <BarChart3 className="w-3 h-3 text-sky-500" />
             <span className="text-xs text-sky-600" style={{ fontWeight: 600, letterSpacing: '0.03em' }}>
-              {ru ? `Снимок за ${selectedWindowLabel(range.days, ru)}` : `Snapshot for the ${selectedWindowLabel(range.days, ru)}`}
+              {ru ? `Снимок за ${selectedWindowLabel(rangeDays, ru)}` : `Snapshot for the ${selectedWindowLabel(rangeDays, ru)}`}
             </span>
           </div>
           <p className="text-sm text-gray-800 leading-relaxed">

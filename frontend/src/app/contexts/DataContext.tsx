@@ -25,11 +25,8 @@ import type { AppData } from '../types/data';
 import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
-
-interface DashboardRangeRef {
-  from: string;
-  to: string;
-}
+import { resolveDisplayedDashboardRange, sameDashboardRange, type DashboardRangeRef } from '../utils/dashboardDisplayRange';
+import type { DashboardDateRange } from '../utils/dashboardDateRange';
 
 interface DashboardMeta {
   trustedEndDate?: string;
@@ -59,6 +56,7 @@ interface DataContextValue {
   isStaleForSelection: boolean;
   error: string | null;
   dashboardMeta: DashboardMeta | null;
+  displayRange: DashboardDateRange | null;
   selectedRange: DashboardRangeRef | null;
   visibleRange: DashboardRangeRef | null;
   lastSuccessfulRange: DashboardRangeRef | null;
@@ -76,6 +74,7 @@ const DataContext = createContext<DataContextValue>({
   isStaleForSelection: false,
   error: null,
   dashboardMeta: null,
+  displayRange: null,
   selectedRange: null,
   visibleRange: null,
   lastSuccessfulRange: null,
@@ -84,10 +83,6 @@ const DataContext = createContext<DataContextValue>({
 
 function snapshotKeyForRange(from: string, to: string): string {
   return `radar.dashboard.snapshot.v5:${from}:${to}`;
-}
-
-function sameRange(a: DashboardRangeRef | null, b: DashboardRangeRef | null): boolean {
-  return Boolean(a && b && a.from === b.from && a.to === b.to);
 }
 
 function loadSnapshot(from: string, to: string): { data: AppData; meta: DashboardMeta | null } | null {
@@ -215,10 +210,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }, [doFetch, ready]);
 
   const selectedRange: DashboardRangeRef = { from: range.from, to: range.to };
+  const displayRange = resolveDisplayedDashboardRange(range, visibleRange);
   const isStaleForSelection = hasLiveData && (
     error !== null
     || Boolean(dashboardMeta?.isStale)
-    || !sameRange(visibleRange, selectedRange)
+    || !sameDashboardRange(visibleRange, selectedRange)
   );
 
   const value: DataContextValue = {
@@ -229,6 +225,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     isStaleForSelection,
     error,
     dashboardMeta,
+    displayRange,
     selectedRange,
     visibleRange,
     lastSuccessfulRange,

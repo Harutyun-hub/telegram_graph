@@ -3,7 +3,6 @@ import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadius
 import { User, MapPin } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useData } from '../../contexts/DataContext';
-import { useDashboardDateRange } from '../../contexts/DashboardDateRangeContext';
 import { EmptyWidget } from '../ui/EmptyWidget';
 import { WidgetTitle } from '../ui/WidgetTitle';
 
@@ -102,10 +101,10 @@ export function PersonaGallery() {
 
 export function InterestRadar() {
   const { lang } = useLanguage();
-  const { data } = useData();
-  const { range } = useDashboardDateRange();
+  const { data, displayRange } = useData();
   const ru = lang === 'ru';
   const interestData = data.interests[lang] ?? [];
+  const rangeDays = displayRange?.days ?? 0;
 
   if (!interestData.length) return <EmptyWidget widgetId="interest_radar" title={ru ? 'Интересы сообщества' : 'Community Interests'} />;
 
@@ -147,13 +146,13 @@ export function InterestRadar() {
           {ru ? 'Интересы сообщества' : 'Community Interests'}
         </WidgetTitle>
         <span className="w-full text-left text-xs text-gray-500 sm:w-auto sm:text-right">
-          {ru ? `Выбранное окно · ${range.days} дн.` : `Selected window · ${range.days}d`}
+          {ru ? `Выбранное окно · ${rangeDays} дн.` : `Selected window · ${rangeDays}d`}
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-3">
         {ru
-          ? `Доля активных участников, обсуждавших каждую тему интереса в выбранном ${range.days}-дневном окне`
-          : `Share of active members discussing each interest area in the selected ${range.days}-day window`}
+          ? `Доля активных участников, обсуждавших каждую тему интереса в выбранном ${rangeDays}-дневном окне`
+          : `Share of active members discussing each interest area in the selected ${rangeDays}-day window`}
       </p>
 
       <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50/70 px-2 py-4">

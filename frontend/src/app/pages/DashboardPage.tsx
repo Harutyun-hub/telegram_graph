@@ -4,7 +4,6 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
 import { useAdminConfig } from '../contexts/AdminConfigContext';
 import { ADMIN_WIDGET_DEFINITIONS, type AdminWidgetId } from '../admin/catalog';
-import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
 import { WIDGET_TIMEFRAME_POLICY } from '../dashboard/widgetTimeframePolicy';
 import { LockedWidget } from '../components/ui/LockedWidget';
 
@@ -68,10 +67,10 @@ function TierHeader({ tier, isOpen, onToggle }: { tier: TierConfig; isOpen: bool
 
 export function DashboardPage() {
   const { lang } = useLanguage();
-  const { data } = useData();
+  const { data, displayRange } = useData();
   const { isWidgetEnabled } = useAdminConfig();
-  const { range } = useDashboardDateRange();
   const ru = lang === 'ru';
+  const rangeDays = displayRange?.days ?? 0;
   const widgetLabels = Object.fromEntries(
     ADMIN_WIDGET_DEFINITIONS.map((widget) => [widget.id, ru ? widget.labelRu : widget.labelEn]),
   ) as Record<string, string>;
@@ -144,7 +143,7 @@ export function DashboardPage() {
     if (!policy.rangeAware) {
       return <LockedWidget widgetId={widgetId as AdminWidgetId} title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason={policy.lockedReason} />;
     }
-    if (range.days < policy.minDays) {
+    if (rangeDays < policy.minDays) {
       return <LockedWidget widgetId={widgetId as AdminWidgetId} title={widgetLabels[widgetId] || widgetId} minDays={policy.minDays} reason="minimum_window" />;
     }
     return node;
