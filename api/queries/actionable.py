@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import time
 
 from api.dashboard_dates import DashboardDateContext
 from api.db import run_query
 from buffer.supabase_writer import SupabaseWriter
+from loguru import logger
 
 
 _supabase_writer: SupabaseWriter | None = None
@@ -117,6 +119,7 @@ def _parse_iso_datetime(value: object) -> datetime | None:
 
 
 def _paginate(query_factory) -> list[dict]:
+    started_at = time.perf_counter()
     rows: list[dict] = []
     offset = 0
     total_count: int | None = None
@@ -132,20 +135,46 @@ def _paginate(query_factory) -> list[dict]:
         if total_count is not None and len(rows) >= total_count:
             break
         offset += len(batch)
+    logger.info(
+        "Actionable ai_analysis pagination | rows={} total_count={} page_size={} elapsed_ms={}",
+        len(rows),
+        total_count,
+        _SUPABASE_PAGE_SIZE,
+        round((time.perf_counter() - started_at) * 1000, 2),
+    )
     return rows
 
 
 def _fetch_batch_analyses_between(start_iso: str, end_iso: str) -> list[dict]:
-    return _paginate(
-        lambda from_idx, to_idx: _get_supabase_writer().client.table("ai_analysis")
-        .select("telegram_user_id, content_id, raw_llm_response, created_at", count="exact")
-        .eq("content_type", "batch")
-        .not_.is_("telegram_user_id", "null")
-        .gte("created_at", start_iso)
-        .lt("created_at", end_iso)
-        .order("created_at", desc=False)
-        .range(from_idx, to_idx)
-    )
+    started_at = time.perf_counter()
+    try:
+        rows = _paginate(
+            lambda from_idx, to_idx: _get_supabase_writer().client.table("ai_analysis")
+            .select("telegram_user_id, content_id, raw_llm_response, created_at", count="exact")
+            .eq("content_type", "batch")
+            .not_.is_("telegram_user_id", "null")
+            .gte("created_at", start_iso)
+            .lt("created_at", end_iso)
+            .order("created_at", desc=False)
+            .range(from_idx, to_idx)
+        )
+        logger.info(
+            "Actionable batch analysis fetch | start={} end={} rows={} elapsed_ms={}",
+            start_iso,
+            end_iso,
+            len(rows),
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return rows
+    except Exception as exc:
+        logger.warning(
+            "Actionable batch analysis fetch failed | start={} end={} elapsed_ms={} error={}",
+            start_iso,
+            end_iso,
+            round((time.perf_counter() - started_at) * 1000, 2),
+            exc,
+        )
+        return []
 
 
 def _extract_work_signal_type(row: dict) -> str | None:

@@ -16,6 +16,7 @@ from typing import Any
 from api.db import run_query, run_single
 from api.dashboard_dates import DashboardDateContext
 from buffer.supabase_writer import SupabaseWriter
+from loguru import logger
 from utils.taxonomy import TAXONOMY_DOMAINS, iter_topics
 
 
@@ -157,6 +158,7 @@ def _fetch_analysis_rows_cached(
 
 def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 12000) -> list[dict]:
     """Fetch recent analysis rows from Supabase in a bounded paginated scan."""
+    started_at = time.perf_counter()
     try:
         writer = _supabase()
         page_size = 1000
@@ -183,8 +185,26 @@ def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 1200
             if len(chunk) < page_size:
                 break
             offset += page_size
-        return rows[:max_rows]
-    except Exception:
+        bounded_rows = rows[:max_rows]
+        logger.info(
+            "Pulse ai_analysis fetch | start={} end={} rows={} pages={} max_rows={} elapsed_ms={}",
+            start.isoformat(),
+            end.isoformat(),
+            len(bounded_rows),
+            max(1, (len(rows) + page_size - 1) // page_size) if rows else 0,
+            max_rows,
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return bounded_rows
+    except Exception as exc:
+        logger.warning(
+            "Pulse ai_analysis fetch failed | start={} end={} max_rows={} elapsed_ms={} error={}",
+            start.isoformat(),
+            end.isoformat(),
+            max_rows,
+            round((time.perf_counter() - started_at) * 1000, 2),
+            exc,
+        )
         return []
 
 
