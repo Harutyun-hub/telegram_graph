@@ -177,6 +177,36 @@ def _fetch_batch_analyses_between(start_iso: str, end_iso: str) -> list[dict]:
         return []
 
 
+def _fetch_work_signal_rows(ctx: DashboardDateContext) -> list[dict]:
+    started_at = time.perf_counter()
+    try:
+        response = _get_supabase_writer().client.rpc(
+            "dashboard_batch_signal_summary",
+            {
+                "p_previous_start": ctx.previous_start_at.isoformat(),
+                "p_previous_end": ctx.previous_end_at.isoformat(),
+                "p_start": ctx.start_at.isoformat(),
+                "p_end": ctx.end_at.isoformat(),
+            },
+        ).execute()
+        rows = list(response.data or [])
+        logger.info(
+            "Actionable batch signal rpc | cache_key={} rows={} elapsed_ms={}",
+            ctx.cache_key,
+            len(rows),
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return rows
+    except Exception as exc:
+        logger.warning(
+            "Actionable batch signal rpc failed; falling back to row scan | cache_key={} elapsed_ms={} error={}",
+            ctx.cache_key,
+            round((time.perf_counter() - started_at) * 1000, 2),
+            exc,
+        )
+        return []
+
+
 def _extract_work_signal_type(row: dict) -> str | None:
     raw = row.get("raw_llm_response")
     if not isinstance(raw, dict):
@@ -224,41 +254,65 @@ def _window_for_timestamp(ts: datetime, ctx: DashboardDateContext) -> str | None
 
 
 def _build_work_signal_snapshot(ctx: DashboardDateContext) -> dict:
-    start_iso = ctx.previous_start_at.isoformat()
-    end_iso = ctx.end_at.isoformat()
-    analyses = _fetch_batch_analyses_between(start_iso, end_iso)
-    if not analyses:
-        return {"jobSeeking": [], "jobTrends": []}
+    rpc_rows = _fetch_work_signal_rows(ctx)
+    if rpc_rows:
+        current_rows = [
+            {
+                "userId": str(row.get("user_id") or ""),
+                "signalType": str(row.get("signal_type") or ""),
+                "signalCount": int(row.get("signal_count") or 0),
+            }
+            for row in rpc_rows
+            if str(row.get("window_key") or "") == "current"
+        ]
+        previous_rows = [
+            {
+                "userId": str(row.get("user_id") or ""),
+                "signalType": str(row.get("signal_type") or ""),
+                "signalCount": int(row.get("signal_count") or 0),
+            }
+            for row in rpc_rows
+            if str(row.get("window_key") or "") == "previous"
+        ]
+        current_rows.sort(key=lambda row: (-int(row.get("signalCount", 0)), str(row.get("signalType") or ""), str(row.get("userId") or "")))
+        previous_rows.sort(key=lambda row: (-int(row.get("signalCount", 0)), str(row.get("signalType") or ""), str(row.get("userId") or "")))
+    else:
+        start_iso = ctx.previous_start_at.isoformat()
+        end_iso = ctx.end_at.isoformat()
+        analyses = _fetch_batch_analyses_between(start_iso, end_iso)
+        if not analyses:
+            return {"jobSeeking": [], "jobTrends": []}
 
-    current_counts: dict[str, Counter] = defaultdict(Counter)
-    current_latest: dict[str, dict[str, datetime]] = defaultdict(dict)
-    previous_counts: dict[str, Counter] = defaultdict(Counter)
-    previous_latest: dict[str, dict[str, datetime]] = defaultdict(dict)
+        current_counts: dict[str, Counter] = defaultdict(Counter)
+        current_latest: dict[str, dict[str, datetime]] = defaultdict(dict)
+        previous_counts: dict[str, Counter] = defaultdict(Counter)
+        previous_latest: dict[str, dict[str, datetime]] = defaultdict(dict)
 
-    for row in analyses:
-        user_id = str(row.get("telegram_user_id") or "").strip()
-        signal_type = _extract_work_signal_type(row)
-        signal_ts = _parse_iso_datetime(row.get("created_at"))
-        if not user_id or not signal_type or signal_ts is None:
-            continue
+        for row in analyses:
+            user_id = str(row.get("telegram_user_id") or "").strip()
+            signal_type = _extract_work_signal_type(row)
+            signal_ts = _parse_iso_datetime(row.get("created_at"))
+            if not user_id or not signal_type or signal_ts is None:
+                continue
 
-        window = _window_for_timestamp(signal_ts, ctx)
-        if window == "current":
-            bucket_counts = current_counts
-            bucket_latest = current_latest
-        elif window == "previous":
-            bucket_counts = previous_counts
-            bucket_latest = previous_latest
-        else:
-            continue
+            window = _window_for_timestamp(signal_ts, ctx)
+            if window == "current":
+                bucket_counts = current_counts
+                bucket_latest = current_latest
+            elif window == "previous":
+                bucket_counts = previous_counts
+                bucket_latest = previous_latest
+            else:
+                continue
 
-        bucket_counts[user_id][signal_type] += 1
-        prev_latest = bucket_latest[user_id].get(signal_type)
-        if prev_latest is None or signal_ts > prev_latest:
-            bucket_latest[user_id][signal_type] = signal_ts
+            bucket_counts[user_id][signal_type] += 1
+            prev_latest = bucket_latest[user_id].get(signal_type)
+            if prev_latest is None or signal_ts > prev_latest:
+                bucket_latest[user_id][signal_type] = signal_ts
 
-    current_rows = _dominant_signal_rows(current_counts, current_latest)
-    previous_rows = _dominant_signal_rows(previous_counts, previous_latest)
+        current_rows = _dominant_signal_rows(current_counts, current_latest)
+        previous_rows = _dominant_signal_rows(previous_counts, previous_latest)
+
     current_by_type = Counter(str(row.get("signalType") or "") for row in current_rows)
     previous_by_type = Counter(str(row.get("signalType") or "") for row in previous_rows)
 

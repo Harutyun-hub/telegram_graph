@@ -135,6 +135,8 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 _row_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
 _row_cache_lock = threading.Lock()
+_summary_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_summary_cache_lock = threading.Lock()
 _health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _health_cache_lock = threading.Lock()
 
@@ -208,6 +210,110 @@ def _fetch_analysis_rows(*, start: datetime, end: datetime, max_rows: int = 1200
             exc,
         )
         return []
+
+
+def _analysis_summary_from_rows(rows: list[dict]) -> dict[str, Any]:
+    intent = _window_intent_stats(rows)
+    volume = _analysis_volume(rows)
+    return {
+        "analysis_units": int(intent["total"]),
+        "positive": int(intent["positive"]),
+        "negative": int(intent["negative"]),
+        "neutral": int(intent["neutral"]),
+        "unique_users": int(volume["unique_users"]),
+        "posts_analyzed": int(volume["posts_analyzed"]),
+        "comment_scopes_analyzed": int(volume["comment_scopes_analyzed"]),
+    }
+
+
+def _fetch_analysis_summary_cached(*, start: datetime, end: datetime) -> dict[str, Any]:
+    key = (start.isoformat(), end.isoformat())
+    now = time.monotonic()
+    with _summary_cache_lock:
+        stale_keys = [cache_key for cache_key, (ts, _summary) in _summary_cache.items() if (now - ts) >= 30.0]
+        for stale_key in stale_keys:
+            _summary_cache.pop(stale_key, None)
+        entry = _summary_cache.get(key)
+        if entry and (now - entry[0]) < 30.0:
+            return entry[1]
+    summary = _fetch_analysis_summary(start=start, end=end)
+    with _summary_cache_lock:
+        _summary_cache[key] = (now, summary)
+    return summary
+
+
+def _fetch_analysis_summary(*, start: datetime, end: datetime) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    try:
+        writer = _supabase()
+        response = writer.client.rpc(
+            "dashboard_ai_analysis_window_summary",
+            {"p_start": start.isoformat(), "p_end": end.isoformat()},
+        ).execute()
+        row = (response.data or [{}])[0]
+        summary = {
+            "analysis_units": int(row.get("analysis_units") or 0),
+            "positive": int(row.get("positive_rows") or 0),
+            "negative": int(row.get("negative_rows") or 0),
+            "neutral": int(row.get("neutral_rows") or 0),
+            "unique_users": int(row.get("unique_users") or 0),
+            "posts_analyzed": int(row.get("posts_analyzed") or 0),
+            "comment_scopes_analyzed": int(row.get("comment_scopes_analyzed") or 0),
+        }
+        logger.info(
+            "Pulse ai_analysis summary rpc | start={} end={} analysis_units={} elapsed_ms={}",
+            start.isoformat(),
+            end.isoformat(),
+            summary["analysis_units"],
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return summary
+    except Exception as exc:
+        logger.warning(
+            "Pulse ai_analysis summary rpc failed; falling back to row scan | start={} end={} elapsed_ms={} error={}",
+            start.isoformat(),
+            end.isoformat(),
+            round((time.perf_counter() - started_at) * 1000, 2),
+            exc,
+        )
+        return _analysis_summary_from_rows(_fetch_analysis_rows(start=start, end=end))
+
+
+def _summary_to_intent_stats(summary: dict[str, Any]) -> dict[str, Any]:
+    total = int(summary.get("analysis_units") or 0)
+    positive = int(summary.get("positive") or 0)
+    negative = int(summary.get("negative") or 0)
+    neutral = int(summary.get("neutral") or 0)
+    if total <= 0:
+        return {
+            "total": 0,
+            "positive": 0,
+            "negative": 0,
+            "neutral": 0,
+            "positive_share": 0.0,
+            "negative_share": 0.0,
+            "neutral_share": 0.0,
+            "avg_sentiment": 0.0,
+        }
+    return {
+        "total": total,
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "positive_share": positive / total,
+        "negative_share": negative / total,
+        "neutral_share": neutral / total,
+        "avg_sentiment": 0.0,
+    }
+
+
+def _summary_to_volume(summary: dict[str, Any]) -> dict[str, int]:
+    return {
+        "posts_analyzed": int(summary.get("posts_analyzed") or 0),
+        "comment_scopes_analyzed": int(summary.get("comment_scopes_analyzed") or 0),
+        "analysis_units": int(summary.get("analysis_units") or 0),
+        "unique_users": int(summary.get("unique_users") or 0),
+    }
 
 
 def _intent_bucket(intent: str | None, sentiment_score: float) -> str:
@@ -767,14 +873,14 @@ def get_community_health(ctx: DashboardDateContext) -> dict:
         if cached is not None:
             return cached[1]
 
-    current_rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
-    previous_rows = _fetch_analysis_rows_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
+    current_summary = _fetch_analysis_summary_cached(start=ctx.start_at, end=ctx.end_at)
+    previous_summary = _fetch_analysis_summary_cached(start=ctx.previous_start_at, end=ctx.previous_end_at)
 
-    current_intent = _window_intent_stats(current_rows)
-    previous_intent = _window_intent_stats(previous_rows)
+    current_intent = _summary_to_intent_stats(current_summary)
+    previous_intent = _summary_to_intent_stats(previous_summary)
 
-    current_volume = _analysis_volume(current_rows)
-    previous_volume = _analysis_volume(previous_rows)
+    current_volume = _summary_to_volume(current_summary)
+    previous_volume = _summary_to_volume(previous_summary)
 
     current_diversity = _topic_diversity_score(start=ctx.start_at, end=ctx.end_at)
     previous_diversity = _topic_diversity_score(start=ctx.previous_start_at, end=ctx.previous_end_at)
@@ -966,13 +1072,13 @@ def _neo4j_brief_fallback(ctx: DashboardDateContext) -> dict:
 
 def get_community_brief(ctx: DashboardDateContext) -> dict:
     """Community pulse snapshot for non-analyst consumers (simple + evidence-ready)."""
-    rows = _fetch_analysis_rows_cached(start=ctx.start_at, end=ctx.end_at)
+    summary = _fetch_analysis_summary_cached(start=ctx.start_at, end=ctx.end_at)
 
-    if not rows:
+    if int(summary.get("analysis_units") or 0) <= 0:
         return _neo4j_brief_fallback(ctx)
 
-    volume = _analysis_volume(rows)
-    intent = _window_intent_stats(rows)
+    volume = _summary_to_volume(summary)
+    intent = _summary_to_intent_stats(summary)
     top_topic_rows = get_trending_topics(ctx, 5)
     top_topic_names = [str(item.get("name") or "").strip() for item in top_topic_rows if item.get("name")]
 
