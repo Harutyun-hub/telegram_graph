@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import config
 from api import aggregator
 from api import behavioral_briefs
 from api import question_briefs
@@ -203,6 +204,56 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
              patch.object(opportunity_briefs, "_ensure_range_refresh") as ensure_mock:
             self.assertEqual(opportunity_briefs.get_business_opportunity_briefs(ctx=ctx), [])
             ensure_mock.assert_not_called()
+
+    def test_opportunity_materialization_accepts_borderline_score(self) -> None:
+        clusters = [
+            {
+                "clusterId": "opp-1",
+                "topic": "Community Solidarity",
+                "category": "Community Life",
+                "messages": 5,
+                "uniqueUsers": 3,
+                "channels": 2,
+                "trend7dPct": 40,
+                "latestAt": "2026-04-15T10:00:00Z",
+                "signals": [
+                    {
+                        "id": "ev-1",
+                        "message": "Need better volunteer coordination.",
+                        "channel": "chan-a",
+                        "timestamp": "2026-04-15T09:00:00Z",
+                        "kind": "comment",
+                    },
+                    {
+                        "id": "ev-2",
+                        "message": "People keep asking where to post urgent help requests.",
+                        "channel": "chan-b",
+                        "timestamp": "2026-04-15T08:00:00Z",
+                        "kind": "comment",
+                    },
+                ],
+            }
+        ]
+        ai_rows = [
+            {
+                "clusterId": "opp-1",
+                "opportunityEn": "A volunteer matching service for urgent neighborhood support.",
+                "opportunityRu": "Сервис подбора волонтёров для срочной соседской поддержки.",
+                "summaryEn": "People repeatedly ask where to post urgent requests and find volunteers.",
+                "summaryRu": "Люди регулярно спрашивают, где размещать срочные запросы и находить волонтёров.",
+                "deliveryModel": "service",
+                "readiness": "validate_now",
+                "confidence": "low",
+                "confidenceScore": 0.57,
+                "evidenceIds": ["ev-1", "ev-2"],
+            }
+        ]
+
+        with patch.object(config, "OPPORTUNITY_BRIEFS_MIN_CONFIDENCE", 0.55):
+            cards = opportunity_briefs._materialize_cards(clusters, ai_rows, diagnostics={})
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["clusterId"], "opp-1")
 
     def test_dedupe_cards_keeps_unique_ai_cards(self) -> None:
         cards = [

@@ -932,14 +932,12 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict], diagnostics: d
             continue
         if confidence not in {"high", "medium", "low"}:
             confidence = _confidence_label(confidence_score)
-        if confidence == "low":
-            if isinstance(rejection_buckets, dict):
-                _increment_bucket(rejection_buckets, "low_confidence_label")
-            continue
         if confidence_score < float(config.OPPORTUNITY_BRIEFS_MIN_CONFIDENCE):
             if isinstance(rejection_buckets, dict):
                 _increment_bucket(rejection_buckets, "low_confidence_score")
             continue
+        if confidence == "low":
+            confidence = _confidence_label(confidence_score)
 
         evidence_by_id = {_as_str(signal.get("id")): signal for signal in cluster.get("signals", [])}
         selected_ids: list[str] = []
