@@ -4,6 +4,7 @@ behavioral.py — Tier 3: Problems & Satisfaction (pain point monitoring)
 Provides: problems, serviceGaps, satisfactionAreas, moodData, urgencySignals
 """
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 from api.dashboard_dates import DashboardDateContext
@@ -50,6 +51,35 @@ def _window_params(ctx: DashboardDateContext) -> dict[str, object]:
         "end": ctx.end_at.isoformat(),
         "previous_start": ctx.previous_start_at.isoformat(),
         "previous_end": ctx.previous_end_at.isoformat(),
+    }
+
+
+def _brief_window_params(days: int, ctx: DashboardDateContext | None = None) -> dict[str, object]:
+    if ctx is None:
+        window_end = datetime.now(timezone.utc)
+        window_start = window_end - timedelta(days=max(7, days))
+        compare_days = min(7, max(1, days - 1))
+        current_start = max(window_start, window_end - timedelta(days=compare_days))
+        previous_end = current_start
+        previous_start = max(window_start, previous_end - timedelta(days=compare_days))
+        return {
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+            "current_start": current_start.isoformat(),
+            "previous_start": previous_start.isoformat(),
+            "previous_end": previous_end.isoformat(),
+        }
+
+    compare_days = min(7, max(1, ctx.days - 1))
+    current_start = max(ctx.start_at, ctx.end_at - timedelta(days=compare_days))
+    previous_end = current_start
+    previous_start = max(ctx.start_at, previous_end - timedelta(days=compare_days))
+    return {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+        "current_start": current_start.isoformat(),
+        "previous_start": previous_start.isoformat(),
+        "previous_end": previous_end.isoformat(),
     }
 
 
@@ -297,6 +327,7 @@ def get_service_gaps(ctx: DashboardDateContext) -> list[dict]:
 def get_problem_brief_candidates(
     *,
     days: int = 30,
+    ctx: DashboardDateContext | None = None,
     limit_topics: int = 16,
     evidence_per_topic: int = 14,
 ) -> list[dict]:
@@ -311,64 +342,81 @@ def get_problem_brief_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
-        CALL {
-            WITH t
+        CALL (t) {
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND s.label IN $negative_labels
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
+            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
+            OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             RETURN
-                count(*) AS postSignals,
-                count(CASE WHEN s.label = 'Urgent' THEN 1 END) AS postUrgentSignals,
-                count(CASE
-                    WHEN EXISTS {
-                        MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-                        WHERE tag.name IN $distress_tags
-                    } THEN 1 END) AS postDistressSignals,
-                count(CASE WHEN p.posted_at > datetime() - duration('P7D') THEN 1 END) AS postSignals7d,
-                count(CASE WHEN p.posted_at > datetime() - duration('P14D')
-                            AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postSignalsPrev7d,
-                max(p.posted_at) AS latestPostTs
-        }
-
-        CALL {
-            WITH t
+                coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
+                'post' AS kind,
+                left(trim(p.text), 2600) AS text,
+                '' AS parentText,
+                coalesce(ch.title, ch.username, 'unknown') AS channel,
+                '' AS userId,
+                p.posted_at AS ts,
+                s.label AS label,
+                collect(DISTINCT tag.name) AS tagNames
+            UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND s.label IN $negative_labels
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
+            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
+            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
+            OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
             RETURN
-                count(*) AS commentSignals,
-                count(CASE WHEN s.label = 'Urgent' THEN 1 END) AS commentUrgentSignals,
-                count(CASE
-                    WHEN EXISTS {
-                        MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-                        WHERE tag.name IN $distress_tags
-                    } THEN 1 END) AS commentDistressSignals,
-                count(CASE WHEN c.posted_at > datetime() - duration('P7D') THEN 1 END) AS commentSignals7d,
-                count(CASE WHEN c.posted_at > datetime() - duration('P14D')
-                            AND c.posted_at <= datetime() - duration('P7D') THEN 1 END) AS commentSignalsPrev7d,
-                max(c.posted_at) AS latestCommentTs
+                coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
+                'comment' AS kind,
+                left(trim(c.text), 2600) AS text,
+                left(coalesce(p.text, ''), 1200) AS parentText,
+                coalesce(ch.title, ch.username, 'unknown') AS channel,
+                coalesce(toString(u.telegram_user_id), '') AS userId,
+                c.posted_at AS ts,
+                s.label AS label,
+                collect(DISTINCT tag.name) AS tagNames
         }
 
+        WITH t, cat, evidenceId, kind, text, parentText, channel, userId, ts, label,
+             CASE WHEN any(tag IN tagNames WHERE tag IN $distress_tags) THEN 1 ELSE 0 END AS distressHit
         WITH t, cat,
-             (postSignals + commentSignals) AS signalCount,
-             (postUrgentSignals + commentUrgentSignals) AS urgentSignals,
-             (postDistressSignals + commentDistressSignals) AS distressSignals,
-             (postSignals7d + commentSignals7d) AS signals7d,
-             (postSignalsPrev7d + commentSignalsPrev7d) AS signalsPrev7d,
-             CASE
-                 WHEN latestPostTs IS NULL THEN latestCommentTs
-                 WHEN latestCommentTs IS NULL THEN latestPostTs
-                 WHEN latestPostTs >= latestCommentTs THEN latestPostTs
-                 ELSE latestCommentTs
-             END AS latestTs
+             collect({
+                 id: evidenceId,
+                 kind: kind,
+                 text: text,
+                 parentText: parentText,
+                 channel: channel,
+                 userId: userId,
+                 timestamp: toString(ts),
+                 label: label,
+                 distressHit: distressHit,
+                 ts: ts
+             }) AS rows,
+             count(DISTINCT evidenceId) AS signalCount,
+             count(DISTINCT CASE WHEN label = 'Urgent' THEN evidenceId END) AS urgentSignals,
+             count(DISTINCT CASE WHEN distressHit = 1 THEN evidenceId END) AS distressSignals,
+             count(DISTINCT CASE
+                 WHEN ts >= datetime($current_start) AND ts < datetime($end)
+                 THEN evidenceId END) AS signals7d,
+             count(DISTINCT CASE
+                 WHEN ts >= datetime($previous_start) AND ts < datetime($previous_end)
+                 THEN evidenceId END) AS signalsPrev7d,
+             count(DISTINCT CASE
+                 WHEN trim(coalesce(userId, '')) <> '' THEN userId
+                 ELSE 'channel:' + toLower(trim(coalesce(channel, 'unknown')))
+             END) AS uniqueUsers,
+             count(DISTINCT toLower(trim(coalesce(channel, 'unknown')))) AS channelCount,
+             max(ts) AS latestTs
         WHERE signalCount >= 4
-        WITH t, cat, signalCount, urgentSignals, distressSignals, signals7d, signalsPrev7d, latestTs,
+        WITH t, cat, rows, signalCount, urgentSignals, distressSignals, signals7d, signalsPrev7d, uniqueUsers, channelCount, latestTs,
              CASE
                  WHEN urgentSignals >= 8 THEN 'critical'
                  WHEN signalCount >= 20
@@ -384,73 +432,10 @@ def get_problem_brief_candidates(
         ORDER BY (urgentSignals * 3 + distressSignals * 2 + signalCount) DESC
         LIMIT $limit_topics
 
-        CALL {
-            WITH t
-            MATCH (p:Post)-[:TAGGED]->(t)
-            MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration({days: $days})
-              AND s.label IN $negative_labels
-              AND p.text IS NOT NULL
-              AND trim(p.text) <> ''
-            OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-            OPTIONAL MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH p, s, ch, collect(DISTINCT tag.name) AS tagNames
-            RETURN
-                coalesce(p.uuid, 'post:' + elementId(p)) AS evidenceId,
-                'post' AS kind,
-                left(trim(p.text), 2600) AS text,
-                '' AS parentText,
-                coalesce(ch.title, ch.username, 'unknown') AS channel,
-                '' AS userId,
-                toString(p.posted_at) AS timestamp,
-                p.posted_at AS ts,
-                s.label AS label,
-                CASE WHEN any(tagName IN tagNames WHERE tagName IN $distress_tags) THEN 1 ELSE 0 END AS distressHit
-            UNION ALL
-            MATCH (c:Comment)-[:TAGGED]->(t)
-            MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration({days: $days})
-              AND s.label IN $negative_labels
-              AND c.text IS NOT NULL
-              AND trim(c.text) <> ''
-            OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
-            OPTIONAL MATCH (u:User)-[:WROTE]->(c)
-            OPTIONAL MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
-            WITH c, p, u, ch, s, collect(DISTINCT tag.name) AS tagNames
-            RETURN
-                coalesce(c.uuid, 'comment:' + elementId(c)) AS evidenceId,
-                'comment' AS kind,
-                left(trim(c.text), 2600) AS text,
-                left(coalesce(p.text, ''), 1200) AS parentText,
-                coalesce(ch.title, ch.username, 'unknown') AS channel,
-                coalesce(toString(u.telegram_user_id), '') AS userId,
-                toString(c.posted_at) AS timestamp,
-                c.posted_at AS ts,
-                s.label AS label,
-                CASE WHEN any(tagName IN tagNames WHERE tagName IN $distress_tags) THEN 1 ELSE 0 END AS distressHit
-        }
-        WITH t, cat, signalCount, signals7d, signalsPrev7d, trend7dPct, severity, latestTs,
-             collect({
-                id: evidenceId,
-                kind: kind,
-                text: text,
-                parentText: parentText,
-                channel: channel,
-                userId: userId,
-                timestamp: timestamp,
-                label: label,
-                distressHit: distressHit,
-                ts: ts
-             }) AS rows
         UNWIND rows AS row
-        WITH t, cat, signalCount, signals7d, signalsPrev7d, trend7dPct, severity, latestTs, row
+        WITH t, cat, signalCount, uniqueUsers, channelCount, signals7d, signalsPrev7d, trend7dPct, severity, latestTs, row
         ORDER BY row.ts DESC
-        WITH t, cat, signalCount, signals7d, signalsPrev7d, trend7dPct, severity, latestTs,
-             count(DISTINCT CASE
-                 WHEN trim(coalesce(row.userId, '')) <> '' THEN row.userId
-                 ELSE 'channel:' + toLower(trim(coalesce(row.channel, 'unknown')))
-             END) AS uniqueUsers,
-             count(DISTINCT toLower(trim(coalesce(row.channel, 'unknown')))) AS channelCount,
+        WITH t, cat, signalCount, uniqueUsers, channelCount, signals7d, signalsPrev7d, trend7dPct, severity, latestTs,
              collect({
                 id: row.id,
                 kind: row.kind,
@@ -477,12 +462,12 @@ def get_problem_brief_candidates(
         ORDER BY signalCount DESC, latestAt DESC
         """,
         {
-            "days": safe_days,
             "limit_topics": safe_limit_topics,
             "evidence_per_topic": safe_evidence,
             "noise": _NOISY_TOPIC_KEYS,
             "negative_labels": _NEGATIVE_SENTIMENTS,
             "distress_tags": _DISTRESS_TAGS,
+            **_brief_window_params(safe_days, ctx),
         },
     )
 
@@ -490,6 +475,7 @@ def get_problem_brief_candidates(
 def get_service_gap_brief_candidates(
     *,
     days: int = 30,
+    ctx: DashboardDateContext | None = None,
     limit_topics: int = 16,
     evidence_per_topic: int = 14,
 ) -> list[dict]:
@@ -508,7 +494,8 @@ def get_service_gap_brief_candidates(
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
             WITH p, s, toLower(trim(p.text)) AS textLower
@@ -527,9 +514,9 @@ def get_service_gap_brief_candidates(
                     MATCH (p)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
                     WHERE tag.name IN $distress_tags
                 } THEN 1 END) AS postDistressTagCount,
-                count(CASE WHEN askLike = 1 AND p.posted_at > datetime() - duration('P7D') THEN 1 END) AS postAsks7d,
-                count(CASE WHEN askLike = 1 AND p.posted_at > datetime() - duration('P14D')
-                            AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postAsksPrev7d,
+                count(CASE WHEN askLike = 1 AND p.posted_at >= datetime($current_start) AND p.posted_at < datetime($end) THEN 1 END) AS postAsks7d,
+                count(CASE WHEN askLike = 1 AND p.posted_at >= datetime($previous_start)
+                            AND p.posted_at < datetime($previous_end) THEN 1 END) AS postAsksPrev7d,
                 max(CASE WHEN askLike = 1 THEN p.posted_at END) AS latestPostTs
         }
 
@@ -537,7 +524,8 @@ def get_service_gap_brief_candidates(
             WITH t
             MATCH (c:Comment)-[:TAGGED]->(t)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
             OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)
@@ -562,9 +550,9 @@ def get_service_gap_brief_candidates(
                     MATCH (c)-[:HAS_SENTIMENT_TAG]->(tag:SentimentTag)
                     WHERE tag.name IN $distress_tags
                 } THEN 1 END) AS commentDistressTagCount,
-                count(CASE WHEN (askLike = 1 OR supportIntent = 1) AND c.posted_at > datetime() - duration('P7D') THEN 1 END) AS commentAsks7d,
-                count(CASE WHEN (askLike = 1 OR supportIntent = 1) AND c.posted_at > datetime() - duration('P14D')
-                            AND c.posted_at <= datetime() - duration('P7D') THEN 1 END) AS commentAsksPrev7d,
+                count(CASE WHEN (askLike = 1 OR supportIntent = 1) AND c.posted_at >= datetime($current_start) AND c.posted_at < datetime($end) THEN 1 END) AS commentAsks7d,
+                count(CASE WHEN (askLike = 1 OR supportIntent = 1) AND c.posted_at >= datetime($previous_start)
+                            AND c.posted_at < datetime($previous_end) THEN 1 END) AS commentAsksPrev7d,
                 max(CASE WHEN askLike = 1 OR supportIntent = 1 THEN c.posted_at END) AS latestCommentTs
         }
 
@@ -599,7 +587,8 @@ def get_service_gap_brief_candidates(
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
@@ -628,7 +617,8 @@ def get_service_gap_brief_candidates(
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
             MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
             OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
@@ -712,13 +702,13 @@ def get_service_gap_brief_candidates(
         ORDER BY unmetPct DESC, signalCount DESC, latestAt DESC
         """,
         {
-            "days": safe_days,
             "limit_topics": safe_limit_topics,
             "evidence_per_topic": safe_evidence,
             "noise": _NOISY_TOPIC_KEYS,
             "negative_labels": _NEGATIVE_SENTIMENTS,
             "distress_tags": _DISTRESS_TAGS,
             "ask_hints": _SERVICE_REQUEST_HINTS,
+            **_brief_window_params(safe_days, ctx),
         },
     )
 

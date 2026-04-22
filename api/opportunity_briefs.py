@@ -15,6 +15,15 @@ from loguru import logger
 
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
+from api.ai_widget_storage import (
+    build_widget_snapshot_paths,
+    dedupe_cards,
+    load_latest_widget_payload,
+    load_widget_state_payload,
+    save_widget_snapshot_payload,
+    save_widget_state_payload,
+)
+from api.dashboard_dates import DashboardDateContext
 from api.queries import actionable
 from buffer.supabase_writer import SupabaseWriter
 from utils.ai_usage import log_openai_usage
@@ -30,6 +39,8 @@ _cached_cards: list[dict] = []
 _cache_ts: float = 0.0
 _state_cache: dict = {}
 _last_refresh_diagnostics: dict = {}
+_range_refresh_lock = threading.Lock()
+_range_refresh_inflight: set[str] = set()
 
 _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
@@ -306,13 +317,14 @@ def _write_versioned_runtime_json(folder: str, payload: dict) -> bool:
     return saved
 
 
-def _acquire_refresh_lease(ttl_seconds: int) -> bool:
+def _acquire_refresh_lease(ttl_seconds: int, ctx: DashboardDateContext | None = None) -> bool:
     store = _get_runtime_store()
     if not store:
         return True
+    lock_folder = _snapshot_paths(ctx).lock_folder
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    key = f"{_LOCK_FOLDER}/{stamp}-{_INSTANCE_ID}.json"
+    key = f"{lock_folder}/{stamp}-{_INSTANCE_ID}.json"
     payload = {
         "owner": _INSTANCE_ID,
         "createdAt": now.isoformat(),
@@ -321,7 +333,7 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     if not _save_runtime_json(key, payload):
         return True
 
-    rows = store.list_runtime_files(_LOCK_FOLDER)
+    rows = store.list_runtime_files(lock_folder)
     json_rows = [row for row in rows if _as_str(row.get("name"), "").endswith(".json")]
     if not json_rows:
         return True
@@ -334,10 +346,10 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     latest_name = _as_str(latest.get("name"), "")
     own_name = key.rsplit("/", 1)[1]
     if latest_name == own_name:
-        _prune_runtime_folder(_LOCK_FOLDER, keep=20)
+        _prune_runtime_folder(lock_folder, keep=20)
         return True
 
-    latest_lock = store.get_runtime_json(f"{_LOCK_FOLDER}/{latest_name}", default={})
+    latest_lock = store.get_runtime_json(f"{lock_folder}/{latest_name}", default={})
     expires = _as_str(latest_lock.get("expiresAt"), "")
     if expires:
         try:
@@ -346,6 +358,25 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
         except Exception:
             return True
     return False
+
+
+def _ensure_range_refresh(ctx: DashboardDateContext) -> None:
+    key = ctx.cache_key
+    with _range_refresh_lock:
+        if key in _range_refresh_inflight:
+            return
+        _range_refresh_inflight.add(key)
+
+    def _runner() -> None:
+        try:
+            refresh_opportunity_briefs(force=False, ctx=ctx)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Opportunity cards background refresh failed for {ctx.range_label}: {exc}")
+        finally:
+            with _range_refresh_lock:
+                _range_refresh_inflight.discard(key)
+
+    threading.Thread(target=_runner, daemon=True, name=f"opportunity-briefs-{key}").start()
 
 
 def get_admin_prompt_defaults() -> dict[str, str]:
@@ -440,42 +471,73 @@ def _cluster_fingerprint(cluster: dict) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _load_state() -> dict:
+def _snapshot_paths(ctx: DashboardDateContext | None = None):
+    return build_widget_snapshot_paths("opportunity_cards", ctx)
+
+
+def _load_state(ctx: DashboardDateContext | None = None) -> dict:
     global _state_cache
-    if isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
+    if ctx is None and isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
         return _state_cache
-    state = _read_latest_runtime_json(
-        _STATE_FOLDER,
+    state = load_widget_state_payload(
+        _get_runtime_store(),
+        state_path=_snapshot_paths(ctx).state_path,
         default={"schemaVersion": _SCHEMA_VERSION, "updatedAt": None, "clusters": {}},
+        fallback_history_folder=_STATE_FOLDER if ctx is None else None,
     )
     if not isinstance(state, dict):
         state = {"schemaVersion": _SCHEMA_VERSION, "updatedAt": None, "clusters": {}}
     if not isinstance(state.get("clusters"), dict):
         state["clusters"] = {}
     state["schemaVersion"] = _SCHEMA_VERSION
-    _state_cache = state
+    if ctx is None:
+        _state_cache = state
     return state
 
 
-def _save_state(state: dict) -> bool:
+def _save_state(state: dict, ctx: DashboardDateContext | None = None) -> bool:
     global _state_cache
     state["schemaVersion"] = _SCHEMA_VERSION
     state["updatedAt"] = _now_iso()
-    saved = _write_versioned_runtime_json(_STATE_FOLDER, state)
+    saved = save_widget_state_payload(
+        _get_runtime_store(),
+        state_path=_snapshot_paths(ctx).state_path,
+        payload=state,
+    )
     if saved:
-        _state_cache = state
+        if ctx is None:
+            _state_cache = state
         return True
     logger.error("Opportunity cards state persistence failed verification")
     return False
 
 
-def _load_snapshot_cards(*, diagnostics: dict | None = None, stage: str = "loadedCards") -> list[dict]:
-    snapshot = _read_latest_runtime_json(_SNAPSHOT_FOLDER, default={"cards": []})
+def _load_snapshot_cards_with_status(
+    *,
+    ctx: DashboardDateContext | None = None,
+    diagnostics: dict | None = None,
+    stage: str = "loadedCards",
+) -> tuple[list[dict], bool]:
+    snapshot, exists = load_latest_widget_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
+        default={"cards": []},
+    )
     cards = snapshot.get("cards") if isinstance(snapshot, dict) else []
     parsed = cards if isinstance(cards, list) else []
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})[stage] = len(parsed)
-    return parsed
+    return parsed, exists
+
+
+def _load_snapshot_cards(
+    *,
+    ctx: DashboardDateContext | None = None,
+    diagnostics: dict | None = None,
+    stage: str = "loadedCards",
+) -> list[dict]:
+    return _load_snapshot_cards_with_status(ctx=ctx, diagnostics=diagnostics, stage=stage)[0]
 
 
 def _should_keep_current_snapshot(
@@ -505,8 +567,18 @@ def _should_keep_current_snapshot(
     return False, ""
 
 
-def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
-    current_snapshot = _read_latest_runtime_json(_SNAPSHOT_FOLDER, default={"cards": []})
+def _save_snapshot_cards(
+    cards: list[dict],
+    metadata: dict | None = None,
+    diagnostics: dict | None = None,
+    ctx: DashboardDateContext | None = None,
+) -> bool:
+    current_snapshot, _ = load_latest_widget_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
+        default={"cards": []},
+    )
     keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, cards, metadata)
     if keep_current:
         current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
@@ -528,8 +600,15 @@ def _save_snapshot_cards(cards: list[dict], metadata: dict | None = None, diagno
         payload["meta"] = metadata
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
-    saved = _write_versioned_runtime_json(_SNAPSHOT_FOLDER, payload)
-    readback_cards = _load_snapshot_cards(diagnostics=diagnostics, stage="readbackCards") if saved else []
+    saved = save_widget_snapshot_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
+        payload=payload,
+        instance_id=_INSTANCE_ID,
+        keep=12,
+    )
+    readback_cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics, stage="readbackCards") if saved else []
     readback_ok = len(readback_cards) == len(cards)
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeSucceeded"] = bool(saved and readback_ok)
@@ -943,54 +1022,69 @@ def refresh_opportunity_briefs_with_diagnostics(*, force: bool = False) -> dict:
     return get_opportunity_briefs_diagnostics()
 
 
-def refresh_opportunity_briefs(*, force: bool = False) -> list[dict]:
+def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext | None = None) -> list[dict]:
     global _cached_cards, _cache_ts
-    with _cache_lock:
-        last_good_cards = list(_cached_cards)
+    if ctx is None:
+        with _cache_lock:
+            last_good_cards = list(_cached_cards)
+    else:
+        last_good_cards, _ = _load_snapshot_cards_with_status(ctx=ctx)
+        if not last_good_cards:
+            last_good_cards = _load_snapshot_cards()
 
     diagnostics = _new_refresh_diagnostics(force=force)
     lease_ttl = max(300, int(config.OPPORTUNITY_BRIEFS_REFRESH_MINUTES) * 60)
 
-    if not force and not _acquire_refresh_lease(lease_ttl):
+    if not force and not _acquire_refresh_lease(lease_ttl, ctx=ctx):
         diagnostics["exitReason"] = "lease_skipped"
-        cards = _load_snapshot_cards(diagnostics=diagnostics)
+        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
+        if not cards and ctx is not None:
+            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
-            with _cache_lock:
-                _cached_cards = cards
-                _cache_ts = time.time()
+            if ctx is None:
+                with _cache_lock:
+                    _cached_cards = cards
+                    _cache_ts = time.time()
             return cards
         return []
 
     if not _client or not _runtime_opportunity_briefs_feature_enabled():
         diagnostics["exitReason"] = "ai_disabled_or_unavailable"
-        cards = _load_snapshot_cards(diagnostics=diagnostics)
+        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
+        if not cards and ctx is not None:
+            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
-            with _cache_lock:
-                _cached_cards = cards
-                _cache_ts = time.time()
+            if ctx is None:
+                with _cache_lock:
+                    _cached_cards = cards
+                    _cache_ts = time.time()
             return cards
         return []
 
     try:
         candidates = actionable.get_business_opportunity_brief_candidates(
-            days=config.OPPORTUNITY_BRIEFS_WINDOW_DAYS,
+            days=(ctx.days if ctx is not None else config.OPPORTUNITY_BRIEFS_WINDOW_DAYS),
+            ctx=ctx,
             limit_topics=config.OPPORTUNITY_BRIEFS_MAX_TOPICS,
             evidence_per_topic=config.OPPORTUNITY_BRIEFS_EVIDENCE_PER_TOPIC,
         )
     except Exception as e:
         diagnostics["exitReason"] = "candidate_error"
         diagnostics["error"] = str(e)
-        cards = _load_snapshot_cards(diagnostics=diagnostics)
+        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
+        if not cards and ctx is not None:
+            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
-            with _cache_lock:
-                _cached_cards = cards
-                _cache_ts = time.time()
+            if ctx is None:
+                with _cache_lock:
+                    _cached_cards = cards
+                    _cache_ts = time.time()
             return cards
         return []
 
@@ -1006,7 +1100,7 @@ def refresh_opportunity_briefs(*, force: bool = False) -> list[dict]:
         _store_refresh_diagnostics(diagnostics)
         return []
 
-    state = _load_state()
+    state = _load_state(ctx=ctx)
     cluster_state = state.get("clusters") if isinstance(state.get("clusters"), dict) else {}
     active_ids = {_as_str(cluster.get("clusterId")) for cluster in clusters if _as_str(cluster.get("clusterId"))}
 
@@ -1091,13 +1185,17 @@ def refresh_opportunity_briefs(*, force: bool = False) -> list[dict]:
         ),
         reverse=True,
     )
-    final_cards = final_cards[: int(config.OPPORTUNITY_BRIEFS_MAX_BRIEFS)]
+    final_cards = dedupe_cards(
+        final_cards,
+        title_fields=["opportunityEn", "opportunityRu"],
+        max_cards=int(config.OPPORTUNITY_BRIEFS_MAX_BRIEFS),
+    )
 
     diagnostics["stages"]["finalCards"] = len(final_cards)
     diagnostics["stages"]["reusedClusters"] = len(clusters) - len(changed_clusters)
 
     state["clusters"] = next_cluster_state
-    state_saved = _save_state(state)
+    state_saved = _save_state(state, ctx=ctx)
     snapshot_saved = False
     published_cards = last_good_cards
     if state_saved:
@@ -1108,15 +1206,20 @@ def refresh_opportunity_briefs(*, force: bool = False) -> list[dict]:
                 "changedClusters": len(changed_clusters),
                 "reusedClusters": len(clusters) - len(changed_clusters),
                 "cards": len(final_cards),
+                "scope": "exact_range" if ctx is not None else "latest_global",
+                "windowStart": ctx.from_date.isoformat() if ctx is not None else None,
+                "windowEnd": ctx.to_date.isoformat() if ctx is not None else None,
             },
             diagnostics=diagnostics,
+            ctx=ctx,
         )
         if snapshot_saved:
-            published_cards = _load_snapshot_cards(diagnostics=diagnostics, stage="publishedCards")
+            published_cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics, stage="publishedCards")
     if state_saved and snapshot_saved:
-        with _cache_lock:
-            _cached_cards = published_cards
-            _cache_ts = time.time()
+        if ctx is None:
+            with _cache_lock:
+                _cached_cards = published_cards
+                _cache_ts = time.time()
         diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if published_cards else "zero_cards_after_materialization")
         result_cards = published_cards
     else:
@@ -1138,10 +1241,16 @@ def refresh_opportunity_briefs(*, force: bool = False) -> list[dict]:
     return result_cards
 
 
-def get_business_opportunity_briefs(*, force_refresh: bool = False) -> list[dict]:
+def get_business_opportunity_briefs(*, force_refresh: bool = False, ctx: DashboardDateContext | None = None) -> list[dict]:
     global _cached_cards, _cache_ts
     if force_refresh:
-        return refresh_opportunity_briefs(force=True)
+        return refresh_opportunity_briefs(force=True, ctx=ctx)
+    if ctx is not None:
+        cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
+        if exists and cards:
+            return cards
+        _ensure_range_refresh(ctx)
+        return _load_snapshot_cards()
     now = time.time()
     with _cache_lock:
         if _cached_cards and _cache_valid(now):

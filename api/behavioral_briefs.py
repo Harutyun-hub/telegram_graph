@@ -16,6 +16,15 @@ from loguru import logger
 
 import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
+from api.ai_widget_storage import (
+    build_widget_snapshot_paths,
+    dedupe_cards,
+    load_latest_widget_payload,
+    load_widget_state_payload,
+    save_widget_snapshot_payload,
+    save_widget_state_payload,
+)
+from api.dashboard_dates import DashboardDateContext
 from api.queries import behavioral
 from buffer.supabase_writer import SupabaseWriter
 from utils.ai_usage import log_openai_usage
@@ -31,6 +40,8 @@ _cached_payload: dict = {"problemBriefs": [], "serviceGapBriefs": []}
 _cache_ts: float = 0.0
 _state_cache: dict = {}
 _last_refresh_diagnostics: dict = {}
+_range_refresh_lock = threading.Lock()
+_range_refresh_inflight: set[str] = set()
 
 _runtime_store_lock = threading.Lock()
 _runtime_store: SupabaseWriter | None = None
@@ -685,14 +696,15 @@ def _prune_runtime_folder(folder: str, keep: int = 12) -> None:
         store.delete_runtime_files(delete_paths)
 
 
-def _acquire_refresh_lease(ttl_seconds: int) -> bool:
+def _acquire_refresh_lease(ttl_seconds: int, ctx: DashboardDateContext | None = None) -> bool:
     store = _get_runtime_store()
     if not store:
         return True
 
+    lock_folder = _snapshot_paths(ctx).lock_folder
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    key = f"{_LOCK_FOLDER}/{stamp}-{_INSTANCE_ID}.json"
+    key = f"{lock_folder}/{stamp}-{_INSTANCE_ID}.json"
     payload = {
         "owner": _INSTANCE_ID,
         "createdAt": now.isoformat(),
@@ -702,7 +714,7 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     if not store.save_runtime_json(key, payload):
         return True
 
-    rows = store.list_runtime_files(_LOCK_FOLDER)
+    rows = store.list_runtime_files(lock_folder)
     json_rows = [row for row in rows if _as_str(row.get("name"), "").endswith(".json")]
     if not json_rows:
         return True
@@ -716,10 +728,10 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     own_name = key.rsplit("/", 1)[1]
     latest_name = _as_str(latest.get("name"), "")
     if latest_name == own_name:
-        _prune_runtime_folder(_LOCK_FOLDER, keep=20)
+        _prune_runtime_folder(lock_folder, keep=20)
         return True
 
-    latest_lock = store.get_runtime_json(f"{_LOCK_FOLDER}/{latest_name}", default={})
+    latest_lock = store.get_runtime_json(f"{lock_folder}/{latest_name}", default={})
     expires = _as_str(latest_lock.get("expiresAt"), "")
     if expires:
         try:
@@ -731,19 +743,44 @@ def _acquire_refresh_lease(ttl_seconds: int) -> bool:
     return False
 
 
-def _load_state() -> dict:
+def _ensure_range_refresh(ctx: DashboardDateContext) -> None:
+    key = ctx.cache_key
+    with _range_refresh_lock:
+        if key in _range_refresh_inflight:
+            return
+        _range_refresh_inflight.add(key)
+
+    def _runner() -> None:
+        try:
+            refresh_behavioral_briefs(force=False, ctx=ctx)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Behavioral cards background refresh failed for {ctx.range_label}: {exc}")
+        finally:
+            with _range_refresh_lock:
+                _range_refresh_inflight.discard(key)
+
+    threading.Thread(target=_runner, daemon=True, name=f"behavioral-briefs-{key}").start()
+
+
+def _snapshot_paths(ctx: DashboardDateContext | None = None):
+    return build_widget_snapshot_paths("behavioral_cards", ctx)
+
+
+def _load_state(ctx: DashboardDateContext | None = None) -> dict:
     global _state_cache
-    if isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
+    if ctx is None and isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
         return _state_cache
 
-    state = _read_latest_runtime_json(
-        _STATE_FOLDER,
+    state = load_widget_state_payload(
+        _get_runtime_store(),
+        state_path=_snapshot_paths(ctx).state_path,
         default={
             "schemaVersion": _SCHEMA_VERSION,
             "updatedAt": None,
             "problemClusters": {},
             "serviceClusters": {},
         },
+        fallback_history_folder=_STATE_FOLDER if ctx is None else None,
     )
     if not isinstance(state, dict):
         state = {
@@ -757,29 +794,41 @@ def _load_state() -> dict:
     if not isinstance(state.get("serviceClusters"), dict):
         state["serviceClusters"] = {}
     state["schemaVersion"] = _SCHEMA_VERSION
-    _state_cache = state
+    if ctx is None:
+        _state_cache = state
     return state
 
 
-def _save_state(state: dict) -> bool:
+def _save_state(state: dict, ctx: DashboardDateContext | None = None) -> bool:
     global _state_cache
     state["schemaVersion"] = _SCHEMA_VERSION
     state["updatedAt"] = _now_iso()
-    saved = _write_versioned_runtime_json(_STATE_FOLDER, state)
+    saved = save_widget_state_payload(
+        _get_runtime_store(),
+        state_path=_snapshot_paths(ctx).state_path,
+        payload=state,
+    )
     if saved:
-        _state_cache = state
+        if ctx is None:
+            _state_cache = state
         return True
     logger.error("Behavioral cards state persistence failed verification")
     return False
 
 
-def _load_snapshot_payload(*, diagnostics: dict | None = None) -> dict:
-    payload = _read_latest_runtime_json(
-        _SNAPSHOT_FOLDER,
+def _load_snapshot_payload_with_status(
+    *,
+    ctx: DashboardDateContext | None = None,
+    diagnostics: dict | None = None,
+) -> tuple[dict, bool]:
+    payload, exists = load_latest_widget_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
         default={"problemBriefs": [], "serviceGapBriefs": []},
     )
     if not isinstance(payload, dict):
-        return {"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []}
+        return {"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []}, False
     problems = payload.get("problemBriefs") if isinstance(payload.get("problemBriefs"), list) else []
     services = payload.get("serviceGapBriefs") if isinstance(payload.get("serviceGapBriefs"), list) else []
     urgency = payload.get("urgencyBriefs") if isinstance(payload.get("urgencyBriefs"), list) else []
@@ -788,7 +837,11 @@ def _load_snapshot_payload(*, diagnostics: dict | None = None) -> dict:
         snapshot["loadedProblemCards"] = len(problems)
         snapshot["loadedServiceCards"] = len(services)
         snapshot["loadedUrgencyCards"] = len(urgency)
-    return {"problemBriefs": problems, "serviceGapBriefs": services, "urgencyBriefs": urgency}
+    return {"problemBriefs": problems, "serviceGapBriefs": services, "urgencyBriefs": urgency}, exists
+
+
+def _load_snapshot_payload(*, ctx: DashboardDateContext | None = None, diagnostics: dict | None = None) -> dict:
+    return _load_snapshot_payload_with_status(ctx=ctx, diagnostics=diagnostics)[0]
 
 
 def _should_keep_current_snapshot(
@@ -820,9 +873,16 @@ def _should_keep_current_snapshot(
     return False, ""
 
 
-def _save_snapshot_payload(payload: dict, metadata: dict | None = None, diagnostics: dict | None = None) -> bool:
-    current_snapshot = _read_latest_runtime_json(
-        _SNAPSHOT_FOLDER,
+def _save_snapshot_payload(
+    payload: dict,
+    metadata: dict | None = None,
+    diagnostics: dict | None = None,
+    ctx: DashboardDateContext | None = None,
+) -> bool:
+    current_snapshot, _ = load_latest_widget_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
         default={"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []},
     )
     keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, payload, metadata)
@@ -849,8 +909,15 @@ def _save_snapshot_payload(payload: dict, metadata: dict | None = None, diagnost
         out["meta"] = metadata
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
-    saved = _write_versioned_runtime_json(_SNAPSHOT_FOLDER, out)
-    readback = _load_snapshot_payload(diagnostics=diagnostics) if saved else {}
+    saved = save_widget_snapshot_payload(
+        _get_runtime_store(),
+        latest_path=_snapshot_paths(ctx).latest_path,
+        history_folder=_snapshot_paths(ctx).history_folder,
+        payload=out,
+        instance_id=_INSTANCE_ID,
+        keep=12,
+    )
+    readback = _load_snapshot_payload(ctx=ctx, diagnostics=diagnostics) if saved else {}
     readback_ok = (
         len(readback.get("problemBriefs") or []) == len(out["problemBriefs"])
         and len(readback.get("serviceGapBriefs") or []) == len(out["serviceGapBriefs"])
@@ -1125,7 +1192,7 @@ def _synthesize_problem_cards(clusters: list[dict]) -> list[dict]:
     if not clusters:
         return []
     if not _client or not _runtime_behavioral_feature_enabled():
-        return _deterministic_problem_cards(clusters)
+        return []
     system_prompt = _runtime_prompt("behavioral_briefs.problem_prompt", BEHAVIORAL_PROBLEM_PROMPT)
 
     out: list[dict] = []
@@ -1165,8 +1232,6 @@ def _synthesize_problem_cards(clusters: list[dict]) -> list[dict]:
         except Exception as e:
             logger.warning(f"Problem cards synthesis failed for {cluster.get('clusterId')}: {e}")
 
-    if not out:
-        return _deterministic_problem_cards(clusters)
     return out
 
 
@@ -1483,8 +1548,6 @@ def _refresh_kind(
         if kind == "problem":
             ai_rows = _synthesize_problem_cards(changed_clusters)
             new_cards = _materialize_problem_cards(changed_clusters, ai_rows)
-            if not new_cards:
-                new_cards = _materialize_problem_cards(changed_clusters, _deterministic_problem_cards(changed_clusters))
         else:
             ai_rows = _synthesize_service_cards(changed_clusters)
             new_cards = _materialize_service_cards(changed_clusters, ai_rows)
@@ -1552,7 +1615,14 @@ def _refresh_kind(
         ),
         reverse=True,
     )
-    final_cards = final_cards[: int(config.BEHAVIORAL_BRIEFS_MAX_CARDS)]
+    if kind == "problem":
+        final_cards = dedupe_cards(
+            final_cards,
+            title_fields=["problemEn", "problemRu"],
+            max_cards=int(config.BEHAVIORAL_BRIEFS_MAX_CARDS),
+        )
+    else:
+        final_cards = final_cards[: int(config.BEHAVIORAL_BRIEFS_MAX_CARDS)]
 
     return final_cards, next_cluster_state, len(changed_clusters)
 
@@ -1582,36 +1652,46 @@ def refresh_behavioral_briefs_with_diagnostics(*, force: bool = False) -> dict:
     return get_behavioral_briefs_diagnostics()
 
 
-def refresh_behavioral_briefs(*, force: bool = False) -> dict:
+def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext | None = None) -> dict:
     """Materialize W8/W9 AI cards and persist snapshot/state for request-time reads."""
     global _cached_payload, _cache_ts
-    with _cache_lock:
-        last_good_payload = {
-            "problemBriefs": list(_cached_payload.get("problemBriefs") or []),
-            "serviceGapBriefs": list(_cached_payload.get("serviceGapBriefs") or []),
-            "urgencyBriefs": list(_cached_payload.get("urgencyBriefs") or []),
-        }
+    if ctx is None:
+        with _cache_lock:
+            last_good_payload = {
+                "problemBriefs": list(_cached_payload.get("problemBriefs") or []),
+                "serviceGapBriefs": list(_cached_payload.get("serviceGapBriefs") or []),
+                "urgencyBriefs": list(_cached_payload.get("urgencyBriefs") or []),
+            }
+    else:
+        last_good_payload, _ = _load_snapshot_payload_with_status(ctx=ctx)
+        if not any(last_good_payload.values()):
+            last_good_payload = _load_snapshot_payload()
     diagnostics = _new_refresh_diagnostics(force=force)
 
     lease_ttl = max(300, int(config.BEHAVIORAL_BRIEFS_REFRESH_MINUTES) * 60)
-    if not force and not _acquire_refresh_lease(lease_ttl):
+    if not force and not _acquire_refresh_lease(lease_ttl, ctx=ctx):
         logger.info("Behavioral cards materialization skipped: another instance holds active lease")
         diagnostics["exitReason"] = "lease_skipped"
-        payload = _load_snapshot_payload(diagnostics=diagnostics)
-        with _cache_lock:
-            _cached_payload = payload
-            _cache_ts = time.time()
+        payload = _load_snapshot_payload(ctx=ctx, diagnostics=diagnostics)
+        if not any(payload.values()) and ctx is not None:
+            payload = _load_snapshot_payload(diagnostics=diagnostics)
+        if ctx is None:
+            with _cache_lock:
+                _cached_payload = payload
+                _cache_ts = time.time()
         _store_refresh_diagnostics(diagnostics)
         return payload
 
     try:
         problem_candidates = behavioral.get_problem_brief_candidates(
-            days=config.BEHAVIORAL_BRIEFS_WINDOW_DAYS,
+            days=(ctx.days if ctx is not None else config.BEHAVIORAL_BRIEFS_WINDOW_DAYS),
+            ctx=ctx,
             limit_topics=config.BEHAVIORAL_BRIEFS_MAX_TOPICS,
             evidence_per_topic=config.BEHAVIORAL_BRIEFS_EVIDENCE_PER_TOPIC,
         )
         service_candidates = behavioral.get_service_gap_brief_candidates(
-            days=config.BEHAVIORAL_BRIEFS_WINDOW_DAYS,
+            days=(ctx.days if ctx is not None else config.BEHAVIORAL_BRIEFS_WINDOW_DAYS),
+            ctx=ctx,
             limit_topics=config.BEHAVIORAL_BRIEFS_MAX_TOPICS,
             evidence_per_topic=config.BEHAVIORAL_BRIEFS_EVIDENCE_PER_TOPIC,
         )
@@ -1620,10 +1700,13 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
         logger.warning(f"Behavioral cards candidate retrieval failed: {e}")
         diagnostics["exitReason"] = "candidate_error"
         diagnostics["error"] = str(e)
-        payload = _load_snapshot_payload(diagnostics=diagnostics)
-        with _cache_lock:
-            _cached_payload = payload
-            _cache_ts = time.time()
+        payload = _load_snapshot_payload(ctx=ctx, diagnostics=diagnostics)
+        if not any(payload.values()) and ctx is not None:
+            payload = _load_snapshot_payload(diagnostics=diagnostics)
+        if ctx is None:
+            with _cache_lock:
+                _cached_payload = payload
+                _cache_ts = time.time()
         _store_refresh_diagnostics(diagnostics)
         return payload
     diagnostics["stages"]["problemCandidateRows"] = len(problem_candidates)
@@ -1635,7 +1718,7 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
     diagnostics["stages"]["problemClusters"] = len(problem_clusters)
     diagnostics["stages"]["serviceClusters"] = len(service_clusters)
 
-    state = _load_state()
+    state = _load_state(ctx=ctx)
     raw_problem_state = state.get("problemClusters")
     raw_service_state = state.get("serviceClusters")
     problem_state: dict = raw_problem_state if isinstance(raw_problem_state, dict) else {}
@@ -1656,7 +1739,10 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
     diagnostics["stages"]["changedProblemClusters"] = changed_problem
     diagnostics["stages"]["changedServiceClusters"] = changed_service
 
-    urgency_cards = _synthesize_urgency_cards(urgency_candidates)
+    if ctx is None:
+        urgency_cards = _synthesize_urgency_cards(urgency_candidates)
+    else:
+        urgency_cards = _load_snapshot_payload().get("urgencyBriefs") or []
     diagnostics["stages"]["problemCards"] = len(problem_cards)
     diagnostics["stages"]["serviceCards"] = len(service_cards)
     diagnostics["stages"]["urgencyCards"] = len(urgency_cards)
@@ -1669,7 +1755,7 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
 
     state["problemClusters"] = next_problem_state
     state["serviceClusters"] = next_service_state
-    state_saved = _save_state(state)
+    state_saved = _save_state(state, ctx=ctx)
     snapshot_saved = False
     published_payload = last_good_payload
     if state_saved:
@@ -1682,20 +1768,25 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
                 "changedServiceClusters": changed_service,
                 "problemCards": len(problem_cards),
                 "serviceCards": len(service_cards),
+                "scope": "exact_range" if ctx is not None else "latest_global",
+                "windowStart": ctx.from_date.isoformat() if ctx is not None else None,
+                "windowEnd": ctx.to_date.isoformat() if ctx is not None else None,
             },
             diagnostics=diagnostics,
+            ctx=ctx,
         )
         if snapshot_saved:
-            published_payload = _load_snapshot_payload(diagnostics=diagnostics)
+            published_payload = _load_snapshot_payload(ctx=ctx, diagnostics=diagnostics)
     if not state_saved:
         diagnostics["error"] = "Behavioral cards state could not be persisted and verified"
     elif not snapshot_saved:
         diagnostics["error"] = "Behavioral cards snapshot could not be persisted and verified"
 
     if state_saved and snapshot_saved:
-        with _cache_lock:
-            _cached_payload = published_payload
-            _cache_ts = time.time()
+        if ctx is None:
+            with _cache_lock:
+                _cached_payload = published_payload
+                _cache_ts = time.time()
         diagnostics["exitReason"] = "ok"
         result_payload = published_payload
     else:
@@ -1718,12 +1809,21 @@ def refresh_behavioral_briefs(*, force: bool = False) -> dict:
     return result_payload
 
 
-def get_behavioral_briefs(*, force_refresh: bool = False) -> dict:
+def get_behavioral_briefs(*, force_refresh: bool = False, ctx: DashboardDateContext | None = None) -> dict:
     """Read materialized behavioral cards (no live LLM in request path)."""
     global _cached_payload, _cache_ts
 
     if force_refresh:
-        return refresh_behavioral_briefs(force=True)
+        return refresh_behavioral_briefs(force=True, ctx=ctx)
+
+    if ctx is not None:
+        payload, exists = _load_snapshot_payload_with_status(ctx=ctx)
+        if exists and (payload.get("problemBriefs") or payload.get("serviceGapBriefs")):
+            if not payload.get("urgencyBriefs"):
+                payload["urgencyBriefs"] = _load_snapshot_payload().get("urgencyBriefs") or []
+            return payload
+        _ensure_range_refresh(ctx)
+        return _load_snapshot_payload()
 
     now = time.time()
     with _cache_lock:

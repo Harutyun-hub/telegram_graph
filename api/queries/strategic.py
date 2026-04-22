@@ -7,7 +7,7 @@ questionBriefCandidates, lifecycleStages
 from __future__ import annotations
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import config
 from api.dashboard_dates import DashboardDateContext
@@ -334,6 +334,7 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
 def get_question_brief_candidates(
     *,
     days: int = RETENTION_DAYS,
+    ctx: DashboardDateContext | None = None,
     limit_topics: int = 14,
     evidence_per_topic: int = 14,
 ) -> list[dict]:
@@ -341,6 +342,21 @@ def get_question_brief_candidates(
     safe_days = max(7, min(int(days), 90))
     safe_limit_topics = max(4, min(int(limit_topics), 40))
     safe_evidence = max(6, min(int(evidence_per_topic), 24))
+
+    if ctx is None:
+        window_end = datetime.now(timezone.utc)
+        window_start = window_end - timedelta(days=safe_days)
+        compare_days = min(7, max(1, safe_days - 1))
+        current_start = max(window_start, window_end - timedelta(days=compare_days))
+        previous_end = current_start
+        previous_start = max(window_start, previous_end - timedelta(days=compare_days))
+    else:
+        window_start = ctx.start_at
+        window_end = ctx.end_at
+        compare_days = min(7, max(1, ctx.days - 1))
+        current_start = max(window_start, window_end - timedelta(days=compare_days))
+        previous_end = current_start
+        previous_start = max(window_start, previous_end - timedelta(days=compare_days))
 
     return run_query(
         """
@@ -351,23 +367,25 @@ def get_question_brief_candidates(
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
             RETURN
                 count(*) AS postSignals,
-                count(CASE WHEN p.posted_at > datetime() - duration('P7D') THEN 1 END) AS postSignals7d,
-                count(CASE WHEN p.posted_at > datetime() - duration('P14D')
-                            AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postSignalsPrev7d,
+                count(CASE WHEN p.posted_at >= datetime($current_start) AND p.posted_at < datetime($end) THEN 1 END) AS postSignals7d,
+                count(CASE WHEN p.posted_at >= datetime($previous_start)
+                            AND p.posted_at < datetime($previous_end) THEN 1 END) AS postSignalsPrev7d,
                 collect(DISTINCT coalesce(ch.title, ch.username, '')) AS postChannels
         }
 
         CALL {
             WITH t
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -376,9 +394,9 @@ def get_question_brief_candidates(
             RETURN
                 count(*) AS commentSignals,
                 count(DISTINCT toString(u.telegram_user_id)) AS uniqueUsers,
-                count(CASE WHEN c.posted_at > datetime() - duration('P7D') THEN 1 END) AS commentSignals7d,
-                count(CASE WHEN c.posted_at > datetime() - duration('P14D')
-                            AND c.posted_at <= datetime() - duration('P7D') THEN 1 END) AS commentSignalsPrev7d,
+                count(CASE WHEN c.posted_at >= datetime($current_start) AND c.posted_at < datetime($end) THEN 1 END) AS commentSignals7d,
+                count(CASE WHEN c.posted_at >= datetime($previous_start)
+                            AND c.posted_at < datetime($previous_end) THEN 1 END) AS commentSignalsPrev7d,
                 collect(DISTINCT coalesce(ch.title, ch.username, '')) AS commentChannels
         }
 
@@ -403,7 +421,8 @@ def get_question_brief_candidates(
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
               AND p.text CONTAINS '?'
@@ -418,7 +437,8 @@ def get_question_brief_candidates(
                 p.posted_at AS ts
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
               AND c.text CONTAINS '?'
@@ -463,7 +483,11 @@ def get_question_brief_candidates(
         ORDER BY signalCount DESC, latestAt DESC
         """,
         {
-            "days": safe_days,
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+            "current_start": current_start.isoformat(),
+            "previous_start": previous_start.isoformat(),
+            "previous_end": previous_end.isoformat(),
             "limit_topics": safe_limit_topics,
             "evidence_per_topic": safe_evidence,
         },

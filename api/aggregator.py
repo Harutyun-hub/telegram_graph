@@ -480,14 +480,14 @@ def _tier_strategic(_ctx: DashboardDateContext) -> dict:
         "trendData": trend_lines,
         "heatmap": _safe("heatmap", lambda: strategic.get_heatmap(_ctx), fallback["heatmap"]),
         "questionCategories": _safe("questionCategories", lambda: strategic.get_question_categories(_ctx), fallback["questionCategories"]),
-        "questionBriefs": _safe("questionBriefs", question_briefs.get_question_briefs, fallback["questionBriefs"]),
+        "questionBriefs": _safe("questionBriefs", lambda: question_briefs.get_question_briefs(ctx=_ctx), fallback["questionBriefs"]),
         "lifecycleStages": _safe("lifecycleStages", lambda: strategic.get_lifecycle_stages(_ctx), fallback["lifecycleStages"]),
     }
 
 
 def _tier_behavioral(_ctx: DashboardDateContext) -> dict:
     try:
-        briefs = behavioral_briefs.get_behavioral_briefs()
+        briefs = behavioral_briefs.get_behavioral_briefs(ctx=_ctx)
         return {
             "problemBriefs": briefs.get("problemBriefs", []),
             "serviceGapBriefs": briefs.get("serviceGapBriefs", []),
@@ -561,7 +561,7 @@ def _tier_actionable(_ctx: DashboardDateContext) -> dict:
         housing_data = actionable.get_housing_data()
         return {
             "businessOpportunities": actionable.get_business_opportunities(_ctx),
-            "businessOpportunityBriefs": opportunity_briefs.get_business_opportunity_briefs(),
+            "businessOpportunityBriefs": opportunity_briefs.get_business_opportunity_briefs(ctx=_ctx),
             "jobSeeking": actionable.get_job_seeking(_ctx),
             "jobTrends": actionable.get_job_trends(_ctx),
             "housingData": housing_data,

@@ -6,7 +6,7 @@ Provides: businessOpportunities, jobSeeking, jobTrends, housingData
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 
 from api.dashboard_dates import DashboardDateContext
@@ -524,9 +524,39 @@ def get_business_opportunities(ctx: DashboardDateContext) -> list[dict]:
     })
 
 
+def _brief_window_params(days: int, ctx: DashboardDateContext | None = None) -> dict[str, object]:
+    if ctx is None:
+        window_end = datetime.now(timezone.utc)
+        window_start = window_end - timedelta(days=max(14, days))
+        compare_days = min(7, max(1, days - 1))
+        current_start = max(window_start, window_end - timedelta(days=compare_days))
+        previous_end = current_start
+        previous_start = max(window_start, previous_end - timedelta(days=compare_days))
+        return {
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+            "current_start": current_start.isoformat(),
+            "previous_start": previous_start.isoformat(),
+            "previous_end": previous_end.isoformat(),
+        }
+
+    compare_days = min(7, max(1, ctx.days - 1))
+    current_start = max(ctx.start_at, ctx.end_at - timedelta(days=compare_days))
+    previous_end = current_start
+    previous_start = max(ctx.start_at, previous_end - timedelta(days=compare_days))
+    return {
+        "start": ctx.start_at.isoformat(),
+        "end": ctx.end_at.isoformat(),
+        "current_start": current_start.isoformat(),
+        "previous_start": previous_start.isoformat(),
+        "previous_end": previous_end.isoformat(),
+    }
+
+
 def get_business_opportunity_brief_candidates(
     *,
     days: int = 30,
+    ctx: DashboardDateContext | None = None,
     limit_topics: int = 16,
     evidence_per_topic: int = 14,
 ) -> list[dict]:
@@ -544,7 +574,8 @@ def get_business_opportunity_brief_candidates(
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
             WITH p, toLower(trim(p.text)) AS textLower
@@ -560,16 +591,17 @@ def get_business_opportunity_brief_candidates(
                  END AS gapHit
             RETURN
                 count(CASE WHEN askLike = 1 OR gapHit = 1 THEN 1 END) AS postSignals,
-                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at > datetime() - duration('P7D') THEN 1 END) AS postSignals7d,
-                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at > datetime() - duration('P14D')
-                            AND p.posted_at <= datetime() - duration('P7D') THEN 1 END) AS postSignalsPrev7d,
+                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at >= datetime($current_start) AND p.posted_at < datetime($end) THEN 1 END) AS postSignals7d,
+                count(CASE WHEN (askLike = 1 OR gapHit = 1) AND p.posted_at >= datetime($previous_start)
+                            AND p.posted_at < datetime($previous_end) THEN 1 END) AS postSignalsPrev7d,
                 max(CASE WHEN askLike = 1 OR gapHit = 1 THEN p.posted_at END) AS latestPostTs
         }
 
         CALL {
             WITH t
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
             OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)
@@ -609,12 +641,13 @@ def get_business_opportunity_brief_candidates(
                     THEN 1 END) AS commentSignals,
                 count(CASE
                     WHEN (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
-                      AND c.posted_at > datetime() - duration('P7D')
+                      AND c.posted_at >= datetime($current_start)
+                      AND c.posted_at < datetime($end)
                     THEN 1 END) AS commentSignals7d,
                 count(CASE
                     WHEN (askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1)
-                      AND c.posted_at > datetime() - duration('P14D')
-                      AND c.posted_at <= datetime() - duration('P7D')
+                      AND c.posted_at >= datetime($previous_start)
+                      AND c.posted_at < datetime($previous_end)
                     THEN 1 END) AS commentSignalsPrev7d,
                 max(CASE
                     WHEN askLike = 1 OR gapHit = 1 OR supportIntent = 1 OR opportunityHint = 1
@@ -643,7 +676,8 @@ def get_business_opportunity_brief_candidates(
         CALL {
             WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
-            WHERE p.posted_at > datetime() - duration({days: $days})
+            WHERE p.posted_at >= datetime($start)
+              AND p.posted_at < datetime($end)
               AND p.text IS NOT NULL
               AND trim(p.text) <> ''
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
@@ -674,7 +708,8 @@ def get_business_opportunity_brief_candidates(
                 0 AS opportunityHint
             UNION ALL
             MATCH (c:Comment)-[:TAGGED]->(t)
-            WHERE c.posted_at > datetime() - duration({days: $days})
+            WHERE c.posted_at >= datetime($start)
+              AND c.posted_at < datetime($end)
               AND c.text IS NOT NULL
               AND trim(c.text) <> ''
             OPTIONAL MATCH (c)-[:REPLIES_TO]->(p:Post)-[:IN_CHANNEL]->(ch:Channel)
@@ -773,7 +808,6 @@ def get_business_opportunity_brief_candidates(
             evidence
         ORDER BY signalCount DESC, uniqueUsers DESC, latestAt DESC
     """, {
-        "days": safe_days,
         "limit_topics": safe_limit_topics,
         "evidence_per_topic": safe_evidence,
         "noise": _NOISY_TOPIC_KEYS,
@@ -781,6 +815,7 @@ def get_business_opportunity_brief_candidates(
         "demand_hints": _DEMAND_HINTS,
         "gap_hints": _GAP_HINTS,
         "excluded_opportunity_types": _EXCLUDED_OPPORTUNITY_TYPES,
+        **_brief_window_params(safe_days, ctx),
     })
 
 
