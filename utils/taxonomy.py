@@ -600,6 +600,73 @@ def _normalize_lookup_key(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+_STRUCTURAL_TOPICS = frozenset(
+    {
+        "Media And News",
+        "Social Media Trend",
+        "Telegram Community",
+    }
+)
+
+_SIGNAL_TOPICS = frozenset(
+    {
+        "Community Solidarity",
+    }
+)
+
+_REJECTED_CANONICAL_TOPICS = frozenset()
+
+_REJECTED_TOPIC_KEYS = frozenset(
+    {
+        "",
+        "null",
+        "none",
+        "unknown",
+        "n/a",
+        "na",
+        "product demand",
+        "business enterprise business opportunity",
+        "proposed classified marketplace listing",
+        "media information media and",
+        "tech economy tech industry",
+        "tech economy startup ecosystem",
+        "society daily life community",
+        "housing infrastructure road and",
+        "emotional distres",
+    }
+)
+
+
+def get_topic_role(topic_name: str | None) -> str:
+    """Return the worker-side role for a topic name."""
+    normalized = str(topic_name or "").strip()
+    if not normalized:
+        return "rejected"
+
+    if normalized in _STRUCTURAL_TOPICS:
+        return "structural"
+    if normalized in _SIGNAL_TOPICS:
+        return "signal"
+    if normalized in _REJECTED_CANONICAL_TOPICS:
+        return "rejected"
+
+    lookup = _normalize_lookup_key(normalized)
+    if lookup in _REJECTED_TOPIC_KEYS:
+        return "rejected"
+
+    return "issue"
+
+
+def is_issue_topic(topic_name: str | None) -> bool:
+    return get_topic_role(topic_name) == "issue"
+
+
+def iter_non_issue_topics() -> Iterable[str]:
+    for topic in iter_topics():
+        if not is_issue_topic(topic):
+            yield topic
+
+
 def canonical_domain_name(value: str | None) -> str:
     """Normalize domain label via compatibility aliases."""
     key = _normalize_lookup_key(value)

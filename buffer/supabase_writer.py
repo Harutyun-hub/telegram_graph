@@ -2927,7 +2927,7 @@ class SupabaseWriter:
 
             stored_state = str(row.get("visibility_state") or "").strip() or state
             stored_eligible = bool(row.get("visibility_eligible", eligible))
-            is_visible = stored_eligible or stored_state == "emerging_visible" or proposed_count >= 3
+            is_visible = stored_eligible or stored_state == "emerging_visible"
             if not is_visible:
                 continue
 

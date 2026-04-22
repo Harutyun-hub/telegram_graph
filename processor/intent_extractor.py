@@ -28,7 +28,7 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.runtime_coordinator import get_runtime_coordinator
 from utils.ai_usage import log_openai_usage
-from utils.taxonomy import TAXONOMY_VERSION, compact_taxonomy_prompt
+from utils.taxonomy import TAXONOMY_VERSION, compact_taxonomy_prompt, get_topic_role
 from utils.topic_normalizer import normalize_model_topics
 
 client = OpenAI(api_key=config.OPENAI_API_KEY)
@@ -641,9 +641,20 @@ def _chunked(items: list[dict], size: int) -> list[list[dict]]:
     return [items[i:i + step] for i in range(0, len(items), step)]
 
 
+def _filter_issue_topic_items(topic_items: list[dict]) -> list[dict]:
+    filtered: list[dict] = []
+    for item in topic_items:
+        if not isinstance(item, dict):
+            continue
+        if get_topic_role(item.get("name")) != "issue":
+            continue
+        filtered.append(dict(item))
+    return filtered
+
+
 def _normalize_payload(parsed: dict) -> dict:
     normalized = dict(parsed)
-    normalized_topics = normalize_model_topics(parsed.get("topics") or [])
+    normalized_topics = _filter_issue_topic_items(normalize_model_topics(parsed.get("topics") or []))
     normalized["topics"] = normalized_topics
 
     evidence_quotes = []
@@ -682,14 +693,17 @@ def _normalize_payload(parsed: dict) -> dict:
             continue
         comment_id = str(item.get("comment_id") or "").strip()
         message_ref = str(item.get("message_ref") or "").strip()
-        item_topics = normalize_model_topics(item.get("topics") or [])
+        # New payloads drop non-issue topics here, while the Neo4j writer still
+        # marks them as proposed as a defensive fallback for replayed legacy rows.
+        item_topics = _filter_issue_topic_items(normalize_model_topics(item.get("topics") or []))
         if not comment_id and not message_ref:
             continue
-        message_topics.append({
-            "comment_id": comment_id,
-            "message_ref": message_ref,
-            "topics": item_topics,
-        })
+        if item_topics:
+            message_topics.append({
+                "comment_id": comment_id,
+                "message_ref": message_ref,
+                "topics": item_topics,
+            })
         for topic in item_topics:
             name = str(topic.get("name") or "").strip()
             if name and name not in aggregate_by_name:

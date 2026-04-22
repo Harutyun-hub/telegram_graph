@@ -20,6 +20,8 @@ from ingester.neo4j_writer import Neo4jWriter
 
 _writer_lock = threading.Lock()
 _shared_background_writer: Neo4jWriter | None = None
+_topic_cleanup_lock = threading.Lock()
+_topic_cleanup_completed = False
 
 
 def _get_background_writer() -> Neo4jWriter:
@@ -28,6 +30,22 @@ def _get_background_writer() -> Neo4jWriter:
         if _shared_background_writer is None:
             _shared_background_writer = Neo4jWriter()
         return _shared_background_writer
+
+
+def _ensure_non_issue_topics_hidden(writer: Neo4jWriter) -> int:
+    global _topic_cleanup_completed
+    if _topic_cleanup_completed:
+        return 0
+    with _topic_cleanup_lock:
+        if _topic_cleanup_completed:
+            return 0
+        try:
+            updated = int(writer.mark_non_issue_topics_proposed() or 0)
+        except Exception as exc:
+            logger.warning("Non-issue topic cleanup skipped due to Neo4j cleanup error: {}", exc)
+            return 0
+        _topic_cleanup_completed = True
+        return updated
 
 
 async def run_scrape_cycle(client: TelegramClient, supabase_writer) -> dict:
@@ -123,6 +141,7 @@ def _run_ai_process_and_sync_blocking(
         "sync_errors": 0,
         "sync_batch_chunks": 0,
         "sync_fallback_posts": 0,
+        "non_issue_topics_hidden": 0,
         "recovery_unlocked_posts": 0,
         "recovery_unlocked_comment_groups": 0,
         "recovery_promoted_permanent": 0,
@@ -208,6 +227,7 @@ def _run_ai_process_and_sync_blocking(
     if posts_to_sync:
         try:
             writer = _get_background_writer()
+            result["non_issue_topics_hidden"] = _ensure_non_issue_topics_hidden(writer)
             batch_size = max(1, int(getattr(config, "NEO4J_SYNC_BATCH_CHUNK_SIZE", 20)))
             for start in range(0, len(posts_to_sync), batch_size):
                 if time.monotonic() >= sync_deadline:

@@ -37,6 +37,7 @@ from utils.topic_normalizer import (
     normalize_topic_category,
     normalize_topic_domain,
 )
+from utils.taxonomy import get_topic_role, is_issue_topic, iter_non_issue_topics
 
 
 SCHEMA_CONSTRAINTS = [
@@ -102,6 +103,33 @@ class Neo4jWriter:
 
         db.execute_write(_work, driver_key=self.driver_key, op_name="writer.clear_graph")
         logger.warning("Neo4j graph data cleared")
+
+    def mark_non_issue_topics_proposed(self) -> int:
+        """Hide broad canonical topics from current read-side queries."""
+        topics = sorted(iter_non_issue_topics())
+        if not topics:
+            return 0
+
+        def _work(tx: ManagedTransaction) -> int:
+            result = tx.run(
+                """
+                MATCH (t:Topic)
+                WHERE t.name IN $non_issue_topics
+                SET t.proposed = true
+                RETURN count(t) AS updated
+                """,
+                {"non_issue_topics": topics},
+            ).single()
+            return int((result or {}).get("updated") or 0)
+
+        return int(
+            db.execute_write(
+                _work,
+                driver_key=self.driver_key,
+                op_name="writer.mark_non_issue_topics_proposed",
+            )
+            or 0
+        )
 
     # ── Enterprise Bundle Sync ────────────────────────────────────────────────
 
@@ -1058,10 +1086,14 @@ def _comment_params(comment: dict, post: dict, analysis: dict,
     raw_topics = cast(list, candidate_topics) if isinstance(candidate_topics, list) else []
     model_topics = normalize_model_topics(raw_topics)
     if model_topics:
-        canon_user_topics = [str(item["name"]) for item in model_topics if item.get("name")]
+        canon_user_topics = [
+            str(item["name"])
+            for item in model_topics
+            if item.get("name") and is_issue_topic(item.get("name"))
+        ]
     else:
         fallback_topics = [str(item) for item in (analysis.get("topics") or []) if item]
-        canon_user_topics = normalize_topics(fallback_topics)
+        canon_user_topics = [topic for topic in normalize_topics(fallback_topics) if is_issue_topic(topic)]
 
     comment_topic_items = _extract_message_topic_items(raw, comment.get("id"))
 
@@ -1164,6 +1196,21 @@ def _extract_entities(raw_response: dict) -> list[dict]:
     return entities
 
 
+def _coerce_topic_item_for_graph(topic_item: dict) -> dict | None:
+    """Keep issue topics visible; downgrade non-issue topics for replay safety."""
+    name = str(topic_item.get("name") or "").strip()
+    if not name:
+        return None
+
+    role = get_topic_role(name)
+    output = dict(topic_item)
+    if role != "issue":
+        output["proposed"] = True
+    else:
+        output["proposed"] = bool(output.get("proposed", False))
+    return output
+
+
 def _collect_post_topic_items(post_analysis: dict | None = None) -> list[dict]:
     """Collect canonical topic items for direct post tagging only."""
     items_by_name: dict[str, dict] = {}
@@ -1184,7 +1231,11 @@ def _collect_post_topic_items(post_analysis: dict | None = None) -> list[dict]:
             if not name:
                 continue
 
-            proposed = bool(topic_item.get("proposed", False))
+            graph_topic = _coerce_topic_item_for_graph(topic_item)
+            if not graph_topic:
+                continue
+
+            proposed = bool(graph_topic.get("proposed", False))
             category = normalize_topic_category(topic_item.get("closest_category") or get_topic_category(name))
             domain = normalize_topic_domain(topic_item.get("domain") or get_topic_domain(name))
 
@@ -1221,6 +1272,9 @@ def _extract_message_topic_items(raw_response: dict, comment_uuid: str | None) -
             name = str(topic_item.get("name") or "").strip()
             if not name:
                 continue
+            graph_topic = _coerce_topic_item_for_graph(topic_item)
+            if not graph_topic:
+                continue
             output.append(
                 {
                     "name": name,
@@ -1228,7 +1282,7 @@ def _extract_message_topic_items(raw_response: dict, comment_uuid: str | None) -
                         topic_item.get("closest_category") or topic_item.get("category")
                     ),
                     "domain": normalize_topic_domain(topic_item.get("domain")),
-                    "proposed": bool(topic_item.get("proposed", False)),
+                    "proposed": bool(graph_topic.get("proposed", False)),
                 }
             )
         return output

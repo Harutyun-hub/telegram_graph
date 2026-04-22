@@ -38,6 +38,26 @@ class TopicMessageTaggingTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["name"], "Cryptocurrency")
 
+    def test_post_topics_force_structural_topics_to_proposed_for_replay_safety(self) -> None:
+        post_analysis = {
+            "raw_llm_response": {
+                "topics": [
+                    {
+                        "name": "Media And News",
+                        "closest_category": "Media Landscape",
+                        "domain": "Media & Information",
+                        "proposed": False,
+                    }
+                ]
+            }
+        }
+
+        items = _collect_post_topic_items(post_analysis)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Media And News")
+        self.assertTrue(items[0]["proposed"])
+
     def test_message_topics_are_scoped_to_comment_id(self) -> None:
         raw_response = {
             "message_topics": [
@@ -72,6 +92,29 @@ class TopicMessageTaggingTests(unittest.TestCase):
         self.assertEqual([item["name"].lower() for item in second_items], ["othertopic"])
         self.assertEqual(missing_items, [])
 
+    def test_message_topics_force_signal_topics_to_proposed_for_replay_safety(self) -> None:
+        raw_response = {
+            "message_topics": [
+                {
+                    "comment_id": "comment-1",
+                    "topics": [
+                        {
+                            "name": "Community Solidarity",
+                            "closest_category": "Community Life",
+                            "domain": "Culture & Identity",
+                            "proposed": False,
+                        }
+                    ],
+                }
+            ]
+        }
+
+        items = _extract_message_topic_items(raw_response, "comment-1")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Community Solidarity")
+        self.assertTrue(items[0]["proposed"])
+
     def test_normalize_payload_keeps_per_comment_topics_and_aggregates_names(self) -> None:
         payload = _normalize_payload(
             {
@@ -94,6 +137,54 @@ class TopicMessageTaggingTests(unittest.TestCase):
 
         self.assertEqual(payload["message_topics"][0]["comment_id"], "comment-1")
         self.assertEqual([item["name"].lower() for item in payload["topics"]], ["testtopic"])
+
+    def test_normalize_payload_drops_structural_topics(self) -> None:
+        payload = _normalize_payload(
+            {
+                "topics": [
+                    {
+                        "name": "Telegram Community",
+                        "closest_category": "Media Landscape",
+                        "domain": "Media & Information",
+                    },
+                    {
+                        "name": "Road And Transit",
+                        "closest_category": "Housing & Infrastructure",
+                        "domain": "Society & Daily Life",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual([item["name"] for item in payload["topics"]], ["Road And Transit"])
+
+    def test_normalize_payload_drops_signal_topics_from_message_aggregation(self) -> None:
+        payload = _normalize_payload(
+            {
+                "topics": [],
+                "message_topics": [
+                    {
+                        "message_ref": "MSG 1",
+                        "comment_id": "comment-1",
+                        "topics": [
+                            {
+                                "name": "Community Solidarity",
+                                "closest_category": "Community Life",
+                                "domain": "Culture & Identity",
+                            },
+                            {
+                                "name": "Visa And Residency",
+                                "closest_category": "Emigration",
+                                "domain": "Migration & Diaspora",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([item["name"] for item in payload["message_topics"][0]["topics"]], ["Visa And Residency"])
+        self.assertEqual([item["name"] for item in payload["topics"]], ["Visa And Residency"])
 
     def test_normalize_payload_normalizes_message_sentiment_enum_values(self) -> None:
         payload = _normalize_payload(

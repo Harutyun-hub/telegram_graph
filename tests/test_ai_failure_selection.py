@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from buffer.supabase_writer import SupabaseWriter
 from ingester import neo4j_writer
+from scraper import scrape_orchestrator
+from utils.taxonomy import iter_non_issue_topics
 
 
 class _RetryQuery:
@@ -77,6 +80,26 @@ class _FallbackFailureClient:
         return self.query
 
 
+class _FakeTopicWriteResult:
+    def __init__(self, updated: int) -> None:
+        self.updated = updated
+
+    def single(self):
+        return {"updated": self.updated}
+
+
+class _FakeTopicWriteTx:
+    def __init__(self, updated: int) -> None:
+        self.updated = updated
+        self.query = ""
+        self.params: dict | None = None
+
+    def run(self, query: str, params: dict):
+        self.query = query
+        self.params = dict(params)
+        return _FakeTopicWriteResult(self.updated)
+
+
 class SelectionHelpersTests(unittest.TestCase):
     def test_filter_out_blocked_rows_skips_dead_letter_items(self) -> None:
         writer = object.__new__(SupabaseWriter)
@@ -147,6 +170,60 @@ class SelectionHelpersTests(unittest.TestCase):
         self.assertEqual(items[0]["domain"], "Society & Daily Life")
         self.assertIsNotNone(items[0]["category"])
         self.assertIsNotNone(items[0]["domain"])
+
+    def test_mark_non_issue_topics_proposed_uses_exact_non_issue_set(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_execute_write(work, *, driver_key, op_name):
+            tx = _FakeTopicWriteTx(updated=4)
+            captured["tx"] = tx
+            captured["driver_key"] = driver_key
+            captured["op_name"] = op_name
+            return work(tx)
+
+        with patch.object(neo4j_writer.db, "execute_write", side_effect=fake_execute_write):
+            writer = neo4j_writer.Neo4jWriter()
+            updated = writer.mark_non_issue_topics_proposed()
+
+        self.assertEqual(updated, 4)
+        self.assertEqual(captured["op_name"], "writer.mark_non_issue_topics_proposed")
+        tx = captured["tx"]
+        self.assertIsInstance(tx, _FakeTopicWriteTx)
+        self.assertIn("SET t.proposed = true", tx.query)
+        self.assertEqual(set(tx.params["non_issue_topics"]), set(iter_non_issue_topics()))
+
+    def test_non_issue_cleanup_guard_runs_once_per_worker_process(self) -> None:
+        writer = Mock()
+        writer.mark_non_issue_topics_proposed.return_value = 7
+
+        with patch.object(scrape_orchestrator, "_topic_cleanup_completed", False):
+            first = scrape_orchestrator._ensure_non_issue_topics_hidden(writer)
+            second = scrape_orchestrator._ensure_non_issue_topics_hidden(writer)
+
+        self.assertEqual(first, 7)
+        self.assertEqual(second, 0)
+        writer.mark_non_issue_topics_proposed.assert_called_once_with()
+
+    def test_emerging_topic_candidates_no_longer_leak_from_proposed_count_only(self) -> None:
+        writer = object.__new__(SupabaseWriter)
+        writer.list_topic_proposals = lambda status, limit: [
+            {
+                "topic_name": "Weak Topic",
+                "closest_category": "General",
+                "domain": "General",
+                "proposed_count": 3,
+                "distinct_content_count": 1,
+                "distinct_user_count": 1,
+                "distinct_channel_count": 1,
+                "visibility_state": "candidate",
+                "visibility_eligible": False,
+                "last_seen_at": "2026-04-22T00:00:00Z",
+            }
+        ]
+
+        candidates = writer.list_emerging_topic_candidates(limit=10)
+
+        self.assertEqual(candidates, [])
 
 
 if __name__ == "__main__":
