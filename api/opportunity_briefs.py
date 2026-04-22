@@ -1247,7 +1247,7 @@ def get_business_opportunity_briefs(*, force_refresh: bool = False, ctx: Dashboa
         return refresh_opportunity_briefs(force=True, ctx=ctx)
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists and cards:
+        if exists:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()

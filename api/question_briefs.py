@@ -1568,7 +1568,7 @@ def get_question_briefs(*, force_refresh: bool = False, ctx: DashboardDateContex
 
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists and cards:
+        if exists:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()

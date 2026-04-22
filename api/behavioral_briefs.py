@@ -1818,7 +1818,7 @@ def get_behavioral_briefs(*, force_refresh: bool = False, ctx: DashboardDateCont
 
     if ctx is not None:
         payload, exists = _load_snapshot_payload_with_status(ctx=ctx)
-        if exists and (payload.get("problemBriefs") or payload.get("serviceGapBriefs")):
+        if exists:
             if not payload.get("urgencyBriefs"):
                 payload["urgencyBriefs"] = _load_snapshot_payload().get("urgencyBriefs") or []
             return payload
