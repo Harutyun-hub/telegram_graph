@@ -120,7 +120,7 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
         cluster = {"messages": 4, "uniqueUsers": 3, "channels": 1, "trend7dPct": 15}
         self.assertTrue(question_briefs._support_gate(cluster))
 
-    def test_load_nearest_shorter_range_cards_prefers_largest_nested_window(self) -> None:
+    def test_load_nearest_shorter_range_cards_accumulates_nested_windows(self) -> None:
         store = _FakeRuntimeStore()
         long_ctx = build_dashboard_date_context("2026-01-16", "2026-04-15")
         ctx_15 = build_dashboard_date_context("2026-04-01", "2026-04-15")
@@ -144,7 +144,7 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
             topic_field="topic",
         )
 
-        self.assertEqual([card["id"] for card in cards], ["q-30"])
+        self.assertEqual([card["id"] for card in cards], ["q-15", "q-30"])
 
     def test_behavioral_problem_refresh_kind_no_longer_emits_generic_fallback(self) -> None:
         cluster = {

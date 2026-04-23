@@ -343,8 +343,7 @@ def load_nearest_shorter_range_cards(
         if "__" in candidate:
             range_keys.add(candidate)
 
-    best_ctx: DashboardDateContext | None = None
-    best_days = 0
+    candidate_contexts: list[DashboardDateContext] = []
     for range_key in range_keys:
         try:
             start_raw, end_raw = range_key.split("__", 1)
@@ -357,21 +356,27 @@ def load_nearest_shorter_range_cards(
             continue
         if candidate_ctx.from_date < ctx.from_date:
             continue
-        if candidate_ctx.days > best_days:
-            best_ctx = candidate_ctx
-            best_days = candidate_ctx.days
+        candidate_contexts.append(candidate_ctx)
 
-    if best_ctx is None:
+    if not candidate_contexts:
         return []
 
-    paths = build_widget_snapshot_paths(str(family).strip().strip("/"), best_ctx)
-    payload = store.get_runtime_json(paths.latest_path, default={})
-    cards = payload.get("cards") if isinstance(payload, dict) else []
-    parsed = cards if isinstance(cards, list) else []
-    if not parsed:
+    candidate_contexts.sort(key=lambda item: item.days)
+    preserved_cards: list[dict] = []
+    for candidate_ctx in candidate_contexts:
+        paths = build_widget_snapshot_paths(str(family).strip().strip("/"), candidate_ctx)
+        payload = store.get_runtime_json(paths.latest_path, default={})
+        cards = payload.get("cards") if isinstance(payload, dict) else []
+        parsed = cards if isinstance(cards, list) else []
+        if not parsed:
+            continue
+        preserved_cards.extend(parsed)
+
+    if not preserved_cards:
         return []
+
     return select_portfolio_cards(
-        parsed,
+        preserved_cards,
         title_fields=title_fields,
         max_cards=max(1, int(max_cards)),
         topic_field=topic_field,
