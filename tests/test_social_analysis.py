@@ -26,7 +26,35 @@ class SocialAnalysisTests(unittest.TestCase):
         self.assertEqual(normalized["summary"], "Offer")
         self.assertEqual(normalized["sentiment"], "Positive")
         self.assertEqual(normalized["sentiment_score"], 1.0)
-        self.assertEqual(normalized["topics"], ["Credit Cards"])
+        self.assertEqual(normalized["topics"], ["Credit Card"])
+
+    def test_normalize_result_drops_structural_signal_and_rejected_topics(self) -> None:
+        raw = {
+            "batch_index": 0,
+            "activity_uid": "facebook:post:1",
+            "topics": [
+                "Media And News",
+                "Community Solidarity",
+                "unknown",
+                "Tax Policy",
+            ],
+        }
+
+        normalized = SocialActivityAnalyzer._normalize_result(raw)
+
+        self.assertEqual(normalized["topics"], ["Tax Policy"])
+        self.assertEqual(raw["topics"], ["Media And News", "Community Solidarity", "unknown", "Tax Policy"])
+
+    def test_normalize_result_preserves_issue_topics_as_canonical_strings(self) -> None:
+        normalized = SocialActivityAnalyzer._normalize_result(
+            {
+                "batch_index": 0,
+                "activity_uid": "facebook:comment:1",
+                "topics": ["credit cards", "Tax Policy", "credit cards"],
+            }
+        )
+
+        self.assertEqual(normalized["topics"], ["Credit Card", "Tax Policy"])
 
 
 if __name__ == "__main__":

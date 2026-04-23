@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
@@ -25,6 +26,36 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+_non_issue_cleanup_lock = threading.Lock()
+_non_issue_cleanup_completed = False
+
+
+def _is_social_worker_owner() -> bool:
+    return str(os.getenv("APP_ROLE") or "").strip().lower() == "social-worker"
+
+
+def _ensure_non_issue_topics_hidden(
+    writer_factory: Callable[[], SocialGraphWriter],
+) -> int:
+    global _non_issue_cleanup_completed
+
+    if not _is_social_worker_owner():
+        return 0
+    if _non_issue_cleanup_completed:
+        return 0
+
+    with _non_issue_cleanup_lock:
+        if _non_issue_cleanup_completed:
+            return 0
+        try:
+            updated = int(writer_factory().mark_non_issue_topics_proposed() or 0)
+        except Exception as exc:
+            logger.warning("Social non-issue topic cleanup skipped: {}", exc)
+            return 0
+        _non_issue_cleanup_completed = True
+        return updated
 
 
 class SocialRuntimeService:
@@ -54,6 +85,10 @@ class SocialRuntimeService:
 
     async def startup(self) -> None:
         self._ensure_scheduler_started()
+        hidden_topics = 0
+        if _is_social_worker_owner():
+            loop = asyncio.get_running_loop()
+            hidden_topics = await loop.run_in_executor(None, _ensure_non_issue_topics_hidden, self._get_graph)
         settings = self.store.get_runtime_setting(
             "scheduler",
             {"is_active": False, "interval_minutes": 360},
@@ -65,10 +100,11 @@ class SocialRuntimeService:
         self._upsert_control_job()
         self._persist_runtime_snapshot()
         logger.info(
-            "Social runtime ready | active={} interval={}m postgres_worker={}",
+            "Social runtime ready | active={} interval={}m postgres_worker={} hidden_non_issue_topics={}",
             self.desired_active,
             self.interval_minutes,
             self.pg_store.enabled,
+            hidden_topics,
         )
 
     async def shutdown(self) -> None:

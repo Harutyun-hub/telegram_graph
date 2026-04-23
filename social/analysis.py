@@ -9,6 +9,7 @@ from openai import OpenAI
 
 import config
 from utils.ai_usage import log_openai_usage
+from utils.topic_normalizer import normalize_model_topics
 
 
 def _trimmed(value: Any) -> str:
@@ -44,6 +45,68 @@ Quality rules:
 - Keep topics canonical and short.
 - If the signal is missing, return empty arrays or null-like strings instead of inventing facts.
 """.strip()
+
+_STRUCTURAL_TOPICS = frozenset(
+    {
+        "Media And News",
+        "Social Media Trend",
+        "Telegram Community",
+    }
+)
+
+_SIGNAL_TOPICS = frozenset(
+    {
+        "Community Solidarity",
+    }
+)
+
+_REJECTED_TOPIC_KEYS = frozenset(
+    {
+        "",
+        "null",
+        "none",
+        "unknown",
+        "n/a",
+        "na",
+        "product demand",
+        "business enterprise business opportunity",
+        "proposed classified marketplace listing",
+        "media information media and",
+        "tech economy tech industry",
+        "tech economy startup ecosystem",
+        "society daily life community",
+        "housing infrastructure road and",
+        "emotional distres",
+    }
+)
+
+
+def _topic_role(topic_name: str | None) -> str:
+    normalized = _trimmed(topic_name)
+    if not normalized:
+        return "rejected"
+    if normalized in _STRUCTURAL_TOPICS:
+        return "structural"
+    if normalized in _SIGNAL_TOPICS:
+        return "signal"
+    if normalized.lower() in _REJECTED_TOPIC_KEYS:
+        return "rejected"
+    return "issue"
+
+
+def _normalize_issue_topics(raw_topics: Any) -> list[str]:
+    normalized_items = normalize_model_topics(raw_topics if isinstance(raw_topics, list) else [])
+    topics: list[str] = []
+    seen: set[str] = set()
+    for item in normalized_items:
+        name = _trimmed(item.get("name"))
+        if not name or _topic_role(name) != "issue":
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        topics.append(name)
+    return topics
 
 
 class SocialActivityAnalyzer:
@@ -198,7 +261,7 @@ class SocialActivityAnalyzer:
             "competitive_signals": _as_list("competitive_signals"),
             "customer_intent": _trimmed(result.get("customer_intent")),
             "urgency_indicators": _as_list("urgency_indicators"),
-            "topics": _as_list("topics"),
+            "topics": _normalize_issue_topics(result.get("topics")),
             "sentiment": _trimmed(result.get("sentiment")) or "Neutral",
             "sentiment_score": SocialActivityAnalyzer._clamp_score(result.get("sentiment_score")),
             "marketing_tactic": _trimmed(result.get("marketing_tactic")),

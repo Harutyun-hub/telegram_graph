@@ -6,6 +6,7 @@ from loguru import logger
 from neo4j import GraphDatabase
 
 import config
+from utils.topic_normalizer import normalize_model_topics
 
 
 def _slug(value: Any) -> str:
@@ -22,6 +23,97 @@ def _slug(value: Any) -> str:
             out.append("-")
             dash = True
     return "".join(out).strip("-") or "unknown"
+
+
+_STRUCTURAL_TOPICS = frozenset(
+    {
+        "Media And News",
+        "Social Media Trend",
+        "Telegram Community",
+    }
+)
+
+_SIGNAL_TOPICS = frozenset(
+    {
+        "Community Solidarity",
+    }
+)
+
+_NON_ISSUE_TOPICS = tuple(sorted(_STRUCTURAL_TOPICS | _SIGNAL_TOPICS))
+
+_REJECTED_TOPIC_KEYS = frozenset(
+    {
+        "",
+        "null",
+        "none",
+        "unknown",
+        "n/a",
+        "na",
+        "product demand",
+        "business enterprise business opportunity",
+        "proposed classified marketplace listing",
+        "media information media and",
+        "tech economy tech industry",
+        "tech economy startup ecosystem",
+        "society daily life community",
+        "housing infrastructure road and",
+        "emotional distres",
+    }
+)
+
+
+def _topic_role(topic_name: str | None) -> str:
+    normalized = str(topic_name or "").strip()
+    if not normalized:
+        return "rejected"
+    if normalized in _SIGNAL_TOPICS:
+        return "signal"
+    if normalized in _STRUCTURAL_TOPICS:
+        return "structural"
+    if normalized.lower() in _REJECTED_TOPIC_KEYS:
+        return "rejected"
+    return "issue"
+
+
+def _coerce_topic_item_for_graph(topic_item: dict[str, Any]) -> dict[str, Any] | None:
+    name = str(topic_item.get("name") or "").strip()
+    if not name:
+        return None
+
+    role = _topic_role(name)
+    output = dict(topic_item)
+    if role != "issue":
+        output["proposed"] = True
+    else:
+        output["proposed"] = bool(output.get("proposed", False))
+    output["name"] = name[:120]
+    return output
+
+
+def _topic_items_from_analysis(analysis_row: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = dict(analysis_row.get("analysis_payload") or {})
+    raw = dict(analysis_row.get("raw_model_output") or {})
+
+    candidate_topics = raw.get("topics")
+    raw_topics = candidate_topics if isinstance(candidate_topics, list) else []
+    normalized_items = normalize_model_topics(raw_topics)
+    if not normalized_items:
+        normalized_items = normalize_model_topics(
+            [str(topic) for topic in (payload.get("topics") or []) if str(topic or "").strip()]
+        )
+
+    items_by_name: dict[str, dict[str, Any]] = {}
+    for topic_item in normalized_items:
+        coerced = _coerce_topic_item_for_graph(topic_item)
+        if not coerced:
+            continue
+        name = str(coerced["name"])
+        existing = items_by_name.get(name)
+        if not existing:
+            items_by_name[name] = {"name": name, "proposed": bool(coerced.get("proposed", False))}
+        else:
+            existing["proposed"] = bool(existing.get("proposed") or coerced.get("proposed"))
+    return list(items_by_name.values())
 
 
 class SocialGraphWriter:
@@ -67,7 +159,8 @@ class SocialGraphWriter:
     def sync_activity(self, item: dict[str, Any]) -> None:
         activity = dict(item)
         entity = dict(activity.get("entity") or {})
-        analysis = dict((activity.get("analysis") or {}).get("analysis_payload") or {})
+        analysis_row = dict(activity.get("analysis") or {})
+        analysis = dict(analysis_row.get("analysis_payload") or {})
 
         params = {
             "entity_id": entity.get("id"),
@@ -91,7 +184,7 @@ class SocialGraphWriter:
             "audiences": self._entity_scoped_nodes(entity.get("id"), analysis.get("audience_segments"), "name"),
             "pain_points": self._entity_scoped_nodes(entity.get("id"), analysis.get("pain_points"), "name"),
             "value_props": self._entity_scoped_nodes(entity.get("id"), analysis.get("value_propositions"), "claim"),
-            "topics": self._topics(analysis.get("topics")),
+            "topics": self._topics(analysis_row),
             "competitors": self._competitors(analysis.get("competitive_signals")),
             "customer_intent": self._customer_intent(entity.get("id"), analysis.get("customer_intent")),
             "time_key": self._time_key(activity.get("published_at")),
@@ -183,6 +276,7 @@ class SocialGraphWriter:
 
         FOREACH (topic IN $topics |
           MERGE (t:Topic {name: topic.name})
+          SET t.proposed = coalesce(t.proposed, false) OR coalesce(topic.proposed, false)
           MERGE (activity)-[:COVERS]->(t)
         )
 
@@ -203,6 +297,20 @@ class SocialGraphWriter:
 
         with self.driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
             session.run(query, params).consume()
+
+    def mark_non_issue_topics_proposed(self) -> int:
+        topics = list(_NON_ISSUE_TOPICS)
+        if not topics:
+            return 0
+        query = """
+        MATCH (t:Topic)
+        WHERE t.name IN $non_issue_topics
+        SET t.proposed = true
+        RETURN count(t) AS updated
+        """
+        with self.driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
+            result = session.run(query, {"non_issue_topics": topics}).single()
+        return int((result or {}).get("updated") or 0)
 
     @staticmethod
     def _entity_scoped_nodes(entity_id: str | None, rows: Any, key_field: str) -> list[dict[str, str]]:
@@ -225,18 +333,8 @@ class SocialGraphWriter:
         return out
 
     @staticmethod
-    def _topics(rows: Any) -> list[dict[str, str]]:
-        out: list[dict[str, str]] = []
-        for row in rows or []:
-            if isinstance(row, str):
-                name = row.strip()
-            elif isinstance(row, dict):
-                name = str(row.get("name") or "").strip()
-            else:
-                name = ""
-            if name:
-                out.append({"name": name[:120]})
-        return out
+    def _topics(analysis_row: dict[str, Any]) -> list[dict[str, Any]]:
+        return _topic_items_from_analysis(analysis_row)
 
     @staticmethod
     def _competitors(rows: Any) -> list[dict[str, str | None]]:
