@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any, Iterable
 
-from api.dashboard_dates import DashboardDateContext
+from api.dashboard_dates import DashboardDateContext, build_dashboard_date_context
 
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9а-яА-ЯёЁ]+")
@@ -315,3 +315,69 @@ def select_portfolio_cards(
                 return selected
 
     return selected
+
+
+def load_nearest_shorter_range_cards(
+    store,
+    *,
+    family: str,
+    ctx: DashboardDateContext | None,
+    title_fields: Iterable[str],
+    max_cards: int,
+    topic_field: str = "topic",
+) -> list[dict]:
+    if not store or ctx is None or int(getattr(ctx, "days", 0)) <= 1:
+        return []
+
+    try:
+        rows = store.list_runtime_files(f"{str(family).strip().strip('/')}/ranges")
+    except Exception:
+        return []
+
+    range_keys: set[str] = set()
+    for row in rows or []:
+        name = str((row or {}).get("name") or "").strip().strip("/")
+        if not name:
+            continue
+        candidate = name.split("/", 1)[0]
+        if "__" in candidate:
+            range_keys.add(candidate)
+
+    best_ctx: DashboardDateContext | None = None
+    best_days = 0
+    for range_key in range_keys:
+        try:
+            start_raw, end_raw = range_key.split("__", 1)
+            candidate_ctx = build_dashboard_date_context(start_raw, end_raw)
+        except Exception:
+            continue
+        if candidate_ctx.to_date != ctx.to_date:
+            continue
+        if candidate_ctx.days >= ctx.days:
+            continue
+        if candidate_ctx.from_date < ctx.from_date:
+            continue
+        if candidate_ctx.days > best_days:
+            best_ctx = candidate_ctx
+            best_days = candidate_ctx.days
+
+    if best_ctx is None:
+        return []
+
+    paths = build_widget_snapshot_paths(str(family).strip().strip("/"), best_ctx)
+    payload, exists = load_latest_widget_payload(
+        store,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
+        default={"cards": []},
+    )
+    cards = payload.get("cards") if isinstance(payload, dict) else []
+    parsed = cards if isinstance(cards, list) else []
+    if not exists and not parsed:
+        return []
+    return select_portfolio_cards(
+        parsed,
+        title_fields=title_fields,
+        max_cards=max(1, int(max_cards)),
+        topic_field=topic_field,
+    )

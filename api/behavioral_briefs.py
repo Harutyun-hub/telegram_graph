@@ -19,6 +19,7 @@ from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
     load_latest_widget_payload,
+    load_nearest_shorter_range_cards,
     load_widget_state_payload,
     save_widget_snapshot_payload,
     save_widget_state_payload,
@@ -1589,6 +1590,7 @@ def _refresh_kind(
     clusters: list[dict],
     state_clusters: Any,
     force: bool,
+    ctx: DashboardDateContext | None = None,
 ) -> tuple[list[dict], dict, int]:
     active_ids = {_as_str(c.get("clusterId"), "") for c in clusters if _as_str(c.get("clusterId"), "")}
     changed_clusters: list[dict] = []
@@ -1681,10 +1683,20 @@ def _refresh_kind(
         reverse=True,
     )
     if kind == "problem":
+        preserved_cards: list[dict] = []
+        if ctx is not None:
+            preserved_cards = load_nearest_shorter_range_cards(
+                _get_runtime_store(),
+                family="behavioral_cards",
+                ctx=ctx,
+                title_fields=["problemEn", "problemRu"],
+                max_cards=int(config.BEHAVIORAL_BRIEFS_MAX_CARDS),
+                topic_field="topic",
+            )
         final_cards = select_portfolio_cards(
-            final_cards,
+            preserved_cards + final_cards,
             title_fields=["problemEn", "problemRu"],
-            max_cards=int(config.BEHAVIORAL_BRIEFS_MAX_CARDS),
+            max_cards=max(int(config.BEHAVIORAL_BRIEFS_MAX_CARDS), len(preserved_cards)),
             topic_field="topic",
         )
     else:
@@ -1795,12 +1807,14 @@ def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext 
         clusters=problem_clusters,
         state_clusters=problem_state,
         force=force,
+        ctx=ctx,
     )
     service_cards, next_service_state, changed_service = _refresh_kind(
         kind="service",
         clusters=service_clusters,
         state_clusters=service_state,
         force=force,
+        ctx=ctx,
     )
     diagnostics["stages"]["changedProblemClusters"] = changed_problem
     diagnostics["stages"]["changedServiceClusters"] = changed_service

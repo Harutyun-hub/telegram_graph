@@ -19,6 +19,7 @@ from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
     load_latest_widget_payload,
+    load_nearest_shorter_range_cards,
     load_widget_state_payload,
     save_widget_snapshot_payload,
     save_widget_state_payload,
@@ -1392,10 +1393,18 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
         ),
         reverse=True,
     )
-    final_cards = select_portfolio_cards(
-        final_cards,
+    preserved_cards = load_nearest_shorter_range_cards(
+        _get_runtime_store(),
+        family="opportunity_cards",
+        ctx=ctx,
         title_fields=["opportunityEn", "opportunityRu"],
         max_cards=int(config.OPPORTUNITY_BRIEFS_MAX_BRIEFS),
+        topic_field="topic",
+    )
+    final_cards = select_portfolio_cards(
+        preserved_cards + final_cards,
+        title_fields=["opportunityEn", "opportunityRu"],
+        max_cards=max(int(config.OPPORTUNITY_BRIEFS_MAX_BRIEFS), len(preserved_cards)),
         topic_field="topic",
     )
 

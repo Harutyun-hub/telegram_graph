@@ -6,7 +6,7 @@ from unittest.mock import patch
 from api import aggregator
 from api import behavioral_briefs
 from api import question_briefs
-from api.ai_widget_storage import dedupe_cards, select_portfolio_cards
+from api.ai_widget_storage import dedupe_cards, load_nearest_shorter_range_cards, select_portfolio_cards
 from api.dashboard_dates import build_dashboard_date_context
 from api import opportunity_briefs
 
@@ -119,6 +119,32 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
     def test_question_support_gate_keeps_small_but_real_family(self) -> None:
         cluster = {"messages": 4, "uniqueUsers": 3, "channels": 1, "trend7dPct": 15}
         self.assertTrue(question_briefs._support_gate(cluster))
+
+    def test_load_nearest_shorter_range_cards_prefers_largest_nested_window(self) -> None:
+        store = _FakeRuntimeStore()
+        long_ctx = build_dashboard_date_context("2026-01-16", "2026-04-15")
+        ctx_15 = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        ctx_30 = build_dashboard_date_context("2026-03-17", "2026-04-15")
+
+        store.save_runtime_json(
+            f"question_cards/ranges/{ctx_15.from_date.isoformat()}__{ctx_15.to_date.isoformat()}/latest.json",
+            {"cards": [{"id": "q-15", "topic": "Visa", "canonicalQuestionEn": "15d card?", "evidence": [{"id": "ev-15"}]}]},
+        )
+        store.save_runtime_json(
+            f"question_cards/ranges/{ctx_30.from_date.isoformat()}__{ctx_30.to_date.isoformat()}/latest.json",
+            {"cards": [{"id": "q-30", "topic": "Visa", "canonicalQuestionEn": "30d card?", "evidence": [{"id": "ev-30"}]}]},
+        )
+
+        cards = load_nearest_shorter_range_cards(
+            store,
+            family="question_cards",
+            ctx=long_ctx,
+            title_fields=["canonicalQuestionEn"],
+            max_cards=8,
+            topic_field="topic",
+        )
+
+        self.assertEqual([card["id"] for card in cards], ["q-30"])
 
     def test_behavioral_problem_refresh_kind_no_longer_emits_generic_fallback(self) -> None:
         cluster = {
