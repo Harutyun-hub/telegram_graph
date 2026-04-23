@@ -88,21 +88,6 @@ class QuestionBriefDiagnosticsTests(unittest.TestCase):
         question_briefs.invalidate_question_briefs_cache()
 
     def test_refresh_diagnostics_happy_path(self) -> None:
-        synth_rows = [
-            {
-                "clusterId": "qc-visa-support",
-                "canonicalQuestionEn": "How can people renew a visa in Armenia without conflicting instructions?",
-                "canonicalQuestionRu": "Как людям продлить визу в Армении без противоречивых инструкций?",
-                "summaryEn": "People repeatedly ask for a clear visa-renewal process.",
-                "summaryRu": "Люди постоянно просят понятный процесс продления визы.",
-                "confidence": "high",
-                "confidenceScore": 0.86,
-                "status": "needs_guide",
-                "resolvedPct": 22,
-                "evidenceIds": ["ev-1", "ev-2"],
-            }
-        ]
-
         def _fake_save_snapshot(
             cards: list[dict],
             metadata: dict | None = None,
@@ -115,13 +100,49 @@ class QuestionBriefDiagnosticsTests(unittest.TestCase):
                 diagnostics["snapshot"]["readbackCards"] = len(cards)
             return True
 
+        def _fake_triage(clusters: list[dict], diagnostics: dict | None = None) -> dict[str, dict]:
+            if isinstance(diagnostics, dict):
+                diagnostics.setdefault("stages", {})["acceptedClusters"] = len(clusters)
+            return {
+                cluster["clusterId"]: {
+                    "clusterId": cluster["clusterId"],
+                    "status": "accepted",
+                    "evidenceIds": ["ev-1", "ev-2"],
+                }
+                for cluster in clusters
+            }
+
+        def _fake_synthesize(
+            clusters: list[dict],
+            triage: dict[str, dict],
+            diagnostics: dict | None = None,
+        ) -> list[dict]:
+            if isinstance(diagnostics, dict):
+                diagnostics.setdefault("stages", {})["synthesizedRows"] = len(clusters)
+            cluster_id = clusters[0]["clusterId"]
+            return [
+                {
+                    "clusterId": cluster_id,
+                    "canonicalQuestionEn": "How can people renew a visa in Armenia without conflicting instructions?",
+                    "canonicalQuestionRu": "Как людям продлить визу в Армении без противоречивых инструкций?",
+                    "summaryEn": "People repeatedly ask for a clear visa-renewal process.",
+                    "summaryRu": "Люди постоянно просят понятный процесс продления визы.",
+                    "confidence": "high",
+                    "confidenceScore": 0.86,
+                    "status": "needs_guide",
+                    "resolvedPct": 22,
+                    "evidenceIds": ["ev-1", "ev-2"],
+                }
+            ]
+
         with patch.object(question_briefs.strategic, "get_question_brief_candidates", return_value=[_candidate_row()]), \
              patch.object(question_briefs, "_acquire_refresh_lease", return_value=True), \
              patch.object(question_briefs, "_load_state", return_value={"schemaVersion": 1, "clusters": {}}), \
              patch.object(question_briefs, "_save_state"), \
              patch.object(question_briefs, "_save_snapshot_cards", side_effect=_fake_save_snapshot), \
              patch.object(question_briefs, "_load_snapshot_cards", return_value=[{"id": "qc-qc-visa-support"}]), \
-             patch.object(question_briefs, "_synthesize_cards", return_value=synth_rows), \
+             patch.object(question_briefs, "_triage_clusters", side_effect=_fake_triage), \
+             patch.object(question_briefs, "_synthesize_cards", side_effect=_fake_synthesize), \
              patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES", 2), \
              patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_USERS", 2), \
              patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_CHANNELS", 2):
@@ -200,6 +221,60 @@ class QuestionBriefDiagnosticsTests(unittest.TestCase):
         self.assertEqual(cards, [])
         self.assertEqual(diagnostics["stages"]["cardsBeforeFilter"], 0)
         self.assertEqual(diagnostics["rejections"]["materialization"]["invalid_question_form"], 1)
+
+    def test_build_clusters_keeps_distinct_question_families_within_one_topic(self) -> None:
+        row = {
+            "topic": "Visa And Residency",
+            "category": "Migration",
+            "evidence": [
+                {
+                    "id": "ev-1",
+                    "kind": "comment",
+                    "text": "How do I renew my visa in Armenia?",
+                    "parentText": "People are comparing migration experiences.",
+                    "channel": "chan-a",
+                    "userId": "u1",
+                    "timestamp": "2026-03-18T10:00:00Z",
+                },
+                {
+                    "id": "ev-2",
+                    "kind": "comment",
+                    "text": "Where can I extend my visa in Yerevan?",
+                    "parentText": "The thread is asking about immigration offices.",
+                    "channel": "chan-b",
+                    "userId": "u2",
+                    "timestamp": "2026-03-19T10:00:00Z",
+                },
+                {
+                    "id": "ev-3",
+                    "kind": "comment",
+                    "text": "Why are residency applications delayed so long this spring?",
+                    "parentText": "People are frustrated about long waits.",
+                    "channel": "chan-a",
+                    "userId": "u3",
+                    "timestamp": "2026-03-20T10:00:00Z",
+                },
+                {
+                    "id": "ev-4",
+                    "kind": "comment",
+                    "text": "Why is the residency approval timeline taking months now?",
+                    "parentText": "The same issue comes up in another chat.",
+                    "channel": "chan-c",
+                    "userId": "u4",
+                    "timestamp": "2026-03-21T10:00:00Z",
+                },
+            ],
+        }
+
+        with patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES", 2), \
+             patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_USERS", 2), \
+             patch.object(question_briefs.config, "QUESTION_BRIEFS_MIN_CLUSTER_CHANNELS", 2):
+            clusters = question_briefs._build_clusters([row], diagnostics=question_briefs._new_refresh_diagnostics(force=True))
+
+        self.assertEqual(len(clusters), 2)
+        seed_questions = {cluster["seedQuestion"] for cluster in clusters}
+        self.assertTrue(any("renew my visa" in seed.lower() or "extend my visa" in seed.lower() for seed in seed_questions))
+        self.assertTrue(any("residency" in seed.lower() and "delay" in seed.lower() for seed in seed_questions))
 
     def test_snapshot_round_trip_uses_runtime_store(self) -> None:
         store = _FakeRuntimeStore()

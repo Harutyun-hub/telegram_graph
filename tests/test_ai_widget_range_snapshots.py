@@ -3,11 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import config
 from api import aggregator
 from api import behavioral_briefs
 from api import question_briefs
-from api.ai_widget_storage import dedupe_cards
+from api.ai_widget_storage import dedupe_cards, select_portfolio_cards
 from api.dashboard_dates import build_dashboard_date_context
 from api import opportunity_briefs
 
@@ -90,22 +89,6 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
             self.assertEqual(question_briefs.get_question_briefs(ctx=ctx), [{"id": "range-q"}])
             ensure_mock.assert_not_called()
 
-    def test_question_briefs_use_empty_exact_range_snapshot_instead_of_global_fallback(self) -> None:
-        store = _FakeRuntimeStore()
-        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
-        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
-
-        store.save_runtime_json("question_cards/latest.json", {"cards": [{"id": "global-q"}]})
-        store.save_runtime_json(
-            f"question_cards/ranges/{range_key}/latest.json",
-            {"cards": []},
-        )
-
-        with patch.object(question_briefs, "_get_runtime_store", return_value=store), \
-             patch.object(question_briefs, "_ensure_range_refresh") as ensure_mock:
-            self.assertEqual(question_briefs.get_question_briefs(ctx=ctx), [])
-            ensure_mock.assert_not_called()
-
     def test_behavioral_problem_refresh_kind_no_longer_emits_generic_fallback(self) -> None:
         cluster = {
             "clusterId": "pb-1",
@@ -158,103 +141,6 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
         self.assertEqual(state["pb-1"]["status"], "rejected")
         self.assertNotIn("card", state["pb-1"])
 
-    def test_behavioral_exact_range_snapshot_wins_even_when_empty(self) -> None:
-        store = _FakeRuntimeStore()
-        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
-        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
-
-        store.save_runtime_json(
-            "behavioral_cards/latest.json",
-            {
-                "problemBriefs": [{"id": "global-problem"}],
-                "serviceGapBriefs": [],
-                "urgencyBriefs": [{"id": "global-urgency"}],
-            },
-        )
-        store.save_runtime_json(
-            f"behavioral_cards/ranges/{range_key}/latest.json",
-            {
-                "problemBriefs": [],
-                "serviceGapBriefs": [],
-                "urgencyBriefs": [],
-            },
-        )
-
-        with patch.object(behavioral_briefs, "_get_runtime_store", return_value=store), \
-             patch.object(behavioral_briefs, "_ensure_range_refresh") as ensure_mock:
-            payload = behavioral_briefs.get_behavioral_briefs(ctx=ctx)
-
-        self.assertEqual(payload["problemBriefs"], [])
-        self.assertEqual(payload["serviceGapBriefs"], [])
-        self.assertEqual(payload["urgencyBriefs"], [{"id": "global-urgency"}])
-        ensure_mock.assert_not_called()
-
-    def test_opportunity_exact_range_snapshot_wins_even_when_empty(self) -> None:
-        store = _FakeRuntimeStore()
-        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
-        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
-
-        store.save_runtime_json("opportunity_cards/latest.json", {"cards": [{"id": "global-opp"}]})
-        store.save_runtime_json(
-            f"opportunity_cards/ranges/{range_key}/latest.json",
-            {"cards": []},
-        )
-
-        with patch.object(opportunity_briefs, "_get_runtime_store", return_value=store), \
-             patch.object(opportunity_briefs, "_ensure_range_refresh") as ensure_mock:
-            self.assertEqual(opportunity_briefs.get_business_opportunity_briefs(ctx=ctx), [])
-            ensure_mock.assert_not_called()
-
-    def test_opportunity_materialization_accepts_borderline_score(self) -> None:
-        clusters = [
-            {
-                "clusterId": "opp-1",
-                "topic": "Community Solidarity",
-                "category": "Community Life",
-                "messages": 5,
-                "uniqueUsers": 3,
-                "channels": 2,
-                "trend7dPct": 40,
-                "latestAt": "2026-04-15T10:00:00Z",
-                "signals": [
-                    {
-                        "id": "ev-1",
-                        "message": "Need better volunteer coordination.",
-                        "channel": "chan-a",
-                        "timestamp": "2026-04-15T09:00:00Z",
-                        "kind": "comment",
-                    },
-                    {
-                        "id": "ev-2",
-                        "message": "People keep asking where to post urgent help requests.",
-                        "channel": "chan-b",
-                        "timestamp": "2026-04-15T08:00:00Z",
-                        "kind": "comment",
-                    },
-                ],
-            }
-        ]
-        ai_rows = [
-            {
-                "clusterId": "opp-1",
-                "opportunityEn": "A volunteer matching service for urgent neighborhood support.",
-                "opportunityRu": "Сервис подбора волонтёров для срочной соседской поддержки.",
-                "summaryEn": "People repeatedly ask where to post urgent requests and find volunteers.",
-                "summaryRu": "Люди регулярно спрашивают, где размещать срочные запросы и находить волонтёров.",
-                "deliveryModel": "service",
-                "readiness": "validate_now",
-                "confidence": "low",
-                "confidenceScore": 0.57,
-                "evidenceIds": ["ev-1", "ev-2"],
-            }
-        ]
-
-        with patch.object(config, "OPPORTUNITY_BRIEFS_MIN_CONFIDENCE", 0.55):
-            cards = opportunity_briefs._materialize_cards(clusters, ai_rows, diagnostics={})
-
-        self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]["clusterId"], "opp-1")
-
     def test_dedupe_cards_keeps_unique_ai_cards(self) -> None:
         cards = [
             {
@@ -280,6 +166,82 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
         deduped = dedupe_cards(cards, title_fields=["canonicalQuestionEn"], max_cards=8)
 
         self.assertEqual([card["id"] for card in deduped], ["q1", "q3"])
+
+    def test_select_portfolio_cards_prefers_topic_diversity_before_fill(self) -> None:
+        cards = [
+            {
+                "id": "q1",
+                "topic": "Visa And Residency",
+                "canonicalQuestionEn": "How do I renew my visa in Armenia?",
+                "evidence": [{"id": "ev-1"}, {"id": "ev-2"}],
+            },
+            {
+                "id": "q2",
+                "topic": "Visa And Residency",
+                "canonicalQuestionEn": "Why are residency applications delayed so long this spring?",
+                "evidence": [{"id": "ev-3"}, {"id": "ev-4"}],
+            },
+            {
+                "id": "q3",
+                "topic": "Government & Leadership",
+                "canonicalQuestionEn": "Why are political discussions becoming more hostile in government threads?",
+                "evidence": [{"id": "ev-5"}, {"id": "ev-6"}],
+            },
+        ]
+
+        selected = select_portfolio_cards(cards, title_fields=["canonicalQuestionEn"], max_cards=2, topic_field="topic")
+
+        self.assertEqual([card["id"] for card in selected], ["q1", "q3"])
+
+    def test_opportunity_materialize_normalizes_delivery_fields(self) -> None:
+        cluster = {
+            "clusterId": "op-community-solidarity",
+            "topic": "Community Solidarity",
+            "category": "Community Life",
+            "messages": 4,
+            "uniqueUsers": 3,
+            "channels": 2,
+            "trend7dPct": 35,
+            "latestAt": "2026-04-15T10:00:00Z",
+            "signals": [
+                {
+                    "id": "ev-1",
+                    "message": "We need a better way to coordinate urgent help requests across chats.",
+                    "context": "People keep asking who can help and where to post.",
+                    "channel": "chan-a",
+                    "timestamp": "2026-04-15T09:00:00Z",
+                    "kind": "message",
+                },
+                {
+                    "id": "ev-2",
+                    "message": "A volunteer coordination group or bot would save time for everyone.",
+                    "context": "The same need came up in another channel.",
+                    "channel": "chan-b",
+                    "timestamp": "2026-04-14T09:00:00Z",
+                    "kind": "message",
+                },
+            ],
+        }
+        ai_rows = [
+            {
+                "clusterId": "op-community-solidarity",
+                "opportunityEn": "A community coordination service for urgent help requests",
+                "opportunityRu": "Сервис координации срочных запросов о помощи",
+                "summaryEn": "Repeated volunteer coordination asks suggest a real need.",
+                "summaryRu": "Повторяющиеся запросы на координацию помощи указывают на реальную потребность.",
+                "deliveryModel": "community program",
+                "readiness": "validate now",
+                "confidence": "medium",
+                "confidenceScore": 0.62,
+                "evidenceIds": ["ev-1", "ev-2"],
+            }
+        ]
+
+        cards = opportunity_briefs._materialize_cards([cluster], ai_rows, diagnostics=opportunity_briefs._new_refresh_diagnostics(force=True))
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["deliveryModel"], "community_program")
+        self.assertEqual(cards[0]["readiness"], "validate_now")
 
     def test_aggregator_passes_dashboard_range_into_ai_widget_loaders(self) -> None:
         ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")

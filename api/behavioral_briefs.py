@@ -18,11 +18,11 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
-    dedupe_cards,
     load_latest_widget_payload,
     load_widget_state_payload,
     save_widget_snapshot_payload,
     save_widget_state_payload,
+    select_portfolio_cards,
 )
 from api.dashboard_dates import DashboardDateContext
 from api.queries import behavioral
@@ -59,10 +59,11 @@ You generate Problem Tracker cards from evidence clusters.
 
 Rules:
 1) Use only the provided evidence text and evidence IDs.
-2) Write one societal problem statement (not taxonomy title).
+2) Write one recurring community problem statement (not a taxonomy title).
 3) Keep wording concrete and human-readable for non-experts.
 4) Do not invent causes, actors, or numbers.
-5) If grounding is weak, set confidence to low.
+5) Strong single-channel recurring narratives are allowed when they clearly represent repeated pain rather than a one-off complaint.
+6) If grounding is weak, set confidence to low.
 
 Return JSON only:
 {
@@ -142,6 +143,22 @@ ADMIN_PROMPT_DEFAULTS = {
 }
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9а-яА-ЯёЁ]+")
+_FAMILY_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "have", "has", "are", "was", "were",
+    "как", "для", "это", "что", "или", "при", "если", "когда", "где", "they", "them", "their",
+    "need", "help", "people", "community", "problem", "issue", "support", "нужна", "нужен",
+    "помощь", "люди", "сообщество", "проблема", "again", "still", "never", "because",
+    "getting", "worse", "keep",
+}
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = len(left.union(right))
+    if union <= 0:
+        return 0.0
+    return len(left.intersection(right)) / union
 _ASK_HINTS = (
     "need help",
     "looking for",
@@ -762,10 +779,6 @@ def _ensure_range_refresh(ctx: DashboardDateContext) -> None:
     threading.Thread(target=_runner, daemon=True, name=f"behavioral-briefs-{key}").start()
 
 
-def _snapshot_paths(ctx: DashboardDateContext | None = None):
-    return build_widget_snapshot_paths("behavioral_cards", ctx)
-
-
 def _load_state(ctx: DashboardDateContext | None = None) -> dict:
     global _state_cache
     if ctx is None and isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
@@ -844,60 +857,12 @@ def _load_snapshot_payload(*, ctx: DashboardDateContext | None = None, diagnosti
     return _load_snapshot_payload_with_status(ctx=ctx, diagnostics=diagnostics)[0]
 
 
-def _should_keep_current_snapshot(
-    current_snapshot: dict,
-    next_payload: dict,
-    metadata: dict | None = None,
-) -> tuple[bool, str]:
-    current_problems = current_snapshot.get("problemBriefs") if isinstance(current_snapshot, dict) else []
-    current_problems = current_problems if isinstance(current_problems, list) else []
-    next_problems = next_payload.get("problemBriefs") if isinstance(next_payload, dict) else []
-    next_problems = next_problems if isinstance(next_problems, list) else []
-    current_count = len(current_problems)
-    next_count = len(next_problems)
-    if current_count > 0 and next_count == 0:
-        return True, "zero_problem_cards_over_non_empty"
-
-    current_meta = current_snapshot.get("meta") if isinstance(current_snapshot, dict) else {}
-    current_meta = current_meta if isinstance(current_meta, dict) else {}
-    next_meta = metadata if isinstance(metadata, dict) else {}
-    current_clusters = _as_int(current_meta.get("activeProblemClusters"), -1)
-    next_clusters = _as_int(next_meta.get("activeProblemClusters"), -1)
-    if (
-        current_count > next_count
-        and current_clusters >= 0
-        and next_clusters >= 0
-        and current_clusters == next_clusters
-    ):
-        return True, "fewer_problem_cards_same_active_clusters"
-    return False, ""
-
-
 def _save_snapshot_payload(
     payload: dict,
     metadata: dict | None = None,
     diagnostics: dict | None = None,
     ctx: DashboardDateContext | None = None,
 ) -> bool:
-    current_snapshot, _ = load_latest_widget_payload(
-        _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
-        default={"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []},
-    )
-    keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, payload, metadata)
-    if keep_current:
-        current = _load_snapshot_payload(diagnostics=diagnostics)
-        if isinstance(diagnostics, dict):
-            snapshot = diagnostics.setdefault("snapshot", {})
-            snapshot["publishSkipped"] = True
-            snapshot["publishSkipReason"] = keep_reason
-            snapshot["writeSucceeded"] = True
-            snapshot["readbackProblemCards"] = len(current.get("problemBriefs") or [])
-            snapshot["readbackServiceCards"] = len(current.get("serviceGapBriefs") or [])
-            snapshot["readbackUrgencyCards"] = len(current.get("urgencyBriefs") or [])
-        return True
-
     out = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -909,10 +874,11 @@ def _save_snapshot_payload(
         out["meta"] = metadata
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
+    paths = _snapshot_paths(ctx)
     saved = save_widget_snapshot_payload(
         _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
         payload=out,
         instance_id=_INSTANCE_ID,
         keep=12,
@@ -950,6 +916,10 @@ def _confidence_label(score: float) -> str:
     return "low"
 
 
+def _snapshot_paths(ctx: DashboardDateContext | None = None):
+    return build_widget_snapshot_paths("behavioral_cards", ctx)
+
+
 def _cluster_fingerprint(kind: str, cluster: dict) -> str:
     payload = {
         "kind": kind,
@@ -978,6 +948,56 @@ def _cluster_fingerprint(kind: str, cluster: dict) -> str:
     }
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _family_tokens(value: Any) -> set[str]:
+    return {
+        (token.lower()[:5] if len(token) > 5 else token.lower())
+        for token in _TOKEN_RE.findall(_as_str(value, ""))
+        if len(token) >= 4 and token.lower() not in _FAMILY_STOPWORDS
+    }
+
+
+def _family_seed_text(signals: list[dict]) -> str:
+    ranked = sorted(
+        signals,
+        key=lambda s: (
+            _as_int(s.get("distressHit"), 0),
+            len(_as_str(s.get("message"), "")),
+            _parse_ts(_as_str(s.get("timestamp"), "")).timestamp(),
+        ),
+        reverse=True,
+    )
+    return _as_str((ranked[0] if ranked else {}).get("message"), "")
+
+
+def _family_cluster_id(kind: str, topic: str, seed_text: str) -> str:
+    digest = hashlib.sha1(f"{kind}|{topic.lower()}|{seed_text.lower()}".encode("utf-8")).hexdigest()[:10]
+    return ("pb-" if kind == "problem" else "sg-") + f"{_slugify(topic)}-{digest}"
+
+
+def _build_problem_families(evidence_rows: list[dict]) -> list[list[dict]]:
+    families: list[dict] = []
+    ordered = sorted(evidence_rows, key=lambda ev: _parse_ts(_as_str(ev.get("timestamp"), "")), reverse=True)
+    for signal in ordered:
+        signal_tokens = _family_tokens(signal.get("message")) or _family_tokens(signal.get("context"))
+        best_family: dict | None = None
+        best_score = 0.0
+        for family in families:
+            family_tokens = family.get("tokens") if isinstance(family.get("tokens"), set) else set()
+            score = _jaccard(signal_tokens, family_tokens)
+            shared_tokens = len(signal_tokens.intersection(family_tokens))
+            if shared_tokens >= 2:
+                score = max(score, 0.22)
+            if score > best_score:
+                best_family = family
+                best_score = score
+        if best_family is not None and best_score >= 0.18:
+            best_family.setdefault("signals", []).append(signal)
+            best_family["tokens"] = set(best_family.get("tokens") or set()).union(signal_tokens)
+            continue
+        families.append({"signals": [signal], "tokens": set(signal_tokens)})
+    return [list(family.get("signals") or []) for family in families]
 
 
 def _normalize_candidates(rows: list[dict], kind: str) -> list[dict]:
@@ -1029,50 +1049,89 @@ def _normalize_candidates(rows: list[dict], kind: str) -> list[dict]:
         if len(evidence_rows) < 2:
             continue
 
-        parsed_timestamps = [_parse_ts(s.get("timestamp")) for s in evidence_rows if _as_str(s.get("timestamp"), "").strip()]
-        row_latest_ts = _parse_ts(row.get("latestAt"))
-        reference_now = max(
-            [dt for dt in parsed_timestamps if dt is not None] + ([row_latest_ts] if row_latest_ts is not None else []),
-            default=datetime.now(timezone.utc),
-        )
         user_keys = {
             (_as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}")
             for s in evidence_rows
         }
         user_keys = {u for u in user_keys if u}
         channels = {_as_str(s.get("channel"), "unknown").strip().lower() for s in evidence_rows if _as_str(s.get("channel"), "").strip()}
-        signals7d = sum(1 for s in evidence_rows if (reference_now - _parse_ts(s.get("timestamp"))).days < 7)
-        signals_prev7d = sum(1 for s in evidence_rows if 7 <= (reference_now - _parse_ts(s.get("timestamp"))).days < 14)
+        latest_candidates = [
+            _parse_ts(_as_str(s.get("timestamp"), ""))
+            for s in evidence_rows
+            if _as_str(s.get("timestamp"), "").strip()
+        ]
+        row_latest = _as_str(row.get("latestAt"), "").strip()
+        if row_latest:
+            latest_candidates.append(_parse_ts(row_latest))
+        reference_ts = max(latest_candidates, default=datetime.now(timezone.utc))
+        latest_ts = reference_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        latest_ts = ""
-        if evidence_rows:
-            latest_ts = max((_as_str(s.get("timestamp"), "") for s in evidence_rows), default="")
+        signals7d = 0
+        signals_prev7d = 0
+        for signal in evidence_rows:
+            signal_ts = _parse_ts(signal.get("timestamp"))
+            age_days = (reference_ts - signal_ts).total_seconds() / 86400
+            if age_days < 0:
+                age_days = 0
+            if age_days < 7:
+                signals7d += 1
+            elif age_days < 14:
+                signals_prev7d += 1
 
-        base = {
-            "clusterId": ("pb-" if kind == "problem" else "sg-") + _slugify(topic),
-            "topic": topic,
-            "category": _as_str(row.get("category"), "General"),
-            "messages": len(evidence_rows),
-            "uniqueUsers": len(user_keys),
-            "channels": len(channels),
-            "signals7d": signals7d,
-            "signalsPrev7d": signals_prev7d,
-            "trend7dPct": _trend_pct(signals7d, signals_prev7d),
-            "latestAt": latest_ts or _as_str(row.get("latestAt"), ""),
-            "signals": evidence_rows[: int(config.BEHAVIORAL_BRIEFS_EVIDENCE_PER_TOPIC)],
-        }
-        if kind == "problem":
-            severity = _as_str(row.get("severity"), "medium").strip().lower()
-            if severity not in {"critical", "high", "medium", "low"}:
-                severity = "medium"
-            base["severity"] = severity
-        else:
-            base["unmetPct"] = int(_clamp(round(_as_float(row.get("unmetPct"), 0.0)), 0, 100))
-        clusters.append(base)
+        families = _build_problem_families(evidence_rows) if kind == "problem" else [evidence_rows]
+        for family_rows in families:
+            if len(family_rows) < 2:
+                continue
+            family_users = {
+                (_as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}")
+                for s in family_rows
+            }
+            family_users = {u for u in family_users if u}
+            family_channels = {
+                _as_str(s.get("channel"), "unknown").strip().lower()
+                for s in family_rows
+                if _as_str(s.get("channel"), "").strip()
+            }
+            family_signals7d = 0
+            family_prev7d = 0
+            for signal in family_rows:
+                signal_ts = _parse_ts(signal.get("timestamp"))
+                age_days = (reference_ts - signal_ts).total_seconds() / 86400
+                if age_days < 0:
+                    age_days = 0
+                if age_days < 7:
+                    family_signals7d += 1
+                elif age_days < 14:
+                    family_prev7d += 1
+
+            base = {
+                "clusterId": _family_cluster_id(kind, topic, _family_seed_text(family_rows)),
+                "topic": topic,
+                "category": _as_str(row.get("category"), "General"),
+                "messages": len(family_rows),
+                "uniqueUsers": len(family_users),
+                "channels": len(family_channels),
+                "signals7d": family_signals7d,
+                "signalsPrev7d": family_prev7d,
+                "trend7dPct": _trend_pct(family_signals7d, family_prev7d),
+                "latestAt": latest_ts or _as_str(row.get("latestAt"), ""),
+                "signals": family_rows[: int(config.BEHAVIORAL_BRIEFS_EVIDENCE_PER_TOPIC)],
+            }
+            if kind == "problem":
+                severity = _as_str(row.get("severity"), "medium").strip().lower()
+                if severity not in {"critical", "high", "medium", "low"}:
+                    severity = "medium"
+                base["severity"] = severity
+            else:
+                base["unmetPct"] = int(_clamp(round(_as_float(row.get("unmetPct"), 0.0)), 0, 100))
+            clusters.append(base)
 
     clusters.sort(
         key=lambda c: (
+            1 if _as_str(c.get("severity"), "") == "critical" else 0,
+            1 if _as_str(c.get("severity"), "") == "high" else 0,
             _as_int(c.get("messages"), 0),
+            _as_int(c.get("signals7d"), 0),
             _as_int(c.get("uniqueUsers"), 0),
             _as_int(c.get("channels"), 0),
         ),
@@ -1094,9 +1153,13 @@ def _support_gate(cluster: dict, kind: str) -> bool:
         service_ok = messages >= 3 and users >= 1 and channels >= 1
         return service_ok and _as_int(cluster.get("unmetPct"), 0) >= 45
 
+    severity = _as_str(cluster.get("severity"), "medium").strip().lower()
+    recent_signals = _as_int(cluster.get("signals7d"), 0)
     base_ok = messages >= min_messages and users >= min_users and channels >= min_channels
     momentum_ok = messages >= max(4, min_messages - 2) and users >= max(2, min_users - 1) and channels >= min_channels and trend >= 35
-    if not (base_ok or momentum_ok):
+    high_severity_ok = severity in {"critical", "high"} and messages >= 6 and users >= 2 and channels >= 1
+    recent_pressure_ok = recent_signals >= 4 and messages >= 6 and users >= 2 and channels >= 1
+    if not (base_ok or momentum_ok or high_severity_ok or recent_pressure_ok):
         return False
     return True
 
@@ -1551,6 +1614,8 @@ def _refresh_kind(
         else:
             ai_rows = _synthesize_service_cards(changed_clusters)
             new_cards = _materialize_service_cards(changed_clusters, ai_rows)
+            if not new_cards:
+                new_cards = _materialize_service_cards(changed_clusters, _deterministic_service_cards(changed_clusters))
 
     cards_by_cluster = {
         _as_str(card.get("clusterId"), ""): card
@@ -1616,10 +1681,11 @@ def _refresh_kind(
         reverse=True,
     )
     if kind == "problem":
-        final_cards = dedupe_cards(
+        final_cards = select_portfolio_cards(
             final_cards,
             title_fields=["problemEn", "problemRu"],
             max_cards=int(config.BEHAVIORAL_BRIEFS_MAX_CARDS),
+            topic_field="topic",
         )
     else:
         final_cards = final_cards[: int(config.BEHAVIORAL_BRIEFS_MAX_CARDS)]
@@ -1757,7 +1823,6 @@ def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext 
     state["serviceClusters"] = next_service_state
     state_saved = _save_state(state, ctx=ctx)
     snapshot_saved = False
-    published_payload = last_good_payload
     if state_saved:
         snapshot_saved = _save_snapshot_payload(
             payload,
@@ -1775,8 +1840,6 @@ def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext 
             diagnostics=diagnostics,
             ctx=ctx,
         )
-        if snapshot_saved:
-            published_payload = _load_snapshot_payload(ctx=ctx, diagnostics=diagnostics)
     if not state_saved:
         diagnostics["error"] = "Behavioral cards state could not be persisted and verified"
     elif not snapshot_saved:
@@ -1785,10 +1848,10 @@ def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext 
     if state_saved and snapshot_saved:
         if ctx is None:
             with _cache_lock:
-                _cached_payload = published_payload
+                _cached_payload = payload
                 _cache_ts = time.time()
         diagnostics["exitReason"] = "ok"
-        result_payload = published_payload
+        result_payload = payload
     else:
         diagnostics["exitReason"] = "persistence_verification_failed"
         result_payload = last_good_payload
@@ -1818,7 +1881,7 @@ def get_behavioral_briefs(*, force_refresh: bool = False, ctx: DashboardDateCont
 
     if ctx is not None:
         payload, exists = _load_snapshot_payload_with_status(ctx=ctx)
-        if exists:
+        if exists and any(payload.values()):
             if not payload.get("urgencyBriefs"):
                 payload["urgencyBriefs"] = _load_snapshot_payload().get("urgencyBriefs") or []
             return payload

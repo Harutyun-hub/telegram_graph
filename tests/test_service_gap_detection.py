@@ -103,7 +103,83 @@ class ServiceGapDetectionTests(unittest.TestCase):
         self.assertEqual(clusters[0]["signals7d"], 2)
         self.assertEqual(clusters[0]["signalsPrev7d"], 1)
 
-    def test_refresh_kind_for_services_has_no_deterministic_fallback(self) -> None:
+    def test_problem_support_gate_accepts_high_severity_cluster_with_compact_support(self) -> None:
+        self.assertTrue(
+            behavioral_briefs._support_gate(
+                {
+                    "messages": 6,
+                    "uniqueUsers": 2,
+                    "channels": 1,
+                    "signals7d": 4,
+                    "trend7dPct": 12,
+                    "severity": "high",
+                },
+                "problem",
+            )
+        )
+
+    def test_normalize_candidates_splits_distinct_problem_families_within_topic(self) -> None:
+        rows = [
+            {
+                "topic": "Road And Transit",
+                "category": "Housing & Infrastructure",
+                "severity": "high",
+                "latestAt": "2026-04-15T12:00:00Z",
+                "evidence": [
+                    {
+                        "id": "ev-1",
+                        "kind": "comment",
+                        "text": "The road repairs are delayed again and buses are still rerouted.",
+                        "parentText": "People are discussing long traffic jams.",
+                        "channel": "chan-a",
+                        "userId": "u1",
+                        "timestamp": "2026-04-15T11:00:00Z",
+                        "label": "Negative",
+                        "distressHit": 1,
+                    },
+                    {
+                        "id": "ev-2",
+                        "kind": "comment",
+                        "text": "Road works are unfinished and transport delays keep getting worse.",
+                        "parentText": "Another transport complaint thread.",
+                        "channel": "chan-b",
+                        "userId": "u2",
+                        "timestamp": "2026-04-14T11:00:00Z",
+                        "label": "Urgent",
+                        "distressHit": 1,
+                    },
+                    {
+                        "id": "ev-3",
+                        "kind": "comment",
+                        "text": "Street lighting is broken and people feel unsafe walking home at night.",
+                        "parentText": "Residents are sharing safety concerns.",
+                        "channel": "chan-a",
+                        "userId": "u3",
+                        "timestamp": "2026-04-13T11:00:00Z",
+                        "label": "Negative",
+                        "distressHit": 1,
+                    },
+                    {
+                        "id": "ev-4",
+                        "kind": "comment",
+                        "text": "The neighborhood is dark again because the street lights were never repaired.",
+                        "parentText": "A second thread about unsafe streets.",
+                        "channel": "chan-c",
+                        "userId": "u4",
+                        "timestamp": "2026-04-12T11:00:00Z",
+                        "label": "Negative",
+                        "distressHit": 1,
+                    },
+                ],
+            }
+        ]
+
+        clusters = behavioral_briefs._normalize_candidates(rows, "problem")
+
+        self.assertEqual(len(clusters), 2)
+        self.assertTrue(all(cluster["topic"] == "Road And Transit" for cluster in clusters))
+
+    def test_refresh_kind_for_services_uses_deterministic_fallback_when_ai_empty(self) -> None:
         cluster = {
             "clusterId": "sg-political-protest",
             "topic": "Political Protest",
@@ -155,9 +231,11 @@ class ServiceGapDetectionTests(unittest.TestCase):
             )
 
         self.assertEqual(changed, 1)
-        self.assertEqual(cards, [])
-        self.assertEqual(state["sg-political-protest"]["status"], "rejected")
-        self.assertEqual(state["sg-political-protest"]["rejectionReason"], "insufficient_grounding")
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["clusterId"], "sg-political-protest")
+        self.assertEqual(cards[0]["serviceNeedEn"], "Practical help needed in Political Protest")
+        self.assertEqual(state["sg-political-protest"]["status"], "accepted")
+        self.assertIn("card", state["sg-political-protest"])
 
 
 if __name__ == "__main__":

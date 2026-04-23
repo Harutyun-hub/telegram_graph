@@ -227,6 +227,27 @@ def _jaccard(left: set[str], right: set[str]) -> float:
     return len(left.intersection(right)) / union
 
 
+def _is_duplicate_card(
+    card: dict,
+    seen: list[tuple[str, set[str], set[str]]],
+    *,
+    title_fields: Iterable[str],
+) -> bool:
+    raw_text = _first_text(card, title_fields)
+    normalized = normalize_card_text(raw_text)
+    tokens = set(normalized.split()) if normalized else set()
+    evidence_ids = card_evidence_ids(card)
+
+    for existing_text, existing_tokens, existing_evidence in seen:
+        if normalized and existing_text and normalized == existing_text:
+            return True
+        if tokens and existing_tokens and _jaccard(tokens, existing_tokens) >= 0.85:
+            return True
+        if evidence_ids and existing_evidence and _jaccard(evidence_ids, existing_evidence) >= 0.6:
+            return True
+    return False
+
+
 def dedupe_cards(cards: list[dict], *, title_fields: Iterable[str], max_cards: int) -> list[dict]:
     deduped: list[dict] = []
     seen: list[tuple[str, set[str], set[str]]] = []
@@ -234,29 +255,63 @@ def dedupe_cards(cards: list[dict], *, title_fields: Iterable[str], max_cards: i
     for card in cards:
         if not isinstance(card, dict):
             continue
+        if _is_duplicate_card(card, seen, title_fields=title_fields):
+            continue
+
         raw_text = _first_text(card, title_fields)
         normalized = normalize_card_text(raw_text)
         tokens = set(normalized.split()) if normalized else set()
         evidence_ids = card_evidence_ids(card)
-
-        duplicate = False
-        for existing_text, existing_tokens, existing_evidence in seen:
-            if normalized and existing_text and normalized == existing_text:
-                duplicate = True
-                break
-            if tokens and existing_tokens and _jaccard(tokens, existing_tokens) >= 0.85:
-                duplicate = True
-                break
-            if evidence_ids and existing_evidence and _jaccard(evidence_ids, existing_evidence) >= 0.6:
-                duplicate = True
-                break
-
-        if duplicate:
-            continue
-
         deduped.append(card)
         seen.append((normalized, tokens, evidence_ids))
         if len(deduped) >= max(1, int(max_cards)):
             break
 
     return deduped
+
+
+def select_portfolio_cards(
+    cards: list[dict],
+    *,
+    title_fields: Iterable[str],
+    max_cards: int,
+    topic_field: str = "topic",
+) -> list[dict]:
+    limit = max(1, int(max_cards))
+    selected: list[dict] = []
+    selected_keys: set[str] = set()
+    seen: list[tuple[str, set[str], set[str]]] = []
+    topic_counts: dict[str, int] = {}
+
+    def _card_key(card: dict, idx: int) -> str:
+        return str(card.get("id") or card.get("clusterId") or f"row-{idx}")
+
+    def _remember(card: dict) -> None:
+        raw_text = _first_text(card, title_fields)
+        normalized = normalize_card_text(raw_text)
+        tokens = set(normalized.split()) if normalized else set()
+        evidence_ids = card_evidence_ids(card)
+        selected.append(card)
+        seen.append((normalized, tokens, evidence_ids))
+        topic = str(card.get(topic_field) or "").strip().lower()
+        if topic:
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+
+    for phase in ("coverage", "fill"):
+        for idx, card in enumerate(cards):
+            if not isinstance(card, dict):
+                continue
+            key = _card_key(card, idx)
+            if key in selected_keys:
+                continue
+            if _is_duplicate_card(card, seen, title_fields=title_fields):
+                continue
+            topic = str(card.get(topic_field) or "").strip().lower()
+            if phase == "coverage" and topic and topic_counts.get(topic, 0) >= 1:
+                continue
+            selected_keys.add(key)
+            _remember(card)
+            if len(selected) >= limit:
+                return selected
+
+    return selected

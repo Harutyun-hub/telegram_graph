@@ -18,11 +18,12 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
-    dedupe_cards,
     load_latest_widget_payload,
     load_widget_state_payload,
+    normalize_card_text,
     save_widget_snapshot_payload,
     save_widget_state_payload,
+    select_portfolio_cards,
 )
 from api.dashboard_dates import DashboardDateContext
 from api.queries import strategic
@@ -59,8 +60,9 @@ You triage candidate societal question clusters for Question Cards.
 
 Rules:
 1) Use only provided evidence snippets and IDs.
-2) Accept only if the cluster reflects a combined societal ask.
-3) Reject rhetorical, emotional, mixed-topic, and low-grounded clusters.
+2) Accept only if the cluster reflects a recurring community-relevant ask, not a one-off anecdote.
+3) Strong single-channel recurring narratives are allowed when they are clearly repeated and evidence-backed.
+4) Reject rhetorical, emotional, mixed-topic, and low-grounded clusters.
 4) Return JSON only; no extra keys.
 
 Return schema:
@@ -71,7 +73,7 @@ Return schema:
       "status": "accepted|rejected",
       "confidence": "high|medium|low",
       "evidenceIds": ["id1", "id2"],
-      "rejectionReason": "low_signal|rhetorical_or_emotional|single_user_or_non_societal|mixed_topics|insufficient_grounding|contradictory_evidence"
+      "rejectionReason": "low_signal|rhetorical_or_emotional|one_off_or_weakly_recurring|mixed_topics|insufficient_grounding|contradictory_evidence"
     }
   ]
 }
@@ -81,10 +83,10 @@ QUESTION_BRIEFS_SYNTHESIS_PROMPT = """
 You generate high-quality Question Cards from evidence clusters.
 
 Rules:
-1) Primary output MUST be a societal, cluster-level question in question form.
+1) Primary output MUST be a recurring narrative-level question in question form.
 2) canonicalQuestionEn and canonicalQuestionRu must end with '?'.
 3) Do NOT output statement headlines.
-4) Do not summarize a single individual anecdote as a societal card.
+4) Do not summarize a single individual anecdote or one-message exchange as a question card.
 5) Use only provided evidence text and IDs.
 6) If grounding is weak, set confidence to low and omit the card from accepted output.
 7) Russian text must be professional and natural.
@@ -140,6 +142,8 @@ _INTERROGATIVE_HINTS = (
     "нужно",
     "кто",
 )
+_QUESTION_FAMILY_STOPWORDS = {hint.lower() for hint in _INTERROGATIVE_HINTS}
+_QUESTION_FAMILY_STOPWORDS.update({"people", "someone", "anyone", "armenia", "yerevan", "please"})
 
 _NOISE_MARKERS = (
     "и что",
@@ -444,9 +448,10 @@ def _load_state(ctx: DashboardDateContext | None = None) -> dict:
     if ctx is None and isinstance(_state_cache, dict) and _state_cache.get("schemaVersion") == _SCHEMA_VERSION:
         return _state_cache
 
+    paths = _snapshot_paths(ctx)
     state = load_widget_state_payload(
         _get_runtime_store(),
-        state_path=_snapshot_paths(ctx).state_path,
+        state_path=paths.state_path,
         default={
             "schemaVersion": _SCHEMA_VERSION,
             "updatedAt": None,
@@ -487,10 +492,11 @@ def _load_snapshot_cards_with_status(
     diagnostics: dict | None = None,
     stage: str = "loadedCards",
 ) -> tuple[list[dict], bool]:
+    paths = _snapshot_paths(ctx)
     snapshot, exists = load_latest_widget_payload(
         _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
         default={"cards": []},
     )
     cards = snapshot.get("cards") if isinstance(snapshot, dict) else []
@@ -509,57 +515,12 @@ def _load_snapshot_cards(
     return _load_snapshot_cards_with_status(ctx=ctx, diagnostics=diagnostics, stage=stage)[0]
 
 
-def _should_keep_current_snapshot(
-    current_snapshot: dict,
-    next_cards: list[dict],
-    metadata: dict | None = None,
-) -> tuple[bool, str]:
-    current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
-    current_cards = current_cards if isinstance(current_cards, list) else []
-    current_count = len(current_cards)
-    next_count = len(next_cards)
-    if current_count > 0 and next_count == 0:
-        return True, "zero_cards_over_non_empty"
-
-    current_meta = current_snapshot.get("meta") if isinstance(current_snapshot, dict) else {}
-    current_meta = current_meta if isinstance(current_meta, dict) else {}
-    next_meta = metadata if isinstance(metadata, dict) else {}
-    current_clusters = _as_int(current_meta.get("activeClusters"), -1)
-    next_clusters = _as_int(next_meta.get("activeClusters"), -1)
-    if (
-        current_count > next_count
-        and current_clusters >= 0
-        and next_clusters >= 0
-        and current_clusters == next_clusters
-    ):
-        return True, "fewer_cards_same_active_clusters"
-    return False, ""
-
-
 def _save_snapshot_cards(
     cards: list[dict],
     metadata: dict | None = None,
     diagnostics: dict | None = None,
     ctx: DashboardDateContext | None = None,
 ) -> bool:
-    current_snapshot, _ = load_latest_widget_payload(
-        _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
-        default={"cards": []},
-    )
-    keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, cards, metadata)
-    if keep_current:
-        current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
-        current_cards = current_cards if isinstance(current_cards, list) else []
-        if isinstance(diagnostics, dict):
-            snapshot = diagnostics.setdefault("snapshot", {})
-            snapshot["publishSkipped"] = True
-            snapshot["publishSkipReason"] = keep_reason
-            snapshot["writeSucceeded"] = True
-            snapshot["readbackCards"] = len(current_cards)
-        return True
-
     payload = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -569,10 +530,11 @@ def _save_snapshot_cards(
         payload["meta"] = metadata
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
+    paths = _snapshot_paths(ctx)
     saved = save_widget_snapshot_payload(
         _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
         payload=payload,
         instance_id=_INSTANCE_ID,
         keep=12,
@@ -745,6 +707,11 @@ def _build_signals(candidates: list[dict], diagnostics: dict | None = None) -> l
                     "context": _trim_text(parent_text, max(220, int(config.QUESTION_BRIEFS_CONTEXT_CHAR_LIMIT))),
                     "question": _trim_text(question, 220),
                     "tokens": set(_tokenize(question)),
+                    "contentTokens": {
+                        token
+                        for token in _tokenize(question)
+                        if len(token) >= 4 and token.lower() not in _QUESTION_FAMILY_STOPWORDS
+                    },
                 }
             )
     if isinstance(diagnostics, dict):
@@ -766,6 +733,31 @@ def _topic_seed_question(signals: list[dict]) -> str:
     return _as_str(best.get("question"), "")
 
 
+def _family_seed_question(signals: list[dict]) -> str:
+    return _topic_seed_question(signals)
+
+
+def _family_key(topic: str, seed_question: str) -> str:
+    normalized = normalize_card_text(seed_question) or _slugify(seed_question)
+    digest = hashlib.sha1(f"{topic.lower()}|{normalized}".encode("utf-8")).hexdigest()[:10]
+    return f"qc-{_slugify(topic)}-{digest}"
+
+
+def _question_family_similarity(signal: dict, family: dict) -> float:
+    normalized = normalize_card_text(signal.get("question"))
+    family_normalized = _as_str(family.get("seedNormalized"), "")
+    if normalized and family_normalized and normalized == family_normalized:
+        return 1.0
+
+    tokens = signal.get("tokens") if isinstance(signal.get("tokens"), set) else set()
+    family_tokens = family.get("seedTokens") if isinstance(family.get("seedTokens"), set) else set()
+    content_tokens = signal.get("contentTokens") if isinstance(signal.get("contentTokens"), set) else set()
+    family_content = family.get("seedContentTokens") if isinstance(family.get("seedContentTokens"), set) else set()
+    if content_tokens and family_content and content_tokens.intersection(family_content):
+        return max(0.62, _jaccard(tokens, family_tokens))
+    return _jaccard(tokens, family_tokens)
+
+
 def _support_gate(cluster: dict) -> bool:
     messages = _as_int(cluster.get("messages"), 0)
     unique_users = _as_int(cluster.get("uniqueUsers"), 0)
@@ -780,9 +772,16 @@ def _support_gate(cluster: dict) -> bool:
         return True
 
     if (
+        messages >= max(6, int(config.QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES))
+        and unique_users >= max(4, int(config.QUESTION_BRIEFS_MIN_CLUSTER_USERS) + 1)
+        and channels >= 1
+    ):
+        return True
+
+    if (
         messages >= max(5, int(config.QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES) - 2)
         and unique_users >= max(3, int(config.QUESTION_BRIEFS_MIN_CLUSTER_USERS) - 1)
-        and channels >= int(config.QUESTION_BRIEFS_MIN_CLUSTER_CHANNELS)
+        and channels >= 1
         and trend >= 40
     ):
         return True
@@ -815,32 +814,61 @@ def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> 
         meta = topic_meta.get(topic_key, {})
         topic = _as_str(meta.get("topic"), topic_signals[0].get("topic", "Topic"))
         category = _as_str(meta.get("category"), topic_signals[0].get("category", "General"))
-        signals = sorted(topic_signals, key=lambda s: s.get("ts", datetime.now(timezone.utc)), reverse=True)
-        channels = {s["channel"] for s in signals if _as_str(s.get("channel"), "").strip()}
-        askers = {
-            _as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}"
-            for s in signals
-        }
-        askers = {a for a in askers if a}
-        sig7d = sum(1 for s in signals if (now - s["ts"]).days < 7)
-        sig_prev7d = sum(1 for s in signals if 7 <= (now - s["ts"]).days < 14)
+        topic_signals = sorted(topic_signals, key=lambda s: s.get("ts", datetime.now(timezone.utc)), reverse=True)
+        families: list[dict] = []
 
-        clusters.append(
-            {
-                "clusterId": f"qc-{_slugify(topic)}",
-                "topic": topic,
-                "category": category,
-                "messages": len(signals),
-                "uniqueUsers": len(askers),
-                "channels": len(channels),
-                "signals7d": sig7d,
-                "signalsPrev7d": sig_prev7d,
-                "trend7dPct": _trend_pct(sig7d, sig_prev7d),
-                "latestAt": _as_str(signals[0].get("timestamp"), "") if signals else "",
-                "signals": signals,
-                "seedQuestion": _topic_seed_question(signals),
+        for signal in topic_signals:
+            best_family: dict | None = None
+            best_score = 0.0
+            for family in families:
+                score = _question_family_similarity(signal, family)
+                if score > best_score:
+                    best_family = family
+                    best_score = score
+            if best_family is not None and best_score >= max(0.5, float(config.QUESTION_BRIEFS_CLUSTER_SIMILARITY) + 0.08):
+                best_family.setdefault("signals", []).append(signal)
+                best_family["seedTokens"] = set(best_family.get("seedTokens") or set()).union(signal.get("tokens") or set())
+                best_family["seedContentTokens"] = set(best_family.get("seedContentTokens") or set()).union(signal.get("contentTokens") or set())
+                continue
+
+            families.append(
+                {
+                    "seedNormalized": normalize_card_text(signal.get("question")),
+                    "seedTokens": set(signal.get("tokens") or set()),
+                    "seedContentTokens": set(signal.get("contentTokens") or set()),
+                    "signals": [signal],
+                }
+            )
+
+        for family in families:
+            family_signals = sorted(family.get("signals") or [], key=lambda s: s.get("ts", datetime.now(timezone.utc)), reverse=True)
+            if not family_signals:
+                continue
+            channels = {s["channel"] for s in family_signals if _as_str(s.get("channel"), "").strip()}
+            askers = {
+                _as_str(s.get("userId"), "").strip() or f"channel:{_as_str(s.get('channel'), 'unknown').strip().lower()}"
+                for s in family_signals
             }
-        )
+            askers = {a for a in askers if a}
+            sig7d = sum(1 for s in family_signals if (now - s["ts"]).days < 7)
+            sig_prev7d = sum(1 for s in family_signals if 7 <= (now - s["ts"]).days < 14)
+            seed_question = _family_seed_question(family_signals)
+            clusters.append(
+                {
+                    "clusterId": _family_key(topic, seed_question),
+                    "topic": topic,
+                    "category": category,
+                    "messages": len(family_signals),
+                    "uniqueUsers": len(askers),
+                    "channels": len(channels),
+                    "signals7d": sig7d,
+                    "signalsPrev7d": sig_prev7d,
+                    "trend7dPct": _trend_pct(sig7d, sig_prev7d),
+                    "latestAt": _as_str(family_signals[0].get("timestamp"), "") if family_signals else "",
+                    "signals": family_signals,
+                    "seedQuestion": seed_question,
+                }
+            )
 
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("stages", {})["clustersBeforeGate"] = len(clusters)
@@ -1492,10 +1520,11 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
         ),
         reverse=True,
     )
-    final_cards = dedupe_cards(
+    final_cards = select_portfolio_cards(
         final_cards,
         title_fields=["canonicalQuestionEn", "canonicalQuestionRu"],
         max_cards=int(config.QUESTION_BRIEFS_MAX_BRIEFS),
+        topic_field="topic",
     )
     diagnostics["stages"]["finalCards"] = len(final_cards)
     diagnostics["stages"]["reusedClusters"] = len(clusters) - len(changed_clusters)
@@ -1503,7 +1532,6 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
     state["clusters"] = next_cluster_state
     state_saved = _save_state(state, ctx=ctx)
     snapshot_saved = False
-    published_cards = last_good_cards
     if state_saved:
         snapshot_saved = _save_snapshot_cards(
             final_cards,
@@ -1519,8 +1547,6 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
             diagnostics=diagnostics,
             ctx=ctx,
         )
-        if snapshot_saved:
-            published_cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics, stage="publishedCards")
     if not state_saved:
         diagnostics["error"] = "Question cards state could not be persisted and verified"
     elif not snapshot_saved:
@@ -1529,10 +1555,10 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
     if state_saved and snapshot_saved:
         if ctx is None:
             with _cache_lock:
-                _cached_cards = published_cards
+                _cached_cards = final_cards
                 _cache_ts = time.time()
-        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if published_cards else "zero_cards_after_materialization")
-        result_cards = published_cards
+        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
+        result_cards = final_cards
     else:
         diagnostics["exitReason"] = "persistence_verification_failed"
         result_cards = last_good_cards
@@ -1568,7 +1594,7 @@ def get_question_briefs(*, force_refresh: bool = False, ctx: DashboardDateContex
 
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists:
+        if exists and cards:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()

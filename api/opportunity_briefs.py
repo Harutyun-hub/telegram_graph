@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,11 +18,12 @@ import config
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
-    dedupe_cards,
     load_latest_widget_payload,
     load_widget_state_payload,
     save_widget_snapshot_payload,
     save_widget_state_payload,
+    normalize_card_text,
+    select_portfolio_cards,
 )
 from api.dashboard_dates import DashboardDateContext
 from api.queries import actionable
@@ -59,7 +61,8 @@ You triage candidate business opportunities grounded in community demand.
 Rules:
 1) Use only provided evidence text and IDs.
 2) Accept only if the cluster shows repeated unmet need, market-gap language, or recurring demand that a business could serve.
-3) Reject generic discussion, news chatter, hiring/investment-only talk, and weak single-user anecdotes.
+3) Strong single-channel recurring narratives are allowed when they show repeated unmet need with solid evidence.
+4) Reject generic discussion, news chatter, hiring/investment-only talk, and one-off weak anecdotes.
 4) Return JSON only.
 
 Return schema:
@@ -70,7 +73,7 @@ Return schema:
       "status": "accepted|rejected",
       "confidence": "high|medium|low",
       "evidenceIds": ["id1", "id2"],
-      "rejectionReason": "low_signal|not_demand_led|generic_topic_chatter|non_businessable|insufficient_grounding"
+      "rejectionReason": "low_signal|not_demand_led|generic_topic_chatter|non_businessable|one_off_or_insufficient_grounding"
     }
   ]
 }
@@ -87,6 +90,7 @@ Rules:
 5) readiness must be one of: pilot_ready, validate_now, watchlist.
 6) If grounding is weak, return {"card": null}.
 7) Do not invent numbers, customer segments, or solution details not supported by evidence.
+8) Strong single-channel recurring narratives are allowed when the unmet need is clearly repeated and actionable.
 
 Return JSON only:
 {
@@ -153,6 +157,12 @@ _EXCLUDED_MARKERS = (
     "инвест",
     "недвиж",
 )
+_FAMILY_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "have", "need", "help", "support", "service",
+    "people", "community", "looking", "recommend", "where", "find", "как", "для", "это", "что", "или",
+    "нужна", "нужен", "помощь", "услуга", "услуги", "сервис", "подскажите", "ищу",
+}
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9а-яА-ЯёЁ]+")
 
 
 def _new_refresh_diagnostics(*, force: bool = False) -> dict:
@@ -443,6 +453,129 @@ def _readiness_rank(value: str) -> int:
     return {"pilot_ready": 3, "validate_now": 2, "watchlist": 1}.get(value, 0)
 
 
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = len(left.union(right))
+    if union <= 0:
+        return 0.0
+    return len(left.intersection(right)) / union
+
+
+def _family_tokens(value: Any) -> set[str]:
+    return {
+        (token.lower()[:5] if len(token) > 5 else token.lower())
+        for token in _TOKEN_RE.findall(_as_str(value, ""))
+        if len(token) >= 4 and token.lower() not in _FAMILY_STOPWORDS
+    }
+
+
+def _family_seed_text(signals: list[dict]) -> str:
+    ranked = sorted(
+        signals,
+        key=lambda s: (
+            _as_int(s.get("askLike"), 0) + _as_int(s.get("gapHit"), 0) + _as_int(s.get("opportunityHint"), 0),
+            len(_as_str(s.get("message"), "")),
+            _parse_ts(_as_str(s.get("timestamp"), "")).timestamp(),
+        ),
+        reverse=True,
+    )
+    return _as_str((ranked[0] if ranked else {}).get("message"), "")
+
+
+def _family_cluster_id(topic: str, seed_text: str) -> str:
+    digest = hashlib.sha1(f"{topic.lower()}|{seed_text.lower()}".encode("utf-8")).hexdigest()[:10]
+    return f"op-{_slugify(topic)}-{digest}"
+
+
+def _build_opportunity_families(evidence_rows: list[dict]) -> list[list[dict]]:
+    families: list[dict] = []
+    ordered = sorted(evidence_rows, key=lambda ev: ev.get("ts", datetime.now(timezone.utc)), reverse=True)
+    for signal in ordered:
+        signal_tokens = _family_tokens(signal.get("message")) or _family_tokens(signal.get("context"))
+        best_family: dict | None = None
+        best_score = 0.0
+        for family in families:
+            family_tokens = family.get("tokens") if isinstance(family.get("tokens"), set) else set()
+            score = _jaccard(signal_tokens, family_tokens)
+            if score > best_score:
+                best_family = family
+                best_score = score
+        if best_family is not None and best_score >= 0.18:
+            best_family.setdefault("signals", []).append(signal)
+            best_family["tokens"] = set(best_family.get("tokens") or set()).union(signal_tokens)
+            continue
+        families.append({"signals": [signal], "tokens": set(signal_tokens)})
+    return [list(family.get("signals") or []) for family in families]
+
+
+def _normalize_delivery_model(value: Any, card: dict, cluster: dict) -> str:
+    raw = normalize_card_text(value)
+    mapping = {
+        "community program": "community_program",
+        "community_program": "community_program",
+        "communityprogram": "community_program",
+        "program": "community_program",
+        "service": "service",
+        "services": "service",
+        "product": "product",
+        "tool": "product",
+        "platform": "product",
+        "marketplace": "marketplace",
+        "market place": "marketplace",
+        "content": "content",
+        "guide": "content",
+    }
+    direct = mapping.get(raw)
+    if direct:
+        return direct
+
+    text = " ".join(
+        [
+            _as_str(card.get("opportunityEn")),
+            _as_str(card.get("summaryEn")),
+            _as_str(card.get("opportunityRu")),
+            _as_str(card.get("summaryRu")),
+            " ".join(_as_str(s.get("message"), "") for s in (cluster.get("signals") or [])[:4]),
+        ]
+    ).lower()
+    if any(token in text for token in ("volunteer", "community", "coordination", "mutual aid", "координац", "волонтер", "сообществ")):
+        return "community_program"
+    if any(token in text for token in ("marketplace", "exchange", "listing", "directory", "объявлен")):
+        return "marketplace"
+    if any(token in text for token in ("guide", "resource", "newsletter", "course", "content", "справоч", "гайд", "курс")):
+        return "content"
+    if any(token in text for token in ("app", "platform", "portal", "tool", "бот", "прилож")):
+        return "product"
+    if any(token in text for token in ("service", "support", "legal", "consult", "translation", "repair", "help desk", "сервис", "помощ", "услуг")):
+        return "service"
+    return ""
+
+
+def _normalize_readiness(value: Any, card: dict, cluster: dict) -> str:
+    raw = normalize_card_text(value)
+    mapping = {
+        "pilot ready": "pilot_ready",
+        "pilot_ready": "pilot_ready",
+        "pilotready": "pilot_ready",
+        "validate now": "validate_now",
+        "validate_now": "validate_now",
+        "validatenow": "validate_now",
+        "watchlist": "watchlist",
+        "watch list": "watchlist",
+        "watch": "watchlist",
+    }
+    direct = mapping.get(raw)
+    if direct:
+        return direct
+
+    trend = _as_int(cluster.get("trend7dPct"), 0)
+    messages = _as_int(cluster.get("messages"), 0)
+    if trend >= 20 or messages >= 6:
+        return "validate_now"
+    return "watchlist"
+
+
 def _cluster_fingerprint(cluster: dict) -> str:
     payload = {
         "topic": _as_str(cluster.get("topic")),
@@ -518,10 +651,11 @@ def _load_snapshot_cards_with_status(
     diagnostics: dict | None = None,
     stage: str = "loadedCards",
 ) -> tuple[list[dict], bool]:
+    paths = _snapshot_paths(ctx)
     snapshot, exists = load_latest_widget_payload(
         _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
         default={"cards": []},
     )
     cards = snapshot.get("cards") if isinstance(snapshot, dict) else []
@@ -540,57 +674,12 @@ def _load_snapshot_cards(
     return _load_snapshot_cards_with_status(ctx=ctx, diagnostics=diagnostics, stage=stage)[0]
 
 
-def _should_keep_current_snapshot(
-    current_snapshot: dict,
-    next_cards: list[dict],
-    metadata: dict | None = None,
-) -> tuple[bool, str]:
-    current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
-    current_cards = current_cards if isinstance(current_cards, list) else []
-    current_count = len(current_cards)
-    next_count = len(next_cards)
-    if current_count > 0 and next_count == 0:
-        return True, "zero_cards_over_non_empty"
-
-    current_meta = current_snapshot.get("meta") if isinstance(current_snapshot, dict) else {}
-    current_meta = current_meta if isinstance(current_meta, dict) else {}
-    next_meta = metadata if isinstance(metadata, dict) else {}
-    current_clusters = _as_int(current_meta.get("activeClusters"), -1)
-    next_clusters = _as_int(next_meta.get("activeClusters"), -1)
-    if (
-        current_count > next_count
-        and current_clusters >= 0
-        and next_clusters >= 0
-        and current_clusters == next_clusters
-    ):
-        return True, "fewer_cards_same_active_clusters"
-    return False, ""
-
-
 def _save_snapshot_cards(
     cards: list[dict],
     metadata: dict | None = None,
     diagnostics: dict | None = None,
     ctx: DashboardDateContext | None = None,
 ) -> bool:
-    current_snapshot, _ = load_latest_widget_payload(
-        _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
-        default={"cards": []},
-    )
-    keep_current, keep_reason = _should_keep_current_snapshot(current_snapshot, cards, metadata)
-    if keep_current:
-        current_cards = current_snapshot.get("cards") if isinstance(current_snapshot, dict) else []
-        current_cards = current_cards if isinstance(current_cards, list) else []
-        if isinstance(diagnostics, dict):
-            snapshot = diagnostics.setdefault("snapshot", {})
-            snapshot["publishSkipped"] = True
-            snapshot["publishSkipReason"] = keep_reason
-            snapshot["writeSucceeded"] = True
-            snapshot["readbackCards"] = len(current_cards)
-        return True
-
     payload: dict[str, Any] = {
         "generatedAt": _now_iso(),
         "source": "materialized",
@@ -600,10 +689,11 @@ def _save_snapshot_cards(
         payload["meta"] = metadata
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
+    paths = _snapshot_paths(ctx)
     saved = save_widget_snapshot_payload(
         _get_runtime_store(),
-        latest_path=_snapshot_paths(ctx).latest_path,
-        history_folder=_snapshot_paths(ctx).history_folder,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
         payload=payload,
         instance_id=_INSTANCE_ID,
         keep=12,
@@ -680,31 +770,37 @@ def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> 
                     "ts": _parse_ts(_as_str(ev.get("timestamp"), "")),
                 }
             )
-        if len(evidence_rows) < int(config.OPPORTUNITY_BRIEFS_MIN_MESSAGES):
-            continue
-        users = {
-            _as_str(ev.get("userId"), "").strip() or f"channel:{_as_str(ev.get('channel'), 'unknown').strip().lower()}"
-            for ev in evidence_rows
-        }
-        users = {user for user in users if user}
-        if len(users) < int(config.OPPORTUNITY_BRIEFS_MIN_USERS):
-            continue
-        channels = {_as_str(ev.get("channel"), "unknown").strip().lower() for ev in evidence_rows if _as_str(ev.get("channel"), "").strip()}
-        clusters.append(
-            {
-                "clusterId": f"op-{topic.lower().replace(' ', '-').replace('/', '-')}",
-                "topic": topic,
-                "category": _as_str(row.get("category"), "General"),
-                "messages": len(evidence_rows),
-                "uniqueUsers": len(users),
-                "channels": len(channels),
-                "signals7d": _as_int(row.get("signals7d"), sum(1 for ev in evidence_rows if (datetime.now(timezone.utc) - ev["ts"]).days < 7)),
-                "signalsPrev7d": _as_int(row.get("signalsPrev7d"), sum(1 for ev in evidence_rows if 7 <= (datetime.now(timezone.utc) - ev["ts"]).days < 14)),
-                "trend7dPct": _as_int(row.get("trend7dPct"), _trend_pct(0, 0)),
-                "latestAt": _as_str(row.get("latestAt"), evidence_rows[0].get("timestamp", "") if evidence_rows else ""),
-                "signals": sorted(evidence_rows, key=lambda ev: ev["ts"], reverse=True),
+        for family_rows in _build_opportunity_families(evidence_rows):
+            if len(family_rows) < int(config.OPPORTUNITY_BRIEFS_MIN_MESSAGES):
+                continue
+            users = {
+                _as_str(ev.get("userId"), "").strip() or f"channel:{_as_str(ev.get('channel'), 'unknown').strip().lower()}"
+                for ev in family_rows
             }
-        )
+            users = {user for user in users if user}
+            if len(users) < int(config.OPPORTUNITY_BRIEFS_MIN_USERS):
+                continue
+            channels = {
+                _as_str(ev.get("channel"), "unknown").strip().lower()
+                for ev in family_rows
+                if _as_str(ev.get("channel"), "").strip()
+            }
+            seed_text = _family_seed_text(family_rows)
+            clusters.append(
+                {
+                    "clusterId": _family_cluster_id(topic, seed_text),
+                    "topic": topic,
+                    "category": _as_str(row.get("category"), "General"),
+                    "messages": len(family_rows),
+                    "uniqueUsers": len(users),
+                    "channels": len(channels),
+                    "signals7d": _as_int(row.get("signals7d"), sum(1 for ev in family_rows if (datetime.now(timezone.utc) - ev["ts"]).days < 7)),
+                    "signalsPrev7d": _as_int(row.get("signalsPrev7d"), sum(1 for ev in family_rows if 7 <= (datetime.now(timezone.utc) - ev["ts"]).days < 14)),
+                    "trend7dPct": _as_int(row.get("trend7dPct"), _trend_pct(0, 0)),
+                    "latestAt": _as_str(row.get("latestAt"), family_rows[0].get("timestamp", "") if family_rows else ""),
+                    "signals": sorted(family_rows, key=lambda ev: ev["ts"], reverse=True),
+                }
+            )
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("stages", {})["clustersAfterGate"] = len(clusters)
     clusters.sort(
@@ -913,8 +1009,8 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict], diagnostics: d
         opportunity_ru = _trim_text(row.get("opportunityRu"), 220)
         summary_en = _trim_text(row.get("summaryEn"), 320)
         summary_ru = _trim_text(row.get("summaryRu"), 360)
-        delivery_model = _as_str(row.get("deliveryModel"), "").strip().lower()
-        readiness = _as_str(row.get("readiness"), "").strip().lower()
+        delivery_model = _normalize_delivery_model(row.get("deliveryModel"), row, cluster)
+        readiness = _normalize_readiness(row.get("readiness"), row, cluster)
         confidence_score = _clamp(_as_float(row.get("confidenceScore"), 0.0), 0.0, 1.0)
         confidence = _as_str(row.get("confidence"), "").strip().lower() or _confidence_label(confidence_score)
 
@@ -932,12 +1028,14 @@ def _materialize_cards(clusters: list[dict], ai_rows: list[dict], diagnostics: d
             continue
         if confidence not in {"high", "medium", "low"}:
             confidence = _confidence_label(confidence_score)
+        if confidence == "low":
+            if isinstance(rejection_buckets, dict):
+                _increment_bucket(rejection_buckets, "low_confidence_label")
+            continue
         if confidence_score < float(config.OPPORTUNITY_BRIEFS_MIN_CONFIDENCE):
             if isinstance(rejection_buckets, dict):
                 _increment_bucket(rejection_buckets, "low_confidence_score")
             continue
-        if confidence == "low":
-            confidence = _confidence_label(confidence_score)
 
         evidence_by_id = {_as_str(signal.get("id")): signal for signal in cluster.get("signals", [])}
         selected_ids: list[str] = []
@@ -1183,10 +1281,11 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
         ),
         reverse=True,
     )
-    final_cards = dedupe_cards(
+    final_cards = select_portfolio_cards(
         final_cards,
         title_fields=["opportunityEn", "opportunityRu"],
         max_cards=int(config.OPPORTUNITY_BRIEFS_MAX_BRIEFS),
+        topic_field="topic",
     )
 
     diagnostics["stages"]["finalCards"] = len(final_cards)
@@ -1195,7 +1294,6 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
     state["clusters"] = next_cluster_state
     state_saved = _save_state(state, ctx=ctx)
     snapshot_saved = False
-    published_cards = last_good_cards
     if state_saved:
         snapshot_saved = _save_snapshot_cards(
             final_cards,
@@ -1211,15 +1309,13 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
             diagnostics=diagnostics,
             ctx=ctx,
         )
-        if snapshot_saved:
-            published_cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics, stage="publishedCards")
     if state_saved and snapshot_saved:
         if ctx is None:
             with _cache_lock:
-                _cached_cards = published_cards
+                _cached_cards = final_cards
                 _cache_ts = time.time()
-        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if published_cards else "zero_cards_after_materialization")
-        result_cards = published_cards
+        diagnostics["exitReason"] = diagnostics["exitReason"] or ("ok" if final_cards else "zero_cards_after_materialization")
+        result_cards = final_cards
     else:
         diagnostics["exitReason"] = "persistence_verification_failed"
         result_cards = last_good_cards
@@ -1245,7 +1341,7 @@ def get_business_opportunity_briefs(*, force_refresh: bool = False, ctx: Dashboa
         return refresh_opportunity_briefs(force=True, ctx=ctx)
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists:
+        if exists and cards:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()
