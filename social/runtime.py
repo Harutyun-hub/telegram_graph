@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
@@ -27,13 +28,42 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat()
 
 
+_non_issue_cleanup_lock = threading.Lock()
+_non_issue_cleanup_completed = False
+
+
+def _is_social_worker_owner() -> bool:
+    return str(os.getenv("APP_ROLE") or "").strip().lower() == "social-worker"
+
+
+def _ensure_non_issue_topics_hidden(
+    writer_factory: Callable[[], SocialGraphWriter],
+) -> int:
+    global _non_issue_cleanup_completed
+
+    if not _is_social_worker_owner():
+        return 0
+    if _non_issue_cleanup_completed:
+        return 0
+
+    with _non_issue_cleanup_lock:
+        if _non_issue_cleanup_completed:
+            return 0
+        try:
+            updated = int(writer_factory().mark_non_issue_topics_proposed() or 0)
+        except Exception as exc:
+            logger.warning("Social non-issue topic cleanup skipped: {}", exc)
+            return 0
+        _non_issue_cleanup_completed = True
+        return updated
+
+
 class SocialRuntimeService:
     def __init__(self, store: SocialStore) -> None:
         self.store = store
         self.pg_store = SocialPostgresStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "social_runtime_job"
-        self.control_job_id = "social_runtime_control_job"
         self.interval_minutes = 360
         self.desired_active = False
         self.running_now = False
@@ -44,31 +74,32 @@ class SocialRuntimeService:
         self.last_result: Optional[dict[str, Any]] = None
         self._run_history = deque(maxlen=12)
         self._run_lock = asyncio.Lock()
-        self._control_run_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task] = set()
         self._connector: ScrapeCreatorsClient | None = None
         self._analyzer: SocialActivityAnalyzer | None = None
         self._graph: SocialGraphWriter | None = None
         self._worker_id = f"{socket.gethostname()}:{os.getpid()}:social-runtime"
-        self._last_control_request_id: str | None = None
 
     async def startup(self) -> None:
         self._ensure_scheduler_started()
+        hidden_topics = 0
+        if _is_social_worker_owner():
+            loop = asyncio.get_running_loop()
+            hidden_topics = await loop.run_in_executor(None, _ensure_non_issue_topics_hidden, self._get_graph)
         settings = self.store.get_runtime_setting(
             "scheduler",
             {"is_active": False, "interval_minutes": 360},
         )
-        self.interval_minutes = max(15, int(settings.get("interval_minutes", 360) or 360))
+        self.interval_minutes = max(1, int(settings.get("interval_minutes", 360) or 360))
         self.desired_active = bool(settings.get("is_active", False)) and bool(config.SOCIAL_RUNTIME_ENABLED)
         if self.desired_active:
             self._upsert_interval_job()
-        self._upsert_control_job()
-        self._persist_runtime_snapshot()
         logger.info(
-            "Social runtime ready | active={} interval={}m postgres_worker={}",
+            "Social runtime ready | active={} interval={}m postgres_worker={} hidden_non_issue_topics={}",
             self.desired_active,
             self.interval_minutes,
             self.pg_store.enabled,
+            hidden_topics,
         )
 
     async def shutdown(self) -> None:
@@ -87,7 +118,6 @@ class SocialRuntimeService:
             except Exception:
                 pass
             self._graph = None
-        self._persist_runtime_snapshot()
 
     def _ensure_scheduler_started(self) -> None:
         if not self.scheduler.running:
@@ -108,20 +138,11 @@ class SocialRuntimeService:
             misfire_grace_time=180,
         )
 
-    def _upsert_control_job(self) -> None:
+    def _remove_interval_job(self) -> None:
         try:
-            self.scheduler.remove_job(self.control_job_id)
+            self.scheduler.remove_job(self.job_id)
         except Exception:
             pass
-        self.scheduler.add_job(
-            self._run_control_cycle,
-            "interval",
-            seconds=max(2, int(config.SOCIAL_CONTROL_POLL_SECONDS)),
-            id=self.control_job_id,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=10,
-        )
 
     def _next_run_iso(self) -> str | None:
         if not self.desired_active:
@@ -144,61 +165,6 @@ class SocialRuntimeService:
             self._graph = SocialGraphWriter()
         return self._graph
 
-    async def start(self) -> dict[str, Any]:
-        self._ensure_scheduler_started()
-        self.desired_active = bool(config.SOCIAL_RUNTIME_ENABLED)
-        if self.desired_active:
-            self._upsert_interval_job()
-        persisted = self.store.save_runtime_setting(
-            "scheduler",
-            {
-                "is_active": self.desired_active,
-                "interval_minutes": self.interval_minutes,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        status = self.status()
-        status["persisted"] = persisted
-        self._persist_runtime_snapshot(status)
-        return status
-
-    async def stop(self) -> dict[str, Any]:
-        self.desired_active = False
-        try:
-            self.scheduler.remove_job(self.job_id)
-        except Exception:
-            pass
-        persisted = self.store.save_runtime_setting(
-            "scheduler",
-            {
-                "is_active": False,
-                "interval_minutes": self.interval_minutes,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        status = self.status()
-        status["persisted"] = persisted
-        self._persist_runtime_snapshot(status)
-        return status
-
-    async def set_interval(self, interval_minutes: int) -> dict[str, Any]:
-        self.interval_minutes = max(15, int(interval_minutes or 360))
-        if self.desired_active:
-            self._ensure_scheduler_started()
-            self._upsert_interval_job()
-        persisted = self.store.save_runtime_setting(
-            "scheduler",
-            {
-                "is_active": self.desired_active,
-                "interval_minutes": self.interval_minutes,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        status = self.status()
-        status["persisted"] = persisted
-        self._persist_runtime_snapshot(status)
-        return status
-
     async def run_once(self) -> dict[str, Any]:
         if self.running_now:
             return self.status()
@@ -217,76 +183,47 @@ class SocialRuntimeService:
         task.add_done_callback(_cleanup)
         return self.status()
 
-    async def _run_control_cycle(self) -> None:
-        if self._control_run_lock.locked():
-            return
-        async with self._control_run_lock:
-            try:
-                command = self.store.get_runtime_setting("control_command", {})
-                if not isinstance(command, dict):
-                    return
-                request_id = str(command.get("request_id") or "").strip()
-                if not request_id or request_id == self._last_control_request_id:
-                    return
-                if str(command.get("status") or "").strip().lower() != "pending":
-                    return
+    async def start(self) -> dict[str, Any]:
+        if not config.SOCIAL_RUNTIME_ENABLED:
+            raise RuntimeError("Social runtime is disabled")
+        self._ensure_scheduler_started()
+        self.desired_active = True
+        self.store.save_runtime_setting(
+            "scheduler",
+            {
+                "is_active": True,
+                "interval_minutes": self.interval_minutes,
+            },
+        )
+        self._upsert_interval_job()
+        return self.status()
 
-                action = str(command.get("action") or "").strip().lower()
-                in_progress = {
-                    **command,
-                    "status": "processing",
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "processed_by_role": "social-worker",
-                }
-                self.store.save_runtime_setting("control_command", in_progress)
+    async def stop(self) -> dict[str, Any]:
+        self._ensure_scheduler_started()
+        self.desired_active = False
+        self.store.save_runtime_setting(
+            "scheduler",
+            {
+                "is_active": False,
+                "interval_minutes": self.interval_minutes,
+            },
+        )
+        self._remove_interval_job()
+        return self.status()
 
-                try:
-                    if action == "start":
-                        status = await self.start()
-                    elif action == "stop":
-                        status = await self.stop()
-                    elif action == "set_interval":
-                        status = await self.set_interval(int(command.get("interval_minutes") or self.interval_minutes or 360))
-                    elif action == "run_once":
-                        await self._run_cycle()
-                        status = self.status()
-                    elif action == "retry":
-                        status = await self.retry_failure(
-                            stage=str(command.get("stage") or ""),
-                            scope_key=str(command.get("scope_key") or ""),
-                        )
-                    elif action == "replay":
-                        status = await self.replay_activities(
-                            stage=str(command.get("stage") or "analysis"),
-                            activity_uids=list(command.get("activity_uids") or []),
-                        )
-                    else:
-                        raise ValueError(f"Unsupported social runtime control action: {action}")
-
-                    self.store.save_runtime_setting(
-                        "control_command",
-                        {
-                            **in_progress,
-                            "status": "completed",
-                            "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "runtime_status": status,
-                        },
-                    )
-                except Exception as exc:
-                    self.store.save_runtime_setting(
-                        "control_command",
-                        {
-                            **in_progress,
-                            "status": "failed",
-                            "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "error": str(exc),
-                        },
-                    )
-                    raise
-                finally:
-                    self._last_control_request_id = request_id
-            except Exception as exc:
-                logger.warning("Social runtime control cycle failed: {}", exc)
+    async def set_interval(self, interval_minutes: int) -> dict[str, Any]:
+        self._ensure_scheduler_started()
+        self.interval_minutes = max(1, int(interval_minutes or 1))
+        self.store.save_runtime_setting(
+            "scheduler",
+            {
+                "is_active": self.desired_active,
+                "interval_minutes": self.interval_minutes,
+            },
+        )
+        if self.desired_active:
+            self._upsert_interval_job()
+        return self.status()
 
     async def retry_failure(self, *, stage: str, scope_key: str) -> dict[str, Any]:
         if self._run_lock.locked():
@@ -317,7 +254,6 @@ class SocialRuntimeService:
             self.last_error = None
             self.last_run_started_at = datetime.now(timezone.utc)
             self.last_run_finished_at = None
-            self._persist_runtime_snapshot()
             run = self.store.create_ingest_run(run_kind="runtime", status="running", metrics={})
 
             try:
@@ -326,18 +262,15 @@ class SocialRuntimeService:
                 self.last_success_at = datetime.now(timezone.utc)
                 self.store.finish_ingest_run(run["id"], status="succeeded", metrics=result)
                 self._record_history(result)
-                self._persist_runtime_snapshot()
                 logger.info("Social runtime completed | {}", result)
             except Exception as exc:
                 self.last_error = str(exc)
                 self.store.finish_ingest_run(run["id"], status="failed", error=str(exc), metrics={})
-                self._persist_runtime_snapshot()
                 logger.error("Social runtime failed: {}", exc)
             finally:
                 coordinator.release_lock("worker:social-runtime", lock_token)
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
-                self._persist_runtime_snapshot()
 
     def _run_cycle_sync(self) -> dict[str, Any]:
         page_settings = self.store.get_runtime_setting(
@@ -442,7 +375,7 @@ class SocialRuntimeService:
                 health_status = self._collect_health_status(exc)
                 failure = self.store.record_failure(
                     stage="ingest",
-                    scope_key=str(account.get("source_key") or f"{account.get('entity_id')}:{account.get('platform')}"),
+                    scope_key=f"{account.get('entity_id')}:{account.get('platform')}:{account.get('source_kind')}",
                     error=str(exc),
                     entity_id=account.get("entity_id"),
                     platform=account.get("platform"),
@@ -657,14 +590,6 @@ class SocialRuntimeService:
             "postgres_worker_enabled": bool(self.pg_store.enabled),
             "worker_id": self._worker_id,
         }
-
-    def _persist_runtime_snapshot(self, status_payload: dict[str, Any] | None = None) -> None:
-        payload = dict(status_payload or self.status())
-        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-        try:
-            self.store.save_runtime_setting("runtime_snapshot", payload)
-        except Exception as exc:
-            logger.warning("Failed to persist social runtime snapshot: {}", exc)
 
     def _record_history(self, result: dict[str, Any]) -> None:
         self._run_history.append(

@@ -17,6 +17,7 @@ class _FakeSocialSourceStore:
                 "entity_id": "entity-1",
                 "company_name": "Unibank",
                 "platform": "facebook",
+                "source_kind": "meta_ads",
                 "display_url": "https://www.facebook.com/unibank",
                 "account_external_id": "unibank",
                 "is_active": True,
@@ -30,9 +31,14 @@ class _FakeSocialSourceStore:
     def list_source_rows(self) -> list[dict]:
         return [deepcopy(item) for item in self.items]
 
-    def create_or_update_facebook_source(self, *, source_key: str, source_url: str, display_name: str) -> dict:
+    def create_or_update_source(self, *, source_type: str, source_key: str | None, source_url: str | None, display_name: str) -> dict:
         for item in self.items:
-            if item["platform"] == "facebook" and item["account_external_id"] == source_key:
+            same_source = False
+            if source_type == "facebook_page":
+                same_source = item["source_kind"] == source_type and item["metadata"].get("source_url") == source_url
+            elif source_type == "meta_ads":
+                same_source = item["source_kind"] == source_type and item["account_external_id"] == source_key
+            if item["platform"] == "facebook" and same_source:
                 action = "exists"
                 if not item["is_active"]:
                     item["is_active"] = True
@@ -45,9 +51,10 @@ class _FakeSocialSourceStore:
             "id": "account-2",
             "entity_id": "entity-2",
             "company_name": display_name,
-            "platform": "facebook",
+            "platform": "facebook" if source_type in {"facebook_page", "meta_ads"} else "instagram" if source_type == "instagram_profile" else "google",
+            "source_kind": source_type,
             "display_url": source_url,
-            "account_external_id": source_key,
+            "account_external_id": source_key if source_type == "meta_ads" else None,
             "is_active": True,
             "health_status": "unknown",
             "last_collected_at": None,
@@ -131,43 +138,59 @@ class SocialSourcesApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["items"][0]["platform"], "facebook")
+        self.assertEqual(payload["items"][0]["source_kind"], "meta_ads")
         self.assertEqual(payload["items"][0]["company_name"], "Unibank")
 
-    def test_create_facebook_source_is_idempotent(self) -> None:
+    def test_create_social_source_is_idempotent(self) -> None:
         fake_store = _FakeSocialSourceStore()
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
              patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
              patch.object(server, "get_social_store", return_value=fake_store):
             created = self.client.post(
-                "/api/sources/social/facebook",
+                "/api/sources/social",
                 headers={"Authorization": "Bearer admin-secret"},
-                json={"url": "https://www.facebook.com/nikol.pashinyan/?ref=bookmarks"},
+                json={"source_type": "facebook_page", "value": "https://www.facebook.com/nikol.pashinyan/?ref=bookmarks"},
             )
             existing = self.client.post(
-                "/api/sources/social/facebook",
+                "/api/sources/social",
                 headers={"Authorization": "Bearer admin-secret"},
-                json={"url": "facebook.com/nikol.pashinyan"},
+                json={"source_type": "facebook_page", "value": "facebook.com/nikol.pashinyan"},
             )
 
         self.assertEqual(created.status_code, 200)
         self.assertEqual(created.json()["action"], "created")
         self.assertEqual(created.json()["item"]["display_url"], "https://www.facebook.com/nikol.pashinyan")
+        self.assertEqual(created.json()["item"]["source_kind"], "facebook_page")
         self.assertEqual(existing.status_code, 200)
         self.assertEqual(existing.json()["action"], "exists")
         self.assertEqual(len(fake_store.items), 2)
 
-    def test_create_facebook_source_rejects_invalid_host(self) -> None:
+    def test_create_social_source_rejects_invalid_host(self) -> None:
         fake_store = _FakeSocialSourceStore()
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
              patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
              patch.object(server, "get_social_store", return_value=fake_store):
             response = self.client.post(
-                "/api/sources/social/facebook",
+                "/api/sources/social",
                 headers={"Authorization": "Bearer admin-secret"},
-                json={"url": "https://instagram.com/not-facebook"},
+                json={"source_type": "facebook_page", "value": "https://instagram.com/not-facebook"},
             )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_create_meta_ads_source_accepts_numeric_id(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"source_type": "meta_ads", "value": "1378368079150250"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["source_kind"], "meta_ads")
 
     def test_update_social_source_toggles_active_state(self) -> None:
         fake_store = _FakeSocialSourceStore()

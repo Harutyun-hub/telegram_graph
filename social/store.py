@@ -10,6 +10,19 @@ from supabase import Client, create_client
 import config
 
 SUPPORTED_SOCIAL_PLATFORMS = ("facebook", "instagram", "google", "tiktok")
+SUPPORTED_SOCIAL_SOURCE_KINDS = (
+    "facebook_page",
+    "meta_ads",
+    "instagram_profile",
+    "google_domain",
+    "tiktok_profile",
+)
+DEFAULT_SOURCE_KIND_BY_PLATFORM = {
+    "facebook": "meta_ads",
+    "instagram": "instagram_profile",
+    "google": "google_domain",
+    "tiktok": "tiktok_profile",
+}
 ACCOUNT_HEALTH_STATUSES = (
     "unknown",
     "healthy",
@@ -43,19 +56,46 @@ def _normalize_platform(value: Any) -> str:
     return platform
 
 
+def _normalize_source_kind(value: Any, platform: Any | None = None) -> str:
+    normalized_platform = _normalize_platform(platform) if platform is not None else None
+    source_kind = _trimmed(value).lower()
+    if not source_kind and normalized_platform:
+        source_kind = DEFAULT_SOURCE_KIND_BY_PLATFORM[normalized_platform]
+    if source_kind not in SUPPORTED_SOCIAL_SOURCE_KINDS:
+        raise ValueError(f"Unsupported social source kind: {value}")
+    if normalized_platform == "facebook" and source_kind not in {"facebook_page", "meta_ads"}:
+        raise ValueError(f"Unsupported Facebook source kind: {source_kind}")
+    if normalized_platform == "instagram" and source_kind != "instagram_profile":
+        raise ValueError(f"Unsupported Instagram source kind: {source_kind}")
+    if normalized_platform == "google" and source_kind != "google_domain":
+        raise ValueError(f"Unsupported Google source kind: {source_kind}")
+    if normalized_platform == "tiktok" and source_kind != "tiktok_profile":
+        raise ValueError(f"Unsupported TikTok source kind: {source_kind}")
+    return source_kind
+
+
 def _serialize_metadata(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _merge_metadata(base: Any, extra: Any) -> dict[str, Any]:
+def _merge_metadata(base: Any, extra: dict[str, Any]) -> dict[str, Any]:
     merged = dict(_serialize_metadata(base))
-    merged.update(_serialize_metadata(extra))
+    for key, value in extra.items():
+        if value is not None:
+            merged[key] = value
     return merged
 
 
 def _normalize_health_status(value: Any) -> str:
     status = _trimmed(value).lower() or "unknown"
     return status if status in ACCOUNT_HEALTH_STATUSES else "unknown"
+
+
+def _account_scope_key(account: dict[str, Any]) -> str:
+    entity_id = _trimmed(account.get("entity_id"))
+    platform = _normalize_platform(account.get("platform"))
+    source_kind = _normalize_source_kind(account.get("source_kind"), platform)
+    return f"{entity_id}:{platform}:{source_kind}"
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -141,6 +181,11 @@ def _engagement_total(activity: dict[str, Any]) -> int:
     return total
 
 
+def _humanize_slug(value: str) -> str:
+    slug = _trimmed(value).strip("/").replace(".", " ").replace("-", " ").replace("_", " ")
+    return " ".join(part.capitalize() for part in slug.split() if part) or "Facebook Source"
+
+
 class SocialStore:
     """Operational data access layer for the social media activities domain."""
 
@@ -222,7 +267,7 @@ class SocialStore:
             "companies",
             columns=(
                 "id,company_key,name,industry,website,logo_url,metadata,is_active,"
-                "facebook_page_id,instagram_username,google_ads_domain"
+                "facebook_page_id,facebook_url,instagram_username,google_ads_domain"
             ),
             filters=filters,
             order_by="name",
@@ -272,6 +317,7 @@ class SocialStore:
                     {
                         "entity_id": entity_id,
                         "platform": "facebook",
+                        "source_kind": "meta_ads",
                         "account_external_id": _clean_optional(company.get("facebook_page_id")),
                         "account_handle": None,
                         "domain": None,
@@ -280,11 +326,30 @@ class SocialStore:
                         "is_active": bool(company.get("is_active", True)),
                     }
                 )
+            if _clean_optional(company.get("facebook_url")):
+                account_payloads.append(
+                    {
+                        "entity_id": entity_id,
+                        "platform": "facebook",
+                        "source_kind": "facebook_page",
+                        "account_external_id": None,
+                        "account_handle": None,
+                        "domain": None,
+                        "import_source": "companies_seed",
+                        "metadata": {
+                            "seeded_from": "companies.facebook_url",
+                            "source_url": _clean_optional(company.get("facebook_url")),
+                            "page_url": _clean_optional(company.get("facebook_url")),
+                        },
+                        "is_active": bool(company.get("is_active", True)),
+                    }
+                )
             if _clean_optional(company.get("instagram_username")):
                 account_payloads.append(
                     {
                         "entity_id": entity_id,
                         "platform": "instagram",
+                        "source_kind": "instagram_profile",
                         "account_external_id": None,
                         "account_handle": _clean_optional(company.get("instagram_username")),
                         "domain": None,
@@ -298,6 +363,7 @@ class SocialStore:
                     {
                         "entity_id": entity_id,
                         "platform": "google",
+                        "source_kind": "google_domain",
                         "account_external_id": None,
                         "account_handle": None,
                         "domain": _clean_optional(company.get("google_ads_domain")),
@@ -309,7 +375,7 @@ class SocialStore:
         if account_payloads:
             self.client.table("social_entity_accounts").upsert(
                 account_payloads,
-                on_conflict="entity_id,platform",
+                on_conflict="entity_id,platform,source_kind",
             ).execute()
 
         return {
@@ -349,8 +415,19 @@ class SocialStore:
         for entity in entities:
             accounts = accounts_by_entity.get(str(entity.get("id")), [])
             entity["accounts"] = accounts
+            sorted_accounts = sorted(
+                accounts,
+                key=lambda item: (
+                    _trimmed(item.get("platform")).lower(),
+                    0
+                    if _trimmed(item.get("source_kind")).lower()
+                    == DEFAULT_SOURCE_KIND_BY_PLATFORM.get(_trimmed(item.get("platform")).lower(), "")
+                    else 1,
+                    _trimmed(item.get("source_kind")).lower(),
+                ),
+            )
             entity["platform_accounts"] = {
-                platform: next((row for row in accounts if row.get("platform") == platform), None)
+                platform: next((row for row in sorted_accounts if row.get("platform") == platform), None)
                 for platform in SUPPORTED_SOCIAL_PLATFORMS
             }
         return entities
@@ -365,103 +442,33 @@ class SocialStore:
             return None
         return self._enrich_entities([entity])[0]
 
-    def update_entity(
-        self,
-        entity_id: str,
-        *,
-        is_active: bool | None = None,
-        metadata: dict[str, Any] | None = None,
-        accounts: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if is_active is not None:
-            payload["is_active"] = bool(is_active)
-        if metadata is not None:
-            payload["metadata"] = _serialize_metadata(metadata)
-        if payload:
-            self.client.table("social_entities").update(payload).eq("id", entity_id).execute()
-        if accounts:
-            self.upsert_accounts(entity_id, accounts)
-        entity = self.get_entity(entity_id)
-        if not entity:
-            raise ValueError("Social entity not found")
-        return entity
-
-    def upsert_accounts(self, entity_id: str, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not accounts:
-            return []
-        payloads = []
-        for account in accounts:
-            platform = _normalize_platform(account.get("platform"))
-            payloads.append(
-                {
-                    "entity_id": entity_id,
-                    "platform": platform,
-                    "account_handle": _clean_optional(account.get("account_handle")),
-                    "account_external_id": _clean_optional(account.get("account_external_id")),
-                    "domain": _clean_optional(account.get("domain")),
-                    "import_source": _clean_optional(account.get("import_source")) or "manual",
-                    "metadata": _serialize_metadata(account.get("metadata")),
-                    "is_active": bool(account.get("is_active", True)),
-                }
-            )
-        self.client.table("social_entity_accounts").upsert(
-            payloads,
-            on_conflict="entity_id,platform",
-        ).execute()
-        entity = self.get_entity(entity_id)
-        return list(entity.get("accounts") or []) if entity else []
-
-    def get_account(self, account_id: str) -> dict[str, Any] | None:
-        row = self._single_row("social_entity_accounts", filters=(("eq", "id", account_id),))
-        if not row:
-            return None
-        entity = self._single_row("social_entities", filters=(("eq", "id", row.get("entity_id")),))
-        if entity:
-            row["entity"] = entity
-        return row
-
-    def get_account_by_scope_key(self, scope_key: str) -> dict[str, Any] | None:
-        entity_id, separator, platform = scope_key.partition(":")
-        if not separator or not entity_id or not platform:
-            return None
-        row = self._single_row(
-            "social_entity_accounts",
-            filters=(("eq", "entity_id", entity_id), ("eq", "platform", _normalize_platform(platform))),
-        )
-        if not row:
-            return None
-        entity = self._single_row("social_entities", filters=(("eq", "id", entity_id),))
-        if entity:
-            row["entity"] = entity
-        return row
-
-    def _project_source_row(
-        self,
-        account: dict[str, Any],
-        entity: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        platform = _normalize_platform(account.get("platform"))
+    def _project_source_row(self, account: dict[str, Any], entity: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata = _serialize_metadata(account.get("metadata"))
-        display_url = (
-            _clean_optional(metadata.get("source_url"))
-            or _clean_optional(account.get("domain"))
-            or (
-                f"https://www.facebook.com/{account['account_external_id']}"
-                if platform == "facebook" and _clean_optional(account.get("account_external_id"))
-                else None
-            )
-            or (
-                f"https://www.instagram.com/{account['account_handle']}"
-                if platform == "instagram" and _clean_optional(account.get("account_handle"))
-                else None
-            )
-        )
+        platform = _normalize_platform(account.get("platform"))
+        source_kind = _normalize_source_kind(account.get("source_kind"), platform)
+        display_url = _clean_optional(metadata.get("source_url"))
+        if not display_url:
+            if platform == "facebook" and source_kind == "facebook_page":
+                display_url = _clean_optional(metadata.get("page_url"))
+            elif platform == "instagram":
+                handle = _clean_optional(account.get("account_handle"))
+                if handle:
+                    display_url = f"https://www.instagram.com/{handle.lstrip('@')}/"
+            elif platform == "google":
+                domain = _clean_optional(account.get("domain"))
+                if domain:
+                    display_url = f"https://{domain}"
+            elif platform == "tiktok":
+                handle = _clean_optional(account.get("account_handle"))
+                if handle:
+                    display_url = f"https://www.tiktok.com/@{handle.lstrip('@')}"
+
         return {
-            "id": str(account.get("id")),
-            "entity_id": str(account.get("entity_id")),
+            "id": account.get("id"),
+            "entity_id": account.get("entity_id"),
             "company_name": _trimmed((entity or {}).get("name")) or "Unknown Company",
             "platform": platform,
+            "source_kind": source_kind,
             "display_url": display_url,
             "account_external_id": _clean_optional(account.get("account_external_id")),
             "is_active": bool(account.get("is_active", True)),
@@ -496,45 +503,136 @@ class SocialStore:
         entity = account.get("entity") if isinstance(account.get("entity"), dict) else None
         return self._project_source_row(account, entity)
 
-    def _find_existing_facebook_source(self, source_key: str) -> dict[str, Any] | None:
-        account = self._single_row(
-            "social_entity_accounts",
-            filters=(("eq", "platform", "facebook"), ("eq", "account_external_id", source_key)),
-        )
+    def _find_existing_source(
+        self,
+        *,
+        platform: str,
+        source_kind: str,
+        account_external_id: str | None = None,
+        account_handle: str | None = None,
+        domain: str | None = None,
+        source_url: str | None = None,
+    ) -> dict[str, Any] | None:
+        filters: list[tuple[str, str, Any]] = [
+            ("eq", "platform", _normalize_platform(platform)),
+            ("eq", "source_kind", _normalize_source_kind(source_kind, platform)),
+        ]
+        if account_external_id:
+            filters.append(("eq", "account_external_id", account_external_id))
+        elif account_handle:
+            filters.append(("eq", "account_handle", account_handle))
+        elif domain:
+            filters.append(("eq", "domain", domain))
+        account = None
+        if len(filters) > 2:
+            account = self._single_row(
+                "social_entity_accounts",
+                filters=filters,
+            )
         if not account:
-            return None
+            source_url_value = _clean_optional(source_url)
+            if not source_url_value:
+                return None
+            rows = self._select_rows(
+                "social_entity_accounts",
+                filters=(("eq", "platform", _normalize_platform(platform)), ("eq", "source_kind", _normalize_source_kind(source_kind, platform))),
+            )
+            account = next(
+                (
+                    row
+                    for row in rows
+                    if _clean_optional(_serialize_metadata(row.get("metadata")).get("source_url")) == source_url_value
+                    or _clean_optional(_serialize_metadata(row.get("metadata")).get("page_url")) == source_url_value
+                ),
+                None,
+            )
+            if not account:
+                return None
         entity = self._single_row("social_entities", filters=(("eq", "id", account.get("entity_id")),))
         if entity:
             account["entity"] = entity
         return account
 
-    def _find_company_for_facebook_source(self, source_key: str, company_key: str) -> dict[str, Any] | None:
-        company = self._single_row("companies", filters=(("eq", "facebook_page_id", source_key),))
+    def _find_company_for_source(
+        self,
+        *,
+        platform: str,
+        source_kind: str,
+        source_key: str | None,
+        source_url: str | None,
+        display_name: str,
+        company_key: str,
+    ) -> dict[str, Any]:
+        platform = _normalize_platform(platform)
+        source_kind = _normalize_source_kind(source_kind, platform)
+        source_key = _clean_optional(source_key)
+        source_url = _clean_optional(source_url)
+        company = None
+        if platform == "facebook" and source_kind == "meta_ads" and source_key:
+            company = self._single_row("companies", filters=(("eq", "facebook_page_id", source_key),))
+        elif platform == "facebook" and source_kind == "facebook_page" and source_url:
+            company = self._single_row("companies", filters=(("eq", "facebook_url", source_url),))
+        elif platform == "instagram" and source_key:
+            company = self._single_row("companies", filters=(("eq", "instagram_username", source_key),))
+        elif platform == "google" and source_key:
+            company = self._single_row("companies", filters=(("eq", "google_ads_domain", source_key),))
         if company:
             return company
         company = self._single_row("companies", filters=(("eq", "company_key", company_key),))
         if company:
             return company
-        return None
+        company = self._single_row("companies", filters=(("eq", "name", display_name),))
+        if company:
+            return company
+        raise ValueError("Company not found")
 
-    def _ensure_company_for_facebook_source(
+    def _ensure_company_for_source(
         self,
         *,
-        source_key: str,
-        source_url: str,
+        platform: str,
+        source_kind: str,
+        source_key: str | None,
+        source_url: str | None,
         display_name: str,
     ) -> dict[str, Any]:
-        company_key = f"facebook:{source_key}"
-        company = self._find_company_for_facebook_source(source_key, company_key)
-        metadata = {"source_url": source_url, "source_slug": source_key, "source_platform": "facebook"}
+        platform = _normalize_platform(platform)
+        source_kind = _normalize_source_kind(source_kind, platform)
+        source_key = _clean_optional(source_key)
+        source_url = _clean_optional(source_url)
+        company_key_seed = source_key or source_url or display_name
+        company_key = f"{source_kind}:{company_key_seed}"
+        try:
+            company = self._find_company_for_source(
+                platform=platform,
+                source_kind=source_kind,
+                source_key=source_key,
+                source_url=source_url,
+                display_name=display_name,
+                company_key=company_key,
+            )
+        except ValueError:
+            company = None
         if company:
             update_payload: dict[str, Any] = {}
             if not _trimmed(company.get("name")):
                 update_payload["name"] = display_name
             if not _trimmed(company.get("company_key")):
                 update_payload["company_key"] = company_key
-            if _clean_optional(company.get("facebook_page_id")) != source_key:
+            if platform == "facebook" and source_kind == "meta_ads" and _clean_optional(company.get("facebook_page_id")) != source_key:
                 update_payload["facebook_page_id"] = source_key
+            if platform == "facebook" and source_kind == "facebook_page" and _clean_optional(company.get("facebook_url")) != source_url:
+                update_payload["facebook_url"] = source_url
+            if platform == "instagram" and _clean_optional(company.get("instagram_username")) != source_key:
+                update_payload["instagram_username"] = source_key
+            if platform == "google" and _clean_optional(company.get("google_ads_domain")) != source_key:
+                update_payload["google_ads_domain"] = source_key
+            metadata = {"source_platform": platform, "source_kind": source_kind}
+            if source_url:
+                metadata["source_url"] = source_url
+                if source_kind == "facebook_page":
+                    metadata["page_url"] = source_url
+            if source_key:
+                metadata["source_key"] = source_key
             update_payload["metadata"] = _merge_metadata(company.get("metadata"), metadata)
             if update_payload:
                 self.client.table("companies").update(update_payload).eq("id", company["id"]).execute()
@@ -544,33 +642,69 @@ class SocialStore:
         payload = {
             "name": display_name,
             "company_key": company_key,
-            "metadata": metadata,
+            "metadata": {
+                "source_platform": platform,
+                "source_kind": source_kind,
+                **({"source_url": source_url} if source_url else {}),
+                **({"page_url": source_url} if source_kind == "facebook_page" and source_url else {}),
+                **({"source_key": source_key} if source_key else {}),
+            },
             "is_active": True,
-            "facebook_page_id": source_key,
         }
+        if platform == "facebook" and source_kind == "meta_ads":
+            payload["facebook_page_id"] = source_key
+        elif platform == "facebook" and source_kind == "facebook_page":
+            payload["facebook_url"] = source_url
+        elif platform == "instagram":
+            payload["instagram_username"] = source_key
+        elif platform == "google":
+            payload["google_ads_domain"] = source_key
         response = self.client.table("companies").insert(payload).execute()
         rows = list(response.data or [])
         if rows:
             return dict(rows[0])
-        company = self._find_company_for_facebook_source(source_key, company_key)
-        if not company:
-            raise ValueError("Failed to create company record for Facebook source")
+        try:
+            company = self._find_company_for_source(
+                platform=platform,
+                source_kind=source_kind,
+                source_key=source_key,
+                source_url=source_url,
+                display_name=display_name,
+                company_key=company_key,
+            )
+        except ValueError as exc:
+            raise ValueError("Failed to create company record for social source") from exc
         return company
 
-    def create_or_update_facebook_source(
+    def create_or_update_source(
         self,
         *,
-        source_key: str,
-        source_url: str,
+        source_type: str,
+        source_key: str | None,
+        source_url: str | None,
         display_name: str,
     ) -> dict[str, Any]:
-        existing = self._find_existing_facebook_source(source_key)
+        source_kind = _normalize_source_kind(source_type)
+        platform = "facebook" if source_kind in {"facebook_page", "meta_ads"} else "instagram" if source_kind == "instagram_profile" else "google" if source_kind == "google_domain" else "tiktok"
+        source_key = _clean_optional(source_key)
+        source_url = _clean_optional(source_url)
+        existing = self._find_existing_source(
+            platform=platform,
+            source_kind=source_kind,
+            account_external_id=source_key if source_kind == "meta_ads" else None,
+            account_handle=source_key if source_kind == "instagram_profile" else None,
+            domain=source_key if source_kind == "google_domain" else None,
+            source_url=source_url if source_kind == "facebook_page" else None,
+        )
         metadata = {
             "source_url": source_url,
-            "source_slug": source_key,
-            "source_platform": "facebook",
+            "source_key": source_key,
+            "source_platform": platform,
+            "source_kind": source_kind,
             "created_from": "sources_page",
         }
+        if source_kind == "facebook_page" and source_url:
+            metadata["page_url"] = source_url
         if existing:
             update_payload = {
                 "metadata": _merge_metadata(existing.get("metadata"), metadata),
@@ -586,35 +720,60 @@ class SocialStore:
                 raise ValueError("Social source row not found after update")
             return {"action": action, "item": item}
 
-        company = self._ensure_company_for_facebook_source(
+        company = self._ensure_company_for_source(
+            platform=platform,
+            source_kind=source_kind,
             source_key=source_key,
             source_url=source_url,
             display_name=display_name,
         )
         entity = self.ensure_entity_from_company(str(company["id"]))
+        account_payload: dict[str, Any] = {
+            "platform": platform,
+            "source_kind": source_kind,
+            "import_source": "sources_page",
+            "metadata": metadata,
+            "is_active": True,
+        }
+        if source_kind == "meta_ads":
+            account_payload["account_external_id"] = source_key
+        elif source_kind == "facebook_page":
+            account_payload["account_external_id"] = None
+        elif source_kind == "instagram_profile":
+            account_payload["account_handle"] = source_key
+        elif source_kind == "google_domain":
+            account_payload["domain"] = source_key
         self.upsert_accounts(
             str(entity["id"]),
-            [
-                {
-                    "platform": "facebook",
-                    "account_external_id": source_key,
-                    "import_source": "sources_page",
-                    "metadata": metadata,
-                    "is_active": True,
-                }
-            ],
+            [account_payload],
         )
         item = next(
             (
                 row
                 for row in self.list_source_rows()
-                if str(row.get("entity_id")) == str(entity["id"]) and str(row.get("platform")) == "facebook"
+                if str(row.get("entity_id")) == str(entity["id"])
+                and str(row.get("platform")) == platform
+                and str(row.get("source_kind")) == source_kind
             ),
             None,
         )
         if not item:
             raise ValueError("Social source row not found after create")
         return {"action": "created", "item": item}
+
+    def create_or_update_facebook_source(
+        self,
+        *,
+        source_key: str,
+        source_url: str,
+        display_name: str,
+    ) -> dict[str, Any]:
+        return self.create_or_update_source(
+            source_type="facebook_page",
+            source_key=source_key,
+            source_url=source_url,
+            display_name=display_name,
+        )
 
     def update_source_account(self, account_id: str, *, is_active: bool) -> dict[str, Any]:
         account = self.get_account(account_id)
@@ -629,6 +788,87 @@ class SocialStore:
         if not item:
             raise ValueError("Social source not found after update")
         return item
+
+    def update_entity(
+        self,
+        entity_id: str,
+        *,
+        is_active: bool | None = None,
+        metadata: dict[str, Any] | None = None,
+        accounts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if is_active is not None:
+            payload["is_active"] = bool(is_active)
+        if metadata is not None:
+            payload["metadata"] = _serialize_metadata(metadata)
+        if payload:
+            self.client.table("social_entities").update(payload).eq("id", entity_id).execute()
+        if accounts:
+            self.upsert_accounts(entity_id, accounts)
+        entity = self.get_entity(entity_id)
+        if not entity:
+            raise ValueError("Social entity not found")
+        return entity
+
+    def upsert_accounts(self, entity_id: str, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not accounts:
+            return []
+        payloads = []
+        for account in accounts:
+            platform = _normalize_platform(account.get("platform"))
+            source_kind = _normalize_source_kind(account.get("source_kind"), platform)
+            payloads.append(
+                {
+                    "entity_id": entity_id,
+                    "platform": platform,
+                    "source_kind": source_kind,
+                    "account_handle": _clean_optional(account.get("account_handle")),
+                    "account_external_id": _clean_optional(account.get("account_external_id")),
+                    "domain": _clean_optional(account.get("domain")),
+                    "import_source": _clean_optional(account.get("import_source")) or "manual",
+                    "metadata": _serialize_metadata(account.get("metadata")),
+                    "is_active": bool(account.get("is_active", True)),
+                }
+            )
+        self.client.table("social_entity_accounts").upsert(
+            payloads,
+            on_conflict="entity_id,platform,source_kind",
+        ).execute()
+        entity = self.get_entity(entity_id)
+        return list(entity.get("accounts") or []) if entity else []
+
+    def get_account(self, account_id: str) -> dict[str, Any] | None:
+        row = self._single_row("social_entity_accounts", filters=(("eq", "id", account_id),))
+        if not row:
+            return None
+        entity = self._single_row("social_entities", filters=(("eq", "id", row.get("entity_id")),))
+        if entity:
+            row["entity"] = entity
+        return row
+
+    def get_account_by_scope_key(self, scope_key: str) -> dict[str, Any] | None:
+        parts = [part.strip() for part in str(scope_key or "").split(":") if part.strip()]
+        if len(parts) < 2:
+            return None
+        entity_id, platform = parts[0], parts[1]
+        source_kind = parts[2] if len(parts) > 2 else None
+        filters: list[tuple[str, str, Any]] = [
+            ("eq", "entity_id", entity_id),
+            ("eq", "platform", _normalize_platform(platform)),
+        ]
+        if source_kind:
+            filters.append(("eq", "source_kind", _normalize_source_kind(source_kind, platform)))
+        row = self._single_row(
+            "social_entity_accounts",
+            filters=filters,
+        )
+        if not row:
+            return None
+        entity = self._single_row("social_entities", filters=(("eq", "id", entity_id),))
+        if entity:
+            row["entity"] = entity
+        return row
 
     def mark_account_collect_success(self, account_id: str) -> None:
         self.client.table("social_entity_accounts").update(
@@ -646,7 +886,7 @@ class SocialStore:
             return
         self.clear_failure(
             stage="ingest",
-            scope_key=f"{account['entity_id']}:{account['platform']}",
+            scope_key=_account_scope_key(account),
         )
 
     def mark_account_collect_failure(
@@ -695,6 +935,11 @@ class SocialStore:
                 _clean_optional(account.get(field))
                 for field in ("account_external_id", "account_handle", "domain")
             )
+            if not has_fetch_key and _normalize_source_kind(account.get("source_kind"), account.get("platform")) == "facebook_page":
+                has_fetch_key = bool(
+                    _clean_optional(_serialize_metadata(account.get("metadata")).get("page_url"))
+                    or _clean_optional(_serialize_metadata(account.get("metadata")).get("source_url"))
+                )
             if not has_fetch_key:
                 continue
             enriched.append(

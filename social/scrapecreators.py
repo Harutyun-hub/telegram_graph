@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 from datetime import datetime, timezone
 from typing import Any
@@ -82,6 +83,14 @@ def _to_iso_datetime(value: Any) -> str | None:
     text = _trimmed(value)
     if not text:
         return None
+    if re.match(r"^[0-9]{10,13}$", text):
+        try:
+            timestamp = int(text)
+            if len(text) == 13:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+        except Exception:
+            pass
     candidates = [text]
     if len(text) == 10 and text.count("-") == 2:
         candidates.append(f"{text}T00:00:00+00:00")
@@ -102,6 +111,20 @@ def _coalesce(*values: Any) -> str | None:
         if text:
             return text
     return None
+
+
+def _account_source_kind(account: dict[str, Any]) -> str:
+    metadata = account.get("metadata") if isinstance(account.get("metadata"), dict) else {}
+    value = _trimmed(account.get("source_kind") or metadata.get("source_kind")).lower()
+    if value:
+        return value
+    platform = _trimmed(account.get("platform")).lower()
+    return {
+        "facebook": "meta_ads",
+        "instagram": "instagram_profile",
+        "google": "google_domain",
+        "tiktok": "tiktok_profile",
+    }.get(platform, "post")
 
 
 def _collect_assets(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -135,6 +158,11 @@ def _engagement_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "view_count",
         "play_count",
         "impression_count",
+        "reactionCount",
+        "commentCount",
+        "videoViewCount",
+        "reply_count",
+        "reaction_count",
     ):
         value = payload.get(key)
         if isinstance(value, (int, float)):
@@ -210,6 +238,40 @@ class ScrapeCreatorsClient:
             },
         )
 
+    def fetch_facebook_profile_posts(
+        self,
+        *,
+        page_url: str | None = None,
+        page_id: str | None = None,
+        cursor: str | None = None,
+        page_size: int = 3,
+    ) -> dict[str, Any]:
+        return self._get(
+            "/v1/facebook/profile/posts",
+            {
+                "url": page_url,
+                "pageId": page_id,
+                "count": page_size,
+                "cursor": cursor,
+            },
+        )
+
+    def fetch_facebook_post_comments(
+        self,
+        *,
+        post_url: str,
+        cursor: str | None = None,
+        page_size: int = 10,
+    ) -> dict[str, Any]:
+        return self._get(
+            "/v1/facebook/post/comments",
+            {
+                "url": post_url,
+                "count": page_size,
+                "cursor": cursor,
+            },
+        )
+
     def fetch_instagram_posts(self, *, handle: str, cursor: str | None = None, page_size: int = 50) -> dict[str, Any]:
         return self._get(
             "/v2/instagram/user/posts",
@@ -257,19 +319,50 @@ class ScrapeCreatorsClient:
         include_tiktok: bool,
     ) -> list[dict[str, Any]]:
         platform = _trimmed(account.get("platform")).lower()
+        source_kind = _account_source_kind(account)
         cursor = None
         pages: list[dict[str, Any]] = []
 
         for page_index in range(max(1, max_pages)):
             if platform == "facebook":
-                page_id = _trimmed(account.get("account_external_id"))
-                if not page_id:
-                    raise SocialCollectionError("Missing Facebook page ID", health_status="invalid_identifier")
-                payload = self.fetch_facebook_ads(
-                    page_id=page_id,
-                    cursor=cursor,
-                    page_size=page_size,
-                )
+                if source_kind == "facebook_page":
+                    metadata = account.get("metadata") if isinstance(account.get("metadata"), dict) else {}
+                    page_url = _trimmed(metadata.get("page_url") or metadata.get("source_url"))
+                    if not page_url:
+                        raise SocialCollectionError("Missing Facebook page URL", health_status="invalid_identifier")
+                    payload = self.fetch_facebook_profile_posts(
+                        page_url=page_url,
+                        cursor=cursor,
+                        page_size=min(page_size, 3),
+                    )
+                    posts = payload.get("posts") or payload.get("items") or payload.get("results") or []
+                    comments_by_post: dict[str, list[dict[str, Any]]] = {}
+                    for post in posts[: max(1, min(3, len(posts)) )]:
+                        if not isinstance(post, dict):
+                            continue
+                        post_url = _coalesce(post.get("permalink"), post.get("url"))
+                        if not post_url:
+                            continue
+                        try:
+                            comments_payload = self.fetch_facebook_post_comments(
+                                post_url=post_url,
+                                page_size=min(page_size, 10),
+                            )
+                        except SocialCollectionError as exc:
+                            logger.warning("Facebook page comments skipped | url={} error={}", post_url, exc)
+                            continue
+                        comments = comments_payload.get("comments") or comments_payload.get("items") or comments_payload.get("results") or []
+                        comments_by_post[post_url] = [row for row in comments if isinstance(row, dict)]
+                    payload["comments_by_post"] = comments_by_post
+                else:
+                    page_id = _trimmed(account.get("account_external_id"))
+                    if not page_id:
+                        raise SocialCollectionError("Missing Facebook page ID", health_status="invalid_identifier")
+                    payload = self.fetch_facebook_ads(
+                        page_id=page_id,
+                        cursor=cursor,
+                        page_size=page_size,
+                    )
             elif platform == "instagram":
                 handle = _trimmed(account.get("account_handle"))
                 if not handle:
@@ -338,6 +431,7 @@ class ScrapeCreatorsClient:
 
     def normalize_payloads(self, account: dict[str, Any], payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         platform = _trimmed(account.get("platform")).lower()
+        source_kind = _account_source_kind(account)
         entity = account.get("entity") or {}
         entity_id = entity.get("id")
         account_id = account.get("id")
@@ -346,8 +440,10 @@ class ScrapeCreatorsClient:
 
         for payload in payloads:
             rows = []
-            if platform == "facebook":
+            if platform == "facebook" and source_kind == "meta_ads":
                 rows = payload.get("results") or payload.get("items") or []
+            elif platform == "facebook" and source_kind == "facebook_page":
+                rows = payload.get("posts") or payload.get("items") or payload.get("results") or []
             elif platform == "instagram":
                 rows = payload.get("items") or payload.get("posts") or payload.get("results") or []
             elif platform == "google":
@@ -360,6 +456,7 @@ class ScrapeCreatorsClient:
                     continue
                 normalized = self._normalize_activity_row(
                     platform=platform,
+                    account_source_kind=source_kind,
                     entity_id=entity_id,
                     account_id=account_id,
                     account=account,
@@ -372,12 +469,32 @@ class ScrapeCreatorsClient:
                     continue
                 seen_uids.add(uid)
                 activities.append(normalized)
+                if platform == "facebook" and source_kind == "facebook_page":
+                    post_url = _coalesce(row.get("permalink"), row.get("url"))
+                    comments = (payload.get("comments_by_post") or {}).get(post_url, [])
+                    for comment in comments:
+                        normalized_comment = self._normalize_activity_row(
+                            platform=platform,
+                            account_source_kind="facebook_page_comment",
+                            entity_id=entity_id,
+                            account_id=account_id,
+                            account=account,
+                            row={**comment, "__parent_post_url": post_url, "__parent_post_id": normalized.get("provider_item_id")},
+                        )
+                        if not normalized_comment:
+                            continue
+                        comment_uid = normalized_comment["activity_uid"]
+                        if comment_uid in seen_uids:
+                            continue
+                        seen_uids.add(comment_uid)
+                        activities.append(normalized_comment)
         return activities
 
     def _normalize_activity_row(
         self,
         *,
         platform: str,
+        account_source_kind: str,
         entity_id: str,
         account_id: str,
         account: dict[str, Any],
@@ -391,6 +508,7 @@ class ScrapeCreatorsClient:
             row.get("creativeId"),
             row.get("creative_id"),
             row.get("url"),
+            row.get("__parent_post_id"),
         )
         source_url = _coalesce(
             row.get("url"),
@@ -398,6 +516,7 @@ class ScrapeCreatorsClient:
             row.get("ad_link_url"),
             row.get("page_profile_uri"),
             row.get("permalink"),
+            row.get("__parent_post_url"),
         )
         if not source_url:
             source_url = provider_item_id
@@ -416,11 +535,13 @@ class ScrapeCreatorsClient:
             )
         )
         source_kind = {
-            "facebook": "ad",
-            "google": "ad",
-            "instagram": "post",
-            "tiktok": "video",
-        }.get(platform, "post")
+            ("facebook", "meta_ads"): "ad",
+            ("facebook", "facebook_page"): "post",
+            ("facebook", "facebook_page_comment"): "comment",
+            ("google", "google_domain"): "ad",
+            ("instagram", "instagram_profile"): "post",
+            ("tiktok", "tiktok_profile"): "video",
+        }.get((platform, account_source_kind), "post")
         if not provider_item_id:
             provider_item_id = source_url
 
@@ -431,12 +552,15 @@ class ScrapeCreatorsClient:
                 row.get("taken_at"),
                 row.get("start_date_string"),
                 row.get("start_date"),
+                row.get("publishTime"),
             )
         )
         author_handle = _coalesce(
             row.get("username"),
             row.get("handle"),
             row.get("page_name"),
+            (row.get("author") or {}).get("name") if isinstance(row.get("author"), dict) else None,
+            (row.get("author") or {}).get("id") if isinstance(row.get("author"), dict) else None,
             account.get("account_handle"),
             account.get("account_external_id"),
             account.get("domain"),
