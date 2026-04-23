@@ -19,6 +19,7 @@ import {
 import { useLanguage } from '../contexts/LanguageContext';
 import { apiFetch } from '../services/api';
 import type { TrackedChannel, ChannelStatus } from '../types/data';
+import { SocialSourcesSection } from './sources/SocialSourcesSection';
 
 type SourceApiItem = {
   id: string;
@@ -551,6 +552,7 @@ function RowActions({
 export function SourcesPage() {
   const { lang } = useLanguage();
   const ru = lang === 'ru';
+  const [mode, setMode] = useState<'telegram' | 'social'>('telegram');
 
   const [channels, setChannels] = useState<TrackedChannel[]>([]);
   const [search, setSearch] = useState('');
@@ -568,6 +570,10 @@ export function SourcesPage() {
   const [freshnessLoading, setFreshnessLoading] = useState(true);
   const [freshnessError, setFreshnessError] = useState<string | null>(null);
   const [intervalInput, setIntervalInput] = useState('15');
+
+  useEffect(() => {
+    setShowAddModal(false);
+  }, [mode]);
 
   const loadSources = async () => {
     setLoading(true);
@@ -610,11 +616,13 @@ export function SourcesPage() {
   };
 
   useEffect(() => {
+    if (mode !== 'telegram') return;
     void loadSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ru]);
+  }, [ru, mode]);
 
   useEffect(() => {
+    if (mode !== 'telegram') return;
     void loadSchedulerStatus();
     void loadFreshnessStatus();
     const timer = window.setInterval(() => {
@@ -622,7 +630,7 @@ export function SourcesPage() {
       void loadFreshnessStatus(true);
     }, 10000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [mode]);
 
   const saveSchedulerInterval = async () => {
     const parsed = Number(intervalInput);
@@ -846,22 +854,56 @@ export function SourcesPage() {
               {ru ? 'Источники данных' : 'Data Sources'}
             </h1>
             <p className="text-sm text-gray-500 mt-1">
-              {ru
-                ? 'Управление Telegram-каналами и группами, которые отслеживает система'
-                : 'Manage Telegram channels and groups tracked by the system'}
+              {mode === 'telegram'
+                ? (
+                    ru
+                      ? 'Управление Telegram-каналами и группами, которые отслеживает система'
+                      : 'Manage Telegram channels and groups tracked by the system'
+                  )
+                : (
+                    ru
+                      ? 'Управление social media источниками, которые отслеживает система'
+                      : 'Manage social media sources tracked by the system'
+                  )}
             </p>
           </div>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white transition-all hover:shadow-lg hover:shadow-blue-500/25 active:scale-[0.98]"
-            style={{ fontWeight: 500, background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}
-          >
-            <Plus className="w-4 h-4" />
-            {ru ? 'Добавить источник' : 'Add Source'}
-          </button>
+          <div className="flex items-center gap-3 flex-wrap justify-end">
+            <div className="inline-flex items-center rounded-xl bg-gray-100 p-1">
+              {(['telegram', 'social'] as const).map((value) => (
+                <button
+                  key={value}
+                  onClick={() => setMode(value)}
+                  className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                    mode === value ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                  style={{ fontWeight: 500 }}
+                >
+                  {value === 'telegram' ? 'Telegram' : 'Social'}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm text-white transition-all hover:shadow-lg hover:shadow-blue-500/25 active:scale-[0.98]"
+              style={{ fontWeight: 500, background: 'linear-gradient(135deg, #1a56db, #1e3a8a)' }}
+            >
+              <Plus className="w-4 h-4" />
+              {mode === 'telegram'
+                ? (ru ? 'Добавить источник' : 'Add Source')
+                : (ru ? 'Добавить Facebook' : 'Add Facebook')}
+            </button>
+          </div>
         </div>
       </div>
 
+      {mode === 'social' ? (
+        <SocialSourcesSection
+          ru={ru}
+          addModalOpen={showAddModal}
+          onCloseAddModal={() => setShowAddModal(false)}
+        />
+      ) : (
+        <>
       {error && (
         <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           <AlertCircle className="w-4 h-4" />
@@ -1362,6 +1404,8 @@ export function SourcesPage() {
         ru={ru}
         onSubmit={handleAddSource}
       />
+        </>
+      )}
     </div>
   );
 }
