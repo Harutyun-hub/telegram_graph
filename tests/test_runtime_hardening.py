@@ -328,6 +328,27 @@ class RuntimeStartupHardeningTests(unittest.TestCase):
 
         self.assertIn("web-only", str(ctx.exception))
 
+    def test_worker_can_run_in_staging_when_override_enabled(self) -> None:
+        fake_scheduler = SimpleNamespace(startup=AsyncMock(), shutdown=AsyncMock())
+
+        with patch.object(worker.config, "IS_STAGING", True), \
+             patch.object(worker.config, "IS_LOCKED_ENV", False), \
+             patch.dict("os.environ", {"ALLOW_STAGING_BACKGROUND_WORKER": "true"}, clear=False), \
+             patch.object(worker, "get_runtime_coordinator", return_value=_CoordinatorStub(ping_result=True)), \
+             patch.object(worker.server, "get_scraper_scheduler", return_value=fake_scheduler), \
+             patch.object(worker.server, "_start_question_cards_scheduler") as question_scheduler, \
+             patch.object(worker.server, "_start_behavioral_cards_scheduler") as behavioral_scheduler, \
+             patch.object(worker.server, "_start_opportunity_cards_scheduler") as opportunity_scheduler, \
+             patch.object(worker.server, "_start_topic_overviews_scheduler") as topic_scheduler, \
+             patch("api.worker.asyncio.Event.wait", AsyncMock(return_value=None)):
+            asyncio.run(worker.run_worker())
+
+        fake_scheduler.startup.assert_awaited_once()
+        question_scheduler.assert_called_once()
+        behavioral_scheduler.assert_called_once()
+        opportunity_scheduler.assert_called_once()
+        topic_scheduler.assert_called_once()
+
 
 class SchedulerDistributedLockTests(unittest.TestCase):
     def _service(self) -> ScraperSchedulerService:

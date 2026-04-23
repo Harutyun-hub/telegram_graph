@@ -8,12 +8,24 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import os
 
 from loguru import logger
 
 import config
 from api import server
 from api.runtime_coordinator import get_runtime_coordinator
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _allow_staging_background_worker() -> bool:
+    return _env_bool("ALLOW_STAGING_BACKGROUND_WORKER", False)
 
 
 async def _shutdown_background_services() -> None:
@@ -39,8 +51,11 @@ async def _shutdown_background_services() -> None:
 
 async def run_worker() -> None:
     logger.info("Starting dedicated worker runtime")
-    if config.IS_STAGING:
+    staging_override_enabled = config.IS_STAGING and _allow_staging_background_worker()
+    if config.IS_STAGING and not staging_override_enabled:
         raise RuntimeError("Staging/testing environments are web-only. Dedicated worker startup is disabled.")
+    if staging_override_enabled:
+        logger.warning("Staging background worker override enabled; starting dedicated worker runtime")
     coordinator = get_runtime_coordinator()
     if config.IS_LOCKED_ENV and not coordinator.ping():
         raise RuntimeError("Locked environments require a healthy Redis runtime coordinator.")
@@ -53,7 +68,8 @@ async def run_worker() -> None:
     server._start_topic_overviews_scheduler()
 
     startup_tasks: list[asyncio.Task] = []
-    if server.RUN_STARTUP_WARMERS:
+    run_startup_warmers = server.RUN_STARTUP_WARMERS or staging_override_enabled
+    if run_startup_warmers:
         if config.QUESTION_BRIEFS_REFRESH_ON_STARTUP:
             startup_tasks.append(asyncio.create_task(server._materialize_question_cards_once(force=False)))
         if config.BEHAVIORAL_BRIEFS_REFRESH_ON_STARTUP:
