@@ -724,12 +724,90 @@ def _is_opportunity_evidence_aligned(message: str, context: str, row: dict) -> b
     gap_hit = any(marker in text for marker in _GAP_MARKERS)
     ask_like = _as_int(row.get("askLike"), 0) > 0
     support_intent = _as_int(row.get("supportIntent"), 0) > 0
+    recommendation_hit = _as_int(row.get("recommendationHit"), 0) > 0
     opportunity_hint = _as_int(row.get("opportunityHint"), 0) > 0
-    if not (demand_hit or gap_hit or ask_like or support_intent or opportunity_hint):
+    if not (demand_hit or gap_hit or ask_like or support_intent or recommendation_hit or opportunity_hint):
         return False
     if text.count("?") >= 3:
         return False
     return True
+
+
+def _opportunity_support_gate(messages: int, unique_users: int, channels: int, trend: int) -> bool:
+    if (
+        messages >= int(config.OPPORTUNITY_BRIEFS_MIN_MESSAGES)
+        and unique_users >= int(config.OPPORTUNITY_BRIEFS_MIN_USERS)
+        and channels >= 2
+    ):
+        return True
+    if messages >= 3 and unique_users >= 2 and channels >= 1:
+        return True
+    if messages >= 2 and unique_users >= 2 and channels >= 2:
+        return True
+    if messages >= 2 and unique_users >= 2 and trend >= 35:
+        return True
+    return False
+
+
+def _load_ctx_or_global_fallback(
+    ctx: DashboardDateContext | None,
+    *,
+    diagnostics: dict | None = None,
+    stage: str = "loadedCards",
+    fallback_stage: str = "globalFallbackCards",
+) -> tuple[list[dict], bool]:
+    cards, exists = _load_snapshot_cards_with_status(ctx=ctx, diagnostics=diagnostics, stage=stage)
+    if exists or ctx is None:
+        return cards, exists
+    return _load_snapshot_cards_with_status(diagnostics=diagnostics, stage=fallback_stage)
+
+
+def _persist_exact_range_result(
+    *,
+    ctx: DashboardDateContext | None,
+    cards: list[dict],
+    diagnostics: dict,
+    exit_reason: str,
+    active_clusters: int,
+    changed_clusters: int,
+    reused_clusters: int,
+    state_clusters: dict | None = None,
+) -> bool:
+    if ctx is None:
+        diagnostics["exitReason"] = exit_reason
+        return False
+
+    diagnostics["exitReason"] = exit_reason
+    diagnostics.setdefault("stages", {})["finalCards"] = len(cards)
+    diagnostics.setdefault("stages", {})["reusedClusters"] = reused_clusters
+    state = {
+        "schemaVersion": _SCHEMA_VERSION,
+        "updatedAt": None,
+        "clusters": state_clusters if isinstance(state_clusters, dict) else {},
+    }
+    state_saved = _save_state(state, ctx=ctx)
+    snapshot_saved = False
+    if state_saved:
+        snapshot_saved = _save_snapshot_cards(
+            cards,
+            metadata={
+                "activeClusters": active_clusters,
+                "changedClusters": changed_clusters,
+                "reusedClusters": reused_clusters,
+                "cards": len(cards),
+                "scope": "exact_range",
+                "windowStart": ctx.from_date.isoformat(),
+                "windowEnd": ctx.to_date.isoformat(),
+                "exitReason": exit_reason,
+            },
+            diagnostics=diagnostics,
+            ctx=ctx,
+        )
+    if not state_saved:
+        diagnostics["error"] = "Opportunity cards state could not be persisted and verified"
+    elif not snapshot_saved:
+        diagnostics["error"] = "Opportunity cards snapshot could not be persisted and verified"
+    return bool(state_saved and snapshot_saved)
 
 
 def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> list[dict]:
@@ -771,20 +849,19 @@ def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> 
                 }
             )
         for family_rows in _build_opportunity_families(evidence_rows):
-            if len(family_rows) < int(config.OPPORTUNITY_BRIEFS_MIN_MESSAGES):
-                continue
             users = {
                 _as_str(ev.get("userId"), "").strip() or f"channel:{_as_str(ev.get('channel'), 'unknown').strip().lower()}"
                 for ev in family_rows
             }
             users = {user for user in users if user}
-            if len(users) < int(config.OPPORTUNITY_BRIEFS_MIN_USERS):
-                continue
             channels = {
                 _as_str(ev.get("channel"), "unknown").strip().lower()
                 for ev in family_rows
                 if _as_str(ev.get("channel"), "").strip()
             }
+            trend = _as_int(row.get("trend7dPct"), _trend_pct(0, 0))
+            if not _opportunity_support_gate(len(family_rows), len(users), len(channels), trend):
+                continue
             seed_text = _family_seed_text(family_rows)
             clusters.append(
                 {
@@ -796,7 +873,7 @@ def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> 
                     "channels": len(channels),
                     "signals7d": _as_int(row.get("signals7d"), sum(1 for ev in family_rows if (datetime.now(timezone.utc) - ev["ts"]).days < 7)),
                     "signalsPrev7d": _as_int(row.get("signalsPrev7d"), sum(1 for ev in family_rows if 7 <= (datetime.now(timezone.utc) - ev["ts"]).days < 14)),
-                    "trend7dPct": _as_int(row.get("trend7dPct"), _trend_pct(0, 0)),
+                    "trend7dPct": trend,
                     "latestAt": _as_str(row.get("latestAt"), family_rows[0].get("timestamp", "") if family_rows else ""),
                     "signals": sorted(family_rows, key=lambda ev: ev["ts"], reverse=True),
                 }
@@ -1129,13 +1206,20 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
             last_good_cards = _load_snapshot_cards()
 
     diagnostics = _new_refresh_diagnostics(force=force)
+    logger.info(
+        "Opportunity cards refresh start | force={} ai_enabled={} min_messages={} min_users={} min_confidence={}".format(
+            force,
+            diagnostics["runtime"]["featureEnabled"],
+            int(config.OPPORTUNITY_BRIEFS_MIN_MESSAGES),
+            int(config.OPPORTUNITY_BRIEFS_MIN_USERS),
+            float(config.OPPORTUNITY_BRIEFS_MIN_CONFIDENCE),
+        )
+    )
     lease_ttl = max(300, int(config.OPPORTUNITY_BRIEFS_REFRESH_MINUTES) * 60)
 
     if not force and not _acquire_refresh_lease(lease_ttl, ctx=ctx):
         diagnostics["exitReason"] = "lease_skipped"
-        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
-        if not cards and ctx is not None:
-            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
+        cards, _ = _load_ctx_or_global_fallback(ctx, diagnostics=diagnostics)
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
@@ -1148,9 +1232,7 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
 
     if not _client or not _runtime_opportunity_briefs_feature_enabled():
         diagnostics["exitReason"] = "ai_disabled_or_unavailable"
-        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
-        if not cards and ctx is not None:
-            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
+        cards, _ = _load_ctx_or_global_fallback(ctx, diagnostics=diagnostics)
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
@@ -1171,9 +1253,7 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
     except Exception as e:
         diagnostics["exitReason"] = "candidate_error"
         diagnostics["error"] = str(e)
-        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
-        if not cards and ctx is not None:
-            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
+        cards, _ = _load_ctx_or_global_fallback(ctx, diagnostics=diagnostics)
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
@@ -1185,16 +1265,47 @@ def refresh_opportunity_briefs(*, force: bool = False, ctx: DashboardDateContext
         return []
 
     diagnostics["stages"]["candidateRows"] = len(candidates)
+    logger.info(f"Opportunity cards candidates fetched | count={len(candidates)}")
     if not candidates:
-        diagnostics["exitReason"] = "no_candidates"
+        if _persist_exact_range_result(
+            ctx=ctx,
+            cards=[],
+            diagnostics=diagnostics,
+            exit_reason="no_candidates",
+            active_clusters=0,
+            changed_clusters=0,
+            reused_clusters=0,
+            state_clusters={},
+        ):
+            _store_refresh_diagnostics(diagnostics)
+            return []
+        diagnostics["exitReason"] = diagnostics.get("exitReason") or "no_candidates"
         _store_refresh_diagnostics(diagnostics)
-        return []
+        return last_good_cards if ctx is not None else []
 
     clusters = _build_clusters(candidates, diagnostics=diagnostics)
+    logger.info(
+        "Opportunity cards clustering | clusters_before_gate={} clusters_after_gate={}".format(
+            diagnostics["stages"]["clustersBeforeGate"],
+            diagnostics["stages"]["clustersAfterGate"],
+        )
+    )
     if not clusters:
-        diagnostics["exitReason"] = "no_clusters_after_support_gate"
+        if _persist_exact_range_result(
+            ctx=ctx,
+            cards=[],
+            diagnostics=diagnostics,
+            exit_reason="no_clusters_after_support_gate",
+            active_clusters=0,
+            changed_clusters=0,
+            reused_clusters=0,
+            state_clusters={},
+        ):
+            _store_refresh_diagnostics(diagnostics)
+            return []
+        diagnostics["exitReason"] = diagnostics.get("exitReason") or "no_clusters_after_support_gate"
         _store_refresh_diagnostics(diagnostics)
-        return []
+        return last_good_cards if ctx is not None else []
 
     state = _load_state(ctx=ctx)
     cluster_state = state.get("clusters") if isinstance(state.get("clusters"), dict) else {}
@@ -1341,7 +1452,7 @@ def get_business_opportunity_briefs(*, force_refresh: bool = False, ctx: Dashboa
         return refresh_opportunity_briefs(force=True, ctx=ctx)
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists and cards:
+        if exists:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()

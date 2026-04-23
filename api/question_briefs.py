@@ -771,22 +771,77 @@ def _support_gate(cluster: dict) -> bool:
     ):
         return True
 
-    if (
-        messages >= max(6, int(config.QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES))
-        and unique_users >= max(4, int(config.QUESTION_BRIEFS_MIN_CLUSTER_USERS) + 1)
-        and channels >= 1
-    ):
+    if messages >= 4 and unique_users >= 3 and channels >= 1:
         return True
 
-    if (
-        messages >= max(5, int(config.QUESTION_BRIEFS_MIN_CLUSTER_MESSAGES) - 2)
-        and unique_users >= max(3, int(config.QUESTION_BRIEFS_MIN_CLUSTER_USERS) - 1)
-        and channels >= 1
-        and trend >= 40
-    ):
+    if messages >= 3 and unique_users >= 2 and channels >= 2:
+        return True
+
+    if messages >= 3 and unique_users >= 2 and trend >= 40:
         return True
 
     return False
+
+
+def _load_ctx_or_global_fallback(
+    ctx: DashboardDateContext | None,
+    *,
+    diagnostics: dict | None = None,
+    stage: str = "loadedCards",
+    fallback_stage: str = "globalFallbackCards",
+) -> tuple[list[dict], bool]:
+    cards, exists = _load_snapshot_cards_with_status(ctx=ctx, diagnostics=diagnostics, stage=stage)
+    if exists or ctx is None:
+        return cards, exists
+    return _load_snapshot_cards_with_status(diagnostics=diagnostics, stage=fallback_stage)
+
+
+def _persist_exact_range_result(
+    *,
+    ctx: DashboardDateContext | None,
+    cards: list[dict],
+    diagnostics: dict,
+    exit_reason: str,
+    active_clusters: int,
+    changed_clusters: int,
+    reused_clusters: int,
+    state_clusters: dict | None = None,
+) -> bool:
+    if ctx is None:
+        diagnostics["exitReason"] = exit_reason
+        return False
+
+    diagnostics["exitReason"] = exit_reason
+    diagnostics.setdefault("stages", {})["finalCards"] = len(cards)
+    diagnostics.setdefault("stages", {})["reusedClusters"] = reused_clusters
+    state = {
+        "schemaVersion": _SCHEMA_VERSION,
+        "updatedAt": None,
+        "clusters": state_clusters if isinstance(state_clusters, dict) else {},
+    }
+    state_saved = _save_state(state, ctx=ctx)
+    snapshot_saved = False
+    if state_saved:
+        snapshot_saved = _save_snapshot_cards(
+            cards,
+            metadata={
+                "activeClusters": active_clusters,
+                "changedClusters": changed_clusters,
+                "reusedClusters": reused_clusters,
+                "cards": len(cards),
+                "scope": "exact_range",
+                "windowStart": ctx.from_date.isoformat(),
+                "windowEnd": ctx.to_date.isoformat(),
+                "exitReason": exit_reason,
+            },
+            diagnostics=diagnostics,
+            ctx=ctx,
+        )
+    if not state_saved:
+        diagnostics["error"] = "Question cards state could not be persisted and verified"
+    elif not snapshot_saved:
+        diagnostics["error"] = "Question cards snapshot could not be persisted and verified"
+    return bool(state_saved and snapshot_saved)
 
 
 def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> list[dict]:
@@ -1360,9 +1415,7 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
     if not force and not _acquire_refresh_lease(lease_ttl, ctx=ctx):
         logger.info("Question cards materialization skipped: another instance holds active lease")
         diagnostics["exitReason"] = "lease_skipped"
-        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
-        if not cards and ctx is not None:
-            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
+        cards, _ = _load_ctx_or_global_fallback(ctx, diagnostics=diagnostics)
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
@@ -1384,9 +1437,7 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
         logger.warning(f"Question cards candidate retrieval failed: {e}")
         diagnostics["exitReason"] = "candidate_error"
         diagnostics["error"] = str(e)
-        cards = _load_snapshot_cards(ctx=ctx, diagnostics=diagnostics)
-        if not cards and ctx is not None:
-            cards = _load_snapshot_cards(diagnostics=diagnostics, stage="globalFallbackCards")
+        cards, _ = _load_ctx_or_global_fallback(ctx, diagnostics=diagnostics)
         diagnostics["stages"]["finalCards"] = len(cards)
         _store_refresh_diagnostics(diagnostics)
         if cards:
@@ -1399,9 +1450,21 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
     diagnostics["stages"]["candidateRows"] = len(candidates)
     logger.info(f"Question cards candidates fetched | count={len(candidates)}")
     if not candidates:
-        diagnostics["exitReason"] = "no_candidates"
+        if _persist_exact_range_result(
+            ctx=ctx,
+            cards=[],
+            diagnostics=diagnostics,
+            exit_reason="no_candidates",
+            active_clusters=0,
+            changed_clusters=0,
+            reused_clusters=0,
+            state_clusters={},
+        ):
+            _store_refresh_diagnostics(diagnostics)
+            return []
+        diagnostics["exitReason"] = diagnostics.get("exitReason") or "no_candidates"
         _store_refresh_diagnostics(diagnostics)
-        return []
+        return last_good_cards if ctx is not None else []
 
     clusters = _build_clusters(candidates, diagnostics=diagnostics)
     logger.info(
@@ -1412,9 +1475,21 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
         )
     )
     if not clusters:
-        diagnostics["exitReason"] = "no_clusters_after_support_gate"
+        if _persist_exact_range_result(
+            ctx=ctx,
+            cards=[],
+            diagnostics=diagnostics,
+            exit_reason="no_clusters_after_support_gate",
+            active_clusters=0,
+            changed_clusters=0,
+            reused_clusters=0,
+            state_clusters={},
+        ):
+            _store_refresh_diagnostics(diagnostics)
+            return []
+        diagnostics["exitReason"] = diagnostics.get("exitReason") or "no_clusters_after_support_gate"
         _store_refresh_diagnostics(diagnostics)
-        return []
+        return last_good_cards if ctx is not None else []
 
     state = _load_state(ctx=ctx)
     cluster_state = state.get("clusters") if isinstance(state.get("clusters"), dict) else {}
@@ -1594,7 +1669,7 @@ def get_question_briefs(*, force_refresh: bool = False, ctx: DashboardDateContex
 
     if ctx is not None:
         cards, exists = _load_snapshot_cards_with_status(ctx=ctx)
-        if exists and cards:
+        if exists:
             return cards
         _ensure_range_refresh(ctx)
         return _load_snapshot_cards()

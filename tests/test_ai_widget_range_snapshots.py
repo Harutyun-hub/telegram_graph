@@ -89,6 +89,37 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
             self.assertEqual(question_briefs.get_question_briefs(ctx=ctx), [{"id": "range-q"}])
             ensure_mock.assert_not_called()
 
+    def test_question_briefs_use_exact_range_empty_snapshot_without_global_fallback(self) -> None:
+        store = _FakeRuntimeStore()
+        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
+
+        store.save_runtime_json("question_cards/latest.json", {"cards": [{"id": "global-q"}]})
+        store.save_runtime_json(f"question_cards/ranges/{range_key}/latest.json", {"cards": []})
+
+        with patch.object(question_briefs, "_get_runtime_store", return_value=store), \
+             patch.object(question_briefs, "_ensure_range_refresh") as ensure_mock:
+            self.assertEqual(question_briefs.get_question_briefs(ctx=ctx), [])
+            ensure_mock.assert_not_called()
+
+    def test_question_refresh_persists_empty_exact_range_snapshot(self) -> None:
+        store = _FakeRuntimeStore()
+        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        range_root = f"question_cards/ranges/{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
+
+        with patch.object(question_briefs, "_get_runtime_store", return_value=store), \
+             patch.object(question_briefs.strategic, "get_question_brief_candidates", return_value=[]):
+            cards = question_briefs.refresh_question_briefs(ctx=ctx)
+
+        self.assertEqual(cards, [])
+        self.assertIn(f"{range_root}/latest.json", store.files)
+        self.assertIn(f"{range_root}/state.json", store.files)
+        self.assertTrue(any(path.startswith(f"{range_root}/snapshots/") for path in store.files))
+
+    def test_question_support_gate_keeps_small_but_real_family(self) -> None:
+        cluster = {"messages": 4, "uniqueUsers": 3, "channels": 1, "trend7dPct": 15}
+        self.assertTrue(question_briefs._support_gate(cluster))
+
     def test_behavioral_problem_refresh_kind_no_longer_emits_generic_fallback(self) -> None:
         cluster = {
             "clusterId": "pb-1",
@@ -242,6 +273,37 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["deliveryModel"], "community_program")
         self.assertEqual(cards[0]["readiness"], "validate_now")
+
+    def test_opportunity_briefs_use_exact_range_empty_snapshot_without_global_fallback(self) -> None:
+        store = _FakeRuntimeStore()
+        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
+
+        store.save_runtime_json("opportunity_cards/latest.json", {"cards": [{"id": "global-op"}]})
+        store.save_runtime_json(f"opportunity_cards/ranges/{range_key}/latest.json", {"cards": []})
+
+        with patch.object(opportunity_briefs, "_get_runtime_store", return_value=store), \
+             patch.object(opportunity_briefs, "_ensure_range_refresh") as ensure_mock:
+            self.assertEqual(opportunity_briefs.get_business_opportunity_briefs(ctx=ctx), [])
+            ensure_mock.assert_not_called()
+
+    def test_opportunity_refresh_persists_empty_exact_range_snapshot(self) -> None:
+        store = _FakeRuntimeStore()
+        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        range_root = f"opportunity_cards/ranges/{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
+
+        with patch.object(opportunity_briefs, "_get_runtime_store", return_value=store), \
+             patch.object(opportunity_briefs, "_client", object()), \
+             patch.object(opportunity_briefs.actionable, "get_business_opportunity_brief_candidates", return_value=[]):
+            cards = opportunity_briefs.refresh_opportunity_briefs(ctx=ctx)
+
+        self.assertEqual(cards, [])
+        self.assertIn(f"{range_root}/latest.json", store.files)
+        self.assertIn(f"{range_root}/state.json", store.files)
+        self.assertTrue(any(path.startswith(f"{range_root}/snapshots/") for path in store.files))
+
+    def test_opportunity_support_gate_accepts_small_multi_channel_family(self) -> None:
+        self.assertTrue(opportunity_briefs._opportunity_support_gate(2, 2, 2, 0))
 
     def test_aggregator_passes_dashboard_range_into_ai_widget_loaders(self) -> None:
         ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
