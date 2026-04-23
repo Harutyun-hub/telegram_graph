@@ -365,15 +365,10 @@ def load_nearest_shorter_range_cards(
         return []
 
     paths = build_widget_snapshot_paths(str(family).strip().strip("/"), best_ctx)
-    payload, exists = load_latest_widget_payload(
-        store,
-        latest_path=paths.latest_path,
-        history_folder=paths.history_folder,
-        default={"cards": []},
-    )
+    payload = store.get_runtime_json(paths.latest_path, default={})
     cards = payload.get("cards") if isinstance(payload, dict) else []
     parsed = cards if isinstance(cards, list) else []
-    if not exists and not parsed:
+    if not parsed:
         return []
     return select_portfolio_cards(
         parsed,
