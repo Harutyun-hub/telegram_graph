@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -621,6 +622,14 @@ class SocialEntityUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     metadata: Optional[Dict[str, Any]] = None
     accounts: List[SocialAccountUpsertRequest] = Field(default_factory=list)
+
+
+class SocialSourceCreateRequest(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2048)
+
+
+class SocialSourceUpdateRequest(BaseModel):
+    is_active: bool
 
 
 class SocialRuntimeRetryRequest(BaseModel):
@@ -2478,6 +2487,55 @@ def _canonical_channel_username(handle: str) -> str:
     return f"@{normalized}" if normalized else ""
 
 
+def _humanize_source_key(value: str) -> str:
+    text = re.sub(r"[._-]+", " ", (value or "").strip())
+    return " ".join(part.capitalize() for part in text.split() if part) or "Facebook Source"
+
+
+def _normalize_facebook_source(raw: str) -> dict[str, str]:
+    value = (raw or "").strip()
+    if not value:
+        return {}
+    if not re.match(r"^[a-z]+://", value, flags=re.IGNORECASE):
+        value = f"https://{value}"
+
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return {}
+
+    host = (parsed.netloc or "").strip().lower()
+    host = re.sub(r"^(www|m)\.", "", host)
+    if host not in {"facebook.com", "fb.com"}:
+        return {}
+
+    query = parse_qs(parsed.query or "")
+    segments = [segment.strip() for segment in (parsed.path or "").split("/") if segment.strip()]
+
+    if segments and segments[0].lower() == "profile.php":
+        source_key = (query.get("id") or [""])[0].strip()
+        if not source_key:
+            return {}
+        return {
+            "source_key": source_key,
+            "source_url": f"https://www.facebook.com/profile.php?id={source_key}",
+            "display_name": f"Facebook {source_key}",
+        }
+
+    if not segments:
+        return {}
+
+    source_key = segments[0].lstrip("@").strip()
+    if not re.match(r"^[A-Za-z0-9._-]{2,255}$", source_key):
+        return {}
+
+    return {
+        "source_key": source_key,
+        "source_url": f"https://www.facebook.com/{source_key}",
+        "display_name": _humanize_source_key(source_key),
+    }
+
+
 async def _try_enrich_channel_metadata(
     channel_uuid: str,
     canonical_username: str,
@@ -3384,6 +3442,48 @@ async def list_channel_sources():
         return {"count": len(items), "items": items}
     except Exception as e:
         logger.error(f"List source channels error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sources/social", dependencies=[Depends(require_operator_access)])
+async def list_social_sources():
+    try:
+        items = get_social_store().list_source_rows()
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        logger.error(f"List social sources error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sources/social/facebook", dependencies=[Depends(require_operator_access)])
+async def create_facebook_source(payload: SocialSourceCreateRequest):
+    try:
+        normalized = _normalize_facebook_source(payload.url)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="Enter a valid Facebook page URL")
+        return get_social_store().create_or_update_facebook_source(
+            source_key=normalized["source_key"],
+            source_url=normalized["source_url"],
+            display_name=normalized["display_name"],
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Create Facebook source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/sources/social/{account_id}", dependencies=[Depends(require_operator_access)])
+async def update_social_source(account_id: str, payload: SocialSourceUpdateRequest):
+    try:
+        item = get_social_store().update_source_account(account_id, is_active=payload.is_active)
+        return {"item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Update social source error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
