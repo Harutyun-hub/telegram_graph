@@ -255,6 +255,60 @@ class TopicQueryPathTests(unittest.TestCase):
         self.assertEqual(candidates[0]["sourceTopic"], "Topic One")
         self.assertEqual(candidates[0]["topChannels"], ["Channel A", "Channel B"])
 
+    def test_build_fallback_topic_overview_from_detail_payload(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        detail_payload = {
+            "name": "Visa And Residency",
+            "sourceTopic": "Visa And Residency",
+            "category": "Emigration",
+            "mentions": 185,
+            "previousMentions": 92,
+            "growth7dPct": 101,
+            "distinctUsers": 48,
+            "distinctChannels": 3,
+            "evidenceCount": 185,
+            "sentimentPositive": 8,
+            "sentimentNeutral": 78,
+            "sentimentNegative": 14,
+            "topChannels": ["Channel A", "Channel B"],
+            "latestAt": "2026-04-15T16:50:43Z",
+            "evidence": [
+                {"id": "ev-1", "text": "Evidence one", "channel": "Channel A", "timestamp": "2026-04-15T16:50:43Z"},
+                {"id": "ev-2", "text": "Evidence two", "channel": "Channel B", "timestamp": "2026-04-15T16:40:43Z"},
+            ],
+            "questionEvidence": [
+                {"id": "q-1", "text": "What visa should I choose?", "channel": "Channel A", "timestamp": "2026-04-15T16:30:43Z"},
+            ],
+        }
+
+        overview = topic_overviews.build_fallback_topic_overview(detail_payload, ctx)
+
+        self.assertIsNotNone(overview)
+        self.assertEqual(overview["topic"], "Visa And Residency")
+        self.assertEqual(overview["category"], "Emigration")
+        self.assertEqual(overview["status"], "fallback")
+        self.assertTrue(overview["summaryEn"])
+        self.assertEqual(len(overview["signalsEn"]), 3)
+
+    def test_refresh_uses_broader_candidate_limit_than_small_default_cap(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        first = _candidate("Topic One")
+
+        with patch.object(topic_overviews.comparative, "get_topic_overview_candidates", return_value=[first]) as candidates_mock, \
+             patch.object(topic_overviews, "_acquire_refresh_lease", return_value=True), \
+             patch.object(topic_overviews, "_load_state", return_value={"schemaVersion": 1, "updatedAt": "", "topics": {}}), \
+             patch.object(topic_overviews, "_load_snapshot_payload", return_value=topic_overviews._default_snapshot_payload()), \
+             patch.object(topic_overviews, "_save_state", return_value=True), \
+             patch.object(topic_overviews, "_save_snapshot_payload", return_value=True), \
+             patch.object(topic_overviews, "_generate_item", return_value=_ready_item("Topic One", ctx)):
+            topic_overviews.refresh_topic_overviews(ctx=ctx, force=True)
+
+        self.assertEqual(candidates_mock.call_count, 1)
+        self.assertGreaterEqual(
+            candidates_mock.call_args.kwargs["limit"],
+            topic_overviews._TOPIC_OVERVIEW_CANDIDATE_LIMIT_FLOOR,
+        )
+
 
 class TopicDetailOverviewEndpointTests(unittest.TestCase):
     @classmethod
@@ -357,7 +411,8 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIn("overview", body)
-        self.assertIsNone(body["overview"])
+        self.assertEqual(body["overview"]["status"], "fallback")
+        self.assertEqual(body["overview"]["topic"], "Topic One")
         get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
 
     def test_topic_detail_tolerates_materialized_overview_errors(self) -> None:
@@ -398,7 +453,47 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertIsNone(body["overview"])
+        self.assertEqual(body["overview"]["status"], "fallback")
+        self.assertEqual(body["overview"]["topic"], "Topic One")
+
+    def test_topic_detail_builds_fallback_overview_when_materialized_item_missing(self) -> None:
+        payload = {
+            "name": "Visa And Residency",
+            "sourceTopic": "Visa And Residency",
+            "category": "Emigration",
+            "mentions": 185,
+            "previousMentions": 92,
+            "growth7dPct": 101,
+            "distinctUsers": 48,
+            "distinctChannels": 3,
+            "evidenceCount": 185,
+            "sentimentPositive": 8,
+            "sentimentNeutral": 78,
+            "sentimentNegative": 14,
+            "topChannels": ["Channel A", "Channel B"],
+            "latestAt": "2026-04-15T16:50:43Z",
+            "evidence": [
+                {"id": "ev-1", "text": "Evidence one", "channel": "Channel A", "timestamp": "2026-04-15T16:50:43Z"},
+                {"id": "ev-2", "text": "Evidence two", "channel": "Channel B", "timestamp": "2026-04-15T16:40:43Z"},
+            ],
+            "questionEvidence": [
+                {"id": "q-1", "text": "What visa should I choose?", "channel": "Channel A", "timestamp": "2026-04-15T16:30:43Z"},
+            ],
+        }
+
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "_default_dashboard_context", return_value=self._ctx()), \
+             patch.object(server, "get_topic_detail", return_value=payload), \
+             patch.object(server.topic_overviews, "get_topic_overview", return_value=None):
+            response = self.client.get("/api/topics/detail", params={"topic": "Visa And Residency"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("overview", body)
+        self.assertEqual(body["overview"]["status"], "fallback")
+        self.assertEqual(body["overview"]["topic"], "Visa And Residency")
+        self.assertTrue(body["overview"]["summaryEn"])
 
 
 if __name__ == "__main__":

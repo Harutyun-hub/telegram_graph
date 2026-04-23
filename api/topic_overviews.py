@@ -42,6 +42,7 @@ _STATE_FOLDER = "topic_overviews/state"
 _LOCK_FOLDER = "topic_overviews/locks"
 _SCHEMA_VERSION = 1
 _INSTANCE_ID = f"{os.getpid()}-{int(time.time())}"
+_TOPIC_OVERVIEW_CANDIDATE_LIMIT_FLOOR = 500
 
 _client = OpenAI(api_key=config.OPENAI_API_KEY) if (OpenAI and config.OPENAI_API_KEY) else None
 
@@ -521,6 +522,56 @@ def _build_evidence_ids(candidate: dict) -> list[str]:
     return output[:6]
 
 
+def _detail_payload_to_candidate(detail_payload: dict[str, Any]) -> dict[str, Any]:
+    top_channels: list[str] = []
+    for channel in (detail_payload.get("topChannels") or []):
+        if isinstance(channel, dict):
+            name = _as_str(channel.get("name") or channel.get("title"), "").strip()
+        else:
+            name = _as_str(channel, "").strip()
+        if name:
+            top_channels.append(name)
+
+    evidence = [row for row in (detail_payload.get("evidence") or []) if isinstance(row, dict)]
+    question_evidence = [row for row in (detail_payload.get("questionEvidence") or []) if isinstance(row, dict)]
+    distinct_channels = _as_int(detail_payload.get("distinctChannels"), 0)
+    if distinct_channels <= 0:
+        distinct_channels = len({name.lower() for name in top_channels if name})
+
+    return {
+        "topic": _as_str(detail_payload.get("sourceTopic") or detail_payload.get("name"), ""),
+        "category": _as_str(detail_payload.get("category"), "General"),
+        "mentions": _as_int(
+            detail_payload.get("mentions"),
+            _as_int(detail_payload.get("mentionCount"), _as_int(detail_payload.get("currentMentions"), 0)),
+        ),
+        "previousMentions": _as_int(
+            detail_payload.get("previousMentions"),
+            _as_int(detail_payload.get("prev7Mentions"), 0),
+        ),
+        "growth": _as_int(detail_payload.get("growth"), _as_int(detail_payload.get("growth7dPct"), 0)),
+        "distinctUsers": _as_int(detail_payload.get("distinctUsers"), _as_int(detail_payload.get("userCount"), 0)),
+        "distinctChannels": distinct_channels,
+        "evidenceCount": _as_int(detail_payload.get("evidenceCount"), len(evidence)),
+        "sentimentPositive": _as_int(detail_payload.get("sentimentPositive"), 0),
+        "sentimentNeutral": _as_int(detail_payload.get("sentimentNeutral"), 0),
+        "sentimentNegative": _as_int(detail_payload.get("sentimentNegative"), 0),
+        "topChannels": top_channels,
+        "latestAt": _as_str(detail_payload.get("latestAt"), ""),
+        "evidence": evidence,
+        "questionEvidence": question_evidence,
+    }
+
+
+def build_fallback_topic_overview(detail_payload: dict[str, Any], ctx: DashboardDateContext) -> dict | None:
+    if not isinstance(detail_payload, dict):
+        return None
+    candidate = _detail_payload_to_candidate(detail_payload)
+    if not _as_str(candidate.get("topic"), "").strip():
+        return None
+    return _fallback_item(candidate, ctx)
+
+
 def _insufficient_item(candidate: dict, ctx: DashboardDateContext) -> dict:
     return {
         "topic": _as_str(candidate.get("topic"), ""),
@@ -760,7 +811,7 @@ def refresh_topic_overviews(
     try:
         candidates = comparative.get_topic_overview_candidates(
             resolved_ctx,
-            limit=int(config.TOPIC_OVERVIEWS_MAX_TOPICS),
+            limit=max(int(config.TOPIC_OVERVIEWS_MAX_TOPICS), _TOPIC_OVERVIEW_CANDIDATE_LIMIT_FLOOR),
             evidence_limit=int(config.TOPIC_OVERVIEWS_EVIDENCE_PER_TOPIC),
             question_limit=int(config.TOPIC_OVERVIEWS_QUESTION_LIMIT),
         )

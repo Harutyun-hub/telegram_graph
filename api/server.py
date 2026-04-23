@@ -3060,6 +3060,8 @@ async def topic_detail(
             )
         except Exception as exc:
             logger.warning(f"Topic overview lookup failed | topic={topic} category={category or ''} error={exc}")
+        if overview is None:
+            overview = topic_overviews.build_fallback_topic_overview(payload, ctx)
         payload = {**payload, "overview": overview}
         return payload
     except HTTPException:
