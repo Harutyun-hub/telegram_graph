@@ -99,6 +99,7 @@ from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
 from social.store import SocialStore
 from social.runtime import SocialRuntimeService
+from api.social_dashboard import build_social_dashboard_snapshot
 from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -3091,6 +3092,28 @@ async def get_social_overview():
         return overview
     except Exception as e:
         logger.error(f"Social overview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/dashboard", dependencies=[Depends(require_operator_access)])
+async def get_social_dashboard(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+    source_kind: Optional[str] = Query(default=None),
+):
+    try:
+        return build_social_dashboard_snapshot(
+            get_social_store(),
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            source_kind=source_kind,
+        )
+    except Exception as e:
+        logger.error(f"Social dashboard snapshot error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
