@@ -189,8 +189,24 @@ class TopicOverviewTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(load_mock.call_count, 1)
 
-    def test_get_topic_overview_ignores_mismatched_window_when_context_is_provided(self) -> None:
+    def test_get_topic_overview_uses_ready_item_when_windows_overlap(self) -> None:
         requested_ctx = build_dashboard_date_context("2026-03-15", "2026-03-22")
+        old_ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        payload = topic_overviews._default_snapshot_payload()
+        payload["items"] = [_ready_item("Topic One", old_ctx)]
+
+        with patch.object(topic_overviews, "_load_snapshot_payload", return_value=payload):
+            overview = topic_overviews.get_topic_overview(
+                "Topic One",
+                "Government & Leadership",
+                ctx=requested_ctx,
+            )
+
+        self.assertIsNotNone(overview)
+        self.assertEqual(overview["status"], "ready")
+
+    def test_get_topic_overview_ignores_ready_item_when_windows_do_not_overlap(self) -> None:
+        requested_ctx = build_dashboard_date_context("2026-04-13", "2026-04-15")
         old_ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
         payload = topic_overviews._default_snapshot_payload()
         payload["items"] = [_ready_item("Topic One", old_ctx)]

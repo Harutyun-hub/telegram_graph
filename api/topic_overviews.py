@@ -983,10 +983,19 @@ def _overview_matches_context(item: dict | None, ctx: DashboardDateContext | Non
         return True
     if not isinstance(item, dict):
         return False
-    return (
-        _as_str(item.get("windowStart"), "") == ctx.from_date.isoformat()
-        and _as_str(item.get("windowEnd"), "") == ctx.to_date.isoformat()
-    )
+
+    start_raw = _as_str(item.get("windowStart"), "").strip()
+    end_raw = _as_str(item.get("windowEnd"), "").strip()
+    if not start_raw and not end_raw:
+        return True
+
+    try:
+        item_start = datetime.fromisoformat(start_raw[:10]).date()
+        item_end = datetime.fromisoformat(end_raw[:10]).date()
+    except Exception:
+        return False
+
+    return item_start <= ctx.to_date and item_end >= ctx.from_date
 
 
 def get_topic_overview(
