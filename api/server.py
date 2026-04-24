@@ -1746,6 +1746,26 @@ def _build_custom_range_fastpath_payload(
         skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
         cache_status="custom_range_fastpath",
     )
+    if not dashboard_aggregator._snapshot_has_core_pulse_data(snapshot):
+        logger.warning(
+            "Custom dashboard fastpath produced no core data; falling back to full snapshot build | key={}",
+            ctx.cache_key,
+        )
+        snapshot, meta = dashboard_aggregator.get_dashboard_snapshot(ctx)
+        return _build_dashboard_api_payload(
+            ctx=ctx,
+            trusted_end_date=trusted_end_iso,
+            dashboard_data=snapshot,
+            dashboard_runtime_meta=meta,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            cache_source=meta.get("cacheSource") or "rebuild",
+            freshness_snapshot=freshness_snapshot or {},
+            freshness_source=freshness_source,
+            cache_status_override=meta.get("cacheStatus") or "refresh_success",
+            fallback_reason=f"custom_range_{memory_state}_full_rebuild",
+        )
+
     prime_dashboard_snapshot(ctx, snapshot, meta)
     refresh_status = schedule_dashboard_snapshot_refresh(ctx)
     return _build_dashboard_api_payload(

@@ -361,6 +361,63 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         prime_mock.assert_called_once()
         schedule_mock.assert_called_once()
 
+    def test_dashboard_custom_fastpath_without_core_data_uses_full_rebuild(self) -> None:
+        empty_fast_snapshot = {"communityHealth": {"score": 0}, "communityBrief": {}, "trendingTopics": []}
+        empty_fast_meta = {
+            "cacheStatus": "custom_range_fastpath",
+            "cacheSource": "custom_fastpath",
+            "degradedTiers": ["pulse", "strategic"],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": None, "strategic": None, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 10.0,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
+        full_snapshot = {
+            "communityHealth": {"score": 55},
+            "communityBrief": {"postsAnalyzed24h": 11, "windowDays": 7},
+            "trendingTopics": [{"name": "Topic One"}],
+        }
+        full_meta = {
+            "cacheStatus": "refresh_success",
+            "cacheSource": "memory",
+            "degradedTiers": [],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 8.0,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+        }
+
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(
+                 server,
+                 "_cached_freshness_resolution",
+                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+             ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(empty_fast_snapshot, empty_fast_meta)) as fast_mock, \
+             patch.object(server.dashboard_aggregator, "get_dashboard_snapshot", return_value=(full_snapshot, full_meta)) as full_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
+             patch.object(server, "schedule_dashboard_snapshot_refresh") as schedule_mock:
+            response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["cacheStatus"], "refresh_success")
+        self.assertEqual(payload["meta"]["fallbackReason"], "custom_range_missing_full_rebuild")
+        self.assertEqual(len(payload["data"]["trendingTopics"]), 1)
+        fast_mock.assert_called_once()
+        full_mock.assert_called_once()
+        prime_mock.assert_not_called()
+        schedule_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
