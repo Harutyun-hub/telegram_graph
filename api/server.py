@@ -1731,6 +1731,39 @@ def _build_dashboard_api_payload(
     return response
 
 
+def _build_custom_range_fastpath_payload(
+    *,
+    ctx,
+    trusted_end_iso: str,
+    requested_from: str,
+    requested_to: str,
+    freshness_snapshot: dict | None,
+    freshness_source: str | None,
+    memory_state: str,
+) -> dict[str, Any]:
+    snapshot, meta = dashboard_aggregator.build_dashboard_snapshot_once(
+        ctx,
+        skipped_tiers=set(_HISTORICAL_FASTPATH_SKIP_TIERS),
+        cache_status="custom_range_fastpath",
+    )
+    prime_dashboard_snapshot(ctx, snapshot, meta)
+    refresh_status = schedule_dashboard_snapshot_refresh(ctx)
+    return _build_dashboard_api_payload(
+        ctx=ctx,
+        trusted_end_date=trusted_end_iso,
+        dashboard_data=snapshot,
+        dashboard_runtime_meta=meta,
+        requested_from=requested_from,
+        requested_to=requested_to,
+        cache_source="custom_fastpath",
+        freshness_snapshot=freshness_snapshot or {},
+        freshness_source=freshness_source,
+        cache_status_override="custom_range_fastpath",
+        fallback_reason=f"custom_range_{memory_state}_fastpath",
+        refresh_suppressed=bool(refresh_status.get("suppressed")),
+    )
+
+
 def _build_dashboard_response_payload(
     from_date: Optional[str],
     to_date: Optional[str],
@@ -1807,6 +1840,17 @@ def _build_dashboard_response_payload(
             cache_status_override=cache_status,
             fallback_reason=fallback_reason,
             refresh_suppressed=bool(refresh_status.get("suppressed")),
+        )
+
+    if not default_request and _HISTORICAL_FASTPATH_SKIP_TIERS:
+        return _build_custom_range_fastpath_payload(
+            ctx=ctx,
+            trusted_end_iso=trusted_end_iso,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            freshness_snapshot=freshness_snapshot,
+            freshness_source=freshness_source,
+            memory_state=memory_state,
         )
 
     schedule_dashboard_snapshot_refresh(ctx)

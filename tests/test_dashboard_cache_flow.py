@@ -223,7 +223,25 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         self.assertFalse(payload["meta"]["refreshSuppressed"])
         schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_schedules_refresh_and_returns_warming_503(self) -> None:
+    def test_dashboard_exact_miss_returns_custom_fastpath_200(self) -> None:
+        fast_snapshot = {
+            "communityHealth": {"score": 55},
+            "communityBrief": {"postsAnalyzed24h": 11, "windowDays": 7},
+            "trendingTopics": [{"name": "Topic One"}],
+        }
+        fast_meta = {
+            "cacheStatus": "custom_range_fastpath",
+            "cacheSource": "custom_fastpath",
+            "degradedTiers": ["network", "comparative", "predictive"],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "network": None, "comparative": None, "predictive": None, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 6.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+            "skippedTiers": ["comparative", "network", "predictive"],
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -233,6 +251,8 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(fast_snapshot, fast_meta)) as build_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
              patch.object(
                  server,
                  "schedule_dashboard_snapshot_refresh",
@@ -240,11 +260,36 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("warming this date range", response.text.lower())
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["cacheStatus"], "custom_range_fastpath")
+        self.assertEqual(payload["meta"]["cacheSource"], "custom_fastpath")
+        self.assertEqual(payload["meta"]["requestedFrom"], "2026-03-31")
+        self.assertEqual(payload["meta"]["requestedTo"], "2026-04-06")
+        self.assertEqual(payload["meta"]["fallbackReason"], "custom_range_missing_fastpath")
+        build_mock.assert_called_once()
+        prime_mock.assert_called_once()
         schedule_mock.assert_called_once()
 
-    def test_dashboard_expired_snapshot_returns_warming_503(self) -> None:
+    def test_dashboard_expired_snapshot_returns_custom_fastpath_200(self) -> None:
+        fast_snapshot = {
+            "communityHealth": {"score": 55},
+            "communityBrief": {"postsAnalyzed24h": 11, "windowDays": 7},
+            "trendingTopics": [{"name": "Topic One"}],
+        }
+        fast_meta = {
+            "cacheStatus": "custom_range_fastpath",
+            "cacheSource": "custom_fastpath",
+            "degradedTiers": ["network", "comparative", "predictive"],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "network": None, "comparative": None, "predictive": None, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 6.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+            "skippedTiers": ["comparative", "network", "predictive"],
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -254,6 +299,8 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, {"cacheStatus": "memory_stale"}, "expired")), \
+             patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(fast_snapshot, fast_meta)) as build_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
              patch.object(
                  server,
                  "schedule_dashboard_snapshot_refresh",
@@ -261,11 +308,33 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("warming this date range", response.text.lower())
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["cacheStatus"], "custom_range_fastpath")
+        self.assertEqual(payload["meta"]["fallbackReason"], "custom_range_expired_fastpath")
+        build_mock.assert_called_once()
+        prime_mock.assert_called_once()
         schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_refresh_inflight_returns_warming_503(self) -> None:
+    def test_dashboard_exact_miss_refresh_inflight_returns_custom_fastpath_200(self) -> None:
+        fast_snapshot = {
+            "communityHealth": {"score": 55},
+            "communityBrief": {"postsAnalyzed24h": 11, "windowDays": 7},
+            "trendingTopics": [{"name": "Topic One"}],
+        }
+        fast_meta = {
+            "cacheStatus": "custom_range_fastpath",
+            "cacheSource": "custom_fastpath",
+            "degradedTiers": ["network", "comparative", "predictive"],
+            "suppressedDegradedTiers": [],
+            "tierTimes": {"pulse": 0.5, "network": None, "comparative": None, "predictive": None, "derived": 0.0},
+            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
+            "isStale": False,
+            "buildElapsedSeconds": 6.5,
+            "buildMode": "parallel",
+            "refreshFailureCount": 0,
+            "skippedTiers": ["comparative", "network", "predictive"],
+        }
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -275,6 +344,8 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
+             patch.object(server.dashboard_aggregator, "build_dashboard_snapshot_once", return_value=(fast_snapshot, fast_meta)) as build_mock, \
+             patch.object(server, "prime_dashboard_snapshot") as prime_mock, \
              patch.object(
                  server,
                  "schedule_dashboard_snapshot_refresh",
@@ -282,8 +353,12 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("warming this date range", response.text.lower())
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["meta"]["cacheStatus"], "custom_range_fastpath")
+        self.assertEqual(payload["meta"]["fallbackReason"], "custom_range_missing_fastpath")
+        build_mock.assert_called_once()
+        prime_mock.assert_called_once()
         schedule_mock.assert_called_once()
 
 
