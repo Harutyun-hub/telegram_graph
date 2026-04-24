@@ -204,6 +204,43 @@ class SelectionHelpersTests(unittest.TestCase):
         self.assertEqual(second, 0)
         writer.mark_non_issue_topics_proposed.assert_called_once_with()
 
+    def test_orchestrator_runs_cleanup_even_without_unsynced_posts(self) -> None:
+        class _Writer:
+            def auto_recover_transient_failures(self):
+                return {}
+
+            def get_unprocessed_comments(self, limit=200):
+                del limit
+                return []
+
+            def get_unprocessed_posts(self, limit=100):
+                del limit
+                return []
+
+            def get_unsynced_posts(self, limit=100):
+                del limit
+                return []
+
+            def reconcile_post_analysis_sync(self, limit=300):
+                del limit
+                return 0
+
+        neo4j_writer_mock = Mock()
+        neo4j_writer_mock.mark_non_issue_topics_proposed.return_value = 4
+
+        with patch.object(scrape_orchestrator, "_topic_cleanup_completed", False), \
+             patch.object(scrape_orchestrator, "_get_background_writer", return_value=neo4j_writer_mock):
+            result = scrape_orchestrator._run_ai_process_and_sync_blocking(
+                _Writer(),
+                comment_limit=10,
+                post_limit=10,
+                sync_limit=10,
+            )
+
+        self.assertEqual(result["non_issue_topics_hidden"], 4)
+        self.assertEqual(result["posts_pending_sync"], 0)
+        neo4j_writer_mock.mark_non_issue_topics_proposed.assert_called_once_with()
+
     def test_emerging_topic_candidates_no_longer_leak_from_proposed_count_only(self) -> None:
         writer = object.__new__(SupabaseWriter)
         writer.list_topic_proposals = lambda status, limit: [

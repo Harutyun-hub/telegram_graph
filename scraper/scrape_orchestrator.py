@@ -222,12 +222,18 @@ def _run_ai_process_and_sync_blocking(
 
     # Neo4j sync stage
     sync_deadline = time.monotonic() + sync_budget
+    try:
+        writer = _get_background_writer()
+        result["non_issue_topics_hidden"] = _ensure_non_issue_topics_hidden(writer)
+    except Exception as e:
+        writer = None
+        logger.error(f"Neo4j writer init failed: {e}")
+        result["sync_error"] = str(e)
+
     posts_to_sync = supabase_writer.get_unsynced_posts(limit=sync_limit)
     result["posts_pending_sync"] = len(posts_to_sync)
-    if posts_to_sync:
+    if posts_to_sync and writer is not None:
         try:
-            writer = _get_background_writer()
-            result["non_issue_topics_hidden"] = _ensure_non_issue_topics_hidden(writer)
             batch_size = max(1, int(getattr(config, "NEO4J_SYNC_BATCH_CHUNK_SIZE", 20)))
             for start in range(0, len(posts_to_sync), batch_size):
                 if time.monotonic() >= sync_deadline:
@@ -296,7 +302,7 @@ def _run_ai_process_and_sync_blocking(
                     if result.get("sync_error"):
                         break
         except Exception as e:
-            logger.error(f"Neo4j writer init failed: {e}")
+            logger.error(f"Neo4j sync stage failed: {e}")
             result["sync_error"] = str(e)
 
     # One-pass reconciliation for historic post-analysis sync mismatches.
