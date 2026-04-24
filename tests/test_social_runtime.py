@@ -79,25 +79,16 @@ class SocialRuntimeTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_control_cycle_processes_pending_run_once_command(self) -> None:
+    def test_run_once_schedules_background_cycle_when_idle(self) -> None:
         async def scenario() -> None:
-            store = _StoreStub()
-            store.settings["control_command"] = {
-                "request_id": "cmd-1",
-                "action": "run_once",
-                "status": "pending",
-                "requested_at": "2026-04-21T10:00:00+00:00",
-            }
-            service = SocialRuntimeService(store)
-
+            service = SocialRuntimeService(_StoreStub())
             run_cycle_mock = AsyncMock()
 
-            with patch.object(service, "_run_cycle", run_cycle_mock), \
-                 patch.object(service, "status", return_value={"status": "active", "running_now": False}):
-                await service._run_control_cycle()
+            with patch.object(service, "_run_cycle", run_cycle_mock):
+                status = await service.run_once()
+                await asyncio.sleep(0)
 
-            self.assertEqual(store.settings["control_command"]["status"], "completed")
-            self.assertEqual(store.settings["control_command"]["runtime_status"]["status"], "active")
+            self.assertFalse(status["running_now"])
             run_cycle_mock.assert_awaited_once_with()
 
         asyncio.run(scenario())

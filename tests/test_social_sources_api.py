@@ -192,6 +192,43 @@ class SocialSourcesApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["item"]["source_kind"], "meta_ads")
 
+    def test_create_instagram_source_accepts_handle_url_and_at_handle(self) -> None:
+        cases = [
+            "unibank",
+            "@unibank",
+            "https://www.instagram.com/unibank/",
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                fake_store = _FakeSocialSourceStore()
+                with patch.object(server.config, "IS_LOCKED_ENV", True), \
+                     patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+                     patch.object(server, "get_social_store", return_value=fake_store):
+                    response = self.client.post(
+                        "/api/sources/social",
+                        headers={"Authorization": "Bearer admin-secret"},
+                        json={"source_type": "instagram_profile", "value": value},
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                item = response.json()["item"]
+                self.assertEqual(item["platform"], "instagram")
+                self.assertEqual(item["source_kind"], "instagram_profile")
+                self.assertEqual(item["display_url"], "https://www.instagram.com/unibank")
+
+    def test_create_instagram_source_rejects_invalid_host(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"source_type": "instagram_profile", "value": "https://facebook.com/unibank"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+
     def test_update_social_source_toggles_active_state(self) -> None:
         fake_store = _FakeSocialSourceStore()
         with patch.object(server.config, "IS_LOCKED_ENV", True), \

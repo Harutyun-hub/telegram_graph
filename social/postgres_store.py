@@ -53,10 +53,6 @@ class SocialPostgresStore:
           FROM public.social_entity_accounts AS sea
           JOIN public.social_entities AS se
             ON se.id = sea.entity_id
-          LEFT JOIN public.social_processing_failures AS failure
-            ON failure.stage = 'ingest'
-           AND failure.scope_key = CONCAT(sea.entity_id::text, ':', sea.platform, ':', sea.source_kind)
-           AND failure.resolved_at IS NULL
           WHERE sea.is_active = TRUE
             AND se.is_active = TRUE
             AND sea.platform = ANY(%s)
@@ -71,12 +67,17 @@ class SocialPostgresStore:
               sea.collect_claimed_at IS NULL
               OR sea.collect_claimed_at < NOW() - (%s * INTERVAL '1 second')
             )
-            AND (
-              failure.id IS NULL
-              OR (
-                failure.is_dead_letter = FALSE
-                AND failure.next_retry_at <= NOW()
-              )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.social_processing_failures AS failure
+              WHERE failure.stage = 'ingest'
+                AND failure.scope_key = CONCAT(sea.entity_id::text, ':', sea.platform, ':', sea.source_kind)
+                AND failure.resolved_at IS NULL
+                AND (
+                  failure.is_dead_letter = TRUE
+                  OR failure.next_retry_at IS NULL
+                  OR failure.next_retry_at > NOW()
+                )
             )
           ORDER BY COALESCE(sea.last_collected_at, to_timestamp(0)) ASC, sea.updated_at ASC
           LIMIT %s
@@ -116,10 +117,6 @@ class SocialPostgresStore:
         WITH candidates AS (
           SELECT sa.id
           FROM public.social_activities AS sa
-          LEFT JOIN public.social_processing_failures AS failure
-            ON failure.stage = 'analysis'
-           AND failure.scope_key = sa.activity_uid
-           AND failure.resolved_at IS NULL
           WHERE sa.ingest_status = 'normalized'
             AND (
               sa.analysis_status IN ('pending', 'failed')
@@ -130,12 +127,17 @@ class SocialPostgresStore:
               sa.analysis_claimed_at IS NULL
               OR sa.analysis_claimed_at < NOW() - (%s * INTERVAL '1 second')
             )
-            AND (
-              failure.id IS NULL
-              OR (
-                failure.is_dead_letter = FALSE
-                AND failure.next_retry_at <= NOW()
-              )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.social_processing_failures AS failure
+              WHERE failure.stage = 'analysis'
+                AND failure.scope_key = sa.activity_uid
+                AND failure.resolved_at IS NULL
+                AND (
+                  failure.is_dead_letter = TRUE
+                  OR failure.next_retry_at IS NULL
+                  OR failure.next_retry_at > NOW()
+                )
             )
           ORDER BY COALESCE(sa.last_seen_at, sa.created_at) ASC
           LIMIT %s
@@ -175,10 +177,6 @@ class SocialPostgresStore:
         WITH candidates AS (
           SELECT sa.id
           FROM public.social_activities AS sa
-          LEFT JOIN public.social_processing_failures AS failure
-            ON failure.stage = 'graph'
-           AND failure.scope_key = sa.activity_uid
-           AND failure.resolved_at IS NULL
           WHERE sa.ingest_status = 'normalized'
             AND sa.analysis_status = 'analyzed'
             AND (
@@ -190,12 +188,17 @@ class SocialPostgresStore:
               sa.graph_claimed_at IS NULL
               OR sa.graph_claimed_at < NOW() - (%s * INTERVAL '1 second')
             )
-            AND (
-              failure.id IS NULL
-              OR (
-                failure.is_dead_letter = FALSE
-                AND failure.next_retry_at <= NOW()
-              )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.social_processing_failures AS failure
+              WHERE failure.stage = 'graph'
+                AND failure.scope_key = sa.activity_uid
+                AND failure.resolved_at IS NULL
+                AND (
+                  failure.is_dead_letter = TRUE
+                  OR failure.next_retry_at IS NULL
+                  OR failure.next_retry_at > NOW()
+                )
             )
           ORDER BY COALESCE(sa.last_seen_at, sa.created_at) ASC
           LIMIT %s

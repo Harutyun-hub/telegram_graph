@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from social.postgres_store import SocialPostgresStore
 
@@ -86,6 +87,21 @@ class SocialPostgresStoreQueryTests(unittest.TestCase):
             self.assertNotIn("LEFT JOIN public.social_processing_failures", query)
             self.assertIn("FOR UPDATE SKIP LOCKED", query)
             self.assertEqual(params, expected_params[index])
+
+
+class SocialFailureScopeMigrationTests(unittest.TestCase):
+    def test_failure_scope_backfill_targets_only_ingest_default_source_kinds(self) -> None:
+        migration = Path("supabase/migrations/20260424_social_failure_scope_kind_backfill.sql").read_text()
+
+        self.assertIn("failure.stage = 'ingest'", migration)
+        self.assertIn("failure.scope_key = CONCAT(failure.entity_id::text, ':', failure.platform)", migration)
+        self.assertIn("CONCAT(failure.entity_id::text, ':', failure.platform, ':', account.source_kind)", migration)
+        self.assertIn("WHEN 'facebook' THEN 'meta_ads'", migration)
+        self.assertIn("WHEN 'instagram' THEN 'instagram_profile'", migration)
+        self.assertIn("WHEN 'google' THEN 'google_domain'", migration)
+        self.assertIn("WHEN 'tiktok' THEN 'tiktok_profile'", migration)
+        self.assertNotIn("failure.stage = 'analysis'", migration)
+        self.assertNotIn("failure.stage = 'graph'", migration)
 
 
 if __name__ == "__main__":

@@ -2059,7 +2059,7 @@ def _normalize_instagram_source(raw: str) -> dict[str, str]:
     if not value:
         return {}
     if not re.match(r"^[a-z]+://", value, flags=re.IGNORECASE):
-        if "/" not in value and not value.startswith("@"):
+        if "/" not in value:
             value = f"https://www.instagram.com/{value.lstrip('@')}"
         else:
             value = f"https://{value}"
