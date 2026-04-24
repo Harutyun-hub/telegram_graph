@@ -108,7 +108,7 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
 
-    def test_critical_degraded_cached_snapshot_is_not_served_as_stale(self) -> None:
+    def test_critical_degraded_cached_snapshot_with_core_data_is_served_as_stale(self) -> None:
         ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
         snapshot = {
             "communityBrief": {"postsAnalyzed24h": 10},
@@ -119,6 +119,24 @@ class DashboardCacheFlowTests(unittest.TestCase):
             "cacheStatus": "refresh_success_uncached_degraded",
             "degradedTiers": ["strategic"],
             "tierTimes": {"pulse": 0.5, "strategic": None, "derived": 0.0},
+            "isStale": True,
+        }
+        aggregator.prime_dashboard_snapshot(ctx, snapshot, meta)
+
+        stale_snapshot, stale_meta, state = aggregator.peek_dashboard_snapshot(ctx)
+
+        self.assertEqual(stale_snapshot, snapshot)
+        self.assertEqual(state, "stale")
+        self.assertIsNotNone(stale_meta)
+        self.assertTrue(stale_meta["isStale"])
+
+    def test_cached_snapshot_without_core_data_is_not_served_as_stale(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        snapshot = {"communityHealth": {"score": 0}, "communityBrief": {}}
+        meta = {
+            "cacheStatus": "refresh_success_uncached_degraded",
+            "degradedTiers": ["pulse", "strategic"],
+            "tierTimes": {"pulse": None, "strategic": None, "derived": 0.0},
             "isStale": True,
         }
         aggregator.prime_dashboard_snapshot(ctx, snapshot, meta)
