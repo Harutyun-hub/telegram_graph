@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Users, MessageCircle, Megaphone, Heart, Hash,
   Target, BarChart3, ChevronDown, ChevronUp,
@@ -8,6 +8,8 @@ import {
   Compass, Flame, Zap, Globe, Star, Layers
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { apiFetch } from '../services/api';
 import {
   ResponsiveContainer, LineChart, Line, AreaChart, Area,
   XAxis, YAxis, Tooltip, CartesianGrid,
@@ -78,12 +80,7 @@ interface TierDef {
 
 interface Organization { id: string; name: string; color: string; }
 
-const ORGS: Organization[] = [
-  { id: 'brand-x',      name: 'Brand X',      color: C.blue    },
-  { id: 'brand-y',      name: 'Brand Y',      color: C.violet  },
-  { id: 'brand-z',      name: 'Brand Z',      color: C.pink    },
-  { id: 'competitor-a', name: 'Competitor A', color: C.emerald },
-];
+const ALL_ORG: Organization = { id: 'all', name: 'All Sources', color: C.blue };
 
 const TOPIC_BUBBLES = [
   { topic: 'Customer Service', count: 145, sentiment: 'negative' as const, x: 115, y: 122, r: 52 },
@@ -259,7 +256,110 @@ const SCORECARD = [
   { id: 'competitor-a', name: 'Competitor A', posts: 64,  ads: 8,  sentiment: 72, intent: 'Lead Gen',    topics: ['Consulting'],               products: ['Services']   },
 ];
 
-const SOV_DATA = VISIBILITY_DATA.map(v => ({ name: v.entity, value: v.sov, color: BRAND_COLORS[v.entity] }));
+type TopicBubbleItem = typeof TOPIC_BUBBLES[number];
+type TopicMomentumItem = typeof TOPIC_MOMENTUM[number];
+type SentimentTrendItem = typeof SENTIMENT_TREND[number];
+type IntentSignalItem = typeof INTENT_SIGNALS[number];
+type SignalTrendItem = typeof SIGNAL_TREND[number];
+type TopQuestionItem = typeof TOP_QUESTIONS[number];
+type AdFeedItem = typeof AD_FEED[number];
+type SentimentByEntityItem = typeof SENTIMENT_BY_ENTITY[number];
+type PainPointItem = typeof PAIN_POINTS[number];
+type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
+type VisibilityItem = typeof VISIBILITY_DATA[number];
+type VisibilityTrendItem = typeof VISIBILITY_TREND[number];
+type WeeklyShiftItem = typeof WEEKLY_SHIFTS[number];
+type PositiveImpactItem = typeof POSITIVE_IMPACT[number];
+type NegativeImpactItem = typeof NEGATIVE_IMPACT[number];
+type ScorecardItem = typeof SCORECARD[number];
+
+interface SocialDashboardSnapshot {
+  meta?: {
+    requestId?: string;
+    cacheStatus?: string;
+    generatedAt?: string;
+    degradedSections?: string[];
+    emptyReasons?: Record<string, string>;
+    timingsMs?: Record<string, number>;
+  };
+  filters?: {
+    entities?: { id: string; name: string }[];
+    platforms?: string[];
+    sourceKinds?: string[];
+  };
+  deepAnalysis?: {
+    topicBubbles?: TopicBubbleItem[];
+    topicMomentum?: TopicMomentumItem[];
+    sentimentTrend?: SentimentTrendItem[];
+    intentSignals?: IntentSignalItem[];
+    signalTrend?: SignalTrendItem[];
+    topQuestions?: TopQuestionItem[];
+    painPoints?: PainPointItem[];
+    evidence?: any[];
+  };
+  adIntelligence?: {
+    items?: (ScrapedAd & Partial<AdFeedItem>)[];
+    summary?: Record<string, unknown>;
+  };
+  strictMetrics?: {
+    sentimentByEntity?: SentimentByEntityItem[];
+    engagementRadar?: EngagementRadarItem[];
+    visibilityData?: VisibilityItem[];
+    visibilityTrend?: VisibilityTrendItem[];
+    positiveImpact?: PositiveImpactItem[];
+    negativeImpact?: NegativeImpactItem[];
+    weeklyShifts?: WeeklyShiftItem[];
+    scorecard?: ScorecardItem[];
+    shareOfVoice?: { name: string; value: number; color?: string }[];
+  };
+}
+
+function colorForEntity(entity: string, index = 0) {
+  if (BRAND_COLORS[entity]) return BRAND_COLORS[entity];
+  const palette = [C.blue, C.violet, C.pink, C.emerald, C.amber, C.cyan, C.indigo];
+  return palette[index % palette.length];
+}
+
+function seriesKey(label: string) {
+  return label.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'entity';
+}
+
+function iconForIntent(intent: string): React.ElementType {
+  const normalized = intent.toLowerCase();
+  if (normalized.includes('complaint')) return ThumbsDown;
+  if (normalized.includes('praise')) return ThumbsUp;
+  if (normalized.includes('purchase')) return Target;
+  if (normalized.includes('comparison')) return Layers;
+  if (normalized.includes('feature')) return Lightbulb;
+  if (normalized.includes('churn')) return ShieldAlert;
+  return HelpCircle;
+}
+
+function colorForIntent(intent: string, fallback?: string): string {
+  if (fallback) return fallback;
+  const normalized = intent.toLowerCase();
+  if (normalized.includes('complaint') || normalized.includes('churn')) return C.rose;
+  if (normalized.includes('praise')) return C.emerald;
+  if (normalized.includes('purchase')) return C.violet;
+  if (normalized.includes('comparison')) return C.amber;
+  if (normalized.includes('feature')) return C.cyan;
+  return C.blue;
+}
+
+function buildSocialDashboardPath(params: {
+  from?: string;
+  to?: string;
+  entityId?: string;
+  platform?: string;
+}) {
+  const query = new URLSearchParams();
+  if (params.from) query.set('from', params.from);
+  if (params.to) query.set('to', params.to);
+  if (params.entityId && params.entityId !== 'all') query.set('entity_id', params.entityId);
+  if (params.platform) query.set('platform', params.platform);
+  const suffix = query.toString();
+  return `/social/dashboard${suffix ? `?${suffix}` : ''}`;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // REUSABLE COMPONENTS (Dashboard-style)
@@ -380,7 +480,7 @@ function PlatformToggle({ selected, onSelect }: { selected: string[]; onSelect: 
 // VISUALIZATION COMPONENTS
 // ═══════════════════════════════════════════════════════════════
 
-function TopicBubbleViz({ ru }: { ru: boolean }) {
+function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[] }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const getSentimentColor = (s: string) => s === 'positive' ? C.emerald : s === 'negative' ? C.rose : '#64748b';
   const getSentimentBg   = (s: string) => s === 'positive' ? `${C.emerald}cc` : s === 'negative' ? `${C.rose}cc` : '#64748bcc';
@@ -389,14 +489,14 @@ function TopicBubbleViz({ ru }: { ru: boolean }) {
     <div className="relative w-full h-full min-h-[290px] rounded-xl overflow-hidden bg-slate-50/60">
       <svg viewBox="0 0 420 265" width="100%" height="100%" className="block">
         <defs>
-          {TOPIC_BUBBLES.map(b => (
+          {topics.map(b => (
             <radialGradient key={b.topic} id={`grad-${b.topic.replace(/\s/g,'-')}`} cx="35%" cy="30%" r="65%">
               <stop offset="0%"   stopColor="white" stopOpacity={0.3} />
               <stop offset="100%" stopColor={getSentimentColor(b.sentiment)} stopOpacity={0} />
             </radialGradient>
           ))}
         </defs>
-        {TOPIC_BUBBLES.map((b) => {
+        {topics.map((b) => {
           const isHov = hovered === b.topic;
           const bgColor = getSentimentBg(b.sentiment);
           const words = b.topic.split(' ');
@@ -425,7 +525,7 @@ function TopicBubbleViz({ ru }: { ru: boolean }) {
           );
         })}
         {hovered && (() => {
-          const b = TOPIC_BUBBLES.find(x => x.topic === hovered)!;
+          const b = topics.find(x => x.topic === hovered)!;
           const showLeft = b.x+b.r+130 > 415;
           const tx = showLeft ? b.x-b.r-120 : b.x+b.r+8;
           return (
@@ -451,11 +551,11 @@ function TopicBubbleViz({ ru }: { ru: boolean }) {
   );
 }
 
-function SentimentAreaChart({ ru }: { ru: boolean }) {
+function SentimentAreaChart({ ru, data }: { ru: boolean; data: SentimentTrendItem[] }) {
   return (
     <>
       <ResponsiveContainer width="100%" height={260}>
-        <LineChart data={SENTIMENT_TREND} margin={{ top:10, right:10, left:-20, bottom:0 }}>
+        <LineChart data={data} margin={{ top:10, right:10, left:-20, bottom:0 }}>
           <CartesianGrid {...GRID_COMMON} />
           <XAxis dataKey="week" {...AXIS_COMMON} dy={8} />
           <YAxis {...AXIS_COMMON} domain={[0, 60]} />
@@ -474,7 +574,7 @@ function SentimentAreaChart({ ru }: { ru: boolean }) {
   );
 }
 
-function SignalTrendChart({ ru }: { ru: boolean }) {
+function SignalTrendChart({ ru, data }: { ru: boolean; data: SignalTrendItem[] }) {
   const series = [
     { key:'questions', label:ru?'Вопросы':'Questions',       color:C.blue    },
     { key:'complaints',label:ru?'Жалобы':'Complaints',       color:C.rose    },
@@ -485,7 +585,7 @@ function SignalTrendChart({ ru }: { ru: boolean }) {
   return (
     <>
       <ResponsiveContainer width="100%" height={260}>
-        <AreaChart data={SIGNAL_TREND} margin={{ top:10, right:10, left:-20, bottom:0 }}>
+        <AreaChart data={data} margin={{ top:10, right:10, left:-20, bottom:0 }}>
           <defs>
             {series.map(s => (
               <linearGradient key={s.key} id={`sg-${s.key}`} x1="0" y1="0" x2="0" y2="1">
@@ -512,8 +612,8 @@ function SignalTrendChart({ ru }: { ru: boolean }) {
 }
 
 /** Topic Momentum — direction arrow + velocity badges */
-function TopicMomentumWidget({ ru }: { ru: boolean }) {
-  const maxCount = Math.max(...TOPIC_MOMENTUM.map(t => t.w5));
+function TopicMomentumWidget({ ru, items }: { ru: boolean; items: TopicMomentumItem[] }) {
+  const maxCount = Math.max(1, ...items.map(t => t.w5));
 
   const getSentColor = (s: string) => s === 'positive' ? C.emerald : s === 'negative' ? C.rose : '#64748b';
   const getSentBg    = (s: string) => s === 'positive' ? 'bg-emerald-50 text-emerald-700' : s === 'negative' ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-600';
@@ -537,7 +637,7 @@ function TopicMomentumWidget({ ru }: { ru: boolean }) {
           </div>
 
           <div className="space-y-2">
-            {[...TOPIC_MOMENTUM].sort((a, b) => Math.abs(b.velocity) - Math.abs(a.velocity)).map((t, i) => {
+            {[...items].sort((a, b) => Math.abs(b.velocity) - Math.abs(a.velocity)).map((t, i) => {
               const color = getSentColor(t.sentiment);
               const isUp = t.velocity > 0;
               const TrendIcon = isUp ? TrendingUp : TrendingDown;
@@ -617,15 +717,15 @@ const INTENT_COLORS: Record<string, string> = {
   Retention:   C.amber,
 };
 
-function AdScrapeTable({ ru }: { ru: boolean }) {
+function AdScrapeTable({ ru, items }: { ru: boolean; items: ScrapedAd[] }) {
   const [activeSource, setActiveSource] = useState<AdSource>('all');
   const [activeBrand,  setActiveBrand]  = useState<string>('All');
   const [expandedId,   setExpandedId]   = useState<string | null>(null);
   const [sortBy,       setSortBy]       = useState<'date'|'engagement'|'impressions'>('date');
 
-  const brands = ['All', ...Array.from(new Set(AD_SCRAPE.map(a => a.entity)))];
+  const brands = ['All', ...Array.from(new Set(items.map(a => a.entity)))];
 
-  const filtered = AD_SCRAPE
+  const filtered = items
     .filter(a => activeSource === 'all' || a.source === activeSource)
     .filter(a => activeBrand === 'All' || a.entity === activeBrand)
     .sort((a, b) => {
@@ -635,11 +735,11 @@ function AdScrapeTable({ ru }: { ru: boolean }) {
     });
 
   const sourceCounts: Record<AdSource, number> = {
-    all:       AD_SCRAPE.length,
-    meta:      AD_SCRAPE.filter(a => a.source === 'meta').length,
-    google:    AD_SCRAPE.filter(a => a.source === 'google').length,
-    facebook:  AD_SCRAPE.filter(a => a.source === 'facebook').length,
-    instagram: AD_SCRAPE.filter(a => a.source === 'instagram').length,
+    all:       items.length,
+    meta:      items.filter(a => a.source === 'meta').length,
+    google:    items.filter(a => a.source === 'google').length,
+    facebook:  items.filter(a => a.source === 'facebook').length,
+    instagram: items.filter(a => a.source === 'instagram').length,
   };
 
   return (
@@ -862,9 +962,13 @@ function AdScrapeTable({ ru }: { ru: boolean }) {
 
 export function SocialPage() {
   const { lang } = useLanguage();
+  const { range, ready: dateRangeReady } = useDashboardDateRange();
   const ru = lang === 'ru';
 
-  const [primarySource,    setPrimarySource]    = useState<Organization>(ORGS[0]);
+  const [dashboard, setDashboard] = useState<SocialDashboardSnapshot | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [primarySource,    setPrimarySource]    = useState<Organization>(ALL_ORG);
   const [secondarySource,  setSecondarySource]  = useState<Organization | null>(null);
   const [selectedPlatforms,setSelectedPlatforms]= useState<string[]>(['All']);
   const [activeTab,        setActiveTab]        = useState<'deep'|'metrics'>('deep');
@@ -873,6 +977,110 @@ export function SocialPage() {
     visibility:true, shifts:true, position:true, scorecard:true,
   });
   const toggleTier = (id: string) => setOpenTiers(p => ({ ...p, [id]: !p[id] }));
+
+  const platformFilter = useMemo(() => {
+    if (selectedPlatforms.includes('All') || selectedPlatforms.length !== 1) return undefined;
+    return selectedPlatforms[0].toLowerCase();
+  }, [selectedPlatforms]);
+
+  useEffect(() => {
+    if (!dateRangeReady) return;
+    let cancelled = false;
+    const path = buildSocialDashboardPath({
+      from: range.from,
+      to: range.to,
+      entityId: primarySource.id,
+      platform: platformFilter,
+    });
+
+    setDashboardLoading(true);
+    setDashboardError(null);
+    apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 20_000 })
+      .then((snapshot) => {
+        if (cancelled) return;
+        setDashboard(snapshot);
+      })
+      .catch((error: Error) => {
+        if (cancelled) return;
+        setDashboardError(error.message || String(error));
+        setDashboard(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDashboardLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [dateRangeReady, platformFilter, primarySource.id, range.from, range.to]);
+
+  const orgOptions = useMemo<Organization[]>(() => {
+    const entities = dashboard?.filters?.entities ?? [];
+    return [
+      ALL_ORG,
+      ...entities.map((entity, index) => ({
+        id: entity.id,
+        name: entity.name,
+        color: colorForEntity(entity.name, index),
+      })),
+    ];
+  }, [dashboard?.filters?.entities]);
+
+  useEffect(() => {
+    if (!orgOptions.some((org) => org.id === primarySource.id)) {
+      setPrimarySource(ALL_ORG);
+    }
+    if (secondarySource && !orgOptions.some((org) => org.id === secondarySource.id)) {
+      setSecondarySource(null);
+    }
+  }, [orgOptions, primarySource.id, secondarySource]);
+
+  const entityColors = useMemo(() => {
+    const colors: Record<string, string> = {};
+    orgOptions.forEach((org, index) => {
+      colors[org.name] = org.color || colorForEntity(org.name, index);
+    });
+    return colors;
+  }, [orgOptions]);
+
+  const topicBubbles = dashboard?.deepAnalysis?.topicBubbles ?? [];
+  const topicMomentum = dashboard?.deepAnalysis?.topicMomentum ?? [];
+  const sentimentTrend = dashboard?.deepAnalysis?.sentimentTrend ?? [];
+  const intentSignals = (dashboard?.deepAnalysis?.intentSignals ?? []).map((signal: any) => ({
+    ...signal,
+    icon: iconForIntent(signal.intent || ''),
+    color: colorForIntent(signal.intent || '', signal.color),
+    examples: Array.isArray(signal.examples) ? signal.examples : [],
+  })) as IntentSignalItem[];
+  const signalTrend = dashboard?.deepAnalysis?.signalTrend ?? [];
+  const topQuestions = dashboard?.deepAnalysis?.topQuestions ?? [];
+  const adItems = dashboard?.adIntelligence?.items ?? [];
+  const sentimentByEntity = dashboard?.strictMetrics?.sentimentByEntity ?? [];
+  const painPoints = dashboard?.deepAnalysis?.painPoints ?? [];
+  const engagementRadar = dashboard?.strictMetrics?.engagementRadar ?? [];
+  const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
+  const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
+  const positiveImpact = dashboard?.strictMetrics?.positiveImpact ?? [];
+  const negativeImpact = dashboard?.strictMetrics?.negativeImpact ?? [];
+  const weeklyShifts = dashboard?.strictMetrics?.weeklyShifts ?? [];
+  const scorecard = dashboard?.strictMetrics?.scorecard ?? [];
+  const sovData = dashboard?.strictMetrics?.shareOfVoice ?? visibilityData.map(v => ({
+    name: v.entity,
+    value: v.sov,
+    color: entityColors[v.entity] || colorForEntity(v.entity),
+  }));
+  const trackedCount = orgOptions.length > 1 ? String(orgOptions.length - 1) : '0';
+  const postsCount = String(scorecard.reduce((sum, row) => sum + (Number(row.posts) || 0), 0));
+  const adsCount = String(adItems.length || scorecard.reduce((sum, row) => sum + (Number(row.ads) || 0), 0));
+  const avgPositive = sentimentByEntity.length
+    ? `${Math.round(sentimentByEntity.reduce((sum, item) => sum + item.pos, 0) / sentimentByEntity.length)}%`
+    : '0%';
+  const topTopic = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || (ru ? 'Нет данных' : 'No data');
+  const degradedSections = dashboard?.meta?.degradedSections ?? [];
+  const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
+    key: seriesKey(item.entity),
+    label: item.entity,
+    color: entityColors[item.entity] || colorForEntity(item.entity, index),
+  }));
+  const radarSeries = chartSeries.slice(0, 3);
 
   // ── Tier configs (Tailwind classes — matches DashboardPage palette) ──
   const TIERS: Record<string, TierDef> = {
@@ -941,23 +1149,39 @@ export function SocialPage() {
           <div className="flex flex-wrap items-center gap-3 flex-1 lg:pl-5 lg:border-l border-slate-100">
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-400">{ru?'Источник:':'Source:'}</span>
-              <select value={primarySource.id} onChange={e => setPrimarySource(ORGS.find(o=>o.id===e.target.value)!)}
+              <select value={primarySource.id} onChange={e => setPrimarySource(orgOptions.find(o=>o.id===e.target.value) || ALL_ORG)}
                 className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700" style={{ fontWeight:500 }}>
-                {ORGS.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                {orgOptions.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-400 italic">VS</span>
-              <select value={secondarySource?.id||''} onChange={e=>setSecondarySource(e.target.value?ORGS.find(o=>o.id===e.target.value)!:null)}
+              <select value={secondarySource?.id||''} onChange={e=>setSecondarySource(e.target.value ? (orgOptions.find(o=>o.id===e.target.value) || null) : null)}
                 className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700">
                 <option value="">{ru?'— Сравнить —':'— Compare with —'}</option>
-                {ORGS.filter(o=>o.id!==primarySource.id).map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                {orgOptions.filter(o=>o.id!==primarySource.id && o.id !== 'all').map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
             </div>
             <div className="h-5 w-px bg-slate-200 hidden md:block" />
             <PlatformToggle selected={selectedPlatforms} onSelect={setSelectedPlatforms} />
           </div>
         </div>
+
+        {(dashboardLoading || dashboardError || degradedSections.length > 0) && (
+          <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
+            dashboardError
+              ? 'border-rose-200 bg-rose-50 text-rose-700'
+              : degradedSections.length > 0
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
+                : 'border-blue-100 bg-blue-50 text-blue-700'
+          }`}>
+            {dashboardError
+              ? (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`)
+              : dashboardLoading
+                ? (ru ? 'Загрузка реальных социальных данных...' : 'Loading real social data...')
+                : (ru ? `Часть секций загружена с ограничениями: ${degradedSections.join(', ')}` : `Some sections are degraded: ${degradedSections.join(', ')}`)}
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex items-center gap-1 mt-4 border-b border-slate-100">
@@ -994,7 +1218,7 @@ export function SocialPage() {
                       subtitle={ru?'Размер = кол-во упоминаний · Цвет = тональность':'Size = mention count · Color = sentiment'}
                     >
                       <div className="h-[290px]">
-                        <TopicBubbleViz ru={ru} />
+                        <TopicBubbleViz ru={ru} topics={topicBubbles} />
                       </div>
                     </WidgetCard>
 
@@ -1002,7 +1226,7 @@ export function SocialPage() {
                       title={ru?'Тренды тональности':'Sentiment Trends'}
                       subtitle={ru?'По неделям (последние 5 недель)':'Weekly breakdown, last 5 weeks'}
                     >
-                      <SentimentAreaChart ru={ru} />
+                      <SentimentAreaChart ru={ru} data={sentimentTrend} />
                     </WidgetCard>
                   </div>
 
@@ -1013,8 +1237,8 @@ export function SocialPage() {
                     headerRight={<span className="text-xs text-slate-400">{ru?'Последние 30 дней':'Last 30 days'}</span>}
                   >
                     <div className="space-y-2.5">
-                      {[...TOPIC_BUBBLES].sort((a,b)=>b.count-a.count).map((t,i) => {
-                        const max = TOPIC_BUBBLES.reduce((m,x)=>Math.max(m,x.count),0);
+                      {[...topicBubbles].sort((a,b)=>b.count-a.count).map((t,i) => {
+                        const max = Math.max(1, topicBubbles.reduce((m,x)=>Math.max(m,x.count),0));
                         const col = t.sentiment==='positive'?C.emerald:t.sentiment==='negative'?C.rose:'#64748b';
                         const badgeCls = t.sentiment==='positive'?'bg-emerald-50 text-emerald-700':t.sentiment==='negative'?'bg-rose-50 text-rose-700':'bg-slate-100 text-slate-600';
                         return (
@@ -1035,7 +1259,7 @@ export function SocialPage() {
                   </WidgetCard>
 
                   {/* NEW: Topic Momentum */}
-                  <TopicMomentumWidget ru={ru} />
+                  <TopicMomentumWidget ru={ru} items={topicMomentum} />
                 </div>
               )}
 
@@ -1044,7 +1268,7 @@ export function SocialPage() {
               {openTiers.intent && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-                    {INTENT_SIGNALS.map(sig => {
+                    {intentSignals.map(sig => {
                       const Icon = sig.icon;
                       return (
                         <div key={sig.intent} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md hover:border-slate-300 transition-all">
@@ -1068,7 +1292,7 @@ export function SocialPage() {
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <WidgetCard title={ru?'Примеры сигналов':'Signal Examples'} subtitle={ru?'Реальные высказывания по категориям':'Real verbatims by intent category'}>
                       <div className="space-y-3 max-h-[310px] overflow-y-auto pr-1">
-                        {INTENT_SIGNALS.slice(0,5).map(sig => {
+                        {intentSignals.slice(0,5).map(sig => {
                           const Icon = sig.icon;
                           return (
                             <div key={sig.intent} className="rounded-xl border border-slate-100 overflow-hidden">
@@ -1092,7 +1316,7 @@ export function SocialPage() {
                     </WidgetCard>
 
                     <WidgetCard title={ru?'Динамика сигналов':'Signal Trend Over Time'} subtitle={ru?'Еженедельная динамика по категориям':'Weekly movement across intent categories'}>
-                      <SignalTrendChart ru={ru} />
+                      <SignalTrendChart ru={ru} data={signalTrend} />
                     </WidgetCard>
                   </div>
                 </div>
@@ -1106,9 +1330,9 @@ export function SocialPage() {
                     title={ru?'Топ вопросы аудитории':'Top Audience Questions'}
                     headerRight={
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-xs text-slate-500">342 {ru?'вопросов':'questions'}</span>
+                        <span className="text-xs text-slate-500">{topQuestions.reduce((sum, question) => sum + question.count, 0)} {ru?'вопросов':'questions'}</span>
                         <span className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full" style={{ fontWeight:600 }}>47% {ru?'отвечено':'answered'}</span>
-                        <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{ru?'8 активных':'8 active'}</span>
+                        <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{topQuestions.length} {ru?'активных':'active'}</span>
                       </div>
                     }
                   >
@@ -1122,12 +1346,12 @@ export function SocialPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
-                          {TOP_QUESTIONS.map((q,i)=>(
+                          {topQuestions.map((q,i)=>(
                             <tr key={i} className="hover:bg-slate-50/50 transition-colors">
                               <td className="py-3 text-xs text-slate-400 pr-4">{i+1}</td>
                               <td className="py-3 text-sm text-slate-800 pr-4 max-w-[240px]" style={{ fontWeight:500 }}>{q.question}</td>
                               <td className="py-3 pr-4">
-                                <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${BRAND_COLORS[q.entity]}15`, color:BRAND_COLORS[q.entity] }}>{q.entity}</span>
+                                <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[q.entity] || colorForEntity(q.entity)}15`, color:entityColors[q.entity] || colorForEntity(q.entity) }}>{q.entity}</span>
                               </td>
                               <td className="py-3 pr-4 text-xs text-slate-500">{q.category}</td>
                               <td className="py-3 pr-4 text-sm text-slate-700 text-right" style={{ fontWeight:700 }}>{q.count}</td>
@@ -1156,11 +1380,11 @@ export function SocialPage() {
                 <div className="space-y-4">
                   <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                     <div className="divide-y divide-slate-100">
-                      {AD_FEED.map(ad=>(
+                      {adItems.map(ad=>(
                         <div key={ad.id} className="p-5 hover:bg-slate-50/50 transition-colors">
                           <div className="flex items-start justify-between mb-3">
                             <div className="flex items-center gap-2.5">
-                              <div className="w-7 h-7 rounded-lg flex items-center justify-center text-xs text-white" style={{ backgroundColor:BRAND_COLORS[ad.entity]||'#64748b', fontWeight:700 }}>{ad.entity[0]}</div>
+                              <div className="w-7 h-7 rounded-lg flex items-center justify-center text-xs text-white" style={{ backgroundColor:entityColors[ad.entity] || colorForEntity(ad.entity), fontWeight:700 }}>{ad.entity[0]}</div>
                               <span className="text-sm text-slate-900" style={{ fontWeight:600 }}>{ad.entity}</span>
                               <span className="text-[11px] bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full" style={{ fontWeight:500 }}>{ad.platform}</span>
                             </div>
@@ -1179,7 +1403,7 @@ export function SocialPage() {
                             )}
                           </div>
                           <div className="flex items-center gap-4 text-xs text-slate-500 pt-3 border-t border-slate-50">
-                            <span>{ru?'Продукты:':'Products:'} <span style={{ fontWeight:600 }}>{ad.products.join(', ')}</span></span>
+                            <span>{ru?'Продукты:':'Products:'} <span style={{ fontWeight:600 }}>{(ad.products || []).join(', ') || '—'}</span></span>
                             <span>{ru?'Ценность:':'Value props:'} <span className="italic">{ad.valueProps.join(', ')}</span></span>
                             <span className="ml-auto">{ru?'Вовлечённость:':'Engagement:'} <span style={{ fontWeight:600 }}>{ad.engagement.toLocaleString()}</span></span>
                           </div>
@@ -1198,11 +1422,11 @@ export function SocialPage() {
                     {/* Sentiment by entity */}
                     <WidgetCard title={ru?'Тональность по брендам':'Sentiment by Brand'} subtitle={ru?'Распределение позитива, нейтрала и негатива':'Positive, neutral & negative breakdown'}>
                       <div className="space-y-5">
-                        {SENTIMENT_BY_ENTITY.map(item=>(
+                        {sentimentByEntity.map(item=>(
                           <div key={item.entity}>
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
-                                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor:BRAND_COLORS[item.entity] }} />
+                                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor:entityColors[item.entity] || colorForEntity(item.entity) }} />
                                 <span className="text-sm text-slate-700" style={{ fontWeight:600 }}>{item.entity}</span>
                               </div>
                               <span className="text-xs text-slate-400">{item.total.toLocaleString()} {ru?'упом.':'mentions'}</span>
@@ -1230,7 +1454,7 @@ export function SocialPage() {
                     {/* Pain points */}
                     <WidgetCard title={ru?'Ключевые боли':'Pain Points & Issues'} subtitle={ru?'Наиболее частые негативные темы':'Most frequently raised negative themes'}>
                       <div className="space-y-3">
-                        {PAIN_POINTS.map((pp,i)=>{
+                        {painPoints.map((pp,i)=>{
                           const severityColor = pp.severity==='high'?C.rose:C.amber;
                           return (
                             <div key={i} className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-100 hover:border-slate-200 transition-colors bg-slate-50/50">
@@ -1242,7 +1466,7 @@ export function SocialPage() {
                                 <div className="flex items-center justify-between flex-wrap gap-2">
                                   <div className="flex flex-wrap gap-1.5">
                                     {pp.entities.map(e=>(
-                                      <span key={e} className="text-[10px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${BRAND_COLORS[e]}15`, color:BRAND_COLORS[e] }}>{e}</span>
+                                      <span key={e} className="text-[10px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[e] || colorForEntity(e)}15`, color:entityColors[e] || colorForEntity(e) }}>{e}</span>
                                     ))}
                                   </div>
                                   <div className="flex items-center gap-1.5">
@@ -1262,22 +1486,26 @@ export function SocialPage() {
                   <WidgetCard title={ru?'Профиль вовлечённости':'Engagement Profile Radar'} subtitle={ru?'Сравнение типов взаимодействия по брендам':'Engagement type comparison across brands'}>
                     <div className="h-[300px]">
                       <ResponsiveContainer width="100%" height="100%">
-                        <RadarChart data={ENGAGEMENT_RADAR}>
+                        <RadarChart data={engagementRadar}>
                           <PolarGrid stroke={C.grid} />
                           <PolarAngleAxis dataKey="subject" tick={{ fontSize:12, fill:'#64748b' }} />
                           <PolarRadiusAxis angle={30} domain={[0,100]} tick={{ fontSize:9, fill:C.muted }} />
-                          <Radar name="Brand X" dataKey="brandX" stroke={C.blue}   fill={C.blue}   fillOpacity={0.15} strokeWidth={2} />
-                          <Radar name="Brand Y" dataKey="brandY" stroke={C.violet} fill={C.violet} fillOpacity={0.10} strokeWidth={2} />
-                          <Radar name="Brand Z" dataKey="brandZ" stroke={C.pink}   fill={C.pink}   fillOpacity={0.10} strokeWidth={2} />
+                          {radarSeries.map((series, index) => (
+                            <Radar
+                              key={series.key}
+                              name={series.label}
+                              dataKey={series.key}
+                              stroke={series.color}
+                              fill={series.color}
+                              fillOpacity={index === 0 ? 0.15 : 0.1}
+                              strokeWidth={2}
+                            />
+                          ))}
                           <Tooltip {...TOOLTIP_STYLE} />
                         </RadarChart>
                       </ResponsiveContainer>
                     </div>
-                    <ChartLegend items={[
-                      { label:'Brand X', color:C.blue   },
-                      { label:'Brand Y', color:C.violet },
-                      { label:'Brand Z', color:C.pink   },
-                    ]} />
+                    <ChartLegend items={radarSeries.map(series => ({ label: series.label, color: series.color }))} />
                   </WidgetCard>
                 </div>
               )}
@@ -1291,11 +1519,11 @@ export function SocialPage() {
               {/* KPI Summary row */}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 {[
-                  { icon:Users,         color:C.blue,    label:ru?'Отслеживаемых':'Tracked',     val:'4',             sub:ru?'конкурента':'competitors'   },
-                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (30д)':'Posts (30d)',  val:'1,245',         sub:ru?'собрано':'collected'         },
-                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:'59',            sub:ru?'объявлений':'active ads'      },
-                  { icon:Heart,         color:C.emerald, label:ru?'Настроение':'Avg Sentiment',  val:'65%',           sub:ru?'позитив':'positive'           },
-                  { icon:Hash,          color:C.pink,    label:ru?'Топ тема':'Top Topic',        val:'Cust. Service', sub:ru?'по упоминаниям':'by mentions' },
+                  { icon:Users,         color:C.blue,    label:ru?'Отслеживаемых':'Tracked',     val:trackedCount, sub:ru?'источников':'sources'   },
+                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (диапазон)':'Posts (range)', val:postsCount, sub:ru?'собрано':'collected' },
+                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:adsCount, sub:ru?'объявлений':'active ads' },
+                  { icon:Heart,         color:C.emerald, label:ru?'Настроение':'Avg Sentiment',  val:avgPositive, sub:ru?'позитив':'positive' },
+                  { icon:Hash,          color:C.pink,    label:ru?'Топ тема':'Top Topic',        val:topTopic, sub:ru?'по упоминаниям':'by mentions' },
                 ].map((kpi,i)=>{
                   const Icon = kpi.icon;
                   return (
@@ -1318,8 +1546,8 @@ export function SocialPage() {
               {openTiers.visibility && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    {VISIBILITY_DATA.map(v=>{
-                      const color = BRAND_COLORS[v.entity];
+                    {visibilityData.map(v=>{
+                      const color = entityColors[v.entity] || colorForEntity(v.entity);
                       return (
                         <div key={v.entity} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 overflow-hidden relative">
                           <div className="absolute top-0 left-0 right-0 h-1 rounded-t-2xl" style={{ backgroundColor:color }} />
@@ -1359,23 +1587,28 @@ export function SocialPage() {
                     <div className="lg:col-span-2 flex flex-col">
                       <WidgetCard title={ru?'Динамика видимости':'Visibility Trend'} subtitle={ru?'Последние 5 периодов наблюдения':'Last 5 observation periods'} className="flex-1">
                         <ResponsiveContainer width="100%" height={260}>
-                          <LineChart data={VISIBILITY_TREND} margin={{ top:16, right:16, left:-10, bottom:0 }}>
+                          <LineChart data={visibilityTrend} margin={{ top:16, right:16, left:-10, bottom:0 }}>
                             <CartesianGrid {...GRID_COMMON} />
                             <XAxis dataKey="day" {...AXIS_COMMON} dy={8} />
                             <YAxis {...AXIS_COMMON} domain={[15, 85]} tickCount={6} />
                             <Tooltip {...TOOLTIP_STYLE} formatter={(v: any, name: string) => [`${v}%`, name]} />
-                            <Line key="brandX" type="monotone" dataKey="brandX" stroke={C.blue}    strokeWidth={2.5} dot={{ r:4, fill:C.blue,    strokeWidth:2, stroke:'white' }} activeDot={{ r:5 }} name="Brand X"      isAnimationActive={false} />
-                            <Line key="brandY" type="monotone" dataKey="brandY" stroke={C.violet}  strokeWidth={2.5} dot={{ r:4, fill:C.violet,  strokeWidth:2, stroke:'white' }} activeDot={{ r:5 }} name="Brand Y"      isAnimationActive={false} strokeDasharray="6 2" />
-                            <Line key="brandZ" type="monotone" dataKey="brandZ" stroke={C.pink}    strokeWidth={2.5} dot={{ r:4, fill:C.pink,    strokeWidth:2, stroke:'white' }} activeDot={{ r:5 }} name="Brand Z"      isAnimationActive={false} strokeDasharray="3 3" />
-                            <Line key="compA"  type="monotone" dataKey="compA"  stroke={C.emerald} strokeWidth={2.5} dot={{ r:4, fill:C.emerald, strokeWidth:2, stroke:'white' }} activeDot={{ r:5 }} name="Competitor A" isAnimationActive={false} strokeDasharray="8 3" />
+                            {chartSeries.map((series, index) => (
+                              <Line
+                                key={series.key}
+                                type="monotone"
+                                dataKey={series.key}
+                                stroke={series.color}
+                                strokeWidth={2.5}
+                                dot={{ r:4, fill:series.color, strokeWidth:2, stroke:'white' }}
+                                activeDot={{ r:5 }}
+                                name={series.label}
+                                isAnimationActive={false}
+                                strokeDasharray={index === 0 ? undefined : index === 1 ? '6 2' : index === 2 ? '3 3' : '8 3'}
+                              />
+                            ))}
                           </LineChart>
                         </ResponsiveContainer>
-                        <ChartLegend items={[
-                          { label:'Brand X',      color:C.blue    },
-                          { label:'Brand Y',      color:C.violet  },
-                          { label:'Brand Z',      color:C.pink    },
-                          { label:'Competitor A', color:C.emerald },
-                        ]} />
+                        <ChartLegend items={chartSeries.map(series => ({ label: series.label, color: series.color }))} />
                       </WidgetCard>
                     </div>
 
@@ -1383,20 +1616,20 @@ export function SocialPage() {
                       <WidgetCard title={ru?'Доля голоса':'Share of Voice'} subtitle={ru?'Распределение упоминаний':'Mention share distribution'} className="flex-1">
                         <ResponsiveContainer width="100%" height={200}>
                           <PieChart>
-                            <Pie data={SOV_DATA} cx="50%" cy="50%" innerRadius={58} outerRadius={88} paddingAngle={3} dataKey="value">
-                              {SOV_DATA.map((entry,i)=><Cell key={i} fill={entry.color} strokeWidth={0} />)}
+                            <Pie data={sovData} cx="50%" cy="50%" innerRadius={58} outerRadius={88} paddingAngle={3} dataKey="value">
+                              {sovData.map((entry,i)=><Cell key={i} fill={entry.color || colorForEntity(entry.name, i)} strokeWidth={0} />)}
                             </Pie>
                             <Tooltip {...TOOLTIP_STYLE} formatter={(v:any)=>[`${v}%`,'']} />
                           </PieChart>
                         </ResponsiveContainer>
                         <div className="space-y-2.5 mt-3">
-                          {[...SOV_DATA].sort((a,b)=>b.value-a.value).map((d,i)=>(
+                          {[...sovData].sort((a,b)=>b.value-a.value).map((d,i)=>(
                             <div key={d.name} className="flex items-center gap-2.5 py-1 border-b border-slate-50 last:border-0">
                               <span className="text-xs text-slate-400 w-4 text-center" style={{ fontWeight:600 }}>#{i+1}</span>
-                              <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor:d.color }} />
+                              <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor:d.color || colorForEntity(d.name, i) }} />
                               <span className="text-xs text-slate-600 flex-1">{d.name}</span>
                               <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full rounded-full" style={{ width:`${(d.value/35.5)*100}%`, backgroundColor:d.color }} />
+                                <div className="h-full rounded-full" style={{ width:`${(d.value/Math.max(1, ...sovData.map(item => item.value)))*100}%`, backgroundColor:d.color || colorForEntity(d.name, i) }} />
                               </div>
                               <span className="text-xs text-slate-800 w-10 text-right" style={{ fontWeight:700 }}>{d.value}%</span>
                             </div>
@@ -1421,7 +1654,7 @@ export function SocialPage() {
               {openTiers.shifts && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    {WEEKLY_SHIFTS.map(s=>{
+                    {weeklyShifts.map(s=>{
                       const delta = s.current - s.previous;
                       const deltaPct = ((delta/s.previous)*100).toFixed(1);
                       const isGood = s.goodIfUp ? delta>0 : delta<0;
@@ -1446,13 +1679,13 @@ export function SocialPage() {
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <WidgetCard title={ru?'Позитивное влияние тем':'Positive Topic Impact'} headerRight={<span className="text-sm text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>+43.44%</span>}>
                       <div className="space-y-1">
-                        {POSITIVE_IMPACT.map((t,i)=>(
+                        {positiveImpact.map((t,i)=>(
                           <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
                             <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
                             <div className="flex-1">
                               <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{t.topic}</span>
                               <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-emerald-400 rounded-full" style={{ width:`${(t.mentions/145)*100}%` }} />
+                                <div className="h-full bg-emerald-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...positiveImpact.map(item => item.mentions)))*100}%` }} />
                               </div>
                             </div>
                             <span className="text-sm text-emerald-600" style={{ fontWeight:700 }}>{t.gain}</span>
@@ -1466,13 +1699,13 @@ export function SocialPage() {
 
                     <WidgetCard title={ru?'Негативное влияние тем':'Negative Topic Impact'} headerRight={<span className="text-sm text-rose-500 bg-rose-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>-22.60%</span>}>
                       <div className="space-y-1">
-                        {NEGATIVE_IMPACT.map((t,i)=>(
+                        {negativeImpact.map((t,i)=>(
                           <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
                             <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
                             <div className="flex-1">
                               <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{t.topic}</span>
                               <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-rose-400 rounded-full" style={{ width:`${(t.mentions/145)*100}%` }} />
+                                <div className="h-full bg-rose-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...negativeImpact.map(item => item.mentions)))*100}%` }} />
                               </div>
                             </div>
                             <span className="text-sm text-rose-500" style={{ fontWeight:700 }}>{t.loss}</span>
@@ -1499,7 +1732,7 @@ export function SocialPage() {
               <TierHeader tier={TIERS.scorecard} isOpen={openTiers.scorecard} onToggle={()=>toggleTier('scorecard')} ru={ru} />
               {openTiers.scorecard && (
                 <div className="space-y-4">
-                  <AdScrapeTable ru={ru} />
+                  <AdScrapeTable ru={ru} items={adItems} />
                   <AIInsight
                     title={ru?'AI-анализ рекламы конкурентов':'AI Ad Intelligence Analysis'}
                     color="#6366f1"
