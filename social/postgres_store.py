@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date, datetime
 from typing import Any, Iterator
+from uuid import UUID
 
 from loguru import logger
 
@@ -13,6 +15,18 @@ try:  # pragma: no cover - optional dependency in local dev until requirements a
 except Exception:  # pragma: no cover
     psycopg = None  # type: ignore[assignment]
     dict_row = None  # type: ignore[assignment]
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 class SocialPostgresStore:
@@ -101,7 +115,7 @@ class SocialPostgresStore:
                 with conn.cursor() as cur:
                     cur.execute(query, (platforms, lease_seconds, limit, worker_id))
                     rows = list(cur.fetchall())
-        return rows
+        return [_json_safe(row) for row in rows]
 
     def claim_analysis_activities(
         self,
@@ -161,7 +175,7 @@ class SocialPostgresStore:
                 with conn.cursor() as cur:
                     cur.execute(query, (analysis_version, lease_seconds, limit, worker_id))
                     rows = list(cur.fetchall())
-        return rows
+        return [_json_safe(row) for row in rows]
 
     def claim_graph_activities(
         self,
@@ -227,7 +241,7 @@ class SocialPostgresStore:
                 with conn.cursor() as cur:
                     cur.execute(query, (projection_version, lease_seconds, limit, worker_id))
                     rows = [row for row in cur.fetchall() if row.get("analysis")]
-        return rows
+        return [_json_safe(row) for row in rows]
 
     def cleanup(self, *, lease_seconds: int, payload_retention_days: int) -> dict[str, int]:
         if not self.enabled:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 from social.postgres_store import SocialPostgresStore
 
@@ -9,6 +11,7 @@ from social.postgres_store import SocialPostgresStore
 class _CursorStub:
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple]] = []
+        self.rows: list[dict] = []
 
     def __enter__(self):
         return self
@@ -20,7 +23,7 @@ class _CursorStub:
         self.executed.append((query, params))
 
     def fetchall(self):
-        return []
+        return list(self.rows)
 
 
 class _TransactionStub:
@@ -87,6 +90,24 @@ class SocialPostgresStoreQueryTests(unittest.TestCase):
             self.assertNotIn("LEFT JOIN public.social_processing_failures", query)
             self.assertIn("FOR UPDATE SKIP LOCKED", query)
             self.assertEqual(params, expected_params[index])
+
+    def test_claim_rows_are_json_safe_for_supabase_payloads(self) -> None:
+        store, cursor = self._build_store()
+        cursor.rows = [
+            {
+                "id": UUID("3384fe5d-a381-4f5e-9cb7-b95d38dce352"),
+                "entity_id": UUID("52a644ef-0352-47b5-8c40-eefd14fa64e3"),
+                "updated_at": datetime(2026, 4, 24, tzinfo=timezone.utc),
+                "entity": {"id": UUID("52a644ef-0352-47b5-8c40-eefd14fa64e3")},
+            }
+        ]
+
+        rows = store.claim_collect_accounts(worker_id="worker-1", platforms=["facebook"], limit=10, lease_seconds=60)
+
+        self.assertEqual(rows[0]["id"], "3384fe5d-a381-4f5e-9cb7-b95d38dce352")
+        self.assertEqual(rows[0]["entity_id"], "52a644ef-0352-47b5-8c40-eefd14fa64e3")
+        self.assertEqual(rows[0]["updated_at"], "2026-04-24T00:00:00+00:00")
+        self.assertEqual(rows[0]["entity"]["id"], "52a644ef-0352-47b5-8c40-eefd14fa64e3")
 
 
 class SocialFailureScopeMigrationTests(unittest.TestCase):
