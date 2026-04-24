@@ -1046,7 +1046,7 @@ def peek_dashboard_snapshot(ctx: Optional[DashboardDateContext] = None) -> tuple
     if _is_cache_valid(cache_key, now) and not _should_bypass_cached_snapshot(snapshot, meta):
         return snapshot, _with_refresh_state(cache_key, meta), "fresh"
 
-    if _can_serve_stale(entry, now):
+    if _can_serve_stale(entry, now) and not _should_bypass_cached_snapshot(snapshot, meta) and _snapshot_has_core_pulse_data(snapshot):
         stale_meta = dict(meta)
         stale_meta["isStale"] = True
         stale_meta.setdefault("cacheStatus", "memory_stale")

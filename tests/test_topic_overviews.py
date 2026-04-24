@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from fastapi.testclient import TestClient
 
@@ -189,6 +189,21 @@ class TopicOverviewTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(load_mock.call_count, 1)
 
+    def test_get_topic_overview_ignores_mismatched_window_when_context_is_provided(self) -> None:
+        requested_ctx = build_dashboard_date_context("2026-03-15", "2026-03-22")
+        old_ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
+        payload = topic_overviews._default_snapshot_payload()
+        payload["items"] = [_ready_item("Topic One", old_ctx)]
+
+        with patch.object(topic_overviews, "_load_snapshot_payload", return_value=payload):
+            overview = topic_overviews.get_topic_overview(
+                "Topic One",
+                "Government & Leadership",
+                ctx=requested_ctx,
+            )
+
+        self.assertIsNone(overview)
+
 class TopicQueryPathTests(unittest.TestCase):
     def test_candidate_mapping_uses_safe_string_conversion(self) -> None:
         ctx = build_dashboard_date_context("2026-03-10", "2026-03-24")
@@ -370,7 +385,7 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
         body = response.json()
         self.assertIn("overview", body)
         self.assertEqual(body["overview"]["summaryEn"], "Overview text")
-        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
+        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership", ctx=ANY)
 
     def test_topic_detail_handles_missing_materialized_overview(self) -> None:
         payload = {
@@ -413,7 +428,7 @@ class TopicDetailOverviewEndpointTests(unittest.TestCase):
         self.assertIn("overview", body)
         self.assertEqual(body["overview"]["status"], "fallback")
         self.assertEqual(body["overview"]["topic"], "Topic One")
-        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership")
+        get_overview_mock.assert_called_once_with("Topic One", "Government & Leadership", ctx=ANY)
 
     def test_topic_detail_tolerates_materialized_overview_errors(self) -> None:
         payload = {

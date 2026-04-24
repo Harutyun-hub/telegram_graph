@@ -25,6 +25,18 @@ class _FakeRuntimeStore:
             return dict(default or {})
         return row["payload"]
 
+    def read_runtime_json(
+        self,
+        path: str,
+        *,
+        prefer_signed_read: bool = False,
+        timeout_seconds: float = 1.5,
+    ) -> dict:
+        row = self.files.get(path)
+        if not row:
+            return {"status": "missing"}
+        return {"status": "ok", "payload": dict(row["payload"])}
+
     def list_runtime_files(self, folder: str) -> list[dict]:
         prefix = f"{folder}/"
         rows = []

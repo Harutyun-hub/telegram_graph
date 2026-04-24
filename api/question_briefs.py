@@ -25,6 +25,7 @@ from api.ai_widget_storage import (
     save_widget_snapshot_payload,
     save_widget_state_payload,
     select_portfolio_cards,
+    snapshot_publish_skip_reason,
 )
 from api.dashboard_dates import DashboardDateContext
 from api.queries import strategic
@@ -532,8 +533,32 @@ def _save_snapshot_cards(
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
     paths = _snapshot_paths(ctx)
+    store = _get_runtime_store()
+    current_payload, current_exists = load_latest_widget_payload(
+        store,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
+        default={"cards": []},
+    )
+    skip_reason = snapshot_publish_skip_reason(
+        current_payload if current_exists else None,
+        payload,
+        active_cluster_field="activeClusters",
+        card_count_field="cards",
+        card_list_field="cards",
+        fewer_cards_reason="fewer_cards_same_active_clusters",
+    )
+    if skip_reason:
+        if isinstance(diagnostics, dict):
+            snapshot = diagnostics.setdefault("snapshot", {})
+            snapshot["publishSkipped"] = True
+            snapshot["publishSkipReason"] = skip_reason
+            snapshot["readbackCards"] = len(current_payload.get("cards") or [])
+            snapshot["writeSucceeded"] = True
+        return True
+
     saved = save_widget_snapshot_payload(
-        _get_runtime_store(),
+        store,
         latest_path=paths.latest_path,
         history_folder=paths.history_folder,
         payload=payload,
@@ -1637,6 +1662,26 @@ def refresh_question_briefs(*, force: bool = False, ctx: DashboardDateContext | 
         diagnostics["error"] = "Question cards snapshot could not be persisted and verified"
 
     if state_saved and snapshot_saved:
+        if diagnostics.get("snapshot", {}).get("publishSkipped"):
+            result_cards = _load_snapshot_cards(ctx=ctx)
+            if ctx is None:
+                with _cache_lock:
+                    _cached_cards = result_cards
+                    _cache_ts = time.time()
+            diagnostics["exitReason"] = diagnostics["snapshot"].get("publishSkipReason") or "snapshot_publish_skipped"
+            _store_refresh_diagnostics(diagnostics)
+            logger.info(
+                "Question cards materialized | cards={} active_clusters={} changed_clusters={} reused_clusters={} accepted_clusters={} synthesized_rows={} first_rejection_bucket={}".format(
+                    len(result_cards),
+                    len(clusters),
+                    len(changed_clusters),
+                    len(clusters) - len(changed_clusters),
+                    diagnostics["stages"]["acceptedClusters"],
+                    diagnostics["stages"]["synthesizedRows"],
+                    _first_bucket(diagnostics["rejections"]["materialization"]) or _first_bucket(diagnostics["rejections"]["triage"]) or "none",
+                )
+            )
+            return result_cards
         if ctx is None:
             with _cache_lock:
                 _cached_cards = final_cards

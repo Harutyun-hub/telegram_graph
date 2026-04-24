@@ -191,6 +191,52 @@ def save_widget_snapshot_payload(
     return True
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot_publish_skip_reason(
+    current_payload: dict | None,
+    new_payload: dict,
+    *,
+    active_cluster_field: str,
+    card_count_field: str,
+    card_list_field: str,
+    fewer_cards_reason: str,
+) -> str | None:
+    """Return a reason when publishing would obviously regress the latest snapshot."""
+    if not isinstance(current_payload, dict) or not isinstance(new_payload, dict):
+        return None
+
+    current_cards = current_payload.get(card_list_field)
+    new_cards = new_payload.get(card_list_field)
+    current_count = len(current_cards) if isinstance(current_cards, list) else 0
+    new_count = len(new_cards) if isinstance(new_cards, list) else 0
+
+    current_meta = current_payload.get("meta") if isinstance(current_payload.get("meta"), dict) else {}
+    new_meta = new_payload.get("meta") if isinstance(new_payload.get("meta"), dict) else {}
+    current_meta_count = _safe_int(current_meta.get(card_count_field))
+    new_meta_count = _safe_int(new_meta.get(card_count_field))
+    if current_meta_count is not None:
+        current_count = current_meta_count
+    if new_meta_count is not None:
+        new_count = new_meta_count
+
+    if new_count == 0 and current_count > 0:
+        return "zero_cards_over_non_empty"
+
+    current_clusters = _safe_int(current_meta.get(active_cluster_field))
+    new_clusters = _safe_int(new_meta.get(active_cluster_field))
+    if current_clusters is not None and new_clusters is not None and current_clusters == new_clusters:
+        if new_count < current_count:
+            return fewer_cards_reason
+
+    return None
+
+
 def normalize_card_text(value: Any) -> str:
     tokens = [token.lower() for token in _TOKEN_RE.findall(str(value or ""))]
     return " ".join(tokens)

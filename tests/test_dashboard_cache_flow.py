@@ -108,6 +108,27 @@ class DashboardCacheFlowTests(unittest.TestCase):
         self.assertEqual(len(thread_starts), 1)
         aggregator._release_refresh_slot(ctx.cache_key)
 
+    def test_critical_degraded_cached_snapshot_is_not_served_as_stale(self) -> None:
+        ctx = build_dashboard_date_context("2026-03-31", "2026-04-06")
+        snapshot = {
+            "communityBrief": {"postsAnalyzed24h": 10},
+            "communityHealth": {"score": 52},
+            "trendingTopics": [{"name": "Topic One"}],
+        }
+        meta = {
+            "cacheStatus": "refresh_success_uncached_degraded",
+            "degradedTiers": ["strategic"],
+            "tierTimes": {"pulse": 0.5, "strategic": None, "derived": 0.0},
+            "isStale": True,
+        }
+        aggregator.prime_dashboard_snapshot(ctx, snapshot, meta)
+
+        stale_snapshot, stale_meta, state = aggregator.peek_dashboard_snapshot(ctx)
+
+        self.assertIsNone(stale_snapshot)
+        self.assertEqual(state, "expired")
+        self.assertIsNotNone(stale_meta)
+
 
 class DashboardApiAvailabilityTests(unittest.TestCase):
     @classmethod
@@ -184,29 +205,7 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
         self.assertFalse(payload["meta"]["refreshSuppressed"])
         schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_rebuilds_without_name_error(self) -> None:
-        rebuild_snapshot = {
-            "communityHealth": {"score": 55},
-            "communityBrief": {
-                "postsAnalyzed24h": 11,
-                "commentScopesAnalyzed24h": 17,
-                "totalAnalyses24h": 28,
-                "refreshedMinutesAgo": 6,
-                "windowDays": 7,
-            },
-        }
-        rebuild_meta = {
-            "cacheStatus": "refresh_success",
-            "cacheSource": "rebuild",
-            "degradedTiers": [],
-            "suppressedDegradedTiers": [],
-            "tierTimes": {"pulse": 0.5, "derived": 0.0},
-            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
-            "isStale": False,
-            "buildElapsedSeconds": 0.5,
-            "buildMode": "parallel",
-            "refreshFailureCount": 0,
-        }
+    def test_dashboard_exact_miss_schedules_refresh_and_returns_warming_503(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -216,50 +215,39 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "get_dashboard_snapshot", return_value=(rebuild_snapshot, rebuild_meta)) as rebuild_mock, \
-             patch.object(server, "_should_persist_dashboard_snapshot", return_value=False), \
-             patch.object(server, "_persist_dashboard_snapshot_async") as persist_mock:
-            response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["meta"]["cacheSource"], "rebuild")
-        self.assertEqual(payload["meta"]["cacheStatus"], "refresh_success")
-        self.assertEqual(payload["meta"]["requestedFrom"], "2026-03-31")
-        self.assertEqual(payload["meta"]["requestedTo"], "2026-04-06")
-        self.assertEqual(payload["meta"]["days"], 7)
-        rebuild_mock.assert_called_once()
-        persist_mock.assert_not_called()
-
-    def test_dashboard_placeholder_snapshot_returns_warming_503(self) -> None:
-        placeholder_meta = {
-            "cacheStatus": "refresh_success",
-            "cacheSource": "rebuild",
-            "degradedTiers": [],
-            "suppressedDegradedTiers": [],
-            "tierTimes": {"pulse": 0.4, "derived": 0.0},
-            "snapshotBuiltAt": "2026-04-06T00:00:00Z",
-            "isStale": False,
-            "buildElapsedSeconds": 0.4,
-            "buildMode": "parallel",
-            "refreshFailureCount": 0,
-        }
-        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
-             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
                  server,
-                 "_cached_freshness_resolution",
-                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
-             ), \
-             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
-             patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "get_dashboard_snapshot", return_value=({"communityHealth": {"score": 0}, "communityBrief": {}}, placeholder_meta)):
+                 "schedule_dashboard_snapshot_refresh",
+                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+             ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("warming this date range", response.text.lower())
+        schedule_mock.assert_called_once()
 
-    def test_dashboard_exact_miss_timeout_returns_warming_503(self) -> None:
+    def test_dashboard_expired_snapshot_returns_warming_503(self) -> None:
+        with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(
+                 server,
+                 "_cached_freshness_resolution",
+                 return_value={"snapshot": None, "source": None, "snapshotBuiltAt": None, "persistedReadStatus": None, "persistedReadMs": None},
+             ), \
+             patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
+             patch.object(server, "peek_dashboard_snapshot", return_value=(None, {"cacheStatus": "memory_stale"}, "expired")), \
+             patch.object(
+                 server,
+                 "schedule_dashboard_snapshot_refresh",
+                 return_value={"started": True, "inflight": False, "suppressed": False, "failureCount": 0},
+             ) as schedule_mock:
+            response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("warming this date range", response.text.lower())
+        schedule_mock.assert_called_once()
+
+    def test_dashboard_exact_miss_refresh_inflight_returns_warming_503(self) -> None:
         with patch.object(server.config, "ANALYTICS_API_REQUIRE_AUTH", False), \
              patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
              patch.object(
@@ -269,11 +257,16 @@ class DashboardApiAvailabilityTests(unittest.TestCase):
              ), \
              patch.object(server, "_load_persisted_dashboard_snapshot", return_value={"status": "miss", "readMs": 0.0}), \
              patch.object(server, "peek_dashboard_snapshot", return_value=(None, None, "missing")), \
-             patch.object(server, "get_dashboard_snapshot", side_effect=TimeoutError("dashboard rebuild timed out")):
+             patch.object(
+                 server,
+                 "schedule_dashboard_snapshot_refresh",
+                 return_value={"started": False, "inflight": True, "suppressed": False, "failureCount": 0},
+             ) as schedule_mock:
             response = self.client.get("/api/dashboard?from=2026-03-31&to=2026-04-06")
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("warming this date range", response.text.lower())
+        schedule_mock.assert_called_once()
 
 
 if __name__ == "__main__":

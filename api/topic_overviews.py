@@ -978,7 +978,22 @@ def get_topic_overviews_snapshot(*, force_refresh: bool = False) -> dict:
     return _set_cached_snapshot(payload)
 
 
-def get_topic_overview(topic_name: str, category: str | None = None) -> dict | None:
+def _overview_matches_context(item: dict | None, ctx: DashboardDateContext | None) -> bool:
+    if ctx is None:
+        return True
+    if not isinstance(item, dict):
+        return False
+    return (
+        _as_str(item.get("windowStart"), "") == ctx.from_date.isoformat()
+        and _as_str(item.get("windowEnd"), "") == ctx.to_date.isoformat()
+    )
+
+
+def get_topic_overview(
+    topic_name: str,
+    category: str | None = None,
+    ctx: DashboardDateContext | None = None,
+) -> dict | None:
     clean_topic = _as_str(topic_name, "").strip()
     clean_category = _as_str(category, "General").strip() or "General"
     if not clean_topic:
@@ -988,12 +1003,12 @@ def get_topic_overview(topic_name: str, category: str | None = None) -> dict | N
     with _cache_lock:
         if _cache_valid(now):
             item = _cached_index.get(_topic_key(clean_topic, clean_category))
-            return copy.deepcopy(item) if isinstance(item, dict) else None
+            return copy.deepcopy(item) if _overview_matches_context(item, ctx) else None
 
     payload = _set_cached_snapshot(_load_snapshot_payload())
     index = _snapshot_index(payload)
     item = index.get(_topic_key(clean_topic, clean_category))
-    return copy.deepcopy(item) if isinstance(item, dict) else None
+    return copy.deepcopy(item) if _overview_matches_context(item, ctx) else None
 
 
 def build_topic_overview_fallback(detail_payload: dict | None, ctx: DashboardDateContext) -> dict | None:

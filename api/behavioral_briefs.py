@@ -24,6 +24,7 @@ from api.ai_widget_storage import (
     save_widget_snapshot_payload,
     save_widget_state_payload,
     select_portfolio_cards,
+    snapshot_publish_skip_reason,
 )
 from api.dashboard_dates import DashboardDateContext
 from api.queries import behavioral
@@ -876,8 +877,34 @@ def _save_snapshot_payload(
     if isinstance(diagnostics, dict):
         diagnostics.setdefault("snapshot", {})["writeAttempted"] = True
     paths = _snapshot_paths(ctx)
+    store = _get_runtime_store()
+    current_payload, current_exists = load_latest_widget_payload(
+        store,
+        latest_path=paths.latest_path,
+        history_folder=paths.history_folder,
+        default={"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []},
+    )
+    skip_reason = snapshot_publish_skip_reason(
+        current_payload if current_exists else None,
+        out,
+        active_cluster_field="activeProblemClusters",
+        card_count_field="problemCards",
+        card_list_field="problemBriefs",
+        fewer_cards_reason="fewer_problem_cards_same_active_clusters",
+    )
+    if skip_reason:
+        if isinstance(diagnostics, dict):
+            snapshot = diagnostics.setdefault("snapshot", {})
+            snapshot["publishSkipped"] = True
+            snapshot["publishSkipReason"] = skip_reason
+            snapshot["readbackProblemCards"] = len(current_payload.get("problemBriefs") or [])
+            snapshot["readbackServiceCards"] = len(current_payload.get("serviceGapBriefs") or [])
+            snapshot["readbackUrgencyCards"] = len(current_payload.get("urgencyBriefs") or [])
+            snapshot["writeSucceeded"] = True
+        return True
+
     saved = save_widget_snapshot_payload(
-        _get_runtime_store(),
+        store,
         latest_path=paths.latest_path,
         history_folder=paths.history_folder,
         payload=out,
@@ -1860,6 +1887,23 @@ def refresh_behavioral_briefs(*, force: bool = False, ctx: DashboardDateContext 
         diagnostics["error"] = "Behavioral cards snapshot could not be persisted and verified"
 
     if state_saved and snapshot_saved:
+        if diagnostics.get("snapshot", {}).get("publishSkipped"):
+            result_payload = _load_snapshot_payload(ctx=ctx)
+            if ctx is None:
+                with _cache_lock:
+                    _cached_payload = result_payload
+                    _cache_ts = time.time()
+            diagnostics["exitReason"] = diagnostics["snapshot"].get("publishSkipReason") or "snapshot_publish_skipped"
+            _store_refresh_diagnostics(diagnostics)
+            logger.info(
+                "Behavioral cards materialized | problems={} services={} active_problem_clusters={} active_service_clusters={}".format(
+                    len(result_payload.get("problemBriefs") or []),
+                    len(result_payload.get("serviceGapBriefs") or []),
+                    len(problem_clusters),
+                    len(service_clusters),
+                )
+            )
+            return result_payload
         if ctx is None:
             with _cache_lock:
                 _cached_payload = payload
@@ -1895,7 +1939,7 @@ def get_behavioral_briefs(*, force_refresh: bool = False, ctx: DashboardDateCont
 
     if ctx is not None:
         payload, exists = _load_snapshot_payload_with_status(ctx=ctx)
-        if exists and any(payload.values()):
+        if exists:
             if not payload.get("urgencyBriefs"):
                 payload["urgencyBriefs"] = _load_snapshot_payload().get("urgencyBriefs") or []
             return payload

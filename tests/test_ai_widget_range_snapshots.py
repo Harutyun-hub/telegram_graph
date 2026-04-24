@@ -198,6 +198,33 @@ class AiWidgetRangeSnapshotTests(unittest.TestCase):
         self.assertEqual(state["pb-1"]["status"], "rejected")
         self.assertNotIn("card", state["pb-1"])
 
+    def test_behavioral_briefs_use_exact_range_empty_snapshot_without_global_problem_fallback(self) -> None:
+        store = _FakeRuntimeStore()
+        ctx = build_dashboard_date_context("2026-04-01", "2026-04-15")
+        range_key = f"{ctx.from_date.isoformat()}__{ctx.to_date.isoformat()}"
+
+        store.save_runtime_json(
+            "behavioral_cards/latest.json",
+            {
+                "problemBriefs": [{"id": "global-p"}],
+                "serviceGapBriefs": [],
+                "urgencyBriefs": [{"id": "global-u"}],
+            },
+        )
+        store.save_runtime_json(
+            f"behavioral_cards/ranges/{range_key}/latest.json",
+            {"problemBriefs": [], "serviceGapBriefs": [], "urgencyBriefs": []},
+        )
+
+        with patch.object(behavioral_briefs, "_get_runtime_store", return_value=store), \
+             patch.object(behavioral_briefs, "_ensure_range_refresh") as ensure_mock:
+            payload = behavioral_briefs.get_behavioral_briefs(ctx=ctx)
+
+        self.assertEqual(payload["problemBriefs"], [])
+        self.assertEqual(payload["serviceGapBriefs"], [])
+        self.assertEqual(payload["urgencyBriefs"], [{"id": "global-u"}])
+        ensure_mock.assert_not_called()
+
     def test_dedupe_cards_keeps_unique_ai_cards(self) -> None:
         cards = [
             {
