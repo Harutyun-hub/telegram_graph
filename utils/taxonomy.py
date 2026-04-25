@@ -640,6 +640,43 @@ def iter_topics() -> Iterable[str]:
                 yield topic
 
 
+STRUCTURAL_TOPICS = {
+    "Media And News",
+    "Social Media Trend",
+    "Telegram Community",
+    "Bot Activity",
+}
+
+SIGNAL_TOPICS = {
+    "Community Solidarity",
+}
+
+REJECTED_TOPIC_ALIASES = {
+    "",
+    "unknown",
+    "none",
+    "n/a",
+    "general",
+}
+
+
+def get_topic_role(topic: str | None) -> str:
+    """Classify whether a topic should be visible as an issue topic."""
+    text = str(topic or "").strip()
+    if text.lower() in REJECTED_TOPIC_ALIASES:
+        return "rejected"
+    if text in STRUCTURAL_TOPICS:
+        return "structural"
+    if text in SIGNAL_TOPICS:
+        return "signal"
+    return "issue"
+
+
+def iter_non_issue_topics() -> Iterable[str]:
+    yield from STRUCTURAL_TOPICS
+    yield from SIGNAL_TOPICS
+
+
 def build_topic_maps() -> tuple[dict[str, str], dict[str, str]]:
     """Build reverse maps for topic -> category and topic -> domain."""
     topic_categories: dict[str, str] = {}

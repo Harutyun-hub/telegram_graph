@@ -6,6 +6,7 @@ from loguru import logger
 from neo4j import GraphDatabase
 
 import config
+from utils.taxonomy import iter_non_issue_topics
 
 
 def _slug(value: Any) -> str:
@@ -203,6 +204,20 @@ class SocialGraphWriter:
 
         with self.driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
             session.run(query, params).consume()
+
+    def mark_non_issue_topics_proposed(self) -> int:
+        topics = sorted(iter_non_issue_topics())
+        if not topics:
+            return 0
+        query = """
+        MATCH (t:Topic)
+        WHERE t.name IN $non_issue_topics
+        SET t.proposed = true
+        RETURN count(t) AS updated
+        """
+        with self.driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
+            result = session.run(query, {"non_issue_topics": topics}).single()
+        return int((result or {}).get("updated") or 0)
 
     @staticmethod
     def _entity_scoped_nodes(entity_id: str | None, rows: Any, key_field: str) -> list[dict[str, str]]:

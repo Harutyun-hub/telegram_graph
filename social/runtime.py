@@ -414,10 +414,27 @@ class SocialRuntimeService:
             else:
                 claimed_items = self.store.list_pending_analysis(limit=config.SOCIAL_STAGE_CLAIM_LIMIT)
 
+        child_items = [
+            item for item in claimed_items
+            if str(item.get("source_kind") or "").strip().lower() == "comment" or item.get("parent_activity_uid")
+        ]
+        if child_items:
+            self.store.mark_analysis_not_needed([str(item["id"]) for item in child_items if item.get("id")])
+        child_ids = {str(item.get("id")) for item in child_items if item.get("id")}
+        claimed_items = [item for item in claimed_items if str(item.get("id")) not in child_ids]
+        comments_by_parent = self.store.list_thread_comments(
+            [str(item.get("activity_uid") or "") for item in claimed_items],
+            limit_per_parent=config.SOCIAL_THREAD_COMMENT_LIMIT,
+        )
+        for item in claimed_items:
+            item["thread_comments"] = comments_by_parent.get(str(item.get("activity_uid") or ""), [])
+
         result = {
             "activities_total": len(claimed_items),
             "activities_analyzed": 0,
             "analysis_failures": 0,
+            "comments_marked_not_needed": len(child_items),
+            "thread_comments_included": sum(len(item.get("thread_comments") or []) for item in claimed_items),
         }
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for item in claimed_items:

@@ -186,6 +186,10 @@ def _humanize_slug(value: str) -> str:
     return " ".join(part.capitalize() for part in slug.split() if part) or "Facebook Source"
 
 
+def _is_thread_child_activity(activity: dict[str, Any]) -> bool:
+    return _trimmed(activity.get("source_kind")).lower() == "comment" or bool(_trimmed(activity.get("parent_activity_uid")))
+
+
 class SocialStore:
     """Operational data access layer for the social media activities domain."""
 
@@ -1095,7 +1099,7 @@ class SocialStore:
             "social_activities",
             columns=(
                 "id,activity_uid,text_content,ingest_status,analysis_status,graph_status,"
-                "first_seen_at,analysis_version,graph_projection_version"
+                "first_seen_at,analysis_version,graph_projection_version,parent_activity_uid,source_kind"
             ),
             filters=(("in", "activity_uid", activity_uids),),
         )
@@ -1112,15 +1116,21 @@ class SocialStore:
             ingest_status = _trimmed(activity.get("ingest_status")).lower() or "normalized"
             if ingest_status not in {"collected", "normalized", "failed", "dead_letter"}:
                 ingest_status = "normalized"
-            analysis_status = "pending" if ingest_status == "normalized" else "not_needed"
+            is_thread_child = _is_thread_child_activity(activity)
+            analysis_status = "not_needed" if is_thread_child or ingest_status != "normalized" else "pending"
             graph_status = "not_ready"
             analysis_version = _trimmed(activity.get("analysis_version")) or config.SOCIAL_ANALYSIS_PROMPT_VERSION
             normalization_version = _trimmed(activity.get("normalization_version")) or config.SOCIAL_ANALYSIS_PROMPT_VERSION
             if existing:
-                analysis_status = str(existing.get("analysis_status") or analysis_status)
-                graph_status = str(existing.get("graph_status") or graph_status)
+                if is_thread_child:
+                    analysis_status = "not_needed"
+                    graph_status = "not_ready"
+                else:
+                    analysis_status = str(existing.get("analysis_status") or analysis_status)
+                    graph_status = str(existing.get("graph_status") or graph_status)
                 if (
-                    ingest_status == "normalized"
+                    not is_thread_child
+                    and ingest_status == "normalized"
                     and (
                         text_changed
                         or _trimmed(existing.get("analysis_version")) != analysis_version
@@ -1129,7 +1139,8 @@ class SocialStore:
                     analysis_status = "pending"
                     graph_status = "not_ready"
                 elif (
-                    ingest_status == "normalized"
+                    not is_thread_child
+                    and ingest_status == "normalized"
                     and analysis_status == "analyzed"
                     and _trimmed(existing.get("graph_projection_version")) != config.SOCIAL_GRAPH_PROJECTION_VERSION
                 ):
@@ -1139,6 +1150,7 @@ class SocialStore:
                     "entity_id": activity["entity_id"],
                     "account_id": activity.get("account_id"),
                     "activity_uid": uid,
+                    "parent_activity_uid": _clean_optional(activity.get("parent_activity_uid")),
                     "platform": _normalize_platform(activity.get("platform")),
                     "source_kind": _trimmed(activity.get("source_kind")) or "post",
                     "provider_item_id": _clean_optional(activity.get("provider_item_id")),
@@ -1156,7 +1168,13 @@ class SocialStore:
                     "ingest_status": ingest_status,
                     "analysis_status": analysis_status,
                     "graph_status": graph_status,
-                    "analysis_version": analysis_version if analysis_status == "analyzed" else existing.get("analysis_version") if existing else None,
+                    "analysis_version": (
+                        analysis_version
+                        if analysis_status == "analyzed"
+                        else existing.get("analysis_version")
+                        if existing and not is_thread_child
+                        else None
+                    ),
                     "first_seen_at": existing.get("first_seen_at") if existing else now,
                     "last_seen_at": now,
                     "last_error": None if ingest_status == "normalized" else activity.get("last_error"),
@@ -1172,7 +1190,11 @@ class SocialStore:
     def list_pending_analysis(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self._select_rows(
             "social_activities",
-            filters=(("eq", "ingest_status", "normalized"),),
+            filters=(
+                ("eq", "ingest_status", "normalized"),
+                ("neq", "source_kind", "comment"),
+                ("is", "parent_activity_uid", "null"),
+            ),
             order_by="last_seen_at",
             desc=False,
             limit=limit,
@@ -1189,6 +1211,42 @@ class SocialStore:
             for row in self._select_rows("social_entities", filters=(("in", "id", list(entity_ids)),))
         } if entity_ids else {}
         return [{**row, "entity": entities.get(row["entity_id"])} for row in eligible]
+
+    def list_thread_comments(self, parent_activity_uids: list[str], *, limit_per_parent: int) -> dict[str, list[dict[str, Any]]]:
+        parent_uids = [uid for uid in dict.fromkeys(_trimmed(uid) for uid in parent_activity_uids) if uid]
+        if not parent_uids or limit_per_parent <= 0:
+            return {uid: [] for uid in parent_uids}
+        rows = self._select_rows(
+            "social_activities",
+            filters=(("in", "parent_activity_uid", parent_uids),),
+            order_by="published_at",
+            desc=False,
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {uid: [] for uid in parent_uids}
+        for row in rows:
+            parent_uid = _trimmed(row.get("parent_activity_uid"))
+            if not parent_uid or parent_uid not in grouped:
+                continue
+            if len(grouped[parent_uid]) >= limit_per_parent:
+                continue
+            grouped[parent_uid].append(row)
+        return grouped
+
+    def mark_analysis_not_needed(self, activity_ids: list[str]) -> None:
+        ids = [activity_id for activity_id in dict.fromkeys(_trimmed(value) for value in activity_ids) if activity_id]
+        if not ids:
+            return
+        self.client.table("social_activities").update(
+            {
+                "analysis_status": "not_needed",
+                "graph_status": "not_ready",
+                "analysis_claimed_at": None,
+                "analysis_claimed_by": None,
+                "graph_claimed_at": None,
+                "graph_claimed_by": None,
+                "last_error": None,
+            }
+        ).in_("id", ids).execute()
 
     def save_analysis(
         self,

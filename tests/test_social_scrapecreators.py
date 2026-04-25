@@ -94,6 +94,7 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
         self.assertEqual(normalized[0]["source_kind"], "post")
         self.assertIsNotNone(normalized[0]["published_at"])
         self.assertEqual(normalized[1]["source_kind"], "comment")
+        self.assertEqual(normalized[1]["parent_activity_uid"], normalized[0]["activity_uid"])
         self.assertEqual(normalized[1]["source_url"], "https://www.facebook.com/post-1")
 
     def test_collect_meta_ads_still_requires_id(self) -> None:

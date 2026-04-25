@@ -132,6 +132,8 @@ class SocialPostgresStore:
           SELECT sa.id
           FROM public.social_activities AS sa
           WHERE sa.ingest_status = 'normalized'
+            AND COALESCE(sa.source_kind, '') <> 'comment'
+            AND sa.parent_activity_uid IS NULL
             AND (
               sa.analysis_status IN ('pending', 'failed')
               OR COALESCE(sa.analysis_version, '') <> %s

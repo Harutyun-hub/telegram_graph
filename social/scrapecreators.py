@@ -479,7 +479,12 @@ class ScrapeCreatorsClient:
                             entity_id=entity_id,
                             account_id=account_id,
                             account=account,
-                            row={**comment, "__parent_post_url": post_url, "__parent_post_id": normalized.get("provider_item_id")},
+                            row={
+                                **comment,
+                                "__parent_activity_uid": uid,
+                                "__parent_post_url": post_url,
+                                "__parent_post_id": normalized.get("provider_item_id"),
+                            },
                         )
                         if not normalized_comment:
                             continue
@@ -584,6 +589,7 @@ class ScrapeCreatorsClient:
             "entity_id": entity_id,
             "account_id": account_id,
             "activity_uid": f"{platform}:{source_kind}:{provider_item_id}",
+            "parent_activity_uid": _coalesce(row.get("__parent_activity_uid")) if source_kind == "comment" else None,
             "platform": platform,
             "source_kind": source_kind,
             "provider_item_id": provider_item_id,

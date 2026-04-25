@@ -90,6 +90,9 @@ class SocialPostgresStoreQueryTests(unittest.TestCase):
             self.assertNotIn("LEFT JOIN public.social_processing_failures", query)
             self.assertIn("FOR UPDATE SKIP LOCKED", query)
             self.assertEqual(params, expected_params[index])
+        analysis_query = cursor.executed[1][0]
+        self.assertIn("COALESCE(sa.source_kind, '') <> 'comment'", analysis_query)
+        self.assertIn("sa.parent_activity_uid IS NULL", analysis_query)
 
     def test_claim_rows_are_json_safe_for_supabase_payloads(self) -> None:
         store, cursor = self._build_store()
@@ -123,6 +126,14 @@ class SocialFailureScopeMigrationTests(unittest.TestCase):
         self.assertIn("WHEN 'tiktok' THEN 'tiktok_profile'", migration)
         self.assertNotIn("failure.stage = 'analysis'", migration)
         self.assertNotIn("failure.stage = 'graph'", migration)
+
+    def test_thread_analysis_migration_adds_parent_activity_uid_and_marks_comments_not_needed(self) -> None:
+        migration = Path("supabase/migrations/20260425_social_thread_analysis.sql").read_text()
+
+        self.assertIn("ADD COLUMN IF NOT EXISTS parent_activity_uid", migration)
+        self.assertIn("social_activities_idx_parent_activity_uid", migration)
+        self.assertIn("source_kind = 'comment'", migration)
+        self.assertIn("analysis_status = 'not_needed'", migration)
 
 
 if __name__ == "__main__":
