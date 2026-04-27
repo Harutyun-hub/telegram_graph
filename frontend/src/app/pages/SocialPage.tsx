@@ -507,6 +507,31 @@ function buildSocialDashboardPath(params: {
   return `/social/dashboard${suffix ? `?${suffix}` : ''}`;
 }
 
+const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v1:';
+
+function socialDashboardCacheKey(path: string): string {
+  return `${SOCIAL_DASHBOARD_CACHE_PREFIX}${path}`;
+}
+
+function readCachedSocialDashboard(path: string): SocialDashboardSnapshot | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(socialDashboardCacheKey(path));
+    return raw ? JSON.parse(raw) as SocialDashboardSnapshot : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnapshot): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(socialDashboardCacheKey(path), JSON.stringify(snapshot));
+  } catch {
+    // Best-effort cache only; never block dashboard rendering on storage quota.
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // REUSABLE COMPONENTS (Dashboard-style)
 // ═══════════════════════════════════════════════════════════════
@@ -1119,18 +1144,24 @@ export function SocialPage() {
       entityId: primarySource.id,
       platform: platformFilter,
     });
+    const cachedSnapshot = readCachedSocialDashboard(path);
+    if (cachedSnapshot) {
+      setDashboard(cachedSnapshot);
+      setDashboardLoading(false);
+    } else {
+      setDashboardLoading(true);
+    }
 
-    setDashboardLoading(true);
     setDashboardError(null);
-    apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 20_000 })
+    apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 15_000 })
       .then((snapshot) => {
         if (cancelled) return;
         setDashboard(snapshot);
+        writeCachedSocialDashboard(path, snapshot);
       })
       .catch((error: Error) => {
         if (cancelled) return;
         setDashboardError(error.message || String(error));
-        setDashboard(null);
       })
       .finally(() => {
         if (!cancelled) setDashboardLoading(false);
@@ -1212,6 +1243,7 @@ export function SocialPage() {
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
   const degradedSections = dashboard?.meta?.degradedSections ?? [];
+  const dashboardWarming = Boolean(dashboardError && /warming|503/i.test(dashboardError));
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
     label: item.entity,
@@ -1312,13 +1344,15 @@ export function SocialPage() {
         {(dashboardLoading || dashboardError || degradedSections.length > 0) && (
           <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
             dashboardError
-              ? 'border-rose-200 bg-rose-50 text-rose-700'
+              ? (dashboardWarming ? 'border-blue-100 bg-blue-50 text-blue-700' : 'border-rose-200 bg-rose-50 text-rose-700')
               : degradedSections.length > 0
                 ? 'border-amber-200 bg-amber-50 text-amber-700'
                 : 'border-blue-100 bg-blue-50 text-blue-700'
           }`}>
             {dashboardError
-              ? (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`)
+              ? (dashboardWarming
+                ? (ru ? 'Социальные данные обновляются в фоне. Показан последний доступный снимок, если он есть.' : 'Social data is warming in the background. Showing the last available snapshot if one exists.')
+                : (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`))
               : dashboardLoading
                 ? (ru ? 'Загрузка реальных социальных данных...' : 'Loading real social data...')
                 : (ru ? `Часть секций загружена с ограничениями: ${degradedSections.join(', ')}` : `Some sections are degraded: ${degradedSections.join(', ')}`)}
