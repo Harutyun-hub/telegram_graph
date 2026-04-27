@@ -10,6 +10,7 @@ import {
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
 import { apiFetch } from '../services/api';
+import { translateTopicRu } from '../services/topicPresentation';
 import {
   ResponsiveContainer, LineChart, Line, AreaChart, Area,
   XAxis, YAxis, Tooltip, CartesianGrid,
@@ -59,6 +60,50 @@ const AXIS_COMMON = {
 };
 
 const GRID_COMMON = { strokeDasharray: '3 3', stroke: C.grid, vertical: false as const };
+
+const SOCIAL_LABEL_RU: Record<string, string> = {
+  'All Sources': 'Все источники',
+  Positive: 'Позитив',
+  Neutral: 'Нейтрал',
+  Negative: 'Негатив',
+  Mixed: 'Смешанная',
+  Urgent: 'Срочная',
+  Sarcastic: 'Сарказм',
+  'Total Mentions': 'Всего упоминаний',
+  'Positive Sentiment': 'Позитивная тональность',
+  'Questions Asked': 'Заданные вопросы',
+  'Ads Running': 'Активная реклама',
+  Questions: 'Вопросы',
+  Complaints: 'Жалобы',
+  Praise: 'Похвала',
+  'Purchase Intent': 'Намерение покупки',
+  Comparison: 'Сравнение',
+  'Feature Request': 'Запрос функции',
+  'Churn Signal': 'Риск ухода',
+  Acquisition: 'Привлечение',
+  Awareness: 'Осведомленность',
+  Retention: 'Удержание',
+  'Lead Gen': 'Лидогенерация',
+  'Political Support': 'Политическая поддержка',
+  'National Pride': 'Национальная гордость',
+  'Campaign Messaging': 'Кампания и сообщения',
+  'Support For Pashinyan': 'Поддержка Пашиняна',
+  'Announcement Teaser': 'Анонс',
+  'Army Readiness': 'Готовность армии',
+  'Artificial Intelligence Development': 'Развитие ИИ',
+  'Artsakh Position': 'Позиция по Арцаху',
+  'Audience Appreciation': 'Благодарность аудитории',
+  'Border Troops': 'Пограничные войска',
+  'Charitable Foundation': 'Благотворительный фонд',
+  'Church Evidence': 'Церковные свидетельства',
+  'Customer Service': 'Обслуживание клиентов',
+  'Product Quality': 'Качество продукта',
+  Pricing: 'Цены',
+  'Delivery Speed': 'Скорость доставки',
+  'App Interface': 'Интерфейс приложения',
+  Sustainability: 'Устойчивость',
+  Refunds: 'Возвраты',
+};
 
 // ═══════════════════════════════════════════════════════════════
 // TIER CONFIG  — Tailwind palette matching DashboardPage
@@ -272,7 +317,13 @@ type TopicRankingItem = TopicBubbleItem & {
   };
 };
 type TopicMomentumItem = typeof TOPIC_MOMENTUM[number];
-type SentimentTrendItem = typeof SENTIMENT_TREND[number];
+type SentimentTrendItem = typeof SENTIMENT_TREND[number] & {
+  bucket?: string;
+  total?: number;
+  mixed?: number;
+  urgent?: number;
+  sarcastic?: number;
+};
 type IntentSignalItem = typeof INTENT_SIGNALS[number];
 type SignalTrendItem = typeof SIGNAL_TREND[number];
 type TopQuestionItem = typeof TOP_QUESTIONS[number];
@@ -337,6 +388,55 @@ function colorForEntity(entity: string, index = 0) {
 
 function seriesKey(label: string) {
   return label.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'entity';
+}
+
+function translateSocialLabel(value: unknown, ru: boolean): string {
+  const label = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : String(value ?? '').trim();
+  if (!label) return '';
+  if (!ru) return label;
+  return SOCIAL_LABEL_RU[label] || translateTopicRu(label) || label;
+}
+
+function sentimentKey(value: unknown): 'positive' | 'neutral' | 'negative' {
+  const label = String(value || '').trim().toLowerCase();
+  if (label === 'positive') return 'positive';
+  if (label === 'negative') return 'negative';
+  return 'neutral';
+}
+
+function sentimentLabel(value: unknown, ru: boolean): string {
+  const key = sentimentKey(value);
+  if (!ru) return key === 'positive' ? 'Positive' : key === 'negative' ? 'Negative' : 'Neutral';
+  return key === 'positive' ? 'Позитив' : key === 'negative' ? 'Негатив' : 'Нейтрал';
+}
+
+function formatTrendDay(value: unknown, ru: boolean): string {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const parsed = new Date(`${text}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return text;
+  return parsed.toLocaleDateString(ru ? 'ru-RU' : 'en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function wrapBubbleLabel(label: string, radius: number): string[] {
+  const maxLines = radius < 32 ? 2 : 3;
+  const maxChars = Math.max(6, Math.floor(radius / 3.2));
+  const words = label.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  for (const word of words) {
+    const last = lines[lines.length - 1] || '';
+    if (!last) {
+      lines.push(word);
+    } else if (`${last} ${word}`.length <= maxChars) {
+      lines[lines.length - 1] = `${last} ${word}`;
+    } else if (lines.length < maxLines) {
+      lines.push(word);
+    } else {
+      lines[lines.length - 1] = `${last}…`;
+      break;
+    }
+  }
+  return lines.slice(0, maxLines);
 }
 
 function iconForIntent(intent: string): React.ElementType {
@@ -497,25 +597,49 @@ function PlatformToggle({ selected, onSelect }: { selected: string[]; onSelect: 
 
 function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[] }) {
   const [hovered, setHovered] = useState<string | null>(null);
-  const getSentimentColor = (s: string) => s === 'positive' ? C.emerald : s === 'negative' ? C.rose : '#64748b';
-  const getSentimentBg   = (s: string) => s === 'positive' ? `${C.emerald}cc` : s === 'negative' ? `${C.rose}cc` : '#64748bcc';
+  const getSentimentColor = (s: string) => sentimentKey(s) === 'positive' ? C.emerald : sentimentKey(s) === 'negative' ? C.rose : '#64748b';
+  const getSentimentBg = (s: string) => sentimentKey(s) === 'positive' ? `${C.emerald}cc` : sentimentKey(s) === 'negative' ? `${C.rose}dd` : '#64748bcc';
+  const bubbles = useMemo(() => {
+    const positions = [
+      [154, 118], [294, 78], [455, 132], [356, 208],
+      [88, 62], [540, 82], [136, 238], [522, 230],
+      [250, 190], [430, 256], [82, 178], [604, 170],
+    ];
+    const counts = topics.map((topic) => Number(topic.count) || 0);
+    const min = Math.min(...counts, 0);
+    const max = Math.max(...counts, 1);
+    return topics.slice(0, 12).map((topic, index) => {
+      const normalized = max === min ? 0.55 : ((Number(topic.count) || 0) - min) / Math.max(1, max - min);
+      const r = Math.round(26 + normalized * 42);
+      const [x, y] = positions[index % positions.length];
+      return { ...topic, x, y, r, displayTopic: translateSocialLabel(topic.topic, ru) };
+    });
+  }, [ru, topics]);
+
+  if (!bubbles.length) {
+    return (
+      <div className="flex h-full min-h-[290px] items-center justify-center rounded-xl bg-slate-50/70 text-sm text-slate-500">
+        {ru ? 'Нет тем за выбранный период.' : 'No topics in the selected period.'}
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full h-full min-h-[290px] rounded-xl overflow-hidden bg-slate-50/60">
-      <svg viewBox="0 0 420 265" width="100%" height="100%" className="block">
+      <svg viewBox="0 0 660 320" width="100%" height="100%" className="block">
         <defs>
-          {topics.map(b => (
-            <radialGradient key={b.topic} id={`grad-${b.topic.replace(/\s/g,'-')}`} cx="35%" cy="30%" r="65%">
+          {bubbles.map((b, index) => (
+            <radialGradient key={b.topic} id={`social-topic-grad-${index}`} cx="35%" cy="30%" r="65%">
               <stop offset="0%"   stopColor="white" stopOpacity={0.3} />
               <stop offset="100%" stopColor={getSentimentColor(b.sentiment)} stopOpacity={0} />
             </radialGradient>
           ))}
         </defs>
-        {topics.map((b) => {
+        {bubbles.map((b, index) => {
           const isHov = hovered === b.topic;
           const bgColor = getSentimentBg(b.sentiment);
-          const words = b.topic.split(' ');
-          const fs = Math.max(9, Math.min(13, b.r / 2.8));
+          const lines = wrapBubbleLabel(b.displayTopic, b.r);
+          const fs = Math.max(10, Math.min(18, b.r / 3.35));
           return (
             <g key={b.topic}
               onMouseEnter={() => setHovered(b.topic)}
@@ -524,30 +648,25 @@ function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[]
             >
               <circle cx={b.x} cy={b.y} r={b.r+(isHov?3:0)} fill={bgColor} stroke="white" strokeWidth={2.5}
                 style={{ filter: isHov ? 'drop-shadow(0 4px 8px rgba(0,0,0,0.2))' : 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))' }} />
-              <circle cx={b.x} cy={b.y} r={b.r+(isHov?3:0)} fill={`url(#grad-${b.topic.replace(/\s/g,'-')})`} />
-              {words.length === 1 ? (
-                <text x={b.x} y={b.y-3} textAnchor="middle" dominantBaseline="middle" fontSize={fs} fill="white" fontWeight="700" style={{ pointerEvents:'none' }}>{b.topic}</text>
-              ) : (
-                <>
-                  {words.slice(0,-1).map((w,i) => (
-                    <text key={i} x={b.x} y={b.y-(words.length>2?fs:fs*0.5)+i*(fs+1)} textAnchor="middle" dominantBaseline="middle" fontSize={fs} fill="white" fontWeight="700" style={{ pointerEvents:'none' }}>{w}</text>
-                  ))}
-                  <text x={b.x} y={b.y+(words.length>2?(words.length-1)*(fs+1)-fs:fs*0.6)} textAnchor="middle" dominantBaseline="middle" fontSize={fs} fill="white" fontWeight="700" style={{ pointerEvents:'none' }}>{words[words.length-1]}</text>
-                </>
-              )}
-              <text x={b.x} y={b.y+b.r-14} textAnchor="middle" fontSize={Math.max(8,fs-2)} fill="rgba(255,255,255,0.9)" fontWeight="600" style={{ pointerEvents:'none' }}>{b.count}</text>
+              <circle cx={b.x} cy={b.y} r={b.r+(isHov?3:0)} fill={`url(#social-topic-grad-${index})`} />
+              <text x={b.x} y={b.y - ((lines.length - 1) * fs * 0.55)} textAnchor="middle" dominantBaseline="middle" fontSize={fs} fill="white" fontWeight="700" style={{ pointerEvents:'none' }}>
+                {lines.map((line, lineIndex) => (
+                  <tspan key={lineIndex} x={b.x} dy={lineIndex === 0 ? 0 : fs + 1}>{line}</tspan>
+                ))}
+              </text>
+              <text x={b.x} y={b.y+b.r-12} textAnchor="middle" fontSize={Math.max(9,fs-3)} fill="rgba(255,255,255,0.92)" fontWeight="700" style={{ pointerEvents:'none' }}>{b.count}</text>
             </g>
           );
         })}
         {hovered && (() => {
-          const b = topics.find(x => x.topic === hovered)!;
-          const showLeft = b.x+b.r+130 > 415;
+          const b = bubbles.find(x => x.topic === hovered)!;
+          const showLeft = b.x+b.r+150 > 650;
           const tx = showLeft ? b.x-b.r-120 : b.x+b.r+8;
           return (
             <g style={{ pointerEvents:'none' }}>
               <rect x={tx} y={b.y-26} width={112} height={46} rx={6} fill="white" stroke={C.border} strokeWidth={1} style={{ filter:'drop-shadow(0 2px 6px rgba(0,0,0,0.1))' }} />
-              <text x={tx+56} y={b.y-10} textAnchor="middle" fontSize={10} fill="#0f172a" fontWeight="700">{b.topic}</text>
-              <text x={tx+56} y={b.y+6}  textAnchor="middle" fontSize={9}  fill={C.muted}>{b.count} {ru?'упом.':'mentions'} · {b.sentiment}</text>
+              <text x={tx+56} y={b.y-10} textAnchor="middle" fontSize={10} fill="#0f172a" fontWeight="700">{b.displayTopic}</text>
+              <text x={tx+56} y={b.y+6}  textAnchor="middle" fontSize={9}  fill={C.muted}>{b.count} {ru?'упом.':'mentions'} · {sentimentLabel(b.sentiment, ru)}</text>
             </g>
           );
         })()}
@@ -567,13 +686,32 @@ function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[]
 }
 
 function SentimentAreaChart({ ru, data }: { ru: boolean; data: SentimentTrendItem[] }) {
+  const chartData = useMemo(
+    () => data.map((item) => ({
+      ...item,
+      label: formatTrendDay(item.bucket || item.week, ru),
+      positive: Number(item.positive) || 0,
+      neutral: Number(item.neutral) || 0,
+      negative: Number(item.negative) || 0,
+    })),
+    [data, ru],
+  );
+  const maxValue = Math.max(1, ...chartData.flatMap((item) => [item.positive, item.neutral, item.negative]));
+  const yMax = Math.max(5, Math.ceil(maxValue / 5) * 5);
+  if (!chartData.length) {
+    return (
+      <div className="flex h-[260px] items-center justify-center rounded-xl bg-slate-50/70 text-sm text-slate-500">
+        {ru ? 'Нет тональности за выбранный период.' : 'No sentiment data in the selected period.'}
+      </div>
+    );
+  }
   return (
     <>
       <ResponsiveContainer width="100%" height={260}>
-        <LineChart data={data} margin={{ top:10, right:10, left:-20, bottom:0 }}>
+        <LineChart data={chartData} margin={{ top:10, right:10, left:-12, bottom:0 }}>
           <CartesianGrid {...GRID_COMMON} />
-          <XAxis dataKey="week" {...AXIS_COMMON} dy={8} />
-          <YAxis {...AXIS_COMMON} domain={[0, 60]} />
+          <XAxis dataKey="label" {...AXIS_COMMON} dy={8} interval={0} tick={{ fontSize: 10, fill: C.muted }} />
+          <YAxis {...AXIS_COMMON} domain={[0, yMax]} allowDecimals={false} />
           <Tooltip {...TOOLTIP_STYLE} />
           <Line type="monotone" dataKey="positive" stroke={C.emerald} strokeWidth={2.5} dot={{ r:4, fill:C.emerald, strokeWidth:0 }} activeDot={{ r:5 }} name={ru?'Позитив':'Positive'} />
           <Line type="monotone" dataKey="neutral"  stroke="#64748b"   strokeWidth={2.5} dot={{ r:4, fill:'#64748b', strokeWidth:0 }} activeDot={{ r:5 }} name={ru?'Нейтрал':'Neutral'} />
@@ -661,7 +799,7 @@ function TopicMomentumWidget({ ru, items }: { ru: boolean; items: TopicMomentumI
                   <span className="text-xs text-slate-400 w-4 text-center flex-shrink-0" style={{ fontWeight:600 }}>{i+1}</span>
 
                   {/* Topic name */}
-                  <span className="text-sm text-slate-700 w-36 flex-shrink-0 truncate" style={{ fontWeight:500 }}>{t.topic}</span>
+                  <span className="text-sm text-slate-700 w-36 flex-shrink-0 truncate" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
 
                   {/* Direction icon */}
                   <div className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style={{ backgroundColor:`${color}15` }}>
@@ -682,7 +820,7 @@ function TopicMomentumWidget({ ru, items }: { ru: boolean; items: TopicMomentumI
 
                   {/* Sentiment badge */}
                   <span className={`flex-shrink-0 text-[10px] px-2 py-0.5 rounded-full ${getSentBg(t.sentiment)}`} style={{ fontWeight:500, minWidth:'4.5rem', textAlign:'center' }}>
-                    {t.sentiment === 'positive' ? (ru?'Позитив':'Positive') : t.sentiment === 'negative' ? (ru?'Негатив':'Negative') : (ru?'Нейтрал':'Neutral')}
+                    {sentimentLabel(t.sentiment, ru)}
                   </span>
                 </div>
               );
@@ -1091,7 +1229,8 @@ export function SocialPage() {
   const avgPositive = sentimentByEntity.length
     ? `${Math.round(sentimentByEntity.reduce((sum, item) => sum + item.pos, 0) / sentimentByEntity.length)}%`
     : '0%';
-  const topTopic = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || (ru ? 'Нет данных' : 'No data');
+  const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
+  const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
   const degradedSections = dashboard?.meta?.degradedSections ?? [];
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
@@ -1169,7 +1308,7 @@ export function SocialPage() {
               <span className="text-xs text-slate-400">{ru?'Источник:':'Source:'}</span>
               <select value={primarySource.id} onChange={e => setPrimarySource(orgOptions.find(o=>o.id===e.target.value) || ALL_ORG)}
                 className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700" style={{ fontWeight:500 }}>
-                {orgOptions.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                {orgOptions.map(o=><option key={o.id} value={o.id}>{translateSocialLabel(o.name, ru)}</option>)}
               </select>
             </div>
             <div className="flex items-center gap-2">
@@ -1242,7 +1381,7 @@ export function SocialPage() {
 
                     <WidgetCard
                       title={ru?'Тренды тональности':'Sentiment Trends'}
-                      subtitle={ru?'По неделям (последние 5 недель)':'Weekly breakdown, last 5 weeks'}
+                      subtitle={ru?'По дням за выбранный период':'Daily breakdown for selected period'}
                     >
                       <SentimentAreaChart ru={ru} data={sentimentTrend} />
                     </WidgetCard>
@@ -1264,7 +1403,7 @@ export function SocialPage() {
                         return (
                           <div key={t.topic} className="flex items-center gap-3 group">
                             <span className="text-xs text-slate-400 w-5 text-center" style={{ fontWeight:600 }}>{i+1}</span>
-                            <span className="text-sm text-slate-700 w-36 flex-shrink-0" style={{ fontWeight:500 }}>{t.topic}</span>
+                            <span className="text-sm text-slate-700 w-36 flex-shrink-0" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
                             <div className="flex-1 h-7 bg-slate-50 rounded-lg overflow-hidden relative border border-slate-100">
                               <div className="h-full rounded-lg transition-all duration-700" style={{ width:`${(t.count/max)*100}%`, backgroundColor:col, opacity:0.75 }} />
                               <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-700" style={{ fontWeight:600 }}>{t.count}</span>
@@ -1273,7 +1412,7 @@ export function SocialPage() {
                               {engagementTotal > 0 ? `${engagementTotal} ${ru ? 'реакц.' : 'eng.'}` : '—'}
                             </span>
                             <span className={`text-[10px] px-2 py-0.5 rounded-full w-20 text-center flex-shrink-0 ${badgeCls}`} style={{ fontWeight:500 }}>
-                              {sentiment==='positive'?(ru?'Позитив':'Positive'):sentiment==='negative'?(ru?'Негатив':'Negative'):(ru?'Нейтрал':'Neutral')}
+                              {sentimentLabel(sentiment, ru)}
                             </span>
                           </div>
                         );
@@ -1301,7 +1440,7 @@ export function SocialPage() {
                             </div>
                             <DeltaBadge value={sig.delta} suffix="%" />
                           </div>
-                          <p className="text-[11px] text-slate-500 leading-tight mb-1">{sig.intent}</p>
+                          <p className="text-[11px] text-slate-500 leading-tight mb-1">{translateSocialLabel(sig.intent, ru)}</p>
                           <p className="text-xl text-slate-900" style={{ fontWeight:700 }}>{sig.count}</p>
                           <div className="mt-2.5 h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                             <div className="h-full rounded-full" style={{ width:`${sig.pct}%`, backgroundColor:sig.color }} />
@@ -1321,7 +1460,7 @@ export function SocialPage() {
                             <div key={sig.intent} className="rounded-xl border border-slate-100 overflow-hidden">
                               <div className="flex items-center gap-2.5 px-3.5 py-2.5" style={{ backgroundColor:`${sig.color}0d` }}>
                                 <Icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color:sig.color }} />
-                                <span className="text-xs text-slate-800" style={{ fontWeight:600 }}>{sig.intent}</span>
+                                <span className="text-xs text-slate-800" style={{ fontWeight:600 }}>{translateSocialLabel(sig.intent, ru)}</span>
                                 <span className="ml-auto text-[10px] text-slate-400" style={{ fontWeight:500 }}>{sig.count} {ru?'сигн.':'signals'}</span>
                               </div>
                               <div className="px-3.5 py-2 space-y-1.5 bg-white">
@@ -1376,7 +1515,7 @@ export function SocialPage() {
                               <td className="py-3 pr-4">
                                 <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[q.entity] || colorForEntity(q.entity)}15`, color:entityColors[q.entity] || colorForEntity(q.entity) }}>{q.entity}</span>
                               </td>
-                              <td className="py-3 pr-4 text-xs text-slate-500">{q.category}</td>
+                              <td className="py-3 pr-4 text-xs text-slate-500">{translateSocialLabel(q.category, ru)}</td>
                               <td className="py-3 pr-4 text-sm text-slate-700 text-right" style={{ fontWeight:700 }}>{q.count}</td>
                               <td className="py-3 pr-4">
                                 {q.trend==='up'     && <TrendingUp   className="w-4 h-4 text-rose-500" />}
@@ -1679,17 +1818,17 @@ export function SocialPage() {
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                     {weeklyShifts.map(s=>{
                       const delta = s.current - s.previous;
-                      const deltaPct = ((delta/s.previous)*100).toFixed(1);
+                      const deltaPct = s.previous ? ((delta/s.previous)*100).toFixed(1) : (delta > 0 ? '100.0' : '0.0');
                       const isGood = s.goodIfUp ? delta>0 : delta<0;
                       return (
                         <div key={s.metric} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md transition-shadow">
-                          <p className="text-[11px] text-slate-500 mb-2 leading-tight" style={{ fontWeight:500 }}>{s.metric}</p>
+                          <p className="text-[11px] text-slate-500 mb-2 leading-tight" style={{ fontWeight:500 }}>{translateSocialLabel(s.metric, ru)}</p>
                           <p className="text-xl text-slate-900" style={{ fontWeight:800 }}>{s.current}{s.unit}</p>
                           <div className="flex items-center gap-1.5 mt-1.5">
                             <span className={`text-xs ${isGood?'text-emerald-600':'text-rose-500'}`} style={{ fontWeight:700 }}>
                               {Number(deltaPct)>0?'+':''}{deltaPct}%
                             </span>
-                            <span className="text-[10px] text-slate-400">vs {s.previous}{s.unit}</span>
+                            <span className="text-[10px] text-slate-400">{ru ? 'против' : 'vs'} {s.previous}{s.unit}</span>
                           </div>
                           <div className="mt-2 h-1 bg-slate-100 rounded-full overflow-hidden">
                             <div className="h-full rounded-full" style={{ width:`${Math.min(100,Math.abs(Number(deltaPct))*5)}%`, backgroundColor:isGood?C.emerald:C.rose }} />
@@ -1706,7 +1845,7 @@ export function SocialPage() {
                           <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
                             <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
                             <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{t.topic}</span>
+                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
                               <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
                                 <div className="h-full bg-emerald-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...positiveImpact.map(item => item.mentions)))*100}%` }} />
                               </div>
@@ -1726,7 +1865,7 @@ export function SocialPage() {
                           <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
                             <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
                             <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{t.topic}</span>
+                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
                               <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
                                 <div className="h-full bg-rose-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...negativeImpact.map(item => item.mentions)))*100}%` }} />
                               </div>
