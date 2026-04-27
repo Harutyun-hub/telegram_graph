@@ -10,6 +10,7 @@ Use this skill when OpenClaw receives Telegram-community analytics questions and
 ## Trigger this skill for
 
 - Telegram community analytics and intelligence requests
+- Explicit source-management asks like `track @examplechannel`, `add this channel to tracking`, `track this Facebook page`, or `monitor this Instagram account`
 - Topic trends or declining topics
 - Sentiment or community mood
 - Problem spikes, urgent issues, or alerts
@@ -22,6 +23,7 @@ Use this skill when OpenClaw receives Telegram-community analytics questions and
 ## Core behavior
 
 - Queries the analytics API with `Authorization: Bearer $ANALYTICS_API_KEY`
+- Can add explicit tracked sources through narrow backend write endpoints
 - Returns compact JSON designed for agent consumption
 - Keeps output Telegram-friendly with `summary`, concise `bullets`, `items`, and `telegram_text`
 - Avoids tables, long prose, and raw large dumps
@@ -38,6 +40,9 @@ Use this skill when OpenClaw receives Telegram-community analytics questions and
 - Always call the CLI with `--json`
 - Use `telegram_text` as the primary user-facing reply
 - Do not paste the full JSON unless the user explicitly asks for raw output
+- Use `add_source` only when the user explicitly asks to track a source
+- If the source is ambiguous, ask for a full URL or `@handle` instead of guessing
+- Do not claim a source was added unless the backend confirms `created`, `exists`, or `reactivated`
 - If `confidence` is `low_confidence`, answer cautiously and mention that current evidence is limited
 - Prefer the existing skill actions instead of answering analytics questions from memory
 - `investigate_question` is the main bounded analyst workflow and may route to topic, channel, category, or graph context
@@ -54,6 +59,9 @@ python3 skills/telegram-analytics-bridge/scripts/bridge.py <action> [flags] --js
 - `ask_insights`
   - Use for causal or synthesis questions
   - Examples: `What is driving concern about residency permits?`, `Why are people talking about housing costs?`
+- `add_source`
+  - Use for explicit source-tracking requests
+  - Examples: `Track https://t.me/examplechannel`, `Add @examplechannel to tracking`, `Track https://facebook.com/examplepage`
 - `investigate_question`
   - Use for bounded analyst-style investigation of a user question
   - This action is intentionally low-fanout and may route to topic, channel, category, or graph context
@@ -92,6 +100,10 @@ python3 skills/telegram-analytics-bridge/scripts/bridge.py <action> [flags] --js
 
 Supported commands:
 
+- `add_source --value "@examplechannel" [--source-type telegram] [--title "Example Channel"]`
+- `add_source --value "https://facebook.com/examplepage" --source-type facebook_page`
+- `add_source --value "https://instagram.com/exampleprofile" --source-type instagram_profile`
+- `add_source --value "https://example.com" --source-type google_domain`
 - `get_top_topics --window 7d --limit 5`
 - `search_entities --query "residency permit delays" --limit 5`
 - `get_topic_detail --topic "Residency permits" --window 7d`
@@ -117,6 +129,7 @@ Supported commands:
 - Keep answers concise, professional, and evidence-oriented
 - Preserve `summary`, `bullets`, `items`, and `source_endpoints`
 - Keep investigation answers bounded and compact; do not expand into freeform multi-step analysis beyond the defined actions
+- For `add_source`, confirm only the exact backend result: created, already tracked, or reactivated
 - For graph answers, summarize the graph rather than dumping raw nodes or links
 - Do not render tables
 - Treat `confidence: "low_confidence"` as a caveated answer, not a failure
@@ -125,6 +138,6 @@ Supported commands:
 ## Notes
 
 - `window` supports `24h`, `7d`, `30d`, `90d`
-- Production defaults tolerate backend cold starts better: `timeout=35s`, `max_retries=2`, exponential backoff enabled
+- Production defaults tolerate backend cold starts better: `timeout=40s`, `max_retries=3`, exponential backoff enabled
 - The skill is intentionally API-first for graph intelligence; direct Neo4j access is out of scope for this phase
 - See [README.md](README.md) for setup, container testing, troubleshooting, and prompt guidance

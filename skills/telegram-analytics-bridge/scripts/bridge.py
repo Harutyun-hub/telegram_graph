@@ -8,6 +8,7 @@ import os
 import sys
 
 from actions import (
+    add_source,
     ask_insights,
     compare_channels,
     compare_topics,
@@ -30,6 +31,7 @@ from actions import (
 from client import AnalyticsAPIError, AnalyticsClient
 from formatters import build_error
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     ClientConfig,
     DEFAULT_BACKOFF_BASE,
@@ -95,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     sentiment.add_argument("--window", default="7d")
 
     subparsers.add_parser("get_active_alerts", parents=[common])
+
+    add_source_parser = subparsers.add_parser("add_source", parents=[common])
+    add_source_parser.add_argument("--value", required=True)
+    add_source_parser.add_argument("--source-type", default="auto")
+    add_source_parser.add_argument("--title", default=None)
 
     search = subparsers.add_parser("search_entities", parents=[common])
     search.add_argument("--query", required=True)
@@ -185,6 +192,11 @@ def main() -> int:
             payload = get_sentiment_overview(client, GetSentimentOverviewRequest(window=args.window))
         elif args.action == "get_active_alerts":
             payload = get_active_alerts(client, GetActiveAlertsRequest())
+        elif args.action == "add_source":
+            payload = add_source(
+                client,
+                AddSourceRequest(value=args.value, source_type=args.source_type, title=args.title),
+            )
         elif args.action == "search_entities":
             payload = search_entities(client, SearchEntitiesRequest(query=args.query, limit=args.limit))
         elif args.action == "get_topic_detail":

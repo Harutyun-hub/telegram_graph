@@ -19,6 +19,16 @@ class BridgeParserTests(unittest.TestCase):
         self.assertEqual(args.max_retries, 3)
         self.assertEqual(args.backoff_base, 0.75)
 
+    def test_add_source_parser_accepts_optional_source_fields(self) -> None:
+        args = build_parser().parse_args(
+            ["add_source", "--value", "@docschat", "--source-type", "telegram", "--title", "Docs Chat"]
+        )
+
+        self.assertEqual(args.action, "add_source")
+        self.assertEqual(args.value, "@docschat")
+        self.assertEqual(args.source_type, "telegram")
+        self.assertEqual(args.title, "Docs Chat")
+
 
 if __name__ == "__main__":
     unittest.main()

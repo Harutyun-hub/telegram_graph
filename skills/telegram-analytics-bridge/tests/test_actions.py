@@ -10,6 +10,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from actions import (
+    add_source,
     ask_insights,
     compare_channels,
     compare_topics,
@@ -31,6 +32,7 @@ from actions import (
 )
 from client import AnalyticsAPIError
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     CompareChannelsRequest,
     CompareTopicsRequest,
@@ -49,6 +51,7 @@ from models import (
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
 
 
@@ -312,6 +315,8 @@ class FakeClient:
         top_channels=None,
         trending_topics=None,
         node_details_by_key=None,
+        telegram_source_result=None,
+        social_source_result=None,
     ):
         self._dashboard = dashboard if dashboard is not None else load_fixture("dashboard.json")
         self._sentiments = sentiments if sentiments is not None else load_fixture("sentiments.json")
@@ -334,7 +339,27 @@ class FakeClient:
             ("category:Documents", "category"): CATEGORY_NODE_DETAIL,
             ("channel:docs-chat", "channel"): CHANNEL_NODE_DETAIL,
         }
+        self._telegram_source_result = telegram_source_result if telegram_source_result is not None else {
+            "action": "created",
+            "item": {
+                "channel_username": "@docschat",
+                "channel_title": "Docs Chat",
+                "is_active": True,
+                "resolution_status": "pending",
+            },
+        }
+        self._social_source_result = social_source_result if social_source_result is not None else {
+            "action": "exists",
+            "item": {
+                "platform": "facebook",
+                "source_kind": "facebook_page",
+                "display_url": "https://www.facebook.com/examplepage",
+                "company_name": "Examplepage",
+                "is_active": True,
+            },
+        }
         self.search_queries = []
+        self.added_sources = []
 
     def get_dashboard(self, window=None):
         return self._dashboard
@@ -363,6 +388,14 @@ class FakeClient:
         if matches:
             return matches[:limit]
         return self._search_results[:limit]
+
+    def add_telegram_source(self, channel_username, *, channel_title=None):
+        self.added_sources.append(("telegram", channel_username, channel_title))
+        return self._telegram_source_result
+
+    def add_social_source(self, source_type, value):
+        self.added_sources.append((source_type, value))
+        return self._social_source_result
 
     def get_topic_detail(self, topic, category=None, window="7d"):
         if self._topic_details_by_topic:
@@ -544,6 +577,87 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["type"], "topic_hint")
         self.assertEqual(payload["items"][0]["name"], "Residency permits")
         self.assertIn("No exact backend entities matched", payload["summary"])
+
+    def test_add_source_auto_detects_telegram_and_formats_created_response(self) -> None:
+        client = FakeClient(
+            telegram_source_result={
+                "action": "created",
+                "item": {
+                    "channel_username": "@docschat",
+                    "channel_title": "Docs Chat",
+                    "is_active": True,
+                    "resolution_status": "pending",
+                },
+            }
+        )
+
+        payload = add_source(client, AddSourceRequest(value="@docschat", source_type="auto", title="Docs Chat"))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "add_source")
+        self.assertEqual(payload["items"][0]["platform"], "telegram")
+        self.assertEqual(payload["items"][0]["source_type"], "telegram")
+        self.assertEqual(payload["items"][0]["status"], "created")
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/telegram"])
+        self.assertEqual(client.added_sources[0], ("telegram", "@docschat", "Docs Chat"))
+
+    def test_add_source_routes_social_source_type_and_formats_exists_response(self) -> None:
+        client = FakeClient(
+            social_source_result={
+                "action": "exists",
+                "item": {
+                    "platform": "facebook",
+                    "source_kind": "facebook_page",
+                    "display_url": "https://www.facebook.com/examplepage",
+                    "company_name": "Examplepage",
+                    "is_active": True,
+                },
+            }
+        )
+
+        payload = add_source(
+            client,
+            AddSourceRequest(value="https://facebook.com/examplepage", source_type="facebook_page"),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["items"][0]["platform"], "facebook")
+        self.assertEqual(payload["items"][0]["source_type"], "facebook_page")
+        self.assertEqual(payload["items"][0]["status"], "exists")
+        self.assertIn("already", payload["summary"].lower())
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/social"])
+        self.assertEqual(client.added_sources[0], ("facebook_page", "https://facebook.com/examplepage"))
+
+    def test_add_source_auto_detects_instagram_url_as_social_source(self) -> None:
+        client = FakeClient(
+            social_source_result={
+                "action": "reactivated",
+                "item": {
+                    "platform": "instagram",
+                    "source_kind": "instagram_profile",
+                    "display_url": "https://instagram.com/exampleprofile",
+                    "company_name": "Exampleprofile",
+                    "is_active": True,
+                },
+            }
+        )
+
+        payload = add_source(
+            client,
+            AddSourceRequest(value="https://instagram.com/exampleprofile", source_type="auto"),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["items"][0]["platform"], "instagram")
+        self.assertEqual(payload["items"][0]["source_type"], "instagram_profile")
+        self.assertEqual(payload["items"][0]["status"], "reactivated")
+        self.assertIn("reactivated", payload["summary"].lower())
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/social"])
+        self.assertEqual(client.added_sources[0], ("instagram_profile", "https://instagram.com/exampleprofile"))
+
+    def test_add_source_ambiguous_value_raises_validation_error(self) -> None:
+        with self.assertRaises(ValidationError):
+            add_source(self.client, AddSourceRequest(value="Dubai News", source_type="auto"))
 
     def test_get_topic_detail_normalizes_detail_payload(self) -> None:
         payload = get_topic_detail(

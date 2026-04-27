@@ -165,6 +165,32 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://analytics.example.com/api/search?query=permit&limit=4")
 
     @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_add_telegram_source_posts_expected_payload(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"action": "created", "item": {"channel_username": "@docschat"}})
+
+        payload = self.client.add_telegram_source("@docschat", channel_title="Docs Chat")
+
+        self.assertEqual(payload["action"], "created")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/agent/sources/telegram")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"channel_username": "@docschat"', request.data)
+        self.assertIn(b'"channel_title": "Docs Chat"', request.data)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_add_social_source_posts_expected_payload(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"action": "exists", "item": {"display_url": "https://facebook.com/example"}})
+
+        payload = self.client.add_social_source("facebook_page", "https://facebook.com/example")
+
+        self.assertEqual(payload["action"], "exists")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/agent/sources/social")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"source_type": "facebook_page"', request.data)
+        self.assertIn(b'"value": "https://facebook.com/example"', request.data)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
     def test_topic_detail_builds_date_range_query(self, mock_urlopen) -> None:
         mock_urlopen.return_value = FakeResponse({"name": "Residency permits"})
 

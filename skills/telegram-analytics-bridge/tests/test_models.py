@@ -10,6 +10,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     ClientConfig,
     CompareChannelsRequest,
@@ -49,6 +50,16 @@ class ModelValidationTests(unittest.TestCase):
         request = SearchEntitiesRequest(query="  residency permit delays  ", limit=3)
         self.assertEqual(request.query, "residency permit delays")
         self.assertEqual(request.limit, 3)
+
+    def test_add_source_accepts_known_source_type(self) -> None:
+        request = AddSourceRequest(value=" @docschat ", source_type="telegram", title=" Docs Chat ")
+        self.assertEqual(request.value, "@docschat")
+        self.assertEqual(request.source_type, "telegram")
+        self.assertEqual(request.title, "Docs Chat")
+
+    def test_add_source_rejects_unknown_source_type(self) -> None:
+        with self.assertRaises(ValidationError):
+            AddSourceRequest(value="@docschat", source_type="twitter")
 
     def test_topic_detail_normalizes_optional_category(self) -> None:
         request = GetTopicDetailRequest(window="7d", topic=" Residency permits ", category=" Documents ")

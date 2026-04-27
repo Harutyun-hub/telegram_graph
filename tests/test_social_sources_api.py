@@ -112,6 +112,35 @@ class _FakeSocialRuntimeControl:
         return deepcopy(self._status)
 
 
+class _FakeTelegramSourceWriter:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+        self.created_rows: list[dict] = []
+
+    def get_channel_by_handle(self, handle: str):
+        normalized = str(handle).strip().lower().lstrip("@")
+        for row in self.rows.values():
+            if str(row.get("channel_username") or "").strip().lower().lstrip("@") == normalized:
+                return deepcopy(row)
+        return None
+
+    def create_channel(self, payload: dict) -> dict:
+        row = {"id": "chan-1", **payload}
+        self.rows[row["id"]] = deepcopy(row)
+        self.created_rows.append(deepcopy(row))
+        return deepcopy(row)
+
+    def update_channel(self, channel_uuid: str, payload: dict) -> dict:
+        row = deepcopy(self.rows.get(channel_uuid, {"id": channel_uuid}))
+        row.update(payload)
+        self.rows[channel_uuid] = deepcopy(row)
+        return deepcopy(row)
+
+    def get_channel_by_id(self, channel_uuid: str) -> dict | None:
+        row = self.rows.get(channel_uuid)
+        return deepcopy(row) if row else None
+
+
 class SocialSourcesApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -177,6 +206,132 @@ class SocialSourcesApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_agent_social_source_accepts_openclaw_token(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/agent/sources/social",
+                headers={"Authorization": "Bearer openclaw-secret"},
+                json={"source_type": "facebook_page", "value": "facebook.com/nikol.pashinyan"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["action"], "created")
+
+    def test_agent_social_source_rejects_frontend_token(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/agent/sources/social",
+                headers={"Authorization": "Bearer frontend-secret"},
+                json={"source_type": "facebook_page", "value": "facebook.com/nikol.pashinyan"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_agent_social_source_accepts_admin_api_key(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/agent/sources/social",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"source_type": "instagram_profile", "value": "@unibank"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["source_kind"], "instagram_profile")
+
+    def test_agent_telegram_source_accepts_openclaw_token(self) -> None:
+        fake_writer = _FakeTelegramSourceWriter()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True), \
+             patch.object(server, "get_supabase_writer", return_value=fake_writer), \
+             patch.object(server, "ensure_resolution_job", return_value={"id": "job-1"}):
+            response = self.client.post(
+                "/api/agent/sources/telegram",
+                headers={"Authorization": "Bearer openclaw-secret"},
+                json={"channel_username": "@docschat", "channel_title": "Docs Chat"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["action"], "created")
+        self.assertEqual(response.json()["item"]["channel_username"], "@docschat")
+
+    def test_agent_telegram_source_rejects_frontend_token(self) -> None:
+        fake_writer = _FakeTelegramSourceWriter()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True), \
+             patch.object(server, "get_supabase_writer", return_value=fake_writer), \
+             patch.object(server, "ensure_resolution_job", return_value={"id": "job-1"}):
+            response = self.client.post(
+                "/api/agent/sources/telegram",
+                headers={"Authorization": "Bearer frontend-secret"},
+                json={"channel_username": "@docschat", "channel_title": "Docs Chat"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_agent_telegram_source_accepts_admin_api_key(self) -> None:
+        fake_writer = _FakeTelegramSourceWriter()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True), \
+             patch.object(server, "get_supabase_writer", return_value=fake_writer), \
+             patch.object(server, "ensure_resolution_job", return_value={"id": "job-1"}):
+            response = self.client.post(
+                "/api/agent/sources/telegram",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"channel_username": "@docschat", "channel_title": "Docs Chat"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["action"], "created")
+        self.assertEqual(response.json()["item"]["channel_title"], "Docs Chat")
+
+    def test_agent_telegram_source_reactivates_existing_inactive_channel(self) -> None:
+        fake_writer = _FakeTelegramSourceWriter()
+        fake_writer.rows["chan-1"] = {
+            "id": "chan-1",
+            "channel_username": "@docschat",
+            "channel_title": "Docs Chat",
+            "is_active": False,
+            "resolution_status": "resolved",
+        }
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ANALYTICS_API_KEY_FRONTEND", "frontend-secret"), \
+             patch.object(server.config, "ANALYTICS_API_KEY_OPENCLAW", "openclaw-secret"), \
+             patch.object(server.config, "ANALYTICS_RATE_LIMIT_ENABLED", False), \
+             patch.object(server.config, "FEATURE_SOURCE_RESOLUTION_QUEUE", True), \
+             patch.object(server, "get_supabase_writer", return_value=fake_writer), \
+             patch.object(server, "ensure_resolution_job", return_value={"id": "job-1"}):
+            response = self.client.post(
+                "/api/agent/sources/telegram",
+                headers={"Authorization": "Bearer openclaw-secret"},
+                json={"channel_username": "@docschat", "channel_title": "Docs Chat"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["action"], "reactivated")
+        self.assertTrue(response.json()["item"]["is_active"])
 
     def test_create_meta_ads_source_accepts_numeric_id(self) -> None:
         fake_store = _FakeSocialSourceStore()

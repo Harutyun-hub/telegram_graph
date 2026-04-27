@@ -8,6 +8,7 @@ SCHEMA_VERSION = "1.0"
 WindowLiteral = Literal["24h", "7d", "30d", "90d"]
 SignalFocusLiteral = Literal["all", "asks", "needs", "fear"]
 EntityTypeLiteral = Literal["auto", "topic", "category", "channel"]
+SourceTypeLiteral = Literal["auto", "telegram", "facebook_page", "instagram_profile", "google_domain"]
 DEFAULT_TIMEOUT = 40.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_BASE = 0.75
@@ -150,6 +151,18 @@ class SearchEntitiesRequest(BaseRequestModel):
     def __post_init__(self) -> None:
         self.query = _require_text(self.query, "query", min_length=2, max_length=200)
         self.limit = _validate_int_range(self.limit, "limit", ge=1, le=10)
+
+
+@dataclass
+class AddSourceRequest(BaseRequestModel):
+    value: str
+    source_type: SourceTypeLiteral = "auto"
+    title: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.value = _require_text(self.value, "value", min_length=2, max_length=2048)
+        self.source_type = _validate_literal(_clean_text(self.source_type), SourceTypeLiteral, "source_type")  # type: ignore[assignment]
+        self.title = _optional_text(self.title, "title", max_length=256)
 
 
 @dataclass
