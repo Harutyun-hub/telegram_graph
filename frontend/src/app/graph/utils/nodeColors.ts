@@ -44,10 +44,10 @@ export function getNodeLabel(type: NodeType | string): string {
 export function getNodeSize(type: NodeType | string, weight: number = 0): number {
   const safeWeight = Math.max(0, Number(weight) || 0);
   if (type === 'category') {
-    return 13 + Math.min(Math.sqrt(safeWeight) * 0.82, 14);
+    return 18 + Math.min(Math.sqrt(safeWeight) * 0.72, 16);
   }
   if (type === 'channel') {
-    return 10.5;
+    return 8.8;
   }
-  return 11 + Math.min(Math.sqrt(safeWeight) * 1.02, 20);
+  return 7 + Math.min(Math.sqrt(safeWeight) * 0.52, 8.5);
 }

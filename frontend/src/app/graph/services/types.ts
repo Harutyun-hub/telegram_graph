@@ -78,6 +78,9 @@ export interface GraphMeta {
   minMentions?: number;
   availableCategories?: string[];
   visibleTopicCount?: number;
+  totalEligibleTopicCount?: number;
+  topicLimit?: number;
+  isCurated?: boolean;
   visibleCategoryCount?: number;
   visibleChannelCount?: number;
   totalMentions?: number;
