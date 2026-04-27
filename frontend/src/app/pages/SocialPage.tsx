@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
 import {
   Users, MessageCircle, Megaphone, Heart, Hash,
   Target, BarChart3, ChevronDown, ChevronUp,
@@ -94,8 +95,16 @@ const SOCIAL_LABEL_RU: Record<string, string> = {
   'Artsakh Position': 'Позиция по Арцаху',
   'Audience Appreciation': 'Благодарность аудитории',
   'Border Troops': 'Пограничные войска',
+  'Border Troops Ceremony': 'Церемония пограничных войск',
   'Charitable Foundation': 'Благотворительный фонд',
   'Church Evidence': 'Церковные свидетельства',
+  'Church Evidence Debate': 'Дискуссия о церковных свидетельствах',
+  'Citizen S Day': 'День гражданина',
+  'City Leadership Criticism': 'Критика городского руководства',
+  'Community Education Event': 'Образовательное событие сообщества',
+  'Concert Programming': 'Концертная программа',
+  'Corruption Allegation': 'Обвинения в коррупции',
+  'Crowd Size Debate': 'Спор о численности участников',
   'Customer Service': 'Обслуживание клиентов',
   'Product Quality': 'Качество продукта',
   Pricing: 'Цены',
@@ -595,7 +604,7 @@ function PlatformToggle({ selected, onSelect }: { selected: string[]; onSelect: 
 // VISUALIZATION COMPONENTS
 // ═══════════════════════════════════════════════════════════════
 
-function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[] }) {
+function TopicBubbleViz({ ru, topics, onTopicSelect }: { ru: boolean; topics: TopicBubbleItem[]; onTopicSelect: (topic: string) => void }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const getSentimentColor = (s: string) => sentimentKey(s) === 'positive' ? C.emerald : sentimentKey(s) === 'negative' ? C.rose : '#64748b';
   const getSentimentBg = (s: string) => sentimentKey(s) === 'positive' ? `${C.emerald}cc` : sentimentKey(s) === 'negative' ? `${C.rose}dd` : '#64748bcc';
@@ -642,8 +651,18 @@ function TopicBubbleViz({ ru, topics }: { ru: boolean; topics: TopicBubbleItem[]
           const fs = Math.max(10, Math.min(18, b.r / 3.35));
           return (
             <g key={b.topic}
+              role="button"
+              tabIndex={0}
+              aria-label={`${ru ? 'Открыть тему' : 'Open topic'} ${b.displayTopic}`}
               onMouseEnter={() => setHovered(b.topic)}
               onMouseLeave={() => setHovered(null)}
+              onClick={() => onTopicSelect(b.topic)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onTopicSelect(b.topic);
+                }
+              }}
               style={{ cursor: 'pointer', transition: 'transform 0.15s ease', transform: isHov ? 'translate(0,-3px)' : 'translate(0,0)', transformOrigin: `${b.x}px ${b.y}px` }}
             >
               <circle cx={b.x} cy={b.y} r={b.r+(isHov?3:0)} fill={bgColor} stroke="white" strokeWidth={2.5}
@@ -761,74 +780,6 @@ function SignalTrendChart({ ru, data }: { ru: boolean; data: SignalTrendItem[] }
       </ResponsiveContainer>
       <ChartLegend items={series.map(s => ({ label:s.label, color:s.color }))} />
     </>
-  );
-}
-
-/** Topic Momentum — direction arrow + velocity badges */
-function TopicMomentumWidget({ ru, items }: { ru: boolean; items: TopicMomentumItem[] }) {
-  const maxCount = Math.max(1, ...items.map(t => t.w5));
-
-  const getSentColor = (s: string) => s === 'positive' ? C.emerald : s === 'negative' ? C.rose : '#64748b';
-  const getSentBg    = (s: string) => s === 'positive' ? 'bg-emerald-50 text-emerald-700' : s === 'negative' ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-600';
-
-  return (
-    <WidgetCard
-      title={ru ? 'Моментум тем' : 'Topic Momentum'}
-      subtitle={ru ? 'Скорость роста и тренд за 5 недель' : 'Growth velocity & 5-week trend direction'}
-      headerRight={<span className="text-[11px] text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full" style={{ fontWeight:500 }}>{ru ? '5 нед.' : '5 weeks'}</span>}
-    >
-      <div className="overflow-x-auto -mx-5 px-5">
-        <div className="min-w-[560px]">
-          {/* Column headers */}
-          <div className="flex items-center gap-3 pb-2 mb-1 border-b border-slate-100">
-            <span className="text-[10px] text-slate-400 w-4 text-center flex-shrink-0" style={{ fontWeight:600 }}>#</span>
-            <span className="text-[10px] text-slate-400 w-36 flex-shrink-0" style={{ fontWeight:600 }}>{ru ? 'Тема' : 'Topic'}</span>
-            <span className="text-[10px] text-slate-400 w-9 flex-shrink-0 text-center" style={{ fontWeight:600 }}>{ru ? 'Нпр.' : 'Dir.'}</span>
-            <span className="text-[10px] text-slate-400 flex-1" style={{ fontWeight:600 }}>{ru ? 'Кол-во' : 'Volume'}</span>
-            <span className="text-[10px] text-slate-400 flex-shrink-0 text-right" style={{ fontWeight:600, minWidth:'4rem' }}>{ru ? 'Скор.' : 'Velocity'}</span>
-            <span className="text-[10px] text-slate-400 flex-shrink-0 text-center" style={{ fontWeight:600, minWidth:'4.5rem' }}>{ru ? 'Тон.' : 'Sentiment'}</span>
-          </div>
-
-          <div className="space-y-2">
-            {[...items].sort((a, b) => Math.abs(b.velocity) - Math.abs(a.velocity)).map((t, i) => {
-              const color = getSentColor(t.sentiment);
-              const isUp = t.velocity > 0;
-              const TrendIcon = isUp ? TrendingUp : TrendingDown;
-              return (
-                <div key={t.topic} className="flex items-center gap-3 py-2 border-b border-slate-50 last:border-0 group hover:bg-slate-50/60 -mx-1 px-1 rounded-lg transition-colors">
-                  <span className="text-xs text-slate-400 w-4 text-center flex-shrink-0" style={{ fontWeight:600 }}>{i+1}</span>
-
-                  {/* Topic name */}
-                  <span className="text-sm text-slate-700 w-36 flex-shrink-0 truncate" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-
-                  {/* Direction icon */}
-                  <div className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center" style={{ backgroundColor:`${color}15` }}>
-                    <TrendIcon className="w-5 h-5" style={{ color }} />
-                  </div>
-
-                  {/* Bar track */}
-                  <div className="flex-1 h-6 bg-slate-50 rounded-lg overflow-hidden border border-slate-100 relative">
-                    <div className="h-full rounded-lg transition-all duration-700" style={{ width:`${(t.w5/maxCount)*100}%`, backgroundColor:`${color}30`, borderLeft:`3px solid ${color}` }} />
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-700" style={{ fontWeight:600 }}>{t.w5}</span>
-                  </div>
-
-                  {/* Velocity */}
-                  <div className={`flex-shrink-0 flex items-center gap-0.5 text-xs ${isUp ? 'text-emerald-600' : 'text-rose-500'}`} style={{ fontWeight:700, minWidth:'4rem', justifyContent:'flex-end' }}>
-                    {isUp ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
-                    {isUp?'+':''}{t.velocity}%
-                  </div>
-
-                  {/* Sentiment badge */}
-                  <span className={`flex-shrink-0 text-[10px] px-2 py-0.5 rounded-full ${getSentBg(t.sentiment)}`} style={{ fontWeight:500, minWidth:'4.5rem', textAlign:'center' }}>
-                    {sentimentLabel(t.sentiment, ru)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </WidgetCard>
   );
 }
 
@@ -1116,6 +1067,7 @@ function AdScrapeTable({ ru, items }: { ru: boolean; items: ScrapedAd[] }) {
 export function SocialPage() {
   const { lang } = useLanguage();
   const { range, ready: dateRangeReady } = useSocialDateRange();
+  const navigate = useNavigate();
   const ru = lang === 'ru';
 
   const [dashboard, setDashboard] = useState<SocialDashboardSnapshot | null>(null);
@@ -1199,6 +1151,11 @@ export function SocialPage() {
     ? dashboard.deepAnalysis.topicRanking
     : topicBubbles;
   const topicMomentum = dashboard?.deepAnalysis?.topicMomentum ?? [];
+  const momentumByTopic = useMemo(() => {
+    const map = new Map<string, TopicMomentumItem>();
+    topicMomentum.forEach((item) => map.set(item.topic.toLowerCase(), item));
+    return map;
+  }, [topicMomentum]);
   const sentimentTrend = dashboard?.deepAnalysis?.sentimentTrend ?? [];
   const intentSignals = (dashboard?.deepAnalysis?.intentSignals ?? []).map((signal: any) => ({
     ...signal,
@@ -1238,6 +1195,11 @@ export function SocialPage() {
     color: entityColors[item.entity] || colorForEntity(item.entity, index),
   }));
   const radarSeries = chartSeries.slice(0, 3);
+  const openSocialTopic = (topic: string) => {
+    const clean = topic.trim();
+    if (!clean) return;
+    navigate(`/social/topics?topic=${encodeURIComponent(clean)}&view=evidence`);
+  };
 
   // ── Tier configs (Tailwind classes — matches DashboardPage palette) ──
   const TIERS: Record<string, TierDef> = {
@@ -1375,7 +1337,7 @@ export function SocialPage() {
                       subtitle={ru?'Размер = кол-во упоминаний · Цвет = тональность':'Size = mention count · Color = sentiment'}
                     >
                       <div className="h-[290px]">
-                        <TopicBubbleViz ru={ru} topics={topicBubbles} />
+                        <TopicBubbleViz ru={ru} topics={topicBubbles} onTopicSelect={openSocialTopic} />
                       </div>
                     </WidgetCard>
 
@@ -1389,8 +1351,8 @@ export function SocialPage() {
 
                   {/* Topic ranking list */}
                   <WidgetCard
-                    title={ru?'Рейтинг тем':'Topic Ranking'}
-                    subtitle={ru?'Топ темы по числу упоминаний':'Top topics by mention count'}
+                    title={ru?'Рейтинг и моментум тем':'Topic Ranking & Momentum'}
+                    subtitle={ru?'Топ темы по упоминаниям, динамике и вовлечённости':'Top topics by mentions, movement, and engagement'}
                     headerRight={<span className="text-xs text-slate-400">{ru?'Последние 30 дней':'Last 30 days'}</span>}
                   >
                     <div className="space-y-2.5">
@@ -1398,30 +1360,41 @@ export function SocialPage() {
                         const max = Math.max(1, topicRanking.reduce((m,x)=>Math.max(m,x.count),0));
                         const sentiment = t.dominantSentiment || t.sentiment;
                         const engagementTotal = t.strictMetrics?.engagementTotal ?? 0;
+                        const momentum = momentumByTopic.get(t.topic.toLowerCase());
+                        const velocity = momentum?.velocity ?? t.growthPct ?? 0;
+                        const hasMomentum = Boolean(momentum || t.growthReliable);
+                        const isUp = velocity >= 0;
                         const col = sentiment==='positive'?C.emerald:sentiment==='negative'?C.rose:'#64748b';
                         const badgeCls = sentiment==='positive'?'bg-emerald-50 text-emerald-700':sentiment==='negative'?'bg-rose-50 text-rose-700':'bg-slate-100 text-slate-600';
                         return (
-                          <div key={t.topic} className="flex items-center gap-3 group">
+                          <button
+                            key={t.topic}
+                            type="button"
+                            onClick={() => openSocialTopic(t.topic)}
+                            className="w-full flex items-center gap-3 group rounded-lg py-1.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                            aria-label={`${ru ? 'Открыть тему' : 'Open topic'} ${translateSocialLabel(t.topic, ru)}`}
+                          >
                             <span className="text-xs text-slate-400 w-5 text-center" style={{ fontWeight:600 }}>{i+1}</span>
                             <span className="text-sm text-slate-700 w-36 flex-shrink-0" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
                             <div className="flex-1 h-7 bg-slate-50 rounded-lg overflow-hidden relative border border-slate-100">
                               <div className="h-full rounded-lg transition-all duration-700" style={{ width:`${(t.count/max)*100}%`, backgroundColor:col, opacity:0.75 }} />
                               <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-700" style={{ fontWeight:600 }}>{t.count}</span>
                             </div>
+                            <span className={`text-[10px] w-20 text-right flex-shrink-0 inline-flex items-center justify-end gap-0.5 ${hasMomentum ? (isUp ? 'text-emerald-600' : 'text-rose-500') : 'text-slate-400'}`} style={{ fontWeight:700 }}>
+                              {hasMomentum ? (isUp ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />) : null}
+                              {hasMomentum ? `${isUp ? '+' : ''}${Number(velocity).toFixed(1)}%` : '—'}
+                            </span>
                             <span className="text-[10px] text-slate-500 w-20 text-right flex-shrink-0">
                               {engagementTotal > 0 ? `${engagementTotal} ${ru ? 'реакц.' : 'eng.'}` : '—'}
                             </span>
                             <span className={`text-[10px] px-2 py-0.5 rounded-full w-20 text-center flex-shrink-0 ${badgeCls}`} style={{ fontWeight:500 }}>
                               {sentimentLabel(sentiment, ru)}
                             </span>
-                          </div>
+                          </button>
                         );
                       })}
                     </div>
                   </WidgetCard>
-
-                  {/* NEW: Topic Momentum */}
-                  <TopicMomentumWidget ru={ru} items={topicMomentum} />
                 </div>
               )}
 
