@@ -90,7 +90,7 @@ export function GraphLegend() {
               ))}
             </div>
             <p className="text-white/40 text-[9px] leading-relaxed pt-1 border-t border-white/10">
-              Topics and categories are sized by importance. Channels stay fixed as source context markers.
+              Topics and categories are sized by importance. Channels connect to the topics they share.
             </p>
           </div>
         </div>

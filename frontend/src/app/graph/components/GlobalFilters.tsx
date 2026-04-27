@@ -1,9 +1,10 @@
-import { ChevronLeft, Filter, Radio, RotateCcw, Search, SlidersHorizontal } from 'lucide-react';
+import { ChevronLeft, Filter, Radio, RotateCcw, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Checkbox } from '@/app/components/ui/checkbox';
 import { FreshnessBadge } from '@/app/graph/components/FreshnessBadge';
 import { getAllChannels, type TopChannel } from '@/app/graph/services/api';
-import type { GraphFilters, GraphFreshnessMeta, RankingMode, SignalFocus, SourceDetail } from '@/app/graph/services/types';
+import type { GraphData, GraphFilters, GraphFreshnessMeta, RankingMode, SignalFocus, SourceDetail } from '@/app/graph/services/types';
+import { buildGraphHighlights } from '@/app/graph/utils/highlights';
 
 const SENTIMENT_OPTIONS = [
   { value: 'Positive', label: 'Positive', accent: 'border-emerald-400/30 bg-emerald-400/15 text-emerald-100' },
@@ -41,6 +42,7 @@ interface GlobalFiltersProps {
   onFiltersChange: (filters: GraphFilters) => void;
   onSearchSelect?: (nodeId: string) => void;
   allNodes?: Array<{ id: string; name: string; type: string }>;
+  graphData?: GraphData | null;
 }
 
 const DEFAULT_FILTERS: GraphFilters = {
@@ -73,6 +75,7 @@ export function GlobalFilters({
   onFiltersChange,
   onSearchSelect,
   allNodes = [],
+  graphData = null,
 }: GlobalFiltersProps) {
   const [selectedChannels, setSelectedChannels] = useState<string[]>(filters.channels || []);
   const [selectedSentiments, setSelectedSentiments] = useState<string[]>(filters.sentiments || []);
@@ -141,6 +144,8 @@ export function GlobalFilters({
       ? allChannels
       : allChannels.filter((channel) => channel.name.toLowerCase().includes(query));
   }, [allChannels, channelQuery]);
+
+  const highlights = useMemo(() => buildGraphHighlights(graphData), [graphData]);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
@@ -276,6 +281,27 @@ export function GlobalFilters({
                 </div>
               )}
             </section>
+
+            {highlights.length > 0 && (
+              <section className="border-b border-white/10 pb-5">
+                <SectionTitle icon={<Sparkles className="h-4 w-4 text-cyan-300/80" />} title="Highlights" />
+                <div className="mt-3 space-y-2">
+                  {highlights.map((highlight) => (
+                    <button
+                      key={highlight.kind}
+                      onClick={() => onSearchSelect?.(highlight.nodeId)}
+                      className="w-full rounded-[18px] border border-white/10 bg-white/5 px-3.5 py-3 text-left transition-colors hover:border-cyan-300/25 hover:bg-cyan-500/10"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-white/42">{highlight.title}</span>
+                        <span className="shrink-0 text-[11px] font-semibold text-cyan-200">{highlight.metric}</span>
+                      </div>
+                      <div className="mt-1.5 truncate text-[13px] font-medium text-white/88">{highlight.name}</div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section className="border-b border-white/10 pb-5">
               <SectionTitle icon={<Radio className="h-4 w-4 text-white/55" />} title="Sentiment" />

@@ -159,6 +159,7 @@ export function GraphDashboard() {
         onFiltersChange={setFilters}
         onSearchSelect={handleSearchSelect}
         allNodes={allNodes}
+        graphData={graphData}
       />
 
       {graphAiEnabled ? (

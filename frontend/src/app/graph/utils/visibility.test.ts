@@ -13,6 +13,7 @@ const graphData: GraphData = {
   links: [
     { source: 'category:Security', target: 'topic:Border', value: 20, type: 'category-topic' },
     { source: 'channel:one', target: 'category:Security', value: 5, type: 'channel-category' },
+    { source: 'channel:one', target: 'topic:Border', value: 5, type: 'channel-topic' },
   ],
 };
 
@@ -29,21 +30,11 @@ describe('buildVisibleGraphData', () => {
     expect(visible?.links.some((link) => link.type === 'category-topic')).toBe(true);
   });
 
-  it('adds focused channel-topic context without hiding other topics', () => {
-    const visible = buildVisibleGraphData(
-      {
-        ...graphData,
-        nodes: graphData.nodes.map((node) => (
-          node.id === 'topic:Border'
-            ? { ...node, topChannels: [{ id: 'channel:one', name: 'One', mentions: 5 }] }
-            : node
-        )),
-      },
-      'category:Security',
-      { sourceDetail: 'standard' },
-    );
+  it('preserves real channel-topic links without adding synthetic click links', () => {
+    const visible = buildVisibleGraphData(graphData, 'category:Security', { sourceDetail: 'standard' });
 
     expect(visible?.nodes.some((node) => node.id === 'topic:Permits')).toBe(true);
-    expect(visible?.links.some((link) => link.type === 'channel-topic-context')).toBe(true);
+    expect(visible?.links.some((link) => link.type === 'channel-topic')).toBe(true);
+    expect(visible?.links.some((link) => link.type === 'channel-topic-context')).toBe(false);
   });
 });
