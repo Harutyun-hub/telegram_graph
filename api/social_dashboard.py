@@ -689,12 +689,17 @@ def _cache_key(filters: dict[str, Any]) -> str:
 def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     started = time.perf_counter()
     activity_filters: list[tuple[str, str, Any]] = []
+    start_bound, end_bound = _range_bounds(filters.get("from"), filters.get("to"))
     if filters.get("entity_id"):
         activity_filters.append(("eq", "entity_id", filters["entity_id"]))
     if filters.get("platform") and filters.get("platform") != "all":
         activity_filters.append(("eq", "platform", filters["platform"]))
     if filters.get("source_kind") and filters.get("source_kind") != "all":
         activity_filters.append(("eq", "source_kind", filters["source_kind"]))
+    if start_bound:
+        activity_filters.append(("gte", "published_at", start_bound.isoformat()))
+    if end_bound:
+        activity_filters.append(("lte", "published_at", end_bound.isoformat()))
     activities = store._select_rows(
         "social_activities",
         columns=(
@@ -704,7 +709,7 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
             "last_seen_at,created_at"
         ),
         filters=activity_filters,
-        order_by="last_seen_at",
+        order_by="published_at",
         desc=True,
         limit=ACTIVITY_SCAN_LIMIT,
     )

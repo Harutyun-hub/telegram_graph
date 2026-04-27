@@ -170,6 +170,10 @@ class _FakeSocialDashboardStore:
                 filtered = [row for row in filtered if row.get(column) == value]
             elif op == "in":
                 filtered = [row for row in filtered if row.get(column) in value]
+            elif op == "gte":
+                filtered = [row for row in filtered if row.get(column) and row.get(column) >= value]
+            elif op == "lte":
+                filtered = [row for row in filtered if row.get(column) and row.get(column) <= value]
         return filtered[:limit] if limit is not None else filtered
 
     def get_topic_metric_enrichment(self, topic_names, **_kwargs) -> dict:

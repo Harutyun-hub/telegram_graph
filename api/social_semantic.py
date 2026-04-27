@@ -295,7 +295,7 @@ def get_sentiment_trend(
         "platform": _platform_filter(platform),
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
     }
-    cache_key = ("sentiment_trend_v1", _cacheable_params(params))
+    cache_key = ("sentiment_trend_v2_day", _cacheable_params(params))
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -311,7 +311,7 @@ def get_sentiment_trend(
         OR EXISTS { MATCH (:TrackedEntity {id: $entity_id})-[:HAS_ACTIVITY]->(a) }
       )
     WITH
-      toString(date.truncate('week', date(a.published_at))) AS bucket,
+      toString(date(a.published_at)) AS bucket,
       toLower(coalesce(s.name, 'neutral')) AS sentiment,
       count(DISTINCT a) AS hits
     RETURN bucket, sentiment, hits
@@ -340,10 +340,23 @@ def get_sentiment_trend(
         item["bucket"] = bucket
         item[sentiment] += hits
         item["total"] += hits
+    start_day = datetime.fromisoformat(start).date()
+    end_day = datetime.fromisoformat(end).date()
+    items: list[dict[str, Any]] = []
+    total_days = (end_day - start_day).days + 1
+    if 0 < total_days <= 366:
+        for offset in range(total_days):
+            key = (start_day + timedelta(days=offset)).isoformat()
+            item = buckets[key]
+            item["bucket"] = key
+            items.append(item)
+    else:
+        items = [buckets[key] for key in sorted(buckets.keys())]
+
     return _cache_set(
         cache_key,
         {
-            "items": [buckets[key] for key in sorted(buckets.keys())],
-            "meta": {"source": "neo4j", "bucket": "week", "window": {"from": start, "to": end}},
+            "items": items,
+            "meta": {"source": "neo4j", "bucket": "day", "window": {"from": start, "to": end}},
         },
     )
