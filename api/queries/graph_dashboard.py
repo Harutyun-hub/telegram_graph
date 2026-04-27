@@ -855,6 +855,7 @@ def _build_channel_nodes(
 
     channel_nodes: dict[str, dict[str, Any]] = {}
     links: dict[tuple[str, str], dict[str, Any]] = {}
+    visible_channel_categories: set[tuple[str, str]] = set()
     category_buckets: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for pair in category_channel_scores.values():
         if pair["id"] in allowed_channel_ids:
@@ -882,11 +883,31 @@ def _build_channel_nodes(
             node["mentionCount"] = _to_int(node.get("mentionCount")) + mentions
             node["topicCount"] = _to_int(node.get("topicCount")) + 1
             node["_categories"].add(category_name)
+            visible_channel_categories.add((channel_id, category_name))
             links[(channel_id, _category_label_id(category_name))] = {
                 "source": channel_id,
                 "target": _category_label_id(category_name),
                 "value": mentions,
                 "type": "channel-category",
+            }
+
+    visible_channel_ids = set(channel_nodes.keys())
+    per_topic_limit = max(per_category_limit * 2, 3)
+    for topic in visible_topics:
+        topic_id = str(topic.get("id") or "").strip()
+        if not topic_id:
+            continue
+        for channel in (topic.get("topChannels") or [])[:per_topic_limit]:
+            channel_id = str(channel.get("id") or "").strip()
+            category_name = _safe_name(topic.get("category"), "General")
+            if channel_id not in visible_channel_ids or (channel_id, category_name) not in visible_channel_categories:
+                continue
+            mentions = max(1, _to_int(channel.get("mentions"), 1))
+            links[(channel_id, topic_id)] = {
+                "source": channel_id,
+                "target": topic_id,
+                "value": mentions,
+                "type": "channel-topic",
             }
 
     for node in channel_nodes.values():

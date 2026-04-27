@@ -187,6 +187,14 @@ class GraphDashboardDataTests(unittest.TestCase):
         self.assertEqual(topics[0]["trendPct"], 42.5)
         self.assertEqual(topics[0]["sentimentNegative"], 70)
         self.assertEqual(topics[0]["topChannels"][0]["name"], "One")
+        self.assertTrue(any(link["type"] == "category-topic" for link in graph["links"]))
+        self.assertTrue(any(
+            link["type"] == "channel-topic"
+            and link["source"] == "channel:one"
+            and link["target"] == "topic:Alpha"
+            and link["value"] == 15
+            for link in graph["links"]
+        ))
         self.assertEqual(graph["meta"]["visibleTopicCount"], 12)
         self.assertEqual(graph["meta"]["totalEligibleTopicCount"], 13)
         self.assertEqual(graph["meta"]["topicLimit"], 12)
