@@ -12,6 +12,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import type { Lang } from '../contexts/LanguageContext';
 import { useData } from '../contexts/DataContext';
 import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { AIAssistant } from '../components/AIAssistant';
 import {
@@ -217,11 +218,15 @@ export function AdminLayout() {
     displayRange,
     refresh,
   } = useData();
-  const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = useDashboardDateRange();
+  const dashboardDateRange = useDashboardDateRange();
+  const socialDateRange = useSocialDateRange();
   const ru = lang === 'ru';
   const isMobile = useIsMobile();
   const isGraphRoute = location.pathname.startsWith('/graph');
   const isSocialRoute = location.pathname.startsWith('/social');
+  const { range, ready, trustedEndDate, freshness, setPreset, setCustomRange } = isSocialRoute
+    ? socialDateRange
+    : dashboardDateRange;
   // UI state
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showMobileDatePicker, setShowMobileDatePicker] = useState(false);
@@ -250,8 +255,9 @@ export function AdminLayout() {
     { id: 'last_3_months', label: ru ? 'Последние 3 месяца' : 'Last 3 months' },
     { id: 'last_6_months', label: ru ? 'Последние 6 месяцев' : 'Last 6 months' },
   ];
-  const displayedRangeDays = displayRange?.days ?? range.days;
-  const showsPreviousSnapshot = isRefreshing && displayedRangeDays !== range.days;
+  const displayedRangeDays = isSocialRoute ? range.days : (displayRange?.days ?? range.days);
+  const showsPreviousSnapshot = !isSocialRoute && isRefreshing && displayedRangeDays !== range.days;
+  const datePickerRefreshing = !isSocialRoute && isRefreshing;
 
   useEffect(() => {
     setDraftFrom(range.from);
@@ -371,8 +377,8 @@ export function AdminLayout() {
   }, [draftFrom, draftTo, setCustomRange]);
   const dateHelperText = isSocialRoute
     ? (ru
-      ? 'Диапазон общий для Telegram и Social. Актуальность Social показана на самой странице.'
-      : 'This date range is shared across Telegram and Social. Social freshness is shown on the page itself.')
+      ? 'Диапазон Social независим от актуальности Telegram.'
+      : 'Social date range is independent from Telegram freshness.')
     : (freshness?.trustedEndLabel || (ru ? `Надёжные данные до ${formatDisplayDate(trustedEndDate, lang)}` : `Trusted data through ${formatDisplayDate(trustedEndDate, lang)}`));
 
   // Date picker content (shared between desktop dropdown and mobile sheet)
@@ -534,11 +540,11 @@ export function AdminLayout() {
           {/* Date picker */}
           <div className={`relative ${isGraphRoute ? 'ml-3' : 'ml-4'}`} ref={datePickerRef}>
             <button onClick={() => setShowDatePicker(!showDatePicker)}
-              title={isRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
+              title={datePickerRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
               className={`flex items-center gap-2 rounded-lg border transition-colors ${isGraphRoute ? 'px-3 py-1.5 text-[13px]' : 'px-3 py-2 text-sm'} ${showDatePicker ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
               <Calendar className={isGraphRoute ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
               {activeRange ? activeRange.label : `${formatDisplayDate(range.from, lang)} — ${formatDisplayDate(range.to, lang)}`}
-              {isRefreshing && (
+              {datePickerRefreshing && (
                 <Loader2
                   className="w-4 h-4 animate-spin text-blue-600"
                   aria-label={ru ? 'Обновление дашборда' : 'Updating dashboard'}
@@ -639,11 +645,11 @@ export function AdminLayout() {
             {/* Date filter */}
             <button
               onClick={() => { setShowMobileDatePicker(v => !v); setShowNotifications(false); setShowAccount(false); }}
-              title={isRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
+              title={datePickerRefreshing ? (ru ? 'Обновляем дашборд для выбранного периода' : 'Updating dashboard for selected range') : undefined}
               className={`relative p-2 rounded-xl transition-colors ${showMobileDatePicker ? 'bg-blue-50' : 'hover:bg-gray-100 active:bg-gray-200'}`}
             >
               <Calendar className={`w-5 h-5 ${showMobileDatePicker ? 'text-blue-600' : 'text-gray-600'}`} />
-              {isRefreshing ? (
+              {datePickerRefreshing ? (
                 <Loader2
                   className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 animate-spin text-blue-600 bg-white rounded-full"
                   aria-label={ru ? 'Обновление дашборда' : 'Updating dashboard'}

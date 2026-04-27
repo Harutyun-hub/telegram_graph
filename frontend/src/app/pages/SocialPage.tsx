@@ -8,7 +8,7 @@ import {
   Compass, Flame, Zap, Globe, Star, Layers
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useDashboardDateRange } from '../contexts/DashboardDateRangeContext';
+import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
 import { apiFetch } from '../services/api';
 import {
   ResponsiveContainer, LineChart, Line, AreaChart, Area,
@@ -977,7 +977,7 @@ function AdScrapeTable({ ru, items }: { ru: boolean; items: ScrapedAd[] }) {
 
 export function SocialPage() {
   const { lang } = useLanguage();
-  const { range, ready: dateRangeReady } = useDashboardDateRange();
+  const { range, ready: dateRangeReady } = useSocialDateRange();
   const ru = lang === 'ru';
 
   const [dashboard, setDashboard] = useState<SocialDashboardSnapshot | null>(null);

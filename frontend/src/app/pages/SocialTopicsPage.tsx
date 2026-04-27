@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useLanguage } from '@/app/contexts/LanguageContext';
-import { useDashboardDateRange } from '@/app/contexts/DashboardDateRangeContext';
+import { useSocialDateRange } from '@/app/contexts/SocialDateRangeContext';
 import { PageInfoButton, type PageInfoCopy } from '@/app/components/ui/PageInfoButton';
 import { SocialAccessDeniedState } from '@/app/components/widgets/SocialShared';
 import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } from '@/app/services/topicPresentation';
@@ -310,7 +310,7 @@ function buildSocialOverview(
 
 export function SocialTopicsPage() {
   const { lang } = useLanguage();
-  const { range } = useDashboardDateRange();
+  const { range } = useSocialDateRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const ru = lang === 'ru';
 
