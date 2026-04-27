@@ -257,6 +257,20 @@ const SCORECARD = [
 ];
 
 type TopicBubbleItem = typeof TOPIC_BUBBLES[number];
+type TopicRankingItem = TopicBubbleItem & {
+  dominantSentiment?: string;
+  growthPct?: number | null;
+  growthReliable?: boolean;
+  strictMetrics?: {
+    engagementTotal?: number;
+    likes?: number;
+    comments?: number;
+    shares?: number;
+    views?: number;
+    reactions?: number;
+    evidenceCount?: number;
+  };
+};
 type TopicMomentumItem = typeof TOPIC_MOMENTUM[number];
 type SentimentTrendItem = typeof SENTIMENT_TREND[number];
 type IntentSignalItem = typeof INTENT_SIGNALS[number];
@@ -289,6 +303,7 @@ interface SocialDashboardSnapshot {
   };
   deepAnalysis?: {
     topicBubbles?: TopicBubbleItem[];
+    topicRanking?: TopicRankingItem[];
     topicMomentum?: TopicMomentumItem[];
     sentimentTrend?: SentimentTrendItem[];
     intentSignals?: IntentSignalItem[];
@@ -1042,6 +1057,9 @@ export function SocialPage() {
   }, [orgOptions]);
 
   const topicBubbles = dashboard?.deepAnalysis?.topicBubbles ?? [];
+  const topicRanking = dashboard?.deepAnalysis?.topicRanking?.length
+    ? dashboard.deepAnalysis.topicRanking
+    : topicBubbles;
   const topicMomentum = dashboard?.deepAnalysis?.topicMomentum ?? [];
   const sentimentTrend = dashboard?.deepAnalysis?.sentimentTrend ?? [];
   const intentSignals = (dashboard?.deepAnalysis?.intentSignals ?? []).map((signal: any) => ({
@@ -1237,10 +1255,12 @@ export function SocialPage() {
                     headerRight={<span className="text-xs text-slate-400">{ru?'Последние 30 дней':'Last 30 days'}</span>}
                   >
                     <div className="space-y-2.5">
-                      {[...topicBubbles].sort((a,b)=>b.count-a.count).map((t,i) => {
-                        const max = Math.max(1, topicBubbles.reduce((m,x)=>Math.max(m,x.count),0));
-                        const col = t.sentiment==='positive'?C.emerald:t.sentiment==='negative'?C.rose:'#64748b';
-                        const badgeCls = t.sentiment==='positive'?'bg-emerald-50 text-emerald-700':t.sentiment==='negative'?'bg-rose-50 text-rose-700':'bg-slate-100 text-slate-600';
+                      {[...topicRanking].sort((a,b)=>b.count-a.count).map((t,i) => {
+                        const max = Math.max(1, topicRanking.reduce((m,x)=>Math.max(m,x.count),0));
+                        const sentiment = t.dominantSentiment || t.sentiment;
+                        const engagementTotal = t.strictMetrics?.engagementTotal ?? 0;
+                        const col = sentiment==='positive'?C.emerald:sentiment==='negative'?C.rose:'#64748b';
+                        const badgeCls = sentiment==='positive'?'bg-emerald-50 text-emerald-700':sentiment==='negative'?'bg-rose-50 text-rose-700':'bg-slate-100 text-slate-600';
                         return (
                           <div key={t.topic} className="flex items-center gap-3 group">
                             <span className="text-xs text-slate-400 w-5 text-center" style={{ fontWeight:600 }}>{i+1}</span>
@@ -1249,8 +1269,11 @@ export function SocialPage() {
                               <div className="h-full rounded-lg transition-all duration-700" style={{ width:`${(t.count/max)*100}%`, backgroundColor:col, opacity:0.75 }} />
                               <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-700" style={{ fontWeight:600 }}>{t.count}</span>
                             </div>
+                            <span className="text-[10px] text-slate-500 w-20 text-right flex-shrink-0">
+                              {engagementTotal > 0 ? `${engagementTotal} ${ru ? 'реакц.' : 'eng.'}` : '—'}
+                            </span>
                             <span className={`text-[10px] px-2 py-0.5 rounded-full w-20 text-center flex-shrink-0 ${badgeCls}`} style={{ fontWeight:500 }}>
-                              {t.sentiment==='positive'?(ru?'Позитив':'Positive'):t.sentiment==='negative'?(ru?'Негатив':'Negative'):(ru?'Нейтрал':'Neutral')}
+                              {sentiment==='positive'?(ru?'Позитив':'Positive'):sentiment==='negative'?(ru?'Негатив':'Negative'):(ru?'Нейтрал':'Neutral')}
                             </span>
                           </div>
                         );
