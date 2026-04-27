@@ -9,6 +9,8 @@ from typing import Any
 
 from loguru import logger
 
+from api import social_semantic
+
 
 SNAPSHOT_TTL_SECONDS = 300
 ACTIVITY_SCAN_LIMIT = 2500
@@ -284,6 +286,120 @@ def _sentiment_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for bucket, counts in sorted(buckets.items())[-12:]
     ]
+
+
+def _semantic_topic_widgets(
+    store: Any,
+    filters: dict[str, Any],
+    timings: dict[str, float],
+    degraded_sections: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    started = time.perf_counter()
+    try:
+        graph_payload = social_semantic.get_topic_aggregates(
+            from_date=filters.get("from"),
+            to_date=filters.get("to"),
+            entity_id=filters.get("entity_id"),
+            platform=filters.get("platform"),
+            limit=25,
+        )
+        graph_topics = list(graph_payload.get("items") or [])
+        enrichment = store.get_topic_metric_enrichment(
+            [item.get("topic") for item in graph_topics if item.get("topic")],
+            from_date=filters.get("from"),
+            to_date=filters.get("to"),
+            entity_id=filters.get("entity_id"),
+            platform=filters.get("platform"),
+        )
+        ranked: list[dict[str, Any]] = []
+        for item in graph_topics:
+            topic = _trimmed(item.get("topic"))
+            if not topic:
+                continue
+            metrics = enrichment.get(topic, {})
+            sentiment_counts = _as_dict(item.get("sentimentCounts"))
+            ranked.append(
+                {
+                    **item,
+                    "sampleSummary": metrics.get("sampleSummary") or "",
+                    "strictMetrics": {
+                        "engagementTotal": int(metrics.get("engagementTotal") or 0),
+                        "likes": int(metrics.get("likes") or 0),
+                        "comments": int(metrics.get("comments") or 0),
+                        "shares": int(metrics.get("shares") or 0),
+                        "views": int(metrics.get("views") or 0),
+                        "reactions": int(metrics.get("reactions") or 0),
+                        "evidenceCount": int(metrics.get("evidenceCount") or 0),
+                    },
+                    "evidence": metrics.get("evidence") or [],
+                    "sentimentCounts": {
+                        "positive": int(sentiment_counts.get("positive") or 0),
+                        "neutral": int(sentiment_counts.get("neutral") or 0),
+                        "negative": int(sentiment_counts.get("negative") or 0),
+                        "mixed": int(sentiment_counts.get("mixed") or 0),
+                        "urgent": int(sentiment_counts.get("urgent") or 0),
+                        "sarcastic": int(sentiment_counts.get("sarcastic") or 0),
+                    },
+                }
+            )
+        bubbles = []
+        for index, item in enumerate(ranked[:12]):
+            sentiment = item.get("dominantSentiment") or "neutral"
+            bubbles.append(
+                {
+                    "topic": item["topic"],
+                    "count": int(item.get("count") or 0),
+                    "sentiment": sentiment,
+                    "dominantSentiment": sentiment,
+                    "sentimentCounts": item.get("sentimentCounts") or {},
+                    "strictMetrics": item.get("strictMetrics") or {},
+                    "x": 70 + (index % 4) * 120,
+                    "y": 70 + (index // 4) * 95,
+                    "r": max(24, min(58, 20 + int(item.get("count") or 0) * 4)),
+                }
+            )
+        return bubbles, ranked
+    except Exception as exc:
+        logger.warning("Social semantic topic widgets degraded: {}", exc)
+        degraded_sections.append("semanticTopics")
+        return [], []
+    finally:
+        timings["semanticTopicReadMs"] = round((time.perf_counter() - started) * 1000, 2)
+
+
+def _semantic_sentiment_trend(
+    filters: dict[str, Any],
+    timings: dict[str, float],
+    degraded_sections: list[str],
+) -> list[dict[str, Any]]:
+    started = time.perf_counter()
+    try:
+        payload = social_semantic.get_sentiment_trend(
+            from_date=filters.get("from"),
+            to_date=filters.get("to"),
+            entity_id=filters.get("entity_id"),
+            platform=filters.get("platform"),
+        )
+        return [
+            {
+                "week": item.get("bucket"),
+                "bucket": item.get("bucket"),
+                "total": int(item.get("total") or 0),
+                "positive": int(item.get("positive") or 0),
+                "neutral": int(item.get("neutral") or 0),
+                "negative": int(item.get("negative") or 0),
+                "mixed": int(item.get("mixed") or 0),
+                "urgent": int(item.get("urgent") or 0),
+                "sarcastic": int(item.get("sarcastic") or 0),
+            }
+            for item in payload.get("items") or []
+        ]
+    except Exception as exc:
+        logger.warning("Social semantic sentiment trend degraded: {}", exc)
+        degraded_sections.append("semanticSentimentTrend")
+        return []
+    finally:
+        timings["semanticSentimentReadMs"] = round((time.perf_counter() - started) * 1000, 2)
 
 
 def _topic_momentum(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -716,11 +832,22 @@ def build_social_dashboard_snapshot(
     else:
         organic = [row for row in enriched if _is_organic(row)]
         ads = [row for row in enriched if _is_ad(row)]
+        degraded_sections: list[str] = []
+        graph_sync_coverage = store.get_graph_sync_coverage(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            source_kind="post",
+        )
+        topic_bubbles, topic_ranking = _semantic_topic_widgets(store, filters, timings, degraded_sections)
+        sentiment_trend = _semantic_sentiment_trend(filters, timings, degraded_sections)
         section_started = time.perf_counter()
         deep = {
-            "topicBubbles": _topic_bubbles(organic),
+            "topicBubbles": topic_bubbles,
+            "topicRanking": topic_ranking,
             "topicMomentum": _topic_momentum(organic),
-            "sentimentTrend": _sentiment_trend(organic),
+            "sentimentTrend": sentiment_trend,
             "intentSignals": _intent_signals(organic),
             "topQuestions": _top_questions(organic),
             "painPoints": _pain_points(organic),
@@ -761,7 +888,15 @@ def build_social_dashboard_snapshot(
                 "missingAnalysis": sum(1 for row in enriched if not row.get("analysis")),
                 "missingText": sum(1 for row in enriched if not _trimmed(row.get("text_content"))),
                 "missingPublishedDate": sum(1 for row in enriched if not row.get("published_at")),
-                "degradedSections": [],
+                "graphSyncCoverage": graph_sync_coverage,
+                "dataSources": {
+                    "deepAnalysis.topicBubbles": "neo4j",
+                    "deepAnalysis.sentimentTrend": "neo4j",
+                    "deepAnalysis.topicRanking": "neo4j+supabase",
+                    "strictMetrics": "supabase",
+                    "adIntelligence": "supabase",
+                },
+                "degradedSections": sorted(set(degraded_sections)),
                 "emptyReasons": empty_reasons,
                 "timingsMs": timings,
             },

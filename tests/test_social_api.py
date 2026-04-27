@@ -127,6 +127,34 @@ class _FakeSocialStore:
             ]
         }
 
+    def get_topic_metric_enrichment(self, topic_names, **kwargs) -> dict:
+        return {
+            topic: {
+                "engagementTotal": 17,
+                "likes": 10,
+                "comments": 5,
+                "shares": 2,
+                "views": 0,
+                "reactions": 10,
+                "evidenceCount": 1,
+                "sampleSummary": "Promotes a fee-free card offer.",
+                "evidence": [{"activity_uid": "facebook:post:123", "summary": "Evidence"}],
+            }
+            for topic in topic_names
+        }
+
+    def get_graph_sync_coverage(self, **kwargs) -> dict:
+        return {
+            "totalParentActivities": 2,
+            "analyzedParentActivities": 2,
+            "graphSyncedParentActivities": 1,
+            "graphPendingParentActivities": 1,
+            "failedParentActivities": 0,
+            "semanticCoveragePct": 50.0,
+            "rowCap": 10000,
+            "rowCapReached": False,
+        }
+
     def get_ad_intelligence(self, **kwargs) -> dict:
         items = self.list_activities(limit=10)
         return {
@@ -457,6 +485,76 @@ class SocialApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["trackedCompetitors"], 1)
         self.assertEqual(payload["dominantTopic"]["name"], "Credit Cards")
+
+    def test_social_topics_endpoint_uses_graph_with_supabase_metric_enrichment(self) -> None:
+        fake_store = _FakeSocialStore()
+        graph_payload = {
+            "items": [
+                {
+                    "topic": "Credit Cards",
+                    "count": 4,
+                    "previousCount": 2,
+                    "deltaCount": 2,
+                    "growthPct": 100.0,
+                    "growthReliable": True,
+                    "avgSentimentScore": 0.42,
+                    "dominantSentiment": "positive",
+                    "sentimentCounts": {"positive": 3, "neutral": 1, "negative": 0},
+                    "topEntities": ["Unibank"],
+                    "topPlatforms": ["facebook"],
+                    "activityUids": ["facebook:post:123"],
+                }
+            ],
+            "meta": {"source": "neo4j"},
+        }
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store), \
+             patch.object(server.social_semantic, "get_topic_aggregates", return_value=graph_payload):
+            response = self.client.get(
+                "/api/social/intelligence/topics?from=2026-03-01&to=2026-03-31",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["items"][0]["topic"], "Credit Cards")
+        self.assertEqual(payload["items"][0]["strictMetrics"]["engagementTotal"], 17)
+        self.assertEqual(payload["meta"]["dataSources"]["semantic"], "neo4j")
+        self.assertEqual(payload["meta"]["dataSources"]["strictMetrics"], "supabase")
+        self.assertEqual(payload["meta"]["graphSyncCoverage"]["semanticCoveragePct"], 50.0)
+
+    def test_social_sentiment_trend_endpoint_uses_graph_and_reports_coverage(self) -> None:
+        fake_store = _FakeSocialStore()
+        trend_payload = {
+            "items": [
+                {
+                    "bucket": "2026-03-23",
+                    "total": 4,
+                    "positive": 2,
+                    "neutral": 1,
+                    "negative": 1,
+                    "mixed": 0,
+                    "urgent": 0,
+                    "sarcastic": 0,
+                }
+            ],
+            "meta": {"source": "neo4j", "bucket": "week"},
+        }
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store), \
+             patch.object(server.social_semantic, "get_sentiment_trend", return_value=trend_payload):
+            response = self.client.get(
+                "/api/social/intelligence/sentiment-trend?from=2026-03-01&to=2026-03-31",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["items"][0]["bucket"], "2026-03-23")
+        self.assertEqual(payload["meta"]["dataSources"]["semantic"], "neo4j")
+        self.assertEqual(payload["meta"]["graphSyncCoverage"]["graphSyncedParentActivities"], 1)
 
     def test_social_intelligence_evidence_endpoint_returns_items(self) -> None:
         fake_store = _FakeSocialStore()

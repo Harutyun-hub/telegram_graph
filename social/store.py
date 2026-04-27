@@ -1601,6 +1601,141 @@ class SocialStore:
         items.sort(key=lambda item: (-item["count"], item["topic"]))
         return {"items": items[:limit]}
 
+    def get_topic_metric_enrichment(
+        self,
+        topic_names: list[str],
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        entity_id: str | None = None,
+        platform: str | None = None,
+        max_rows: int = 5000,
+        evidence_per_topic: int = 3,
+    ) -> dict[str, dict[str, Any]]:
+        normalized_topics = {
+            _trimmed(topic_name).lower(): _trimmed(topic_name)
+            for topic_name in topic_names
+            if _trimmed(topic_name)
+        }
+        if not normalized_topics:
+            return {}
+
+        activities = self._list_filtered_intelligence_activities(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            source_kind="post",
+            limit=max(1, min(int(max_rows or 5000), 10000)),
+        )
+        enrichment: dict[str, dict[str, Any]] = {
+            canonical: {
+                "engagementTotal": 0,
+                "likes": 0,
+                "comments": 0,
+                "shares": 0,
+                "views": 0,
+                "reactions": 0,
+                "evidenceCount": 0,
+                "sampleSummary": "",
+                "evidence": [],
+            }
+            for canonical in normalized_topics.values()
+        }
+        for activity in activities:
+            payload = dict((activity.get("analysis") or {}).get("analysis_payload") or {})
+            activity_topics = {_trimmed(value).lower() for value in _analysis_list(payload, "topics")}
+            matched_topics = activity_topics.intersection(normalized_topics.keys())
+            if not matched_topics:
+                continue
+
+            metrics = dict(activity.get("metrics") or {})
+            likes = int(metrics.get("likes") or metrics.get("like_count") or metrics.get("reactions") or 0)
+            comments = int(metrics.get("comments") or metrics.get("comment_count") or 0)
+            shares = int(metrics.get("shares") or metrics.get("share_count") or 0)
+            views = int(metrics.get("views") or metrics.get("impressions") or 0)
+            reactions = int(metrics.get("reactions") or metrics.get("reaction_count") or likes)
+            engagement_total = _engagement_total(activity)
+            summary = _analysis_text(payload, "summary") or _trimmed(activity.get("text_content")) or ""
+            evidence_item = {
+                "activity_uid": activity.get("activity_uid"),
+                "entity": (activity.get("entity") or {}).get("name"),
+                "platform": activity.get("platform"),
+                "published_at": activity.get("published_at"),
+                "summary": summary,
+                "source_url": activity.get("source_url"),
+                "metrics": {
+                    "likes": likes,
+                    "comments": comments,
+                    "shares": shares,
+                    "views": views,
+                    "reactions": reactions,
+                    "engagementTotal": engagement_total,
+                },
+            }
+            for normalized_topic in matched_topics:
+                record = enrichment[normalized_topics[normalized_topic]]
+                record["engagementTotal"] += engagement_total
+                record["likes"] += likes
+                record["comments"] += comments
+                record["shares"] += shares
+                record["views"] += views
+                record["reactions"] += reactions
+                record["evidenceCount"] += 1
+                if summary and len(summary) > len(record["sampleSummary"]):
+                    record["sampleSummary"] = summary
+                if len(record["evidence"]) < max(0, min(int(evidence_per_topic or 3), 10)):
+                    record["evidence"].append(evidence_item)
+        return enrichment
+
+    def get_graph_sync_coverage(
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        entity_id: str | None = None,
+        platform: str | None = None,
+        source_kind: str = "post",
+        limit: int = 10000,
+    ) -> dict[str, Any]:
+        filters: list[tuple[str, str, Any]] = []
+        start_iso, end_iso = _published_bounds(from_date, to_date)
+        if entity_id:
+            filters.append(("eq", "entity_id", entity_id))
+        if platform and platform != "all":
+            filters.append(("eq", "platform", _normalize_platform(platform)))
+        if source_kind:
+            filters.append(("eq", "source_kind", _trimmed(source_kind).lower()))
+        if start_iso:
+            filters.append(("gte", "published_at", start_iso))
+        if end_iso:
+            filters.append(("lte", "published_at", end_iso))
+
+        row_limit = max(1, min(int(limit or 10000), 20000))
+        rows = self._select_rows(
+            "social_activities",
+            columns="id,analysis_status,graph_status",
+            filters=filters,
+            order_by="published_at",
+            desc=True,
+            limit=row_limit,
+        )
+        total = len(rows)
+        analyzed = sum(1 for row in rows if row.get("analysis_status") == "analyzed")
+        graph_synced = sum(1 for row in rows if row.get("graph_status") == "synced")
+        failed = sum(1 for row in rows if row.get("graph_status") in {"failed", "dead_letter"})
+        pending = max(0, analyzed - graph_synced)
+        return {
+            "totalParentActivities": total,
+            "analyzedParentActivities": analyzed,
+            "graphSyncedParentActivities": graph_synced,
+            "graphPendingParentActivities": pending,
+            "failedParentActivities": failed,
+            "semanticCoveragePct": round((graph_synced / total) * 100, 1) if total else 0.0,
+            "rowCap": row_limit,
+            "rowCapReached": total >= row_limit,
+        }
+
     def get_ad_intelligence(
         self,
         *,

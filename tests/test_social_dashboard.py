@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from api import social_dashboard
 from api import server
 from api.social_dashboard import build_social_dashboard_snapshot
 
@@ -171,6 +172,34 @@ class _FakeSocialDashboardStore:
                 filtered = [row for row in filtered if row.get(column) in value]
         return filtered[:limit] if limit is not None else filtered
 
+    def get_topic_metric_enrichment(self, topic_names, **_kwargs) -> dict:
+        return {
+            topic: {
+                "engagementTotal": 7,
+                "likes": 4,
+                "comments": 2,
+                "shares": 1,
+                "views": 0,
+                "reactions": 4,
+                "evidenceCount": 1,
+                "sampleSummary": "Customers ask about card fees and support speed.",
+                "evidence": [{"activity_uid": "facebook:post:post-1"}],
+            }
+            for topic in topic_names
+        }
+
+    def get_graph_sync_coverage(self, **_kwargs) -> dict:
+        return {
+            "totalParentActivities": 1,
+            "analyzedParentActivities": 1,
+            "graphSyncedParentActivities": 1,
+            "graphPendingParentActivities": 0,
+            "failedParentActivities": 0,
+            "semanticCoveragePct": 100.0,
+            "rowCap": 10000,
+            "rowCapReached": False,
+        }
+
 
 class SocialDashboardSnapshotTests(unittest.TestCase):
     def test_empty_store_returns_valid_snapshot_with_diagnostics(self) -> None:
@@ -182,22 +211,47 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertIn("total", payload["meta"]["timingsMs"])
 
     def test_organic_discussion_maps_to_topics_sentiment_and_evidence(self) -> None:
-        payload = build_social_dashboard_snapshot(
-            _FakeSocialDashboardStore(),
-            from_date="2026-04-01",
-            to_date="2026-04-15",
-            use_cache=False,
-        )
+        graph_payload = {
+            "items": [
+                {
+                    "topic": "Card Fees",
+                    "count": 1,
+                    "previousCount": 0,
+                    "deltaCount": 1,
+                    "growthPct": 100.0,
+                    "growthReliable": False,
+                    "avgSentimentScore": -0.6,
+                    "dominantSentiment": "negative",
+                    "sentimentCounts": {"positive": 0, "neutral": 0, "negative": 1},
+                    "topEntities": ["Example Bank"],
+                    "topPlatforms": ["facebook"],
+                    "activityUids": ["facebook:post:post-1"],
+                }
+            ],
+            "meta": {"source": "neo4j"},
+        }
+        trend_payload = {"items": [{"bucket": "2026-04-06", "total": 1, "positive": 0, "neutral": 0, "negative": 1}]}
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value=graph_payload), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value=trend_payload):
+            payload = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
 
         topic_names = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertIn("Card Fees", topic_names)
-        self.assertIn("Customer Service", topic_names)
+        self.assertEqual(payload["deepAnalysis"]["sentimentTrend"][0]["negative"], 1)
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)
 
     def test_ads_are_separate_from_organic_widgets(self) -> None:
-        payload = build_social_dashboard_snapshot(_FakeSocialDashboardStore(), use_cache=False)
+        graph_payload = {"items": [{"topic": "Card Fees", "count": 1, "dominantSentiment": "negative"}]}
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value=graph_payload), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            payload = build_social_dashboard_snapshot(_FakeSocialDashboardStore(), use_cache=False)
 
         self.assertEqual(len(payload["adIntelligence"]["items"]), 1)
         self.assertEqual(payload["adIntelligence"]["summary"]["topMarketingIntent"], "Acquisition")
@@ -213,7 +267,9 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
             client = TestClient(server.app)
             with patch.object(server.config, "IS_LOCKED_ENV", True), \
                  patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
-                 patch.object(server, "get_social_store", return_value=_FakeSocialDashboardStore()):
+                 patch.object(server, "get_social_store", return_value=_FakeSocialDashboardStore()), \
+                 patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+                 patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
                 response = client.get(
                     "/api/social/dashboard?from=2026-04-01&to=2026-04-15",
                     headers={"Authorization": "Bearer admin-secret"},

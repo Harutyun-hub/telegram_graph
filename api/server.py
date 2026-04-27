@@ -100,6 +100,7 @@ from scraper.channel_metadata import minimal_source_metadata_from_entity, resolv
 from social.store import SocialStore
 from social.runtime import SocialRuntimeService
 from api.social_dashboard import build_social_dashboard_snapshot
+from api import social_semantic
 from utils.taxonomy import TAXONOMY_DOMAINS
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -3398,6 +3399,73 @@ def _social_unavailable(detail: str, error: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail=str(error))
 
 
+def _social_topic_items_from_graph(
+    *,
+    from_date: str | None,
+    to_date: str | None,
+    entity_id: str | None,
+    platform: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    graph_payload = social_semantic.get_topic_aggregates(
+        from_date=from_date,
+        to_date=to_date,
+        entity_id=entity_id,
+        platform=platform,
+        limit=limit,
+    )
+    graph_items = list(graph_payload.get("items") or [])
+    graph_ms = round((time.perf_counter() - started) * 1000, 2)
+
+    started = time.perf_counter()
+    enrichment = get_social_store().get_topic_metric_enrichment(
+        [item.get("topic") for item in graph_items if item.get("topic")],
+        from_date=from_date,
+        to_date=to_date,
+        entity_id=entity_id,
+        platform=platform,
+    )
+    supabase_ms = round((time.perf_counter() - started) * 1000, 2)
+
+    items: list[dict[str, Any]] = []
+    for item in graph_items:
+        topic = str(item.get("topic") or "").strip()
+        if not topic:
+            continue
+        metrics = enrichment.get(topic, {})
+        items.append(
+            {
+                **item,
+                "sampleSummary": metrics.get("sampleSummary") or "",
+                "strictMetrics": {
+                    "engagementTotal": int(metrics.get("engagementTotal") or 0),
+                    "likes": int(metrics.get("likes") or 0),
+                    "comments": int(metrics.get("comments") or 0),
+                    "shares": int(metrics.get("shares") or 0),
+                    "views": int(metrics.get("views") or 0),
+                    "reactions": int(metrics.get("reactions") or 0),
+                    "evidenceCount": int(metrics.get("evidenceCount") or 0),
+                },
+                "evidence": metrics.get("evidence") or [],
+            }
+        )
+    return {
+        "items": items[:limit],
+        "meta": {
+            "dataSources": {
+                "semantic": "neo4j",
+                "strictMetrics": "supabase",
+            },
+            "timingsMs": {
+                "neo4jTopicAggregate": graph_ms,
+                "supabaseMetricEnrichment": supabase_ms,
+            },
+            "degradedSections": [],
+        },
+    }
+
+
 @app.get("/api/social/intelligence/summary", dependencies=[Depends(require_operator_access)])
 async def get_social_intelligence_summary(
     from_date: Optional[str] = Query(default=None, alias="from"),
@@ -3447,15 +3515,88 @@ async def get_social_intelligence_topics(
     limit: int = Query(default=20, ge=1, le=100),
 ):
     try:
-        return get_social_store().get_topic_intelligence(
+        payload = _social_topic_items_from_graph(
             from_date=from_date,
             to_date=to_date,
             entity_id=entity_id,
             platform=platform,
             limit=limit,
         )
+        payload["meta"]["graphSyncCoverage"] = get_social_store().get_graph_sync_coverage(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            source_kind="post",
+        )
+        return payload
     except Exception as e:
-        raise _social_unavailable("Social intelligence topics error", e) from e
+        logger.warning("Social intelligence topics degraded: {}", e)
+        return {
+            "items": [],
+            "meta": {
+                "dataSources": {"semantic": "neo4j", "strictMetrics": "supabase"},
+                "degradedSections": ["semanticTopics"],
+                "lastError": str(e),
+                "graphSyncCoverage": get_social_store().get_graph_sync_coverage(
+                    from_date=from_date,
+                    to_date=to_date,
+                    entity_id=entity_id,
+                    platform=platform,
+                    source_kind="post",
+                ),
+            },
+        }
+
+
+@app.get("/api/social/intelligence/sentiment-trend", dependencies=[Depends(require_operator_access)])
+async def get_social_intelligence_sentiment_trend(
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    entity_id: Optional[str] = Query(default=None),
+    platform: Optional[str] = Query(default=None),
+):
+    try:
+        payload = social_semantic.get_sentiment_trend(
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+        )
+        return {
+            **payload,
+            "meta": {
+                **dict(payload.get("meta") or {}),
+                "dataSources": {"semantic": "neo4j", "coverage": "supabase"},
+                "graphSyncCoverage": get_social_store().get_graph_sync_coverage(
+                    from_date=from_date,
+                    to_date=to_date,
+                    entity_id=entity_id,
+                    platform=platform,
+                    source_kind="post",
+                ),
+                "degradedSections": [],
+            },
+        }
+    except Exception as e:
+        logger.warning("Social intelligence sentiment trend degraded: {}", e)
+        return {
+            "items": [],
+            "meta": {
+                "source": "neo4j",
+                "bucket": "week",
+                "dataSources": {"semantic": "neo4j", "coverage": "supabase"},
+                "degradedSections": ["semanticSentimentTrend"],
+                "lastError": str(e),
+                "graphSyncCoverage": get_social_store().get_graph_sync_coverage(
+                    from_date=from_date,
+                    to_date=to_date,
+                    entity_id=entity_id,
+                    platform=platform,
+                    source_kind="post",
+                ),
+            },
+        }
 
 
 @app.get("/api/social/intelligence/ads", dependencies=[Depends(require_operator_access)])
