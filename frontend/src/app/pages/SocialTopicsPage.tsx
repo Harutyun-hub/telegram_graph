@@ -17,7 +17,6 @@ import {
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { useLanguage } from '@/app/contexts/LanguageContext';
 import { useDashboardDateRange } from '@/app/contexts/DashboardDateRangeContext';
-import { useAuth } from '@/app/contexts/AuthContext';
 import { PageInfoButton, type PageInfoCopy } from '@/app/components/ui/PageInfoButton';
 import { SocialAccessDeniedState } from '@/app/components/widgets/SocialShared';
 import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } from '@/app/services/topicPresentation';
@@ -311,7 +310,6 @@ function buildSocialOverview(
 
 export function SocialTopicsPage() {
   const { lang } = useLanguage();
-  const { authMode } = useAuth();
   const { range } = useDashboardDateRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const ru = lang === 'ru';
@@ -412,7 +410,6 @@ export function SocialTopicsPage() {
     setProofView(requestedView === 'questions' ? 'questions' : 'evidence');
   }, [requestedView]);
 
-  const usingSupabaseSession = authMode === 'supabase';
   const accessDenied = listAccessDenied || detailAccessDenied;
   const totalMentions = topicViewModels.reduce((sum, topic) => sum + topic.mentions, 0);
   const requestedTopicMissing = Boolean(requestedTopic && !topicsLoading && !selectedTopic);
@@ -503,17 +500,6 @@ export function SocialTopicsPage() {
     next.delete('evidenceId');
     setSearchParams(next);
   };
-
-  if (!usingSupabaseSession) {
-    return (
-      <SocialAccessDeniedState
-        title={ru ? 'Для Social Topics нужен вход через Supabase' : 'Social Topics requires a Supabase sign-in'}
-        description={ru
-          ? 'Текущая локальная сессия не передаёт Supabase user token в operator-only social endpoints. Выйдите и войдите через Supabase-аккаунт оператора, чтобы открыть social topic evidence.'
-          : 'The current local session does not send a Supabase user token to the operator-only social endpoints. Sign out and sign back in with the operator Supabase account to inspect social topic evidence.'}
-      />
-    );
-  }
 
   if (accessDenied) {
     return (
