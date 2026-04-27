@@ -20,7 +20,7 @@ import { useDashboardDateRange } from '@/app/contexts/DashboardDateRangeContext'
 import { useAuth } from '@/app/contexts/AuthContext';
 import { PageInfoButton, type PageInfoCopy } from '@/app/components/ui/PageInfoButton';
 import { SocialAccessDeniedState } from '@/app/components/widgets/SocialShared';
-import { TOPICS_PAGE_GROUPS_EN, translateTopicsPageGroup } from '@/app/services/topicPresentation';
+import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } from '@/app/services/topicPresentation';
 import {
   formatSocialBucket,
   formatSocialDateLabel,
@@ -39,19 +39,36 @@ const categoryColors: Record<string, string> = {
   Lifestyle: '#ec4899',
   Integration: '#10b981',
   Admin: '#6b7280',
+  Tech: '#06b6d4',
 };
 
 type SocialTopicGroup = (typeof TOPICS_PAGE_GROUPS_EN)[number];
 
 interface SocialTopicViewModel extends SocialTopicListItem {
   id: string;
+  name: string;
+  nameRu: string;
+  sourceTopic: string;
+  mentions: number;
+  growth: number;
   topicGroup: SocialTopicGroup;
+  category: string;
+  description: string;
+  descriptionRu: string;
   categoryLabelEn: string;
   categoryLabelRu: string;
   color: string;
+  sentiment: {
+    positive: number;
+    neutral: number;
+    negative: number;
+  };
   positivePct: number;
   neutralPct: number;
   negativePct: number;
+  weeklyData: Array<{ week: string; count: number }>;
+  topChannels: string[];
+  evidenceCount: number;
   displayPlatforms: string[];
 }
 
@@ -319,7 +336,6 @@ export function SocialTopicsPage() {
   }), [entityParam, platformParam, range.from, range.to]);
 
   const {
-    entities,
     topics,
     loading: topicsLoading,
     error: topicsError,
@@ -331,17 +347,40 @@ export function SocialTopicsPage() {
     topics.map((topic) => {
       const topicGroup = inferSocialTopicGroup(topic);
       const color = categoryColors[topicGroup] || categoryColors.Admin;
+      const categoryLabelEn = deriveSocialCategory(topic, false);
+      const categoryLabelRu = deriveSocialCategory(topic, true);
+      const positivePct = sentimentPct(topic, 'positive');
+      const neutralPct = sentimentPct(topic, 'neutral');
+      const negativePct = sentimentPct(topic, 'negative');
+      const displayPlatforms = topic.topPlatforms.map((item) => socialPlatformLabel(item, lang));
+      const topChannels = (topic.topEntities.length > 0 ? topic.topEntities : displayPlatforms).slice(0, 4);
       return {
         ...topic,
         id: topic.topic,
+        name: topic.topic,
+        nameRu: topic.topic,
+        sourceTopic: topic.topic,
+        mentions: topic.count,
+        growth: topic.growthPct,
         topicGroup,
-        categoryLabelEn: deriveSocialCategory(topic, false),
-        categoryLabelRu: deriveSocialCategory(topic, true),
+        category: categoryLabelEn,
+        description: topic.sampleSummary?.trim() || categoryLabelEn,
+        descriptionRu: topic.sampleSummary?.trim() || categoryLabelRu,
+        categoryLabelEn,
+        categoryLabelRu,
         color,
-        positivePct: sentimentPct(topic, 'positive'),
-        neutralPct: sentimentPct(topic, 'neutral'),
-        negativePct: sentimentPct(topic, 'negative'),
-        displayPlatforms: topic.topPlatforms.map((item) => socialPlatformLabel(item, lang)),
+        sentiment: {
+          positive: positivePct,
+          neutral: neutralPct,
+          negative: negativePct,
+        },
+        positivePct,
+        neutralPct,
+        negativePct,
+        weeklyData: [],
+        topChannels,
+        evidenceCount: topic.count,
+        displayPlatforms,
       };
     })
   ), [lang, topics]);
@@ -349,7 +388,11 @@ export function SocialTopicsPage() {
   const selectedTopic = useMemo(() => {
     if (!requestedTopic) return null;
     const target = normalizeTopicKey(requestedTopic);
-    return topicViewModels.find((topic) => normalizeTopicKey(topic.topic) === target) || null;
+    return topicViewModels.find((topic) =>
+      normalizeTopicKey(topic.sourceTopic || topic.name) === target
+      || normalizeTopicKey(topic.name) === target
+      || normalizeTopicKey(topic.nameRu) === target,
+    ) || null;
   }, [requestedTopic, topicViewModels]);
 
   const {
@@ -371,47 +414,53 @@ export function SocialTopicsPage() {
 
   const usingSupabaseSession = authMode === 'supabase';
   const accessDenied = listAccessDenied || detailAccessDenied;
-  const totalMentions = topicViewModels.reduce((sum, topic) => sum + topic.count, 0);
+  const totalMentions = topicViewModels.reduce((sum, topic) => sum + topic.mentions, 0);
   const requestedTopicMissing = Boolean(requestedTopic && !topicsLoading && !selectedTopic);
 
   const filtered = topicViewModels
     .filter((topic) => {
       if (selectedCategory !== 'All' && topic.topicGroup !== selectedCategory) return false;
-      if (searchQuery && !topic.topic.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+      const displayName = ru ? topic.nameRu : topic.name;
+      if (searchQuery && !displayName.toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     })
     .sort((a, b) => {
       if (sortBy === 'mentions') {
         return (
-          (b.count - a.count)
+          (b.mentions - a.mentions)
           || (b.deltaCount - a.deltaCount)
-          || (b.negativePct - a.negativePct)
-          || a.topic.localeCompare(b.topic)
+          || (b.sentiment.negative - a.sentiment.negative)
+          || a.name.localeCompare(b.name)
         );
       }
       return (
         (b.deltaCount - a.deltaCount)
-        || (b.growthPct - a.growthPct)
-        || (b.count - a.count)
-        || a.topic.localeCompare(b.topic)
+        || (b.growth - a.growth)
+        || (b.mentions - a.mentions)
+        || a.name.localeCompare(b.name)
       );
     });
 
-  const activeOverview = selectedTopic ? buildSocialOverview(selectedTopic, evidenceItems, range) : null;
-  const overviewState = activeOverview?.status || 'unavailable';
   const activeTimeline = timeline.map((item) => ({
     week: item.bucket,
     count: item.total,
   }));
+  const activeTopic = selectedTopic
+    ? {
+      ...selectedTopic,
+      weeklyData: activeTimeline,
+      evidenceCount,
+    }
+    : null;
+  const topicAccentColor = activeTopic?.color || selectedTopic?.color || '#64748b';
+  const activeOverview = selectedTopic ? buildSocialOverview(selectedTopic, evidenceItems, range) : null;
+  const overviewState = activeOverview?.status || 'unavailable';
   const visibleEvidence = proofView === 'questions'
     ? evidenceItems.filter(isQuestionEvidence)
     : evidenceItems;
   const visibleEvidenceCount = proofView === 'questions'
     ? visibleEvidence.length
     : evidenceCount;
-  const topChips = selectedTopic
-    ? (selectedTopic.topEntities.length > 0 ? selectedTopic.topEntities : selectedTopic.displayPlatforms).slice(0, 4)
-    : [];
 
   useEffect(() => {
     if (!selectedTopic || !requestedEvidenceId) return;
@@ -440,7 +489,7 @@ export function SocialTopicsPage() {
 
   const selectTopic = (topic: SocialTopicViewModel, view: 'evidence' | 'questions' = proofView, evidenceId?: string) => {
     const next = new URLSearchParams(searchParams);
-    next.set('topic', topic.topic);
+    next.set('topic', topic.sourceTopic || topic.name);
     next.set('view', view);
     if (evidenceId) next.set('evidenceId', evidenceId);
     else next.delete('evidenceId');
@@ -492,18 +541,6 @@ export function SocialTopicsPage() {
               <p className="text-xs text-gray-500 mt-0.5">
                 {topicViewModels.length} {ru ? 'тем отслеживается' : 'topics tracked'} &middot; {totalMentions.toLocaleString()} {ru ? 'всего упоминаний' : 'total mentions'}
               </p>
-              {(entityParam !== 'all' || platformParam !== 'all') && (
-                <p className="text-[11px] text-gray-400 mt-1">
-                  {[
-                    entityParam !== 'all'
-                      ? `${ru ? 'Сущность' : 'Entity'}: ${entities.find((entity) => entity.id === entityParam)?.name || entityParam}`
-                      : null,
-                    platformParam !== 'all'
-                      ? `${ru ? 'Площадка' : 'Platform'}: ${socialPlatformLabel(platformParam, lang)}`
-                      : null,
-                  ].filter(Boolean).join(' · ')}
-                </p>
-              )}
             </div>
           </div>
 
@@ -618,22 +655,22 @@ export function SocialTopicsPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: topic.color }} />
-                    <span className="text-sm text-gray-900 truncate" style={{ fontWeight: 500 }}>{topic.topic}</span>
+                    <span className="text-sm text-gray-900 truncate" style={{ fontWeight: 500 }}>{ru ? topic.nameRu : topic.name}</span>
                     <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 flex-shrink-0">
-                      {ru ? topic.categoryLabelRu : topic.categoryLabelEn}
+                      {translateCategory(topic.category, ru)}
                     </span>
                   </div>
                   <div className="flex items-center gap-3 mt-1.5 ml-4.5">
-                    <span className="text-xs text-gray-500">{topic.count.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}</span>
-                    <span className={`text-xs flex items-center gap-0.5 ${topic.growthPct > 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>
-                      {topic.growthPct > 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                      {topic.growthPct > 0 ? '+' : ''}{topic.growthPct}%
+                    <span className="text-xs text-gray-500">{topic.mentions.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}</span>
+                    <span className={`text-xs flex items-center gap-0.5 ${topic.growth > 0 ? 'text-emerald-600' : 'text-red-500'}`} style={{ fontWeight: 600 }}>
+                      {topic.growth > 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                      {topic.growth > 0 ? '+' : ''}{topic.growth}%
                     </span>
                     <div className="flex items-center gap-0.5 ml-auto">
                       <div className="flex h-1.5 w-16 rounded-full overflow-hidden">
-                        <div className="bg-emerald-400" style={{ width: `${topic.positivePct}%` }} />
-                        <div className="bg-gray-300" style={{ width: `${topic.neutralPct}%` }} />
-                        <div className="bg-red-400" style={{ width: `${topic.negativePct}%` }} />
+                        <div className="bg-emerald-400" style={{ width: `${topic.sentiment.positive}%` }} />
+                        <div className="bg-gray-300" style={{ width: `${topic.sentiment.neutral}%` }} />
+                        <div className="bg-red-400" style={{ width: `${topic.sentiment.negative}%` }} />
                       </div>
                     </div>
                   </div>
@@ -669,12 +706,12 @@ export function SocialTopicsPage() {
           <div className="bg-white border-b border-gray-200 px-6 py-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${selectedTopic.color}15` }}>
-                  <Hash className="w-5 h-5" style={{ color: selectedTopic.color }} />
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${topicAccentColor}15` }}>
+                  <Hash className="w-5 h-5" style={{ color: topicAccentColor }} />
                 </div>
                 <div>
-                  <h2 className="text-gray-900" style={{ fontSize: '1.1rem', fontWeight: 600 }}>{selectedTopic.topic}</h2>
-                  <p className="text-xs text-gray-500">{ru ? activeOverview?.summaryRu : activeOverview?.summaryEn}</p>
+                  <h2 className="text-gray-900" style={{ fontSize: '1.1rem', fontWeight: 600 }}>{ru ? selectedTopic.nameRu : selectedTopic.name}</h2>
+                  <p className="text-xs text-gray-500">{activeTopic ? (ru ? activeTopic.descriptionRu : activeTopic.description) : ''}</p>
                 </div>
               </div>
               <button type="button" onClick={clearTopicSelection} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
@@ -684,10 +721,10 @@ export function SocialTopicsPage() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
               {[
-                { label: ru ? 'Упоминания' : 'Mentions', value: selectedTopic.count.toLocaleString(), color: 'text-gray-900' },
-                { label: ru ? 'Рост' : 'Growth', value: `${selectedTopic.growthPct > 0 ? '+' : ''}${selectedTopic.growthPct}%`, color: selectedTopic.growthPct > 0 ? 'text-emerald-600' : 'text-red-500' },
-                { label: ru ? 'Позитив' : 'Positive', value: `${selectedTopic.positivePct}%`, color: 'text-emerald-600' },
-                { label: ru ? 'Негатив' : 'Negative', value: `${selectedTopic.negativePct}%`, color: 'text-red-500' },
+                { label: ru ? 'Упоминания' : 'Mentions', value: (activeTopic?.mentions || 0).toLocaleString(), color: 'text-gray-900' },
+                { label: ru ? 'Рост' : 'Growth', value: `${(activeTopic?.growth || 0) > 0 ? '+' : ''}${activeTopic?.growth || 0}%`, color: (activeTopic?.growth || 0) > 0 ? 'text-emerald-600' : 'text-red-500' },
+                { label: ru ? 'Позитив' : 'Positive', value: `${activeTopic?.sentiment.positive || 0}%`, color: 'text-emerald-600' },
+                { label: ru ? 'Негатив' : 'Negative', value: `${activeTopic?.sentiment.negative || 0}%`, color: 'text-red-500' },
               ].map((stat) => (
                 <div key={stat.label} className="bg-gray-50 rounded-lg px-3 py-2.5">
                   <p className="text-xs text-gray-500">{stat.label}</p>
@@ -698,7 +735,7 @@ export function SocialTopicsPage() {
 
             <div className="mt-4">
               <ResponsiveContainer width="100%" height={120}>
-                <AreaChart data={activeTimeline}>
+                <AreaChart data={activeTopic?.weeklyData || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                   <XAxis
                     dataKey="week"
@@ -710,7 +747,7 @@ export function SocialTopicsPage() {
                   />
                   <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" hide />
                   <Tooltip labelFormatter={(value) => formatTopicTrendTooltip(String(value || ''), lang)} />
-                  <Area type="monotone" dataKey="count" stroke={selectedTopic.color} fill={`${selectedTopic.color}20`} strokeWidth={2} />
+                  <Area type="monotone" dataKey="count" stroke={topicAccentColor} fill={`${topicAccentColor}20`} strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -720,9 +757,9 @@ export function SocialTopicsPage() {
                 <div className="flex items-center gap-3">
                   <div
                     className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-                    style={{ backgroundColor: `${selectedTopic.color}18` }}
+                    style={{ backgroundColor: `${topicAccentColor}18` }}
                   >
-                    <Sparkles className="w-4 h-4" style={{ color: selectedTopic.color }} />
+                    <Sparkles className="w-4 h-4" style={{ color: topicAccentColor }} />
                   </div>
                   <div>
                     <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500" style={{ fontWeight: 700 }}>
@@ -796,7 +833,7 @@ export function SocialTopicsPage() {
 
             <div className="flex items-center gap-2 mt-3">
               <span className="text-xs text-gray-400">{ru ? 'Ведущие каналы:' : 'Top channels:'}</span>
-              {topChips.map((item) => (
+              {(activeTopic?.topChannels || []).map((item) => (
                 <span key={item} className="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full">{item}</span>
               ))}
             </div>
