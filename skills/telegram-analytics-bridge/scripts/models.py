@@ -9,6 +9,7 @@ WindowLiteral = Literal["24h", "7d", "30d", "90d"]
 SignalFocusLiteral = Literal["all", "asks", "needs", "fear"]
 EntityTypeLiteral = Literal["auto", "topic", "category", "channel"]
 SourceTypeLiteral = Literal["auto", "telegram", "facebook_page", "instagram_profile", "google_domain"]
+AnalysisModeLiteral = Literal["quick", "deep"]
 DEFAULT_TIMEOUT = 40.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_BASE = 0.75
@@ -141,6 +142,17 @@ class AskInsightsRequest(WindowedRequest):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.question = _require_text(self.question, "question", min_length=3, max_length=300)
+
+
+@dataclass
+class DeepAnalyzeRequest(WindowedRequest):
+    question: str = ""
+    mode: AnalysisModeLiteral = "quick"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.question = _require_text(self.question, "question", min_length=3, max_length=500)
+        self.mode = _validate_literal(_clean_text(self.mode), AnalysisModeLiteral, "mode")  # type: ignore[assignment]
 
 
 @dataclass

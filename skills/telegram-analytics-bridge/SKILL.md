@@ -16,6 +16,7 @@ Use this skill when OpenClaw receives Telegram-community analytics questions and
 - Problem spikes, urgent issues, or alerts
 - Repeated user questions
 - Explanatory asks like `what is driving ...`, `why are people talking about ...`, or `what is causing concern about ...`
+- Professional deep-analysis asks like `deep analyze ...`, `what changed that is not obvious`, `test whether this trend is real`, or `what should I notice here?`
 - Channel-specific questions like `What is going on in Docs Chat?`
 - Graph or ecosystem questions like `Which channels are shaping the current discussion?`
 - Comparison asks like `Compare residency permits and rental costs this week`
@@ -46,6 +47,7 @@ Use this skill when OpenClaw receives Telegram-community analytics questions and
 - If `confidence` is `low_confidence`, answer cautiously and mention that current evidence is limited
 - Prefer the existing skill actions instead of answering analytics questions from memory
 - `investigate_question` is the main bounded analyst workflow and may route to topic, channel, category, or graph context
+- `deep_analyze` is the V3 analyst workflow for non-obvious findings, disconfirmation, concentration checks, and evidence traces
 - For direct exact drill-downs, use the narrower actions instead of overusing `investigate_question`
 
 Run the CLI:
@@ -65,6 +67,10 @@ python3 skills/telegram-analytics-bridge/scripts/bridge.py <action> [flags] --js
 - `investigate_question`
   - Use for bounded analyst-style investigation of a user question
   - This action is intentionally low-fanout and may route to topic, channel, category, or graph context
+- `deep_analyze`
+  - Use when the user asks for a professional analyst read, hidden signal, non-obvious change, or whether a trend is real
+  - This action runs backend-owned bounded probes; it does not expose raw SQL or Cypher to OpenClaw
+  - Prefer `--mode quick` by default and `--mode deep` when the user explicitly asks for deeper analysis
 - `get_top_topics`
   - Use for top discussion trends
 - `search_entities`
@@ -121,6 +127,7 @@ Supported commands:
 - `get_sentiment_overview --window 7d`
 - `get_active_alerts`
 - `ask_insights --question "What is driving concern about residency?" [--window 7d]`
+- `deep_analyze --question "What is driving concern about residency?" [--window 7d] [--mode quick|deep]`
 - `investigate_question --question "What is driving concern about residency?" [--window 7d]`
 
 ## Output rules
@@ -129,6 +136,7 @@ Supported commands:
 - Keep answers concise, professional, and evidence-oriented
 - Preserve `summary`, `bullets`, `items`, and `source_endpoints`
 - Keep investigation answers bounded and compact; do not expand into freeform multi-step analysis beyond the defined actions
+- For `deep_analyze`, lead with the non-obvious finding, mention considered-and-rejected explanations when useful, and keep caveats attached to confidence
 - For `add_source`, confirm only the exact backend result: created, already tracked, or reactivated
 - For graph answers, summarize the graph rather than dumping raw nodes or links
 - Do not render tables

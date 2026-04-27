@@ -75,6 +75,7 @@ from api.queries import graph_dashboard, pulse
 from api import freshness as freshness_runtime
 from api.freshness import get_freshness_snapshot
 from api import insights
+from api import agent_analysis
 from api import behavioral_briefs
 from api import opportunity_briefs
 from api import question_briefs
@@ -615,6 +616,12 @@ class GraphRequest(BaseModel):
 class InsightCardsRequest(BaseModel):
     filters: dict = Field(default_factory=dict)
     audience: str = Field(default="analyst", max_length=32)
+
+
+class DeepAnalysisRequest(BaseModel):
+    question: str = Field(..., min_length=3, max_length=500)
+    window: str = Field(default="7d", max_length=16)
+    mode: str = Field(default="quick", max_length=16)
 
 
 class FailureRetryRequest(BaseModel):
@@ -1344,6 +1351,45 @@ async def require_openclaw_source_write_access(
 
     if bearer_token and frontend_token and hmac.compare_digest(bearer_token, frontend_token):
         raise HTTPException(status_code=403, detail="Frontend analytics token cannot modify tracked sources.")
+
+    return await require_operator_access(
+        x_supabase_authorization=x_supabase_authorization,
+        x_admin_authorization=x_admin_authorization,
+        authorization=authorization,
+    )
+
+
+async def require_openclaw_analysis_access(
+    request: Request,
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    """
+    Narrow read capability for OpenClaw deep analysis.
+
+    This route can expose richer evidence and analysis traces than the frontend
+    dashboard endpoints, so accept the dedicated OpenClaw token or operator auth
+    and explicitly reject the frontend analytics token.
+    """
+    _enforce_analytics_rate_limit(request)
+
+    if x_supabase_authorization or x_admin_authorization:
+        return await require_operator_access(
+            x_supabase_authorization=x_supabase_authorization,
+            x_admin_authorization=x_admin_authorization,
+            authorization=authorization,
+        )
+
+    bearer_token = _extract_bearer_token(authorization)
+    openclaw_token = str(getattr(config, "ANALYTICS_API_KEY_OPENCLAW", "") or "").strip()
+    frontend_token = str(getattr(config, "ANALYTICS_API_KEY_FRONTEND", "") or "").strip()
+
+    if bearer_token and openclaw_token and hmac.compare_digest(bearer_token, openclaw_token):
+        return {"id": "analytics-openclaw", "email": "", "auth": "analytics_openclaw"}
+
+    if bearer_token and frontend_token and hmac.compare_digest(bearer_token, frontend_token):
+        raise HTTPException(status_code=403, detail="Frontend analytics token cannot run agent deep analysis.")
 
     return await require_operator_access(
         x_supabase_authorization=x_supabase_authorization,
@@ -3057,6 +3103,24 @@ async def insight_cards(payload: InsightCardsRequest):
         )
     except Exception as e:
         logger.error(f"Insight cards endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/agent/analysis/deep", dependencies=[Depends(require_openclaw_analysis_access)])
+async def agent_deep_analysis(payload: DeepAnalysisRequest):
+    """OpenClaw V3 bounded analyst endpoint."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: agent_analysis.deep_analyze(
+                payload.question,
+                window=payload.window,
+                mode=payload.mode,
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Agent deep analysis endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

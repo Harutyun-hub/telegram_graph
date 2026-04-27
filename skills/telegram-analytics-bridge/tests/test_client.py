@@ -191,6 +191,20 @@ class ClientTests(unittest.TestCase):
         self.assertIn(b'"value": "https://facebook.com/example"', request.data)
 
     @mock.patch("client.urllib_request.urlopen", autospec=True)
+    def test_deep_analyze_posts_expected_payload(self, mock_urlopen) -> None:
+        mock_urlopen.return_value = FakeResponse({"summary": "ok", "confidence": "medium"})
+
+        payload = self.client.deep_analyze("What changed?", window="7d", mode="deep")
+
+        self.assertEqual(payload["summary"], "ok")
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://analytics.example.com/api/agent/analysis/deep")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"question": "What changed?"', request.data)
+        self.assertIn(b'"window": "7d"', request.data)
+        self.assertIn(b'"mode": "deep"', request.data)
+
+    @mock.patch("client.urllib_request.urlopen", autospec=True)
     def test_topic_detail_builds_date_range_query(self, mock_urlopen) -> None:
         mock_urlopen.return_value = FakeResponse({"name": "Residency permits"})
 

@@ -12,6 +12,7 @@ from actions import (
     ask_insights,
     compare_channels,
     compare_topics,
+    deep_analyze,
     get_freshness_status,
     get_active_alerts,
     get_declining_topics,
@@ -34,6 +35,7 @@ from models import (
     AddSourceRequest,
     AskInsightsRequest,
     ClientConfig,
+    DeepAnalyzeRequest,
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
@@ -157,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     insights.add_argument("--window", default="7d")
     insights.add_argument("--question", required=True)
 
+    deep_analysis = subparsers.add_parser("deep_analyze", parents=[common])
+    deep_analysis.add_argument("--window", default="7d")
+    deep_analysis.add_argument("--question", required=True)
+    deep_analysis.add_argument("--mode", default="quick")
+
     investigate_question_parser = subparsers.add_parser("investigate_question", parents=[common])
     investigate_question_parser.add_argument("--window", default="7d")
     investigate_question_parser.add_argument("--question", required=True)
@@ -255,6 +262,11 @@ def main() -> int:
             )
         elif args.action == "ask_insights":
             payload = ask_insights(client, AskInsightsRequest(window=args.window, question=args.question))
+        elif args.action == "deep_analyze":
+            payload = deep_analyze(
+                client,
+                DeepAnalyzeRequest(window=args.window, question=args.question, mode=args.mode),
+            )
         elif args.action == "investigate_question":
             payload = investigate_question(
                 client,

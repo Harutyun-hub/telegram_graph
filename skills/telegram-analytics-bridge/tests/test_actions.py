@@ -14,6 +14,7 @@ from actions import (
     ask_insights,
     compare_channels,
     compare_topics,
+    deep_analyze,
     get_freshness_status,
     get_active_alerts,
     get_declining_topics,
@@ -36,6 +37,7 @@ from models import (
     AskInsightsRequest,
     CompareChannelsRequest,
     CompareTopicsRequest,
+    DeepAnalyzeRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
@@ -317,6 +319,7 @@ class FakeClient:
         node_details_by_key=None,
         telegram_source_result=None,
         social_source_result=None,
+        deep_analysis_result=None,
     ):
         self._dashboard = dashboard if dashboard is not None else load_fixture("dashboard.json")
         self._sentiments = sentiments if sentiments is not None else load_fixture("sentiments.json")
@@ -358,8 +361,61 @@ class FakeClient:
                 "is_active": True,
             },
         }
+        self._deep_analysis_result = deep_analysis_result if deep_analysis_result is not None else {
+            "summary": "The important signal: Visa And Residency is above baseline.",
+            "confidence": "medium",
+            "surprise": {
+                "recipe": "surprise_score",
+                "topic": "Visa And Residency",
+                "current_mentions": 12,
+                "baseline_mentions": 4,
+                "lift": 3.0,
+                "label": "high",
+            },
+            "key_findings": [
+                "Visa And Residency is above its baseline: 12 mentions vs 4 previously (3.0x lift).",
+                "The signal does not appear to collapse into a single-channel artifact.",
+            ],
+            "tested_explanations": [
+                {
+                    "explanation": "The topic is genuinely above its recent baseline.",
+                    "status": "supported",
+                    "probe": "surprise_score",
+                },
+                {
+                    "explanation": "The trend is a single-channel amplification artifact.",
+                    "status": "rejected",
+                    "probe": "concentration_risk",
+                },
+            ],
+            "considered_and_rejected": [
+                {
+                    "explanation": "The trend is a single-channel amplification artifact.",
+                    "status": "rejected",
+                    "probe": "concentration_risk",
+                }
+            ],
+            "evidence": [
+                {
+                    "id": "comment-1",
+                    "type": "comment",
+                    "channel": "Docs Chat",
+                    "text": "Why are appointments delayed again?",
+                    "timestamp": "2026-04-20T10:00:00Z",
+                }
+            ],
+            "caveats": ["Answer coverage is inferred from lightweight text markers."],
+            "analysis_trace": {
+                "mode": "quick",
+                "window": "7d",
+                "recipes": ["surprise_score", "concentration_risk", "evidence_trace"],
+                "probe_count": 3,
+            },
+            "telegram_text": "The important signal: Visa And Residency is above baseline.\nConfidence: medium.",
+        }
         self.search_queries = []
         self.added_sources = []
+        self.deep_analysis_calls = []
 
     def get_dashboard(self, window=None):
         return self._dashboard
@@ -396,6 +452,10 @@ class FakeClient:
     def add_social_source(self, source_type, value):
         self.added_sources.append((source_type, value))
         return self._social_source_result
+
+    def deep_analyze(self, question, window="7d", mode="quick"):
+        self.deep_analysis_calls.append((question, window, mode))
+        return self._deep_analysis_result
 
     def get_topic_detail(self, topic, category=None, window="7d"):
         if self._topic_details_by_topic:
@@ -658,6 +718,28 @@ class ActionTests(unittest.TestCase):
     def test_add_source_ambiguous_value_raises_validation_error(self) -> None:
         with self.assertRaises(ValidationError):
             add_source(self.client, AddSourceRequest(value="Dubai News", source_type="auto"))
+
+    def test_deep_analyze_formats_v3_analyst_payload(self) -> None:
+        payload = deep_analyze(
+            self.client,
+            DeepAnalyzeRequest(
+                window="7d",
+                question="What is driving concern about visa appointments?",
+                mode="quick",
+            ),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "deep_analyze")
+        self.assertEqual(payload["confidence"], "medium")
+        self.assertIn("surprise_score", payload["analysis_trace"]["recipes"])
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/analysis/deep"])
+        self.assertEqual(
+            self.client.deep_analysis_calls[0],
+            ("What is driving concern about visa appointments?", "7d", "quick"),
+        )
+        self.assertIn("considered_and_rejected", payload["items"][0])
+        self.assertIn("Confidence: medium", payload["telegram_text"])
 
     def test_get_topic_detail_normalizes_detail_payload(self) -> None:
         payload = get_topic_detail(

@@ -59,6 +59,17 @@ class AnalyticsClient:
             },
         )
 
+    def deep_analyze(self, question: str, window: str = "7d", mode: str = "quick") -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/agent/analysis/deep",
+            payload={
+                "question": question,
+                "window": window,
+                "mode": mode,
+            },
+        )
+
     def search_entities(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._request_json(
             "GET",

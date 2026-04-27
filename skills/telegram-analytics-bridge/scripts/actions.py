@@ -11,6 +11,7 @@ from models import (
     AskInsightsRequest,
     CompareChannelsRequest,
     CompareTopicsRequest,
+    DeepAnalyzeRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
@@ -665,6 +666,64 @@ def add_source(client, request: AddSourceRequest) -> dict[str, Any]:
         items=[item],
         source_endpoints=source_endpoints,
     )
+
+
+def _deep_analysis_bullets(payload: dict[str, Any]) -> list[str]:
+    bullets: list[str] = []
+    for finding in list(payload.get("key_findings") or [])[:3]:
+        text = _trim_text(finding, 170)
+        if text:
+            bullets.append(text)
+    rejected = list(payload.get("considered_and_rejected") or [])
+    if rejected:
+        rejected_labels = [
+            _trim_text(item.get("explanation"), 80)
+            for item in rejected[:2]
+            if isinstance(item, dict) and item.get("explanation")
+        ]
+        if rejected_labels:
+            bullets.append("Rejected: " + "; ".join(rejected_labels) + ".")
+    trace = payload.get("analysis_trace") if isinstance(payload.get("analysis_trace"), dict) else {}
+    recipes = list(trace.get("recipes") or [])[:4]
+    if recipes:
+        bullets.append("Probes used: " + ", ".join(str(recipe) for recipe in recipes) + ".")
+    return _limit_bullets(bullets or ["No strong hidden signal was detected for this question."])
+
+
+def deep_analyze(client, request: DeepAnalyzeRequest) -> dict[str, Any]:
+    payload = client.deep_analyze(request.question, window=request.window, mode=request.mode)
+    summary = _clean_text(payload.get("summary")) or "Deep analysis completed."
+    caveats = [str(item) for item in list(payload.get("caveats") or []) if item]
+    response = build_success(
+        action="deep_analyze",
+        window=request.window,
+        summary=summary,
+        confidence=_clean_text(payload.get("confidence")) or "medium",
+        bullets=_deep_analysis_bullets(payload),
+        items=[
+            {
+                "surprise": payload.get("surprise") or {},
+                "key_findings": list(payload.get("key_findings") or []),
+                "tested_explanations": list(payload.get("tested_explanations") or []),
+                "considered_and_rejected": list(payload.get("considered_and_rejected") or []),
+                "evidence": list(payload.get("evidence") or []),
+                "analysis_trace": payload.get("analysis_trace") or {},
+            }
+        ],
+        source_endpoints=["/api/agent/analysis/deep"],
+        caveat=caveats[0] if caveats else None,
+    )
+    response["surprise"] = payload.get("surprise") or {}
+    response["key_findings"] = list(payload.get("key_findings") or [])
+    response["tested_explanations"] = list(payload.get("tested_explanations") or [])
+    response["considered_and_rejected"] = list(payload.get("considered_and_rejected") or [])
+    response["evidence"] = list(payload.get("evidence") or [])
+    response["analysis_trace"] = payload.get("analysis_trace") or {}
+    if caveats:
+        response["caveats"] = caveats
+    if payload.get("telegram_text"):
+        response["telegram_text"] = _trim_text(payload.get("telegram_text"), 900)
+    return response
 
 
 def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:

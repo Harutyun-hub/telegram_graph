@@ -15,6 +15,7 @@ from models import (
     ClientConfig,
     CompareChannelsRequest,
     CompareTopicsRequest,
+    DeepAnalyzeRequest,
     GetGraphSnapshotRequest,
     GetNodeContextRequest,
     GetQuestionClustersRequest,
@@ -60,6 +61,19 @@ class ModelValidationTests(unittest.TestCase):
     def test_add_source_rejects_unknown_source_type(self) -> None:
         with self.assertRaises(ValidationError):
             AddSourceRequest(value="@docschat", source_type="twitter")
+
+    def test_deep_analyze_accepts_known_mode(self) -> None:
+        request = DeepAnalyzeRequest(
+            window="7d",
+            question="  What changed in residency permits?  ",
+            mode="deep",
+        )
+        self.assertEqual(request.question, "What changed in residency permits?")
+        self.assertEqual(request.mode, "deep")
+
+    def test_deep_analyze_rejects_unknown_mode(self) -> None:
+        with self.assertRaises(ValidationError):
+            DeepAnalyzeRequest(window="7d", question="What changed?", mode="raw")
 
     def test_topic_detail_normalizes_optional_category(self) -> None:
         request = GetTopicDetailRequest(window="7d", topic=" Residency permits ", category=" Documents ")
