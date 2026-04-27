@@ -315,6 +315,17 @@ type TopicRankingItem = TopicBubbleItem & {
   dominantSentiment?: string;
   growthPct?: number | null;
   growthReliable?: boolean;
+  sampleSummary?: string;
+  evidence?: Array<{
+    activity_uid?: string;
+    entity?: string;
+    platform?: string;
+    published_at?: string;
+    summary?: string;
+    source_url?: string;
+  }>;
+  topEntities?: string[];
+  topPlatforms?: string[];
   strictMetrics?: {
     engagementTotal?: number;
     likes?: number;
@@ -346,6 +357,17 @@ type WeeklyShiftItem = typeof WEEKLY_SHIFTS[number];
 type PositiveImpactItem = typeof POSITIVE_IMPACT[number];
 type NegativeImpactItem = typeof NEGATIVE_IMPACT[number];
 type ScorecardItem = typeof SCORECARD[number];
+
+function topicEvidencePreview(topic: TopicRankingItem, ru: boolean): string {
+  const evidenceSummary = Array.isArray(topic.evidence)
+    ? topic.evidence.find((item) => String(item?.summary || '').trim())?.summary
+    : '';
+  const preview = String(topic.sampleSummary || evidenceSummary || '').trim();
+  if (preview) return preview;
+  return ru
+    ? 'Откройте тему, чтобы увидеть посты, комментарии и доказательства.'
+    : 'Open the topic to view posts, comments, and evidence.';
+}
 
 interface SocialDashboardSnapshot {
   meta?: {
@@ -1150,6 +1172,7 @@ export function SocialPage() {
   const topicRanking = dashboard?.deepAnalysis?.topicRanking?.length
     ? dashboard.deepAnalysis.topicRanking
     : topicBubbles;
+  const maxTopicRankingCount = Math.max(1, topicRanking.reduce((max, item) => Math.max(max, Number(item.count) || 0), 0));
   const topicMomentum = dashboard?.deepAnalysis?.topicMomentum ?? [];
   const momentumByTopic = useMemo(() => {
     const map = new Map<string, TopicMomentumItem>();
@@ -1355,41 +1378,75 @@ export function SocialPage() {
                     subtitle={ru?'Топ темы по упоминаниям, динамике и вовлечённости':'Top topics by mentions, movement, and engagement'}
                     headerRight={<span className="text-xs text-slate-400">{ru?'Последние 30 дней':'Last 30 days'}</span>}
                   >
-                    <div className="space-y-2.5">
+                    <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
                       {[...topicRanking].sort((a,b)=>b.count-a.count).map((t,i) => {
-                        const max = Math.max(1, topicRanking.reduce((m,x)=>Math.max(m,x.count),0));
                         const sentiment = t.dominantSentiment || t.sentiment;
                         const engagementTotal = t.strictMetrics?.engagementTotal ?? 0;
+                        const evidenceCount = t.strictMetrics?.evidenceCount ?? t.evidence?.length ?? 0;
                         const momentum = momentumByTopic.get(t.topic.toLowerCase());
                         const velocity = momentum?.velocity ?? t.growthPct ?? 0;
                         const hasMomentum = Boolean(momentum || t.growthReliable);
                         const isUp = velocity >= 0;
                         const col = sentiment==='positive'?C.emerald:sentiment==='negative'?C.rose:'#64748b';
                         const badgeCls = sentiment==='positive'?'bg-emerald-50 text-emerald-700':sentiment==='negative'?'bg-rose-50 text-rose-700':'bg-slate-100 text-slate-600';
+                        const sourceContext = t.topEntities?.[0] || t.evidence?.[0]?.entity || t.topPlatforms?.[0] || t.evidence?.[0]?.platform;
                         return (
                           <button
                             key={t.topic}
                             type="button"
                             onClick={() => openSocialTopic(t.topic)}
-                            className="w-full flex items-center gap-3 group rounded-lg py-1.5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                            className="block w-full rounded-xl border border-slate-100 bg-slate-50/70 p-3 text-left transition-all hover:border-slate-200 hover:bg-slate-50 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30"
                             aria-label={`${ru ? 'Открыть тему' : 'Open topic'} ${translateSocialLabel(t.topic, ru)}`}
                           >
-                            <span className="text-xs text-slate-400 w-5 text-center" style={{ fontWeight:600 }}>{i+1}</span>
-                            <span className="text-sm text-slate-700 w-36 flex-shrink-0" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-                            <div className="flex-1 h-7 bg-slate-50 rounded-lg overflow-hidden relative border border-slate-100">
-                              <div className="h-full rounded-lg transition-all duration-700" style={{ width:`${(t.count/max)*100}%`, backgroundColor:col, opacity:0.75 }} />
-                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-700" style={{ fontWeight:600 }}>{t.count}</span>
+                            <div className="flex items-start gap-3">
+                              <span className="mt-0.5 w-5 flex-shrink-0 text-center text-xs text-slate-400" style={{ fontWeight:700 }}>{i+1}</span>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-sm text-slate-800" style={{ fontWeight:700 }}>{translateSocialLabel(t.topic, ru)}</p>
+                                    <p className="mt-1 flex min-w-0 items-center gap-1.5 text-xs italic text-slate-400">
+                                      <MessageSquare className="h-3.5 w-3.5 flex-shrink-0 text-slate-300" />
+                                      <span className="truncate">{topicEvidencePreview(t, ru)}</span>
+                                    </p>
+                                  </div>
+                                  <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] ${badgeCls}`} style={{ fontWeight:600 }}>
+                                    {sentimentLabel(sentiment, ru)}
+                                  </span>
+                                </div>
+
+                                <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                                  <span className="rounded bg-white px-1.5 py-0.5 text-xs text-slate-500">
+                                    {t.count.toLocaleString()} {ru ? 'упоминаний' : 'mentions'}
+                                  </span>
+                                  <span className={`inline-flex items-center gap-0.5 text-xs ${hasMomentum ? (isUp ? 'text-emerald-600' : 'text-rose-500') : 'text-slate-400'}`} style={{ fontWeight:700 }}>
+                                    {hasMomentum ? (isUp ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />) : null}
+                                    {hasMomentum ? `${isUp ? '+' : ''}${Number(velocity).toFixed(1)}%` : (ru ? 'мало данных' : 'low evidence')}
+                                  </span>
+                                  {engagementTotal > 0 && (
+                                    <span className="text-xs text-slate-500">
+                                      {engagementTotal.toLocaleString()} {ru ? 'реакц.' : 'eng.'}
+                                    </span>
+                                  )}
+                                  {evidenceCount > 0 && (
+                                    <span className="text-xs text-slate-500">
+                                      {evidenceCount} {ru ? 'доказ.' : 'evidence'}
+                                    </span>
+                                  )}
+                                  {sourceContext && (
+                                    <span className="max-w-[220px] truncate rounded bg-white px-1.5 py-0.5 text-xs text-slate-400">
+                                      {sourceContext}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="mt-2.5 h-2 rounded-full border border-slate-100 bg-white">
+                                  <div
+                                    className="h-full rounded-full transition-all duration-700"
+                                    style={{ width:`${(t.count / maxTopicRankingCount) * 100}%`, backgroundColor:col, opacity:0.72 }}
+                                  />
+                                </div>
+                              </div>
                             </div>
-                            <span className={`text-[10px] w-20 text-right flex-shrink-0 inline-flex items-center justify-end gap-0.5 ${hasMomentum ? (isUp ? 'text-emerald-600' : 'text-rose-500') : 'text-slate-400'}`} style={{ fontWeight:700 }}>
-                              {hasMomentum ? (isUp ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />) : null}
-                              {hasMomentum ? `${isUp ? '+' : ''}${Number(velocity).toFixed(1)}%` : '—'}
-                            </span>
-                            <span className="text-[10px] text-slate-500 w-20 text-right flex-shrink-0">
-                              {engagementTotal > 0 ? `${engagementTotal} ${ru ? 'реакц.' : 'eng.'}` : '—'}
-                            </span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full w-20 text-center flex-shrink-0 ${badgeCls}`} style={{ fontWeight:500 }}>
-                              {sentimentLabel(sentiment, ru)}
-                            </span>
                           </button>
                         );
                       })}
