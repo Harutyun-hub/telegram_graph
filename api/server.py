@@ -1314,6 +1314,44 @@ async def require_kb_access(
             raise analytics_exc
 
 
+async def require_openclaw_source_write_access(
+    request: Request,
+    x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
+    x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, str]:
+    """
+    Narrow write capability for OpenClaw source registration.
+
+    Accept operator/admin auth or the dedicated OpenClaw analytics token, but
+    explicitly reject the frontend analytics token for mutating routes.
+    """
+    _enforce_analytics_rate_limit(request)
+
+    if x_supabase_authorization or x_admin_authorization:
+        return await require_operator_access(
+            x_supabase_authorization=x_supabase_authorization,
+            x_admin_authorization=x_admin_authorization,
+            authorization=authorization,
+        )
+
+    bearer_token = _extract_bearer_token(authorization)
+    openclaw_token = str(getattr(config, "ANALYTICS_API_KEY_OPENCLAW", "") or "").strip()
+    frontend_token = str(getattr(config, "ANALYTICS_API_KEY_FRONTEND", "") or "").strip()
+
+    if bearer_token and openclaw_token and hmac.compare_digest(bearer_token, openclaw_token):
+        return {"id": "analytics-openclaw", "email": "", "auth": "analytics_openclaw"}
+
+    if bearer_token and frontend_token and hmac.compare_digest(bearer_token, frontend_token):
+        raise HTTPException(status_code=403, detail="Frontend analytics token cannot modify tracked sources.")
+
+    return await require_operator_access(
+        x_supabase_authorization=x_supabase_authorization,
+        x_admin_authorization=x_admin_authorization,
+        authorization=authorization,
+    )
+
+
 async def require_debug_endpoint_access(
     x_supabase_authorization: Optional[str] = Header(default=None, alias="X-Supabase-Authorization"),
     x_admin_authorization: Optional[str] = Header(default=None, alias="X-Admin-Authorization"),
@@ -3084,34 +3122,51 @@ async def list_social_sources():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _create_or_update_social_source_from_payload(payload: SocialSourceCreateRequest) -> dict[str, Any]:
+    source_type = str(payload.source_type or "").strip().lower()
+    normalizers = {
+        "facebook_page": (_normalize_facebook_source, "Enter a valid Facebook page URL"),
+        "meta_ads": (_normalize_meta_ads_source, "Enter a valid Meta Ads page ID"),
+        "instagram_profile": (_normalize_instagram_source, "Enter a valid Instagram profile URL"),
+        "google_domain": (_normalize_google_source, "Enter a valid website URL"),
+    }
+    normalizer = normalizers.get(source_type)
+    if not normalizer:
+        raise HTTPException(status_code=400, detail="Unsupported social source type")
+    normalized = normalizer[0](payload.value)
+    if not normalized:
+        raise HTTPException(status_code=400, detail=normalizer[1])
+    return get_social_store().create_or_update_source(
+        source_type=source_type,
+        source_key=normalized["source_key"],
+        source_url=normalized["source_url"],
+        display_name=normalized["display_name"],
+    )
+
+
 @app.post("/api/sources/social", dependencies=[Depends(require_operator_access)])
 async def create_social_source(payload: SocialSourceCreateRequest):
     try:
-        source_type = str(payload.source_type or "").strip().lower()
-        normalizers = {
-            "facebook_page": (_normalize_facebook_source, "Enter a valid Facebook page URL"),
-            "meta_ads": (_normalize_meta_ads_source, "Enter a valid Meta Ads page ID"),
-            "instagram_profile": (_normalize_instagram_source, "Enter a valid Instagram profile URL"),
-            "google_domain": (_normalize_google_source, "Enter a valid website URL"),
-        }
-        normalizer = normalizers.get(source_type)
-        if not normalizer:
-            raise HTTPException(status_code=400, detail="Unsupported social source type")
-        normalized = normalizer[0](payload.value)
-        if not normalized:
-            raise HTTPException(status_code=400, detail=normalizer[1])
-        return get_social_store().create_or_update_source(
-            source_type=source_type,
-            source_key=normalized["source_key"],
-            source_url=normalized["source_url"],
-            display_name=normalized["display_name"],
-        )
+        return _create_or_update_social_source_from_payload(payload)
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         logger.error(f"Create social source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/agent/sources/social", dependencies=[Depends(require_openclaw_source_write_access)])
+async def create_agent_social_source(payload: SocialSourceCreateRequest):
+    try:
+        return _create_or_update_social_source_from_payload(payload)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Create agent social source error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3511,83 +3566,97 @@ async def get_social_intelligence_evidence(
         raise _social_unavailable("Social intelligence evidence error", e) from e
 
 
+async def _create_or_reactivate_channel_source_from_payload(payload: ChannelSourceCreateRequest) -> dict[str, Any]:
+    normalized_handle = _normalize_channel_username(payload.channel_username)
+    _validate_channel_username(normalized_handle)
+    canonical_username = _canonical_channel_username(normalized_handle)
+
+    provided_title = (payload.channel_title or "").strip()
+    channel_title = provided_title or normalized_handle
+
+    writer = get_supabase_writer()
+    existing = writer.get_channel_by_handle(normalized_handle)
+    if existing:
+        update_payload = {
+            "channel_username": canonical_username,
+            "scrape_depth_days": payload.scrape_depth_days,
+            "scrape_comments": payload.scrape_comments,
+        }
+        existing_title = (existing.get("channel_title") or "").strip()
+        if provided_title:
+            update_payload["channel_title"] = provided_title
+        elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
+            update_payload["channel_title"] = normalized_handle
+        if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
+            pending_title = (update_payload.get("channel_title") or channel_title or canonical_username).strip() or canonical_username
+            if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+                update_payload.update(build_pending_source_payload(channel_title=pending_title))
+            else:
+                update_payload.update(_pending_source_payload(channel_title=pending_title))
+        action = "exists"
+        if not existing.get("is_active", False):
+            update_payload["is_active"] = True
+            action = "reactivated"
+
+        updated = writer.update_channel(existing["id"], update_payload)
+        if updated and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+            if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
+                ensure_resolution_job(writer, updated)
+            updated = writer.get_channel_by_id(updated["id"]) or updated
+        elif updated:
+            inline_resolved = await _try_enrich_channel_metadata(
+                updated["id"],
+                updated.get("channel_username") or canonical_username,
+                updated.get("channel_title"),
+            )
+            updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
+        return {"action": action, "item": updated}
+
+    create_payload = {
+        "channel_username": canonical_username,
+        "is_active": True,
+        "scrape_depth_days": payload.scrape_depth_days,
+        "scrape_comments": payload.scrape_comments,
+    }
+    if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+        create_payload.update(build_pending_source_payload(channel_title=channel_title))
+    else:
+        create_payload.update(_pending_source_payload(channel_title=channel_title))
+    created = writer.create_channel(create_payload)
+    if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
+        ensure_resolution_job(writer, created)
+        created = writer.get_channel_by_id(created["id"]) or created
+    else:
+        inline_resolved = await _try_enrich_channel_metadata(
+            created["id"],
+            created.get("channel_username") or canonical_username,
+            created.get("channel_title"),
+        )
+        created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
+    return {"action": "created", "item": created}
+
+
 @app.post("/api/sources/channels", dependencies=[Depends(require_operator_access)])
 async def create_channel_source(payload: ChannelSourceCreateRequest):
     """Create or reactivate a Telegram channel source for scheduler pickup."""
     try:
-        normalized_handle = _normalize_channel_username(payload.channel_username)
-        _validate_channel_username(normalized_handle)
-        canonical_username = _canonical_channel_username(normalized_handle)
-
-        provided_title = (payload.channel_title or "").strip()
-        channel_title = provided_title or normalized_handle
-
-        writer = get_supabase_writer()
-        existing = writer.get_channel_by_handle(normalized_handle)
-        if existing:
-            update_payload = {
-                "channel_username": canonical_username,
-                "scrape_depth_days": payload.scrape_depth_days,
-                "scrape_comments": payload.scrape_comments,
-            }
-            existing_title = (existing.get("channel_title") or "").strip()
-            if provided_title:
-                update_payload["channel_title"] = provided_title
-            elif (not existing_title) or (existing_title.lower() == canonical_username.lower()):
-                update_payload["channel_title"] = normalized_handle
-            if str(existing.get("resolution_status") or "").strip().lower() != "resolved":
-                pending_title = (update_payload.get("channel_title") or channel_title or canonical_username).strip() or canonical_username
-                if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
-                    update_payload.update(build_pending_source_payload(channel_title=pending_title))
-                else:
-                    update_payload.update(_pending_source_payload(channel_title=pending_title))
-            action = "exists"
-            if not existing.get("is_active", False):
-                update_payload["is_active"] = True
-                action = "reactivated"
-
-            updated = writer.update_channel(existing["id"], update_payload)
-            if updated and config.FEATURE_SOURCE_RESOLUTION_QUEUE:
-                if str(updated.get("resolution_status") or "").strip().lower() != "resolved":
-                    ensure_resolution_job(writer, updated)
-                updated = writer.get_channel_by_id(updated["id"]) or updated
-            elif updated:
-                inline_resolved = await _try_enrich_channel_metadata(
-                    updated["id"],
-                    updated.get("channel_username") or canonical_username,
-                    updated.get("channel_title"),
-                )
-                updated = inline_resolved or writer.get_channel_by_id(updated["id"]) or updated
-            return {"action": action, "item": updated}
-
-        create_payload = {
-            "channel_username": canonical_username,
-            "is_active": True,
-            "scrape_depth_days": payload.scrape_depth_days,
-            "scrape_comments": payload.scrape_comments,
-        }
-        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
-            create_payload.update(build_pending_source_payload(channel_title=channel_title))
-        else:
-            create_payload.update(_pending_source_payload(channel_title=channel_title))
-        created = writer.create_channel(
-            create_payload
-        )
-        if config.FEATURE_SOURCE_RESOLUTION_QUEUE:
-            ensure_resolution_job(writer, created)
-            created = writer.get_channel_by_id(created["id"]) or created
-        else:
-            inline_resolved = await _try_enrich_channel_metadata(
-                created["id"],
-                created.get("channel_username") or canonical_username,
-                created.get("channel_title"),
-            )
-            created = inline_resolved or writer.get_channel_by_id(created["id"]) or created
-        return {"action": "created", "item": created}
+        return await _create_or_reactivate_channel_source_from_payload(payload)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Create source channel error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/agent/sources/telegram", dependencies=[Depends(require_openclaw_source_write_access)])
+async def create_agent_channel_source(payload: ChannelSourceCreateRequest):
+    """OpenClaw-safe Telegram source registration endpoint."""
+    try:
+        return await _create_or_reactivate_channel_source_from_payload(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Create agent source channel error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
