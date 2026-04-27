@@ -59,11 +59,49 @@ class AnalyticsClient:
             },
         )
 
+    def deep_analyze(self, question: str, window: str = "7d", mode: str = "quick") -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/agent/analysis/deep",
+            payload={
+                "question": question,
+                "window": window,
+                "mode": mode,
+            },
+        )
+
     def search_entities(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._request_json(
             "GET",
             "/api/search",
             query={"query": query, "limit": limit},
+        )
+
+    def add_telegram_source(
+        self,
+        channel_username: str,
+        *,
+        channel_title: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "channel_username": channel_username,
+        }
+        if channel_title:
+            payload["channel_title"] = channel_title
+        return self._request_json(
+            "POST",
+            "/api/agent/sources/telegram",
+            payload=payload,
+        )
+
+    def add_social_source(self, source_type: str, value: str) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/agent/sources/social",
+            payload={
+                "source_type": source_type,
+                "value": value,
+            },
         )
 
     def get_topic_detail(self, topic: str, category: str | None = None, window: str = "7d") -> dict[str, Any]:

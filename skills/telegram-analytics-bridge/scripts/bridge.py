@@ -8,9 +8,11 @@ import os
 import sys
 
 from actions import (
+    add_source,
     ask_insights,
     compare_channels,
     compare_topics,
+    deep_analyze,
     get_freshness_status,
     get_active_alerts,
     get_declining_topics,
@@ -30,8 +32,10 @@ from actions import (
 from client import AnalyticsAPIError, AnalyticsClient
 from formatters import build_error
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     ClientConfig,
+    DeepAnalyzeRequest,
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
@@ -100,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--query", required=True)
     search.add_argument("--limit", type=int, default=5)
 
+    add_source_parser = subparsers.add_parser("add_source", parents=[common])
+    add_source_parser.add_argument("--value", required=True)
+    add_source_parser.add_argument("--source-type", default="auto")
+    add_source_parser.add_argument("--title", default=None)
+
     topic_detail = subparsers.add_parser("get_topic_detail", parents=[common])
     topic_detail.add_argument("--topic", required=True)
     topic_detail.add_argument("--category", default=None)
@@ -150,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     insights.add_argument("--window", default="7d")
     insights.add_argument("--question", required=True)
 
+    deep_analysis = subparsers.add_parser("deep_analyze", parents=[common])
+    deep_analysis.add_argument("--window", default="7d")
+    deep_analysis.add_argument("--question", required=True)
+    deep_analysis.add_argument("--mode", default="quick")
+
     investigate_question_parser = subparsers.add_parser("investigate_question", parents=[common])
     investigate_question_parser.add_argument("--window", default="7d")
     investigate_question_parser.add_argument("--question", required=True)
@@ -187,6 +201,11 @@ def main() -> int:
             payload = get_active_alerts(client, GetActiveAlertsRequest())
         elif args.action == "search_entities":
             payload = search_entities(client, SearchEntitiesRequest(query=args.query, limit=args.limit))
+        elif args.action == "add_source":
+            payload = add_source(
+                client,
+                AddSourceRequest(value=args.value, source_type=args.source_type, title=args.title),
+            )
         elif args.action == "get_topic_detail":
             payload = get_topic_detail(
                 client,
@@ -243,6 +262,11 @@ def main() -> int:
             )
         elif args.action == "ask_insights":
             payload = ask_insights(client, AskInsightsRequest(window=args.window, question=args.question))
+        elif args.action == "deep_analyze":
+            payload = deep_analyze(
+                client,
+                DeepAnalyzeRequest(window=args.window, question=args.question, mode=args.mode),
+            )
         elif args.action == "investigate_question":
             payload = investigate_question(
                 client,

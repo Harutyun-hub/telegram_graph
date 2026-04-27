@@ -10,9 +10,11 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from actions import (
+    add_source,
     ask_insights,
     compare_channels,
     compare_topics,
+    deep_analyze,
     get_freshness_status,
     get_active_alerts,
     get_declining_topics,
@@ -31,9 +33,11 @@ from actions import (
 )
 from client import AnalyticsAPIError
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     CompareChannelsRequest,
     CompareTopicsRequest,
+    DeepAnalyzeRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
@@ -49,6 +53,7 @@ from models import (
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
 
 
@@ -312,6 +317,9 @@ class FakeClient:
         top_channels=None,
         trending_topics=None,
         node_details_by_key=None,
+        telegram_source_result=None,
+        social_source_result=None,
+        deep_analysis_result=None,
     ):
         self._dashboard = dashboard if dashboard is not None else load_fixture("dashboard.json")
         self._sentiments = sentiments if sentiments is not None else load_fixture("sentiments.json")
@@ -334,7 +342,80 @@ class FakeClient:
             ("category:Documents", "category"): CATEGORY_NODE_DETAIL,
             ("channel:docs-chat", "channel"): CHANNEL_NODE_DETAIL,
         }
+        self._telegram_source_result = telegram_source_result if telegram_source_result is not None else {
+            "action": "created",
+            "item": {
+                "channel_username": "@docschat",
+                "channel_title": "Docs Chat",
+                "is_active": True,
+                "resolution_status": "pending",
+            },
+        }
+        self._social_source_result = social_source_result if social_source_result is not None else {
+            "action": "exists",
+            "item": {
+                "platform": "facebook",
+                "source_kind": "facebook_page",
+                "display_url": "https://www.facebook.com/examplepage",
+                "company_name": "Examplepage",
+                "is_active": True,
+            },
+        }
+        self._deep_analysis_result = deep_analysis_result if deep_analysis_result is not None else {
+            "summary": "The important signal: Visa And Residency is above baseline.",
+            "confidence": "medium",
+            "surprise": {
+                "recipe": "surprise_score",
+                "topic": "Visa And Residency",
+                "current_mentions": 12,
+                "baseline_mentions": 4,
+                "lift": 3.0,
+                "label": "high",
+            },
+            "key_findings": [
+                "Visa And Residency is above its baseline: 12 mentions vs 4 previously (3.0x lift).",
+                "The signal does not appear to collapse into a single-channel artifact.",
+            ],
+            "tested_explanations": [
+                {
+                    "explanation": "The topic is genuinely above its recent baseline.",
+                    "status": "supported",
+                    "probe": "surprise_score",
+                },
+                {
+                    "explanation": "The trend is a single-channel amplification artifact.",
+                    "status": "rejected",
+                    "probe": "concentration_risk",
+                },
+            ],
+            "considered_and_rejected": [
+                {
+                    "explanation": "The trend is a single-channel amplification artifact.",
+                    "status": "rejected",
+                    "probe": "concentration_risk",
+                }
+            ],
+            "evidence": [
+                {
+                    "id": "comment-1",
+                    "type": "comment",
+                    "channel": "Docs Chat",
+                    "text": "Why are appointments delayed again?",
+                    "timestamp": "2026-04-20T10:00:00Z",
+                }
+            ],
+            "caveats": ["Answer coverage is inferred from lightweight text markers."],
+            "analysis_trace": {
+                "mode": "quick",
+                "window": "7d",
+                "recipes": ["surprise_score", "concentration_risk", "evidence_trace"],
+                "probe_count": 3,
+            },
+            "telegram_text": "The important signal: Visa And Residency is above baseline.\nConfidence: medium.",
+        }
         self.search_queries = []
+        self.added_sources = []
+        self.deep_analysis_calls = []
 
     def get_dashboard(self, window=None):
         return self._dashboard
@@ -363,6 +444,18 @@ class FakeClient:
         if matches:
             return matches[:limit]
         return self._search_results[:limit]
+
+    def add_telegram_source(self, channel_username, *, channel_title=None):
+        self.added_sources.append(("telegram", channel_username, channel_title))
+        return self._telegram_source_result
+
+    def add_social_source(self, source_type, value):
+        self.added_sources.append((source_type, value))
+        return self._social_source_result
+
+    def deep_analyze(self, question, window="7d", mode="quick"):
+        self.deep_analysis_calls.append((question, window, mode))
+        return self._deep_analysis_result
 
     def get_topic_detail(self, topic, category=None, window="7d"):
         if self._topic_details_by_topic:
@@ -544,6 +637,109 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["type"], "topic_hint")
         self.assertEqual(payload["items"][0]["name"], "Residency permits")
         self.assertIn("No exact backend entities matched", payload["summary"])
+
+    def test_add_source_auto_detects_telegram_and_formats_created_response(self) -> None:
+        client = FakeClient(
+            telegram_source_result={
+                "action": "created",
+                "item": {
+                    "channel_username": "@docschat",
+                    "channel_title": "Docs Chat",
+                    "is_active": True,
+                    "resolution_status": "pending",
+                },
+            }
+        )
+
+        payload = add_source(client, AddSourceRequest(value="@docschat", source_type="auto", title="Docs Chat"))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "add_source")
+        self.assertEqual(payload["items"][0]["platform"], "telegram")
+        self.assertEqual(payload["items"][0]["source_type"], "telegram")
+        self.assertEqual(payload["items"][0]["status"], "created")
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/telegram"])
+        self.assertEqual(client.added_sources[0], ("telegram", "@docschat", "Docs Chat"))
+
+    def test_add_source_routes_social_source_type_and_formats_exists_response(self) -> None:
+        client = FakeClient(
+            social_source_result={
+                "action": "exists",
+                "item": {
+                    "platform": "facebook",
+                    "source_kind": "facebook_page",
+                    "display_url": "https://www.facebook.com/examplepage",
+                    "company_name": "Examplepage",
+                    "is_active": True,
+                },
+            }
+        )
+
+        payload = add_source(
+            client,
+            AddSourceRequest(value="https://facebook.com/examplepage", source_type="facebook_page"),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["items"][0]["platform"], "facebook")
+        self.assertEqual(payload["items"][0]["source_type"], "facebook_page")
+        self.assertEqual(payload["items"][0]["status"], "exists")
+        self.assertIn("already", payload["summary"].lower())
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/social"])
+        self.assertEqual(client.added_sources[0], ("facebook_page", "https://facebook.com/examplepage"))
+
+    def test_add_source_auto_detects_instagram_url_as_social_source(self) -> None:
+        client = FakeClient(
+            social_source_result={
+                "action": "reactivated",
+                "item": {
+                    "platform": "instagram",
+                    "source_kind": "instagram_profile",
+                    "display_url": "https://instagram.com/exampleprofile",
+                    "company_name": "Exampleprofile",
+                    "is_active": True,
+                },
+            }
+        )
+
+        payload = add_source(
+            client,
+            AddSourceRequest(value="https://instagram.com/exampleprofile", source_type="auto"),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["items"][0]["platform"], "instagram")
+        self.assertEqual(payload["items"][0]["source_type"], "instagram_profile")
+        self.assertEqual(payload["items"][0]["status"], "reactivated")
+        self.assertIn("reactivated", payload["summary"].lower())
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/sources/social"])
+        self.assertEqual(client.added_sources[0], ("instagram_profile", "https://instagram.com/exampleprofile"))
+
+    def test_add_source_ambiguous_value_raises_validation_error(self) -> None:
+        with self.assertRaises(ValidationError):
+            add_source(self.client, AddSourceRequest(value="Dubai News", source_type="auto"))
+
+    def test_deep_analyze_formats_v3_analyst_payload(self) -> None:
+        payload = deep_analyze(
+            self.client,
+            DeepAnalyzeRequest(
+                window="7d",
+                question="What is driving concern about visa appointments?",
+                mode="quick",
+            ),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "deep_analyze")
+        self.assertEqual(payload["confidence"], "medium")
+        self.assertIn("surprise_score", payload["analysis_trace"]["recipes"])
+        self.assertEqual(payload["source_endpoints"], ["/api/agent/analysis/deep"])
+        self.assertEqual(
+            self.client.deep_analysis_calls[0],
+            ("What is driving concern about visa appointments?", "7d", "quick"),
+        )
+        self.assertIn("considered_and_rejected", payload["items"][0])
+        self.assertIn("Confidence: medium", payload["telegram_text"])
 
     def test_get_topic_detail_normalizes_detail_payload(self) -> None:
         payload = get_topic_detail(

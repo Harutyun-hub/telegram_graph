@@ -7,9 +7,11 @@ from typing import Any
 from client import AnalyticsAPIError
 from formatters import build_success
 from models import (
+    AddSourceRequest,
     AskInsightsRequest,
     CompareChannelsRequest,
     CompareTopicsRequest,
+    DeepAnalyzeRequest,
     GetFreshnessStatusRequest,
     GetActiveAlertsRequest,
     GetDecliningTopicsRequest,
@@ -25,6 +27,7 @@ from models import (
     InvestigateQuestionRequest,
     InvestigateTopicRequest,
     SearchEntitiesRequest,
+    ValidationError,
 )
 
 
@@ -73,6 +76,10 @@ GRAPH_HINT_TOKENS = {
 }
 CHANNEL_HINT_TOKENS = {"channel", "channels", "chat", "group", "groups", "inside", "in"}
 RESOLUTION_PROBE_LIMIT = 3
+TELEGRAM_SOURCE_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/", re.IGNORECASE)
+FACEBOOK_SOURCE_RE = re.compile(r"^(?:https?://)?(?:(?:www|m)\.)?(?:facebook\.com|fb\.com)/", re.IGNORECASE)
+INSTAGRAM_SOURCE_RE = re.compile(r"^(?:https?://)?(?:(?:www|m)\.)?instagram\.com/", re.IGNORECASE)
+WEB_DOMAIN_RE = re.compile(r"^(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:[/?#].*)?$", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 
 
@@ -113,6 +120,80 @@ def _dashboard_data(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload.get("data"), dict):
         return payload["data"]
     return payload
+
+
+def _detect_source_type(value: str, requested_type: str) -> str:
+    source_type = _normalize_text(requested_type) or "auto"
+    if source_type != "auto":
+        return source_type
+
+    text = _clean_text(value)
+    if not text:
+        raise ValidationError("value is required")
+
+    if text.startswith("@") or TELEGRAM_SOURCE_RE.match(text):
+        return "telegram"
+    if FACEBOOK_SOURCE_RE.match(text):
+        return "facebook_page"
+    if INSTAGRAM_SOURCE_RE.match(text):
+        return "instagram_profile"
+    if WEB_DOMAIN_RE.match(text):
+        return "google_domain"
+
+    raise ValidationError("Source is ambiguous. Provide a full URL or @handle.")
+
+
+def _source_item_label(item: dict[str, Any]) -> str:
+    for key in ("channel_title", "channel_username", "display_url", "company_name", "value"):
+        text = _clean_text(item.get(key))
+        if text:
+            return text
+    return "Source"
+
+
+def _source_action_summary(action: str, label: str) -> str:
+    if action == "created":
+        return f"{label} was added to the tracking list."
+    if action == "reactivated":
+        return f"{label} was already known and has been reactivated for tracking."
+    return f"{label} is already in the tracking list."
+
+
+def _source_action_bullets(action: str, item: dict[str, Any]) -> list[str]:
+    bullets = []
+    status = _clean_text(item.get("resolution_status"))
+    if action == "created":
+        bullets.append("Status: source added successfully.")
+    elif action == "reactivated":
+        bullets.append("Status: existing source restored to active tracking.")
+    else:
+        bullets.append("Status: source already tracked.")
+    if item.get("platform"):
+        bullets.append(f"Platform: {item['platform']}.")
+    if item.get("source_type"):
+        bullets.append(f"Source type: {item['source_type']}.")
+    if status:
+        bullets.append(f"Resolution status: {status}.")
+    return _limit_bullets(bullets)
+
+
+def _build_source_item(action: str, resolved_type: str, request_value: str, backend_item: dict[str, Any]) -> dict[str, Any]:
+    platform = "telegram" if resolved_type == "telegram" else _clean_text(backend_item.get("platform")) or "social"
+    source_type = "telegram" if resolved_type == "telegram" else _clean_text(backend_item.get("source_kind")) or resolved_type
+    value = (
+        _clean_text(backend_item.get("channel_username"))
+        or _clean_text(backend_item.get("display_url"))
+        or _clean_text(request_value)
+    )
+    return {
+        "platform": platform,
+        "source_type": source_type,
+        "value": value,
+        "status": action,
+        "is_active": bool(backend_item.get("is_active", True)),
+        "resolution_status": backend_item.get("resolution_status"),
+        "title": _clean_text(backend_item.get("channel_title") or backend_item.get("company_name")),
+    }
 
 
 def _severity_sort_key(value: Any) -> int:
@@ -561,6 +642,88 @@ def get_top_topics(client, request: GetTopTopicsRequest) -> dict[str, Any]:
         source_endpoints=["/api/dashboard"],
         caveat=None if items else "The backend returned no trending topics for the selected window.",
     )
+
+
+def add_source(client, request: AddSourceRequest) -> dict[str, Any]:
+    resolved_type = _detect_source_type(request.value, request.source_type)
+    if resolved_type == "telegram":
+        payload = client.add_telegram_source(request.value, channel_title=request.title)
+        source_endpoints = ["/api/agent/sources/telegram"]
+    else:
+        payload = client.add_social_source(resolved_type, request.value)
+        source_endpoints = ["/api/agent/sources/social"]
+
+    action = _normalize_text(payload.get("action")) or "created"
+    backend_item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+    item = _build_source_item(action, resolved_type, request.value, backend_item)
+    label = _source_item_label({**backend_item, **item})
+    return build_success(
+        action="add_source",
+        window=None,
+        summary=_source_action_summary(action, label),
+        confidence="high",
+        bullets=_source_action_bullets(action, item),
+        items=[item],
+        source_endpoints=source_endpoints,
+    )
+
+
+def _deep_analysis_bullets(payload: dict[str, Any]) -> list[str]:
+    bullets: list[str] = []
+    for finding in list(payload.get("key_findings") or [])[:3]:
+        text = _trim_text(finding, 170)
+        if text:
+            bullets.append(text)
+    rejected = list(payload.get("considered_and_rejected") or [])
+    if rejected:
+        rejected_labels = [
+            _trim_text(item.get("explanation"), 80)
+            for item in rejected[:2]
+            if isinstance(item, dict) and item.get("explanation")
+        ]
+        if rejected_labels:
+            bullets.append("Rejected: " + "; ".join(rejected_labels) + ".")
+    trace = payload.get("analysis_trace") if isinstance(payload.get("analysis_trace"), dict) else {}
+    recipes = list(trace.get("recipes") or [])[:4]
+    if recipes:
+        bullets.append("Probes used: " + ", ".join(str(recipe) for recipe in recipes) + ".")
+    return _limit_bullets(bullets or ["No strong hidden signal was detected for this question."])
+
+
+def deep_analyze(client, request: DeepAnalyzeRequest) -> dict[str, Any]:
+    payload = client.deep_analyze(request.question, window=request.window, mode=request.mode)
+    summary = _clean_text(payload.get("summary")) or "Deep analysis completed."
+    caveats = [str(item) for item in list(payload.get("caveats") or []) if item]
+    response = build_success(
+        action="deep_analyze",
+        window=request.window,
+        summary=summary,
+        confidence=_clean_text(payload.get("confidence")) or "medium",
+        bullets=_deep_analysis_bullets(payload),
+        items=[
+            {
+                "surprise": payload.get("surprise") or {},
+                "key_findings": list(payload.get("key_findings") or []),
+                "tested_explanations": list(payload.get("tested_explanations") or []),
+                "considered_and_rejected": list(payload.get("considered_and_rejected") or []),
+                "evidence": list(payload.get("evidence") or []),
+                "analysis_trace": payload.get("analysis_trace") or {},
+            }
+        ],
+        source_endpoints=["/api/agent/analysis/deep"],
+        caveat=caveats[0] if caveats else None,
+    )
+    response["surprise"] = payload.get("surprise") or {}
+    response["key_findings"] = list(payload.get("key_findings") or [])
+    response["tested_explanations"] = list(payload.get("tested_explanations") or [])
+    response["considered_and_rejected"] = list(payload.get("considered_and_rejected") or [])
+    response["evidence"] = list(payload.get("evidence") or [])
+    response["analysis_trace"] = payload.get("analysis_trace") or {}
+    if caveats:
+        response["caveats"] = caveats
+    if payload.get("telegram_text"):
+        response["telegram_text"] = _trim_text(payload.get("telegram_text"), 900)
+    return response
 
 
 def search_entities(client, request: SearchEntitiesRequest) -> dict[str, Any]:
