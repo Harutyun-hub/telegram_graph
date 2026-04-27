@@ -249,7 +249,7 @@ def _channel_predicate(alias: str) -> str:
 
 def _resolve_filters(raw_filters: dict | None = None) -> dict[str, Any]:
     filters = raw_filters or {}
-    max_nodes = max(12, min(_to_int(filters.get("max_nodes"), 28), 60))
+    max_nodes = max(12, min(_to_int(filters.get("max_nodes"), 20), 60))
     min_mentions = max(1, min(_to_int(filters.get("minMentions"), 2), 50))
     return {
         "channels": _normalize_channels(filters.get("channels") or filters.get("brandSource")),
@@ -729,7 +729,7 @@ def _load_topic_rows(ctx: DashboardDateContext, filters: dict[str, Any]) -> list
     return _canonicalize_topic_rows(output)
 
 
-def _filter_topic_rows(topic_rows: list[dict[str, Any]], filters: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _filter_topic_rows(topic_rows: list[dict[str, Any]], filters: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], int]:
     available_categories = sorted({str(row.get("category") or "") for row in topic_rows if str(row.get("category") or "").strip()})
     filtered: list[dict[str, Any]] = []
     selected_category = filters["category"]
@@ -742,7 +742,8 @@ def _filter_topic_rows(topic_rows: list[dict[str, Any]], filters: dict[str, Any]
             continue
         filtered.append(row)
     filtered.sort(key=lambda row: _topic_sort_key(row, filters["ranking_mode"]))
-    return filtered[: filters["max_nodes"]], available_categories
+    total_eligible = len(filtered)
+    return filtered[: filters["max_nodes"]], available_categories, total_eligible
 
 
 def _build_category_nodes(visible_topics: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
@@ -899,13 +900,16 @@ def _load_evidence_for_topic_names(
     topic_names: list[str],
     ctx: DashboardDateContext,
     channels: list[str] | None = None,
+    sentiments: list[str] | None = None,
     *,
     limit: int = 6,
+    questions_only: bool = False,
 ) -> list[dict[str, Any]]:
     cleaned_topics = [str(name or "").strip() for name in topic_names if str(name or "").strip()]
     if not cleaned_topics:
         return []
     normalized_channels = _normalize_channels(channels)
+    normalized_sentiments = _normalize_sentiments(sentiments)
 
     rows = run_query(
         f"""
@@ -917,8 +921,18 @@ def _load_evidence_for_topic_names(
             WHERE p.posted_at >= datetime($start)
               AND p.posted_at < datetime($end)
             OPTIONAL MATCH (p)-[:IN_CHANNEL]->(ch:Channel)
-            WITH p, ch, t
+            OPTIONAL MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WITH p, ch, t, max(toLower(coalesce(s.label, ''))) AS sentimentLabel
             WHERE {_channel_predicate('ch')}
+              AND ($sentiment_count = 0 OR
+                   CASE
+                       WHEN sentimentLabel = 'positive' THEN 'Positive'
+                       WHEN sentimentLabel = 'neutral' THEN 'Neutral'
+                       WHEN sentimentLabel IN $fear_labels THEN 'Negative'
+                       ELSE ''
+                   END IN $sentiments
+                   OR ('Urgent' IN $sentiments AND sentimentLabel = 'urgent'))
+              AND ($questions_only = false OR p.text CONTAINS '?')
             RETURN {{
                 id: coalesce(p.uuid, 'post:' + elementId(p)),
                 channel: coalesce(ch.title, ch.username, 'Community message'),
@@ -938,8 +952,18 @@ def _load_evidence_for_topic_names(
               AND c.posted_at < datetime($end)
             OPTIONAL MATCH (u:User)-[:WROTE]->(c)
             OPTIONAL MATCH (c)-[:REPLIES_TO]->(:Post)-[:IN_CHANNEL]->(ch:Channel)
-            WITH c, u, ch, t
+            OPTIONAL MATCH (c)-[:HAS_SENTIMENT]->(s:Sentiment)
+            WITH c, u, ch, t, max(toLower(coalesce(s.label, ''))) AS sentimentLabel
             WHERE {_channel_predicate('ch')}
+              AND ($sentiment_count = 0 OR
+                   CASE
+                       WHEN sentimentLabel = 'positive' THEN 'Positive'
+                       WHEN sentimentLabel = 'neutral' THEN 'Neutral'
+                       WHEN sentimentLabel IN $fear_labels THEN 'Negative'
+                       ELSE ''
+                   END IN $sentiments
+                   OR ('Urgent' IN $sentiments AND sentimentLabel = 'urgent'))
+              AND ($questions_only = false OR c.text CONTAINS '?')
             RETURN {{
                 id: coalesce(c.uuid, 'comment:' + elementId(c)),
                 channel: coalesce(ch.title, ch.username, 'Community message'),
@@ -963,6 +987,10 @@ def _load_evidence_for_topic_names(
             "end": ctx.end_at.isoformat(),
             "channels": normalized_channels,
             "channel_count": len(normalized_channels),
+            "sentiments": normalized_sentiments,
+            "sentiment_count": len(normalized_sentiments),
+            "fear_labels": sorted(_NEGATIVE_SENTIMENT_LABELS),
+            "questions_only": bool(questions_only),
             "limit": max(1, min(int(limit), 24)),
         },
     )
@@ -990,7 +1018,7 @@ def get_graph_data(filters: dict | None = None) -> dict:
 
     def build_graph() -> dict[str, Any]:
         topic_rows = _load_topic_rows(ctx, resolved_filters)
-        visible_topics, available_categories = _filter_topic_rows(topic_rows, resolved_filters)
+        visible_topics, available_categories, total_eligible_topics = _filter_topic_rows(topic_rows, resolved_filters)
 
         if not visible_topics:
             return {
@@ -1009,6 +1037,9 @@ def get_graph_data(filters: dict | None = None) -> dict:
                     "minMentions": resolved_filters["min_mentions"],
                     "availableCategories": available_categories,
                     "visibleTopicCount": 0,
+                    "totalEligibleTopicCount": total_eligible_topics,
+                    "topicLimit": resolved_filters["max_nodes"],
+                    "isCurated": False,
                     "visibleCategoryCount": 0,
                     "visibleChannelCount": 0,
                     "totalMentions": 0,
@@ -1038,6 +1069,9 @@ def get_graph_data(filters: dict | None = None) -> dict:
                 "minMentions": resolved_filters["min_mentions"],
                 "availableCategories": available_categories,
                 "visibleTopicCount": len(visible_topics),
+                "totalEligibleTopicCount": total_eligible_topics,
+                "topicLimit": resolved_filters["max_nodes"],
+                "isCurated": total_eligible_topics > len(visible_topics),
                 "visibleCategoryCount": len(category_nodes),
                 "visibleChannelCount": len(channel_nodes),
                 "totalMentions": sum(_to_int(node.get("mentionCount")) for node in visible_topics),
@@ -1076,7 +1110,7 @@ def _graph_scope_topic_rows(
     resolved_filters = _resolve_filters(raw_filters)
     ctx = _resolve_context(raw_filters, timeframe=timeframe)
     topic_rows = _load_topic_rows(ctx, resolved_filters)
-    visible_topics, _ = _filter_topic_rows(topic_rows, resolved_filters)
+    visible_topics, _, _ = _filter_topic_rows(topic_rows, resolved_filters)
     return visible_topics, ctx
 
 
@@ -1135,6 +1169,7 @@ def get_node_details(
                 [str(row.get("name") or "") for row in scoped_topics[:12]],
                 scoped_ctx,
                 channels=channels,
+                sentiments=sentiments,
                 limit=8,
             )
             topic_payload = [
@@ -1224,6 +1259,32 @@ def get_node_details(
                 str(topic_detail.get("sourceTopic") or row.get("name") or topic_name),
                 str(topic_detail.get("category") or row.get("category") or ""),
             )
+            if overview is None:
+                overview = topic_overviews.build_fallback_topic_overview(topic_detail or row, scoped_ctx)
+            has_scoped_filters = bool(
+                _normalize_channels(channels)
+                or _normalize_sentiments(sentiments)
+                or _normalize_signal_focus(signal_focus) != "all"
+            )
+            if has_scoped_filters:
+                evidence_rows = _load_evidence_for_topic_names(
+                    [str(row.get("name") or topic_name)],
+                    scoped_ctx,
+                    channels=channels,
+                    sentiments=sentiments,
+                    limit=20,
+                )
+                question_rows = _load_evidence_for_topic_names(
+                    [str(row.get("name") or topic_name)],
+                    scoped_ctx,
+                    channels=channels,
+                    sentiments=sentiments,
+                    limit=20,
+                    questions_only=True,
+                )
+            else:
+                evidence_rows = list(topic_evidence.get("items") or [])
+                question_rows = list(topic_questions.get("items") or [])
             related_topics = run_query(
                 """
                 MATCH (t:Topic {name: $topic})-[r:CO_OCCURS_WITH]-(other:Topic)-[:BELONGS_TO_CATEGORY]->(cat:TopicCategory)
@@ -1258,8 +1319,8 @@ def get_node_details(
                 "topChannels": row.get("topChannels") or [],
                 "relatedTopics": related_topics,
                 "overview": overview,
-                "evidence": list(topic_evidence.get("items") or []),
-                "questionEvidence": list(topic_questions.get("items") or []),
+                "evidence": evidence_rows,
+                "questionEvidence": question_rows,
                 "dailyRows": list(topic_detail.get("dailyRows") or []),
                 "weeklyRows": list(topic_detail.get("weeklyRows") or []),
                 "sampleEvidence": topic_detail.get("sampleEvidence"),

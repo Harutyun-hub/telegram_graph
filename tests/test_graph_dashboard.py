@@ -120,6 +120,121 @@ class GraphDashboardNodeDetailsTests(unittest.TestCase):
         self.assertEqual(evidence_mock.call_count, 2)
 
 
+class GraphDashboardDataTests(unittest.TestCase):
+    def setUp(self) -> None:
+        graph_dashboard.invalidate_graph_cache()
+
+    def _ctx(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            cache_key="2026-03-13:2026-03-27",
+            from_date=date(2026, 3, 13),
+            to_date=date(2026, 3, 27),
+            days=15,
+        )
+
+    def _topic_row(
+        self,
+        name: str,
+        mentions: int,
+        *,
+        category: str = "Security",
+        trend: float = 10.0,
+        dominant: str = "Negative",
+        fear_signals: int = 8,
+        need_signals: int = 4,
+        ask_signals: int = 3,
+        distinct_channels: int = 2,
+    ) -> dict:
+        return {
+            "id": f"topic:{name}",
+            "name": name,
+            "type": "topic",
+            "category": category,
+            "mentionCount": mentions,
+            "postCount": mentions // 2,
+            "commentCount": mentions - (mentions // 2),
+            "evidenceCount": mentions,
+            "distinctUsers": max(1, mentions // 3),
+            "distinctChannels": distinct_channels,
+            "trendPct": trend,
+            "sentimentPositive": 80 if dominant == "Positive" else 10,
+            "sentimentNeutral": 80 if dominant == "Neutral" else 20,
+            "sentimentNegative": 70 if dominant == "Negative" else 10,
+            "dominantSentiment": dominant,
+            "askSignalCount": ask_signals,
+            "needSignalCount": need_signals,
+            "fearSignalCount": fear_signals,
+            "topChannels": [{"id": "channel:one", "name": "One", "mentions": max(1, mentions // 2)}],
+            "val": mentions,
+        }
+
+    def test_graph_data_is_curated_and_preserves_topic_metrics(self) -> None:
+        topic_rows = [
+            self._topic_row("Alpha", 30, trend=42.5),
+            self._topic_row("Beta", 29, category="Services"),
+            *[self._topic_row(f"Topic {idx}", 28 - idx) for idx in range(11)],
+        ]
+
+        with patch.object(graph_dashboard, "_resolve_context", return_value=self._ctx()), \
+             patch.object(graph_dashboard, "_load_topic_rows", return_value=topic_rows):
+            graph = graph_dashboard.get_graph_data({"max_nodes": 12})
+
+        topics = [node for node in graph["nodes"] if node["type"] == "topic"]
+        self.assertEqual(len(topics), 12)
+        self.assertEqual([node["name"] for node in topics[:2]], ["Alpha", "Beta"])
+        self.assertEqual(topics[0]["mentionCount"], 30)
+        self.assertEqual(topics[0]["evidenceCount"], 30)
+        self.assertEqual(topics[0]["trendPct"], 42.5)
+        self.assertEqual(topics[0]["sentimentNegative"], 70)
+        self.assertEqual(topics[0]["topChannels"][0]["name"], "One")
+        self.assertEqual(graph["meta"]["visibleTopicCount"], 12)
+        self.assertEqual(graph["meta"]["totalEligibleTopicCount"], 13)
+        self.assertEqual(graph["meta"]["topicLimit"], 12)
+        self.assertEqual(graph["meta"]["isCurated"], True)
+
+    def test_topic_filters_are_scoped_and_ranked_deterministically(self) -> None:
+        topic_rows = [
+            self._topic_row("Momentum", 12, trend=90.0, fear_signals=2),
+            self._topic_row("Volume", 30, trend=10.0, fear_signals=3),
+            self._topic_row("Positive", 40, trend=95.0, dominant="Positive", fear_signals=5),
+            self._topic_row("Other category", 50, category="Services", trend=100.0, fear_signals=5),
+            self._topic_row("No fear", 60, trend=110.0, fear_signals=0),
+        ]
+        filters = graph_dashboard._resolve_filters({
+            "category": "Security",
+            "sentiments": ["Negative"],
+            "signalFocus": "fear",
+            "rankingMode": "momentum",
+            "max_nodes": 12,
+        })
+
+        visible_topics, available_categories, total_eligible = graph_dashboard._filter_topic_rows(topic_rows, filters)
+
+        self.assertEqual(available_categories, ["Security", "Services"])
+        self.assertEqual(total_eligible, 2)
+        self.assertEqual([row["name"] for row in visible_topics], ["Momentum", "Volume"])
+
+    def test_load_topic_rows_passes_channel_and_min_mentions_filters_to_neo4j(self) -> None:
+        filters = graph_dashboard._resolve_filters({
+            "channels": ["@ChannelOne"],
+            "minMentions": 5,
+        })
+        ctx = SimpleNamespace(
+            start_at=date(2026, 3, 13),
+            end_at=date(2026, 3, 27),
+            previous_start_at=date(2026, 2, 27),
+            previous_end_at=date(2026, 3, 13),
+        )
+
+        with patch.object(graph_dashboard, "run_query", return_value=[]) as run_query_mock:
+            graph_dashboard._load_topic_rows(ctx, filters)
+
+        params = run_query_mock.call_args.args[1]
+        self.assertEqual(params["channels"], ["channelone"])
+        self.assertEqual(params["channel_count"], 1)
+        self.assertEqual(params["min_mentions"], 5)
+
+
 class GraphDashboardSearchTests(unittest.TestCase):
     def setUp(self) -> None:
         graph_dashboard.invalidate_graph_cache()
