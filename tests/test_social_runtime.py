@@ -84,6 +84,18 @@ class _StoreStub:
         return items
 
 
+class _ConnectorStub:
+    def __init__(self) -> None:
+        self.collect_kwargs = None
+
+    def collect_account(self, account, **kwargs):
+        self.collect_kwargs = kwargs
+        return [{"items": []}]
+
+    def normalize_payloads(self, account, payloads):
+        return [{"id": "activity-1", "platform": account["platform"]}]
+
+
 class SocialRuntimeTests(unittest.TestCase):
     def test_set_interval_persists_scheduler_state(self) -> None:
         async def scenario() -> None:
@@ -107,6 +119,34 @@ class SocialRuntimeTests(unittest.TestCase):
             run_cycle_mock.assert_awaited_once_with()
 
         asyncio.run(scenario())
+
+    def test_collect_stage_passes_facebook_page_limits_to_connector(self) -> None:
+        store = _StoreStub()
+        connector = _ConnectorStub()
+        service = SocialRuntimeService(store)
+        service.pg_store = type("_PgDisabled", (), {"enabled": False})()
+
+        with patch.object(service, "_get_connector", return_value=connector):
+            result = service._run_collect_stage_sync(
+                enabled_platforms=["facebook"],
+                max_pages=1,
+                page_size=50,
+                include_tiktok=False,
+                facebook_page_post_limit=1,
+                facebook_page_comment_limit=20,
+                accounts=[
+                    {
+                        "id": "account-1",
+                        "entity_id": "entity-1",
+                        "platform": "facebook",
+                        "source_kind": "facebook_page",
+                    }
+                ],
+            )
+
+        self.assertEqual(result["accounts_processed"], 1)
+        self.assertEqual(connector.collect_kwargs["facebook_page_post_limit"], 1)
+        self.assertEqual(connector.collect_kwargs["facebook_page_comment_limit"], 20)
 
     def test_analysis_stage_analyzes_parent_threads_and_marks_comments_not_needed(self) -> None:
         store = _StoreStub()

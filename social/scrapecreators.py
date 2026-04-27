@@ -317,6 +317,8 @@ class ScrapeCreatorsClient:
         max_pages: int,
         page_size: int,
         include_tiktok: bool,
+        facebook_page_post_limit: int | None = None,
+        facebook_page_comment_limit: int | None = None,
     ) -> list[dict[str, Any]]:
         platform = _trimmed(account.get("platform")).lower()
         source_kind = _account_source_kind(account)
@@ -330,29 +332,46 @@ class ScrapeCreatorsClient:
                     page_url = _trimmed(metadata.get("page_url") or metadata.get("source_url"))
                     if not page_url:
                         raise SocialCollectionError("Missing Facebook page URL", health_status="invalid_identifier")
+                    post_limit = max(
+                        1,
+                        int(facebook_page_post_limit)
+                        if facebook_page_post_limit is not None
+                        else min(page_size, 3),
+                    )
+                    comment_limit = max(
+                        0,
+                        int(facebook_page_comment_limit)
+                        if facebook_page_comment_limit is not None
+                        else min(page_size, 10),
+                    )
                     payload = self.fetch_facebook_profile_posts(
                         page_url=page_url,
                         cursor=cursor,
-                        page_size=min(page_size, 3),
+                        page_size=post_limit,
                     )
                     posts = payload.get("posts") or payload.get("items") or payload.get("results") or []
+                    posts = [post for post in posts if isinstance(post, dict)][:post_limit]
+                    payload["posts"] = posts
+                    payload["items"] = posts
+                    payload["results"] = posts
                     comments_by_post: dict[str, list[dict[str, Any]]] = {}
-                    for post in posts[: max(1, min(3, len(posts)) )]:
-                        if not isinstance(post, dict):
-                            continue
+                    for post in posts[:post_limit]:
                         post_url = _coalesce(post.get("permalink"), post.get("url"))
                         if not post_url:
+                            continue
+                        if comment_limit <= 0:
+                            comments_by_post[post_url] = []
                             continue
                         try:
                             comments_payload = self.fetch_facebook_post_comments(
                                 post_url=post_url,
-                                page_size=min(page_size, 10),
+                                page_size=comment_limit,
                             )
                         except SocialCollectionError as exc:
                             logger.warning("Facebook page comments skipped | url={} error={}", post_url, exc)
                             continue
                         comments = comments_payload.get("comments") or comments_payload.get("items") or comments_payload.get("results") or []
-                        comments_by_post[post_url] = [row for row in comments if isinstance(row, dict)]
+                        comments_by_post[post_url] = [row for row in comments if isinstance(row, dict)][:comment_limit]
                     payload["comments_by_post"] = comments_by_post
                 else:
                     page_id = _trimmed(account.get("account_external_id"))

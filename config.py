@@ -372,8 +372,10 @@ KB_UPLOAD_MAX_MB       = int(os.getenv("KB_UPLOAD_MAX_MB", "50"))
 # ── Social Media Activities ───────────────────────────────────────────────────
 SOCIAL_FETCH_MAX_PAGES = max(1, int(os.getenv("SOCIAL_FETCH_MAX_PAGES", "3")))
 SOCIAL_FETCH_PAGE_SIZE = max(1, int(os.getenv("SOCIAL_FETCH_PAGE_SIZE", "50")))
+SOCIAL_FACEBOOK_PAGE_POST_LIMIT = max(1, int(os.getenv("SOCIAL_FACEBOOK_PAGE_POST_LIMIT", "1")))
+SOCIAL_FACEBOOK_PAGE_COMMENT_LIMIT = max(0, int(os.getenv("SOCIAL_FACEBOOK_PAGE_COMMENT_LIMIT", "20")))
 SOCIAL_ANALYSIS_BATCH_SIZE = max(1, min(int(os.getenv("SOCIAL_ANALYSIS_BATCH_SIZE", "8")), 8))
-SOCIAL_THREAD_COMMENT_LIMIT = max(0, int(os.getenv("SOCIAL_THREAD_COMMENT_LIMIT", "25")))
+SOCIAL_THREAD_COMMENT_LIMIT = max(0, int(os.getenv("SOCIAL_THREAD_COMMENT_LIMIT", "20")))
 SOCIAL_ANALYSIS_MODEL = os.getenv("SOCIAL_ANALYSIS_MODEL", OPENAI_MODEL).strip() or OPENAI_MODEL
 SOCIAL_ANALYSIS_PROMPT_VERSION = os.getenv("SOCIAL_ANALYSIS_PROMPT_VERSION", "social-thread-v1").strip() or "social-thread-v1"
 SOCIAL_GRAPH_PROJECTION_VERSION = os.getenv("SOCIAL_GRAPH_PROJECTION_VERSION", "social-graph-v1").strip() or "social-graph-v1"

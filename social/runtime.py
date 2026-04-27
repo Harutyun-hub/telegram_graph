@@ -278,6 +278,8 @@ class SocialRuntimeService:
             {
                 "max_pages": config.SOCIAL_FETCH_MAX_PAGES,
                 "page_size": config.SOCIAL_FETCH_PAGE_SIZE,
+                "facebook_page_post_limit": config.SOCIAL_FACEBOOK_PAGE_POST_LIMIT,
+                "facebook_page_comment_limit": config.SOCIAL_FACEBOOK_PAGE_COMMENT_LIMIT,
                 "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
             },
         )
@@ -290,6 +292,8 @@ class SocialRuntimeService:
             enabled_platforms=enabled_platforms,
             max_pages=max(1, int(page_settings.get("max_pages", config.SOCIAL_FETCH_MAX_PAGES))),
             page_size=max(1, int(page_settings.get("page_size", config.SOCIAL_FETCH_PAGE_SIZE))),
+            facebook_page_post_limit=max(1, int(page_settings.get("facebook_page_post_limit", config.SOCIAL_FACEBOOK_PAGE_POST_LIMIT))),
+            facebook_page_comment_limit=max(0, int(page_settings.get("facebook_page_comment_limit", config.SOCIAL_FACEBOOK_PAGE_COMMENT_LIMIT))),
             include_tiktok=tiktok_enabled,
         )
         analysis_result = self._run_analysis_stage_sync()
@@ -322,6 +326,8 @@ class SocialRuntimeService:
         max_pages: int,
         page_size: int,
         include_tiktok: bool,
+        facebook_page_post_limit: int | None = None,
+        facebook_page_comment_limit: int | None = None,
         accounts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         connector = self._get_connector()
@@ -357,6 +363,8 @@ class SocialRuntimeService:
                     account,
                     max_pages=max_pages,
                     page_size=page_size,
+                    facebook_page_post_limit=facebook_page_post_limit,
+                    facebook_page_comment_limit=facebook_page_comment_limit,
                     include_tiktok=include_tiktok,
                 )
                 normalized = connector.normalize_payloads(account, payloads)
@@ -559,6 +567,8 @@ class SocialRuntimeService:
                     enabled_platforms=[str(account["platform"])],
                     max_pages=config.SOCIAL_FETCH_MAX_PAGES,
                     page_size=config.SOCIAL_FETCH_PAGE_SIZE,
+                    facebook_page_post_limit=config.SOCIAL_FACEBOOK_PAGE_POST_LIMIT,
+                    facebook_page_comment_limit=config.SOCIAL_FACEBOOK_PAGE_COMMENT_LIMIT,
                     include_tiktok=bool(config.SOCIAL_TIKTOK_ENABLED),
                     accounts=[account],
                 ),
