@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+import threading
 import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from copy import deepcopy
 from datetime import datetime, time as datetime_time, timezone
 from typing import Any
@@ -13,11 +15,21 @@ from api import social_semantic
 
 
 SNAPSHOT_TTL_SECONDS = 300
+SNAPSHOT_STALE_SECONDS = 3600
+SECTION_TIMEOUT_SECONDS = 8.0
 ACTIVITY_SCAN_LIMIT = 2500
 EVIDENCE_LIMIT = 24
 
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CACHE_LOCK = threading.Lock()
+_REFRESHING: set[str] = set()
+_REFRESH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="social-dashboard")
+_SECTION_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="social-dashboard-section")
+
+
+class SocialDashboardWarmingError(RuntimeError):
+    """Raised when a dashboard snapshot is building in the background."""
 
 
 def _trimmed(value: Any) -> str:
@@ -289,7 +301,7 @@ def _sentiment_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _semantic_topic_widgets(
-    store: Any,
+    rows: list[dict[str, Any]],
     filters: dict[str, Any],
     timings: dict[str, float],
     degraded_sections: list[str],
@@ -304,12 +316,9 @@ def _semantic_topic_widgets(
             limit=25,
         )
         graph_topics = list(graph_payload.get("items") or [])
-        enrichment = store.get_topic_metric_enrichment(
+        enrichment = _topic_metric_enrichment_from_rows(
             [item.get("topic") for item in graph_topics if item.get("topic")],
-            from_date=filters.get("from"),
-            to_date=filters.get("to"),
-            entity_id=filters.get("entity_id"),
-            platform=filters.get("platform"),
+            rows,
         )
         ranked: list[dict[str, Any]] = []
         for item in graph_topics:
@@ -686,6 +695,99 @@ def _cache_key(filters: dict[str, Any]) -> str:
     return "|".join(parts)
 
 
+def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | None = None) -> dict[str, Any]:
+    payload = deepcopy(snapshot)
+    meta = payload.setdefault("meta", {})
+    age_seconds = round(time.time() - cached_at, 2) if cached_at else 0.0
+    meta["cacheStatus"] = status
+    meta["cache"] = {
+        "status": status,
+        "ageSeconds": age_seconds,
+        "ttlSeconds": SNAPSHOT_TTL_SECONDS,
+        "staleSeconds": SNAPSHOT_STALE_SECONDS,
+        "servedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    if cached_at:
+        meta["cachedAt"] = datetime.fromtimestamp(cached_at, tz=timezone.utc).isoformat()
+    return payload
+
+
+def _store_cache_snapshot(key: str, snapshot: dict[str, Any]) -> None:
+    with _CACHE_LOCK:
+        if len(_CACHE) >= 128 and key not in _CACHE:
+            _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[key] = (time.time(), deepcopy(snapshot))
+
+
+def _topic_metric_enrichment_from_rows(
+    topic_names: list[str],
+    rows: list[dict[str, Any]],
+    *,
+    evidence_per_topic: int = 3,
+) -> dict[str, dict[str, Any]]:
+    canonical_by_key = {
+        _trimmed(topic_name).lower(): _trimmed(topic_name)
+        for topic_name in topic_names
+        if _trimmed(topic_name)
+    }
+    if not canonical_by_key:
+        return {}
+
+    enrichment: dict[str, dict[str, Any]] = {
+        canonical: {
+            "engagementTotal": 0,
+            "likes": 0,
+            "comments": 0,
+            "shares": 0,
+            "views": 0,
+            "reactions": 0,
+            "evidenceCount": 0,
+            "sampleSummary": "",
+            "evidence": [],
+        }
+        for canonical in canonical_by_key.values()
+    }
+
+    for row in rows:
+        row_topics = {_trimmed(topic).lower() for topic in _analysis_list(row, "topics")}
+        matches = row_topics.intersection(canonical_by_key.keys())
+        if not matches:
+            continue
+        parts = _engagement_parts(row)
+        engagement_total = sum(parts.values())
+        summary = _analysis_text(row, "summary") or _trimmed(row.get("text_content"))
+        evidence_item = {
+            "activity_uid": row.get("activity_uid"),
+            "entity": _entity_name(row),
+            "platform": row.get("platform"),
+            "published_at": row.get("published_at"),
+            "summary": summary,
+            "source_url": row.get("source_url"),
+            "metrics": {
+                "likes": parts["likes"],
+                "comments": parts["comments"],
+                "shares": parts["shares"],
+                "views": parts["views"],
+                "reactions": parts["likes"],
+                "engagementTotal": engagement_total,
+            },
+        }
+        for topic_key in matches:
+            record = enrichment[canonical_by_key[topic_key]]
+            record["engagementTotal"] += engagement_total
+            record["likes"] += parts["likes"]
+            record["comments"] += parts["comments"]
+            record["shares"] += parts["shares"]
+            record["views"] += parts["views"]
+            record["reactions"] += parts["likes"]
+            record["evidenceCount"] += 1
+            if summary and len(summary) > len(record["sampleSummary"]):
+                record["sampleSummary"] = summary
+            if len(record["evidence"]) < max(0, min(int(evidence_per_topic or 3), 10)):
+                record["evidence"].append(evidence_item)
+    return enrichment
+
+
 def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     started = time.perf_counter()
     activity_filters: list[tuple[str, str, Any]] = []
@@ -759,7 +861,7 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
     return activities, list(analyses.values()), entities, accounts
 
 
-def build_social_dashboard_snapshot(
+def _build_social_dashboard_snapshot_uncached(
     store: Any,
     *,
     from_date: str | None = None,
@@ -767,7 +869,6 @@ def build_social_dashboard_snapshot(
     entity_id: str | None = None,
     platform: str | None = None,
     source_kind: str | None = None,
-    use_cache: bool = True,
 ) -> dict[str, Any]:
     filters = {
         "from": from_date,
@@ -776,30 +877,10 @@ def build_social_dashboard_snapshot(
         "platform": platform,
         "source_kind": source_kind,
     }
-    key = _cache_key(filters)
-    now = time.time()
-    if use_cache and key in _CACHE:
-        cached_at, cached = _CACHE[key]
-        if now - cached_at < SNAPSHOT_TTL_SECONDS:
-            payload = deepcopy(cached)
-            payload["meta"]["cacheStatus"] = "hit"
-            payload["meta"]["servedFromCacheAt"] = datetime.now(timezone.utc).isoformat()
-            return payload
-
     request_id = uuid.uuid4().hex[:12]
     started_at = time.perf_counter()
     timings: dict[str, float] = {}
-    try:
-        activities, analyses, entities, accounts = _fetch_rows(store, filters, timings)
-    except Exception as exc:
-        if use_cache and key in _CACHE:
-            payload = deepcopy(_CACHE[key][1])
-            payload["meta"]["cacheStatus"] = "stale"
-            payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + ["fetch"]))
-            payload["meta"]["lastError"] = str(exc)
-            logger.warning("Social dashboard served stale snapshot | request_id={} error={}", request_id, exc)
-            return payload
-        raise
+    activities, analyses, entities, accounts = _fetch_rows(store, filters, timings)
 
     analysis_by_activity = {row.get("activity_id"): row for row in analyses}
     start_bound, end_bound = _range_bounds(from_date, to_date)
@@ -845,8 +926,22 @@ def build_social_dashboard_snapshot(
             platform=platform,
             source_kind="post",
         )
-        topic_bubbles, topic_ranking = _semantic_topic_widgets(store, filters, timings, degraded_sections)
-        sentiment_trend = _semantic_sentiment_trend(filters, timings, degraded_sections)
+        topic_future = _SECTION_EXECUTOR.submit(_semantic_topic_widgets, organic, filters, timings, degraded_sections)
+        trend_future = _SECTION_EXECUTOR.submit(_semantic_sentiment_trend, filters, timings, degraded_sections)
+        semantic_started = time.perf_counter()
+        try:
+            topic_bubbles, topic_ranking = topic_future.result(timeout=SECTION_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("Social semantic topic widgets timed out after {}s", SECTION_TIMEOUT_SECONDS)
+            degraded_sections.append("semanticTopics")
+            topic_bubbles, topic_ranking = [], []
+        try:
+            remaining_timeout = max(0.1, SECTION_TIMEOUT_SECONDS - (time.perf_counter() - semantic_started))
+            sentiment_trend = trend_future.result(timeout=remaining_timeout)
+        except TimeoutError:
+            logger.warning("Social semantic sentiment trend timed out after {}s", SECTION_TIMEOUT_SECONDS)
+            degraded_sections.append("semanticSentimentTrend")
+            sentiment_trend = []
         section_started = time.perf_counter()
         deep = {
             "topicBubbles": topic_bubbles,
@@ -917,5 +1012,88 @@ def build_social_dashboard_snapshot(
         }
 
     snapshot["meta"]["timingsMs"]["total"] = round((time.perf_counter() - started_at) * 1000, 2)
-    _CACHE[key] = (time.time(), deepcopy(snapshot))
     return snapshot
+
+
+def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: str) -> bool:
+    with _CACHE_LOCK:
+        if key in _REFRESHING:
+            return False
+        _REFRESHING.add(key)
+
+    def _refresh() -> None:
+        started = time.perf_counter()
+        try:
+            snapshot = _build_social_dashboard_snapshot_uncached(
+                store,
+                from_date=filters.get("from"),
+                to_date=filters.get("to"),
+                entity_id=filters.get("entity_id"),
+                platform=filters.get("platform"),
+                source_kind=filters.get("source_kind"),
+            )
+            snapshot.setdefault("meta", {})["refreshReason"] = reason
+            snapshot["meta"]["backgroundBuildMs"] = round((time.perf_counter() - started) * 1000, 2)
+            _store_cache_snapshot(key, snapshot)
+            logger.info("Social dashboard snapshot refreshed | key={} reason={} elapsed_ms={}", key, reason, snapshot["meta"]["backgroundBuildMs"])
+        except Exception as exc:
+            logger.warning("Social dashboard background refresh failed | key={} reason={} error={}", key, reason, exc)
+        finally:
+            with _CACHE_LOCK:
+                _REFRESHING.discard(key)
+
+    _REFRESH_EXECUTOR.submit(_refresh)
+    return True
+
+
+def build_social_dashboard_snapshot(
+    store: Any,
+    *,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    entity_id: str | None = None,
+    platform: str | None = None,
+    source_kind: str | None = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    filters = {
+        "from": from_date,
+        "to": to_date,
+        "entity_id": entity_id,
+        "platform": platform,
+        "source_kind": source_kind,
+    }
+    if not use_cache:
+        return _build_social_dashboard_snapshot_uncached(
+            store,
+            from_date=from_date,
+            to_date=to_date,
+            entity_id=entity_id,
+            platform=platform,
+            source_kind=source_kind,
+        )
+
+    key = _cache_key(filters)
+    now = time.time()
+    with _CACHE_LOCK:
+        cached_entry = _CACHE.get(key)
+        refreshing = key in _REFRESHING
+
+    if cached_entry:
+        cached_at, cached = cached_entry
+        age = now - cached_at
+        if age < SNAPSHOT_TTL_SECONDS:
+            payload = _cache_payload(cached, status="fresh", cached_at=cached_at)
+            payload["meta"]["cache"]["refreshing"] = refreshing
+            return payload
+        _schedule_refresh(store, filters, key, reason="stale")
+        payload = _cache_payload(cached, status="stale", cached_at=cached_at)
+        payload["meta"]["cache"]["refreshing"] = True
+        payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + ["staleCache"]))
+        return payload
+
+    scheduled = _schedule_refresh(store, filters, key, reason="miss")
+    detail = "Social dashboard snapshot is warming. Please retry shortly."
+    if not scheduled:
+        detail = "Social dashboard snapshot is already warming. Please retry shortly."
+    raise SocialDashboardWarmingError(detail)

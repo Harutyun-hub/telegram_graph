@@ -206,6 +206,10 @@ class _FakeSocialDashboardStore:
 
 
 class SocialDashboardSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        social_dashboard._CACHE.clear()
+        social_dashboard._REFRESHING.clear()
+
     def test_empty_store_returns_valid_snapshot_with_diagnostics(self) -> None:
         payload = build_social_dashboard_snapshot(_FakeSocialDashboardStore(empty=True), use_cache=False)
 
@@ -262,6 +266,46 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         organic_topics = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertNotIn("Credit Cards", organic_topics)
 
+    def test_social_dashboard_cache_miss_returns_warming(self) -> None:
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            with self.assertRaises(social_dashboard.SocialDashboardWarmingError):
+                build_social_dashboard_snapshot(
+                    _FakeSocialDashboardStore(),
+                    from_date="2026-04-01",
+                    to_date="2026-04-15",
+                )
+        schedule.assert_called_once()
+
+    def test_social_dashboard_stale_cache_returns_without_rebuild(self) -> None:
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        key = social_dashboard._cache_key(filters)
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        social_dashboard._CACHE[key] = (0.0, snapshot)
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            payload = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(empty=True),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        schedule.assert_called_once()
+        self.assertEqual(payload["meta"]["cache"]["status"], "stale")
+        self.assertGreater(payload["meta"]["usedActivities"], 0)
+
     def test_social_dashboard_endpoint_uses_new_snapshot_path(self) -> None:
         startup_handlers = list(server.app.router.on_startup)
         shutdown_handlers = list(server.app.router.on_shutdown)
@@ -274,6 +318,23 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
                  patch.object(server, "get_social_store", return_value=_FakeSocialDashboardStore()), \
                  patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
                  patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+                filters = {
+                    "from": "2026-04-01",
+                    "to": "2026-04-15",
+                    "entity_id": None,
+                    "platform": None,
+                    "source_kind": None,
+                }
+                key = social_dashboard._cache_key(filters)
+                social_dashboard._CACHE[key] = (
+                    social_dashboard.time.time(),
+                    build_social_dashboard_snapshot(
+                        _FakeSocialDashboardStore(),
+                        from_date="2026-04-01",
+                        to_date="2026-04-15",
+                        use_cache=False,
+                    ),
+                )
                 response = client.get(
                     "/api/social/dashboard?from=2026-04-01&to=2026-04-15",
                     headers={"Authorization": "Bearer admin-secret"},
@@ -287,6 +348,29 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["meta"]["usedActivities"], 3)
         self.assertIn("deepAnalysis", payload)
+
+    def test_social_dashboard_endpoint_returns_warming_on_cache_miss(self) -> None:
+        startup_handlers = list(server.app.router.on_startup)
+        shutdown_handlers = list(server.app.router.on_shutdown)
+        server.app.router.on_startup = []
+        server.app.router.on_shutdown = []
+        try:
+            client = TestClient(server.app)
+            with patch.object(server.config, "IS_LOCKED_ENV", True), \
+                 patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+                 patch.object(server, "get_social_store", return_value=_FakeSocialDashboardStore()), \
+                 patch.object(social_dashboard, "_schedule_refresh", return_value=True):
+                response = client.get(
+                    "/api/social/dashboard?from=2026-04-01&to=2026-04-15",
+                    headers={"Authorization": "Bearer admin-secret"},
+                )
+            client.close()
+        finally:
+            server.app.router.on_startup = startup_handlers
+            server.app.router.on_shutdown = shutdown_handlers
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("warming", response.text.lower())
 
 
 if __name__ == "__main__":

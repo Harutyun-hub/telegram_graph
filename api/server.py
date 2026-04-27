@@ -100,7 +100,7 @@ from processor import intent_extractor
 from scraper.channel_metadata import minimal_source_metadata_from_entity, resolve_source_metadata
 from social.store import SocialStore
 from social.runtime import SocialRuntimeService
-from api.social_dashboard import build_social_dashboard_snapshot
+from api.social_dashboard import SocialDashboardWarmingError, build_social_dashboard_snapshot
 from api import social_semantic
 from utils.taxonomy import TAXONOMY_DOMAINS
 
@@ -3296,6 +3296,9 @@ async def get_social_dashboard(
             platform=platform,
             source_kind=source_kind,
         )
+    except SocialDashboardWarmingError as e:
+        logger.info(f"Social dashboard warming response: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Social dashboard snapshot error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
