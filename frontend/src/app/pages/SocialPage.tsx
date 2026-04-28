@@ -496,12 +496,22 @@ function buildSocialDashboardPath(params: {
   from?: string;
   to?: string;
   entityId?: string;
+  compareEntityId?: string;
   platform?: string;
 }) {
   const query = new URLSearchParams();
   if (params.from) query.set('from', params.from);
   if (params.to) query.set('to', params.to);
   if (params.entityId && params.entityId !== 'all') query.set('entity_id', params.entityId);
+  if (
+    params.entityId &&
+    params.entityId !== 'all' &&
+    params.compareEntityId &&
+    params.compareEntityId !== 'all' &&
+    params.compareEntityId !== params.entityId
+  ) {
+    query.set('compare_entity_id', params.compareEntityId);
+  }
   if (params.platform) query.set('platform', params.platform);
   const suffix = query.toString();
   return `/social/dashboard${suffix ? `?${suffix}` : ''}`;
@@ -1135,6 +1145,7 @@ export function SocialPage() {
   const [dashboard, setDashboard] = useState<SocialDashboardSnapshot | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [knownEntities, setKnownEntities] = useState<Organization[]>([]);
   const [primarySource,    setPrimarySource]    = useState<Organization>(ALL_ORG);
   const [secondarySource,  setSecondarySource]  = useState<Organization | null>(null);
   const [selectedPlatforms,setSelectedPlatforms]= useState<string[]>(['All']);
@@ -1157,6 +1168,7 @@ export function SocialPage() {
       from: range.from,
       to: range.to,
       entityId: primarySource.id,
+      compareEntityId: secondarySource?.id,
       platform: platformFilter,
     });
     const cachedSnapshot = readCachedSocialDashboard(path);
@@ -1183,19 +1195,37 @@ export function SocialPage() {
       });
 
     return () => { cancelled = true; };
-  }, [dateRangeReady, platformFilter, primarySource.id, range.from, range.to]);
+  }, [dateRangeReady, platformFilter, primarySource.id, range.from, range.to, secondarySource?.id]);
+
+  useEffect(() => {
+    const entities = dashboard?.filters?.entities ?? [];
+    if (!entities.length) return;
+    setKnownEntities((current) => {
+      const byId = new Map(current.map((entity) => [entity.id, entity]));
+      entities.forEach((entity, index) => {
+        byId.set(entity.id, {
+          id: entity.id,
+          name: entity.name,
+          color: byId.get(entity.id)?.color || colorForEntity(entity.name, byId.size + index),
+        });
+      });
+      return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+    });
+  }, [dashboard?.filters?.entities]);
 
   const orgOptions = useMemo<Organization[]>(() => {
-    const entities = dashboard?.filters?.entities ?? [];
-    return [
-      ALL_ORG,
-      ...entities.map((entity, index) => ({
-        id: entity.id,
-        name: entity.name,
-        color: colorForEntity(entity.name, index),
-      })),
-    ];
-  }, [dashboard?.filters?.entities]);
+    return [ALL_ORG, ...knownEntities];
+  }, [knownEntities]);
+
+  useEffect(() => {
+    if (primarySource.id === 'all' && secondarySource) {
+      setSecondarySource(null);
+    }
+  }, [primarySource.id, secondarySource]);
+
+  const comparisonOptions = useMemo(() => {
+    return orgOptions.filter(o => o.id !== primarySource.id && o.id !== 'all');
+  }, [orgOptions, primarySource.id]);
 
   useEffect(() => {
     if (!orgOptions.some((org) => org.id === primarySource.id)) {
@@ -1348,7 +1378,7 @@ export function SocialPage() {
               <select value={secondarySource?.id||''} onChange={e=>setSecondarySource(e.target.value ? (orgOptions.find(o=>o.id===e.target.value) || null) : null)}
                 className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700">
                 <option value="">{ru?'— Сравнить —':'— Compare with —'}</option>
-                {orgOptions.filter(o=>o.id!==primarySource.id && o.id !== 'all').map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                {comparisonOptions.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
             </div>
             <div className="h-5 w-px bg-slate-200 hidden md:block" />
