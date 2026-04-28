@@ -582,14 +582,29 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
                 continue
             seen.add(key)
             if question:
+                quotes = _quotes_for_item(item, ids)
+                if not quotes:
+                    continue
+                sources = []
+                for uid in ids:
+                    source = _trimmed(evidence_by_uid[uid].get("entity"))
+                    if source and source not in sources:
+                        sources.append(source)
+                try:
+                    question_count = max(1, int(item.get("count") or len(ids)))
+                except (TypeError, ValueError):
+                    question_count = len(ids)
                 output.append(
                     {
                         "question": title_en,
                         "question_en": title_en,
                         "question_ru": title_ru,
                         "topic": _trimmed(item.get("topic")),
-                        "count": max(1, int(item.get("count") or len(ids))),
+                        "count": question_count,
                         "confidence": confidence,
+                        "sources": sources,
+                        "evidence_quotes": quotes,
+                        "evidence_count": len(ids),
                         "evidence_ids": ids,
                     }
                 )

@@ -224,6 +224,52 @@ class SocialAiBriefTests(unittest.TestCase):
 
         self.assertEqual(result["topSignals"], [])
 
+    def test_validator_enriches_top_questions_from_evidence_metadata(self) -> None:
+        result = social_ai_briefs.validate_social_ai_brief_output(
+            {
+                "topQuestions": [
+                    {
+                        "question_en": "Why are residents asking about public services?",
+                        "question_ru": "Почему жители спрашивают о государственных услугах?",
+                        "topic": "Public Services",
+                        "count": "2",
+                        "confidence": 0.84,
+                        "evidence_ids": ["facebook:post:1", "facebook:post:2"],
+                    }
+                ]
+            },
+            evidence_by_uid={
+                "facebook:post:1": {"quote": "Why did this public service change?", "entity": "Source A"},
+                "facebook:post:2": {"quote": "People still need a clear answer.", "entity": "Source B"},
+            },
+        )
+
+        self.assertEqual(len(result["topQuestions"]), 1)
+        question = result["topQuestions"][0]
+        self.assertEqual(question["question_en"], "Why are residents asking about public services?")
+        self.assertEqual(question["sources"], ["Source A", "Source B"])
+        self.assertEqual(question["evidence_quotes"], ["Why did this public service change?", "People still need a clear answer."])
+        self.assertEqual(question["evidence_count"], 2)
+        self.assertEqual(question["count"], 2)
+
+    def test_validator_rejects_top_questions_without_real_evidence(self) -> None:
+        result = social_ai_briefs.validate_social_ai_brief_output(
+            {
+                "topQuestions": [
+                    {
+                        "question_en": "What changed?",
+                        "question_ru": "Что изменилось?",
+                        "topic": "Public Services",
+                        "confidence": 0.9,
+                        "evidence_ids": ["missing"],
+                    }
+                ]
+            },
+            evidence_by_uid={"facebook:post:1": {"quote": "real quote", "entity": "Source A"}},
+        )
+
+        self.assertEqual(result["topQuestions"], [])
+
     def test_signal_history_is_bounded(self) -> None:
         store = _FakeBriefStore(activity_count=1)
         store.settings[social_ai_briefs.SIGNAL_HISTORY_SETTING_KEY] = [
