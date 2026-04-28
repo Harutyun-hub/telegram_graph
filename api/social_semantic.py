@@ -127,6 +127,20 @@ def _platform_filter(platform: str | None) -> str | None:
     return None if clean in {"", "all"} else clean
 
 
+def _entity_filter_values(entity_id: str | None = None, entity_ids: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    values: list[str] = []
+    candidates: list[Any] = []
+    if entity_id:
+        candidates.append(entity_id)
+    if entity_ids:
+        candidates.extend(entity_ids)
+    for value in candidates:
+        clean = str(value or "").strip()
+        if clean and clean.lower() != "all" and clean not in values:
+            values.append(clean)
+    return values
+
+
 def _query_rows(cypher: str, params: dict[str, Any], *, op_name: str) -> list[dict[str, Any]]:
     started = time.perf_counter()
     with _get_driver().session(database=config.SOCIAL_NEO4J_DATABASE) as session:
@@ -141,6 +155,7 @@ def get_topic_aggregates(
     from_date: str | None = None,
     to_date: str | None = None,
     entity_id: str | None = None,
+    entity_ids: list[str] | tuple[str, ...] | None = None,
     platform: str | None = None,
     limit: int = 25,
 ) -> dict[str, Any]:
@@ -151,7 +166,7 @@ def get_topic_aggregates(
         "end": end,
         "previous_start": previous_start,
         "previous_end": previous_end,
-        "entity_id": str(entity_id).strip() if entity_id else None,
+        "entity_ids": _entity_filter_values(entity_id, entity_ids),
         "platform": _platform_filter(platform),
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
         "noise": list(_NOISE_TOPIC_NAMES),
@@ -171,8 +186,8 @@ def get_topic_aggregates(
       AND coalesce(t.proposed, false) = false
       AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
       AND (
-        $entity_id IS NULL
-        OR EXISTS { MATCH (:TrackedEntity {id: $entity_id})-[:HAS_ACTIVITY]->(a) }
+        size($entity_ids) = 0
+        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
       )
     OPTIONAL MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
     WITH t, a, head(collect(DISTINCT toLower(coalesce(s.name, 'neutral')))) AS sentiment
@@ -197,8 +212,8 @@ def get_topic_aggregates(
         AND coalesce(pa.source_kind, '') IN $source_kinds
         AND ($platform IS NULL OR pa.platform = $platform)
         AND (
-          $entity_id IS NULL
-          OR EXISTS { MATCH (:TrackedEntity {id: $entity_id})-[:HAS_ACTIVITY]->(pa) }
+          size($entity_ids) = 0
+          OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(pa) WHERE matchedEntity.id IN $entity_ids }
         )
       RETURN count(DISTINCT pa) AS previousMentions
     }
@@ -208,7 +223,7 @@ def get_topic_aggregates(
         AND ea.published_at < datetime($end)
         AND coalesce(ea.source_kind, '') IN $source_kinds
         AND ($platform IS NULL OR ea.platform = $platform)
-        AND ($entity_id IS NULL OR entity.id = $entity_id)
+        AND (size($entity_ids) = 0 OR entity.id IN $entity_ids)
       WITH entity.name AS name, count(DISTINCT ea) AS hits
       ORDER BY hits DESC, name ASC
       RETURN collect(name)[..5] AS topEntities
@@ -286,13 +301,14 @@ def get_sentiment_trend(
     from_date: str | None = None,
     to_date: str | None = None,
     entity_id: str | None = None,
+    entity_ids: list[str] | tuple[str, ...] | None = None,
     platform: str | None = None,
 ) -> dict[str, Any]:
     start, end, _previous_start, _previous_end = _range_bounds(from_date, to_date)
     params = {
         "start": start,
         "end": end,
-        "entity_id": str(entity_id).strip() if entity_id else None,
+        "entity_ids": _entity_filter_values(entity_id, entity_ids),
         "platform": _platform_filter(platform),
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
     }
@@ -308,8 +324,8 @@ def get_sentiment_trend(
       AND coalesce(a.source_kind, '') IN $source_kinds
       AND ($platform IS NULL OR a.platform = $platform)
       AND (
-        $entity_id IS NULL
-        OR EXISTS { MATCH (:TrackedEntity {id: $entity_id})-[:HAS_ACTIVITY]->(a) }
+        size($entity_ids) = 0
+        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
       )
     WITH
       toString(date(a.published_at)) AS bucket,

@@ -157,6 +157,15 @@ def _entity_id(row: dict[str, Any]) -> str:
     return _trimmed(_as_dict(row.get("entity")).get("id") or row.get("entity_id"))
 
 
+def _selected_entity_ids(filters: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("entity_id", "compare_entity_id"):
+        clean = _trimmed(filters.get(key))
+        if clean and clean.lower() != "all" and clean not in values:
+            values.append(clean)
+    return values
+
+
 def _is_ad(row: dict[str, Any]) -> bool:
     source_kind = _trimmed(row.get("source_kind")).lower()
     return source_kind in {"ad", "meta_ads", "google_ads"} or _trimmed(row.get("platform")).lower() == "google"
@@ -311,7 +320,7 @@ def _semantic_topic_widgets(
         graph_payload = social_semantic.get_topic_aggregates(
             from_date=filters.get("from"),
             to_date=filters.get("to"),
-            entity_id=filters.get("entity_id"),
+            entity_ids=_selected_entity_ids(filters),
             platform=filters.get("platform"),
             limit=25,
         )
@@ -386,7 +395,7 @@ def _semantic_sentiment_trend(
         payload = social_semantic.get_sentiment_trend(
             from_date=filters.get("from"),
             to_date=filters.get("to"),
-            entity_id=filters.get("entity_id"),
+            entity_ids=_selected_entity_ids(filters),
             platform=filters.get("platform"),
         )
         return [
@@ -689,6 +698,7 @@ def _cache_key(filters: dict[str, Any]) -> str:
         filters.get("from") or "",
         filters.get("to") or "",
         filters.get("entity_id") or "",
+        filters.get("compare_entity_id") or "",
         filters.get("platform") or "",
         filters.get("source_kind") or "",
     ]
@@ -804,15 +814,46 @@ def _empty_graph_sync_coverage() -> dict[str, Any]:
     }
 
 
+def _combine_graph_sync_coverage(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        return _empty_graph_sync_coverage()
+    total = sum(int(record.get("totalParentActivities") or 0) for record in records)
+    graph_synced = sum(int(record.get("graphSyncedParentActivities") or 0) for record in records)
+    row_cap = sum(int(record.get("rowCap") or 0) for record in records)
+    return {
+        "totalParentActivities": total,
+        "analyzedParentActivities": sum(int(record.get("analyzedParentActivities") or 0) for record in records),
+        "graphSyncedParentActivities": graph_synced,
+        "graphPendingParentActivities": sum(int(record.get("graphPendingParentActivities") or 0) for record in records),
+        "failedParentActivities": sum(int(record.get("failedParentActivities") or 0) for record in records),
+        "semanticCoveragePct": round((graph_synced / total) * 100, 1) if total else 0.0,
+        "rowCap": row_cap,
+        "rowCapReached": any(bool(record.get("rowCapReached")) for record in records),
+    }
+
+
 def _fetch_graph_sync_coverage(store: Any, filters: dict[str, Any]) -> tuple[dict[str, Any], float]:
     started = time.perf_counter()
-    coverage = store.get_graph_sync_coverage(
-        from_date=filters.get("from"),
-        to_date=filters.get("to"),
-        entity_id=filters.get("entity_id"),
-        platform=filters.get("platform"),
-        source_kind="post",
-    )
+    entity_ids = _selected_entity_ids(filters)
+    if len(entity_ids) > 1:
+        coverage = _combine_graph_sync_coverage([
+            store.get_graph_sync_coverage(
+                from_date=filters.get("from"),
+                to_date=filters.get("to"),
+                entity_id=entity_id,
+                platform=filters.get("platform"),
+                source_kind="post",
+            )
+            for entity_id in entity_ids
+        ])
+    else:
+        coverage = store.get_graph_sync_coverage(
+            from_date=filters.get("from"),
+            to_date=filters.get("to"),
+            entity_id=entity_ids[0] if entity_ids else None,
+            platform=filters.get("platform"),
+            source_kind="post",
+        )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     return coverage, elapsed_ms
 
@@ -821,8 +862,11 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
     started = time.perf_counter()
     activity_filters: list[tuple[str, str, Any]] = []
     start_bound, end_bound = _range_bounds(filters.get("from"), filters.get("to"))
-    if filters.get("entity_id"):
-        activity_filters.append(("eq", "entity_id", filters["entity_id"]))
+    entity_ids = _selected_entity_ids(filters)
+    if len(entity_ids) == 1:
+        activity_filters.append(("eq", "entity_id", entity_ids[0]))
+    elif len(entity_ids) > 1:
+        activity_filters.append(("in", "entity_id", entity_ids))
     if filters.get("platform") and filters.get("platform") != "all":
         activity_filters.append(("eq", "platform", filters["platform"]))
     if filters.get("source_kind") and filters.get("source_kind") != "all":
@@ -896,6 +940,7 @@ def _build_social_dashboard_snapshot_uncached(
     from_date: str | None = None,
     to_date: str | None = None,
     entity_id: str | None = None,
+    compare_entity_id: str | None = None,
     platform: str | None = None,
     source_kind: str | None = None,
 ) -> dict[str, Any]:
@@ -903,6 +948,7 @@ def _build_social_dashboard_snapshot_uncached(
         "from": from_date,
         "to": to_date,
         "entity_id": entity_id,
+        "compare_entity_id": compare_entity_id,
         "platform": platform,
         "source_kind": source_kind,
     }
@@ -1066,6 +1112,7 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
                 from_date=filters.get("from"),
                 to_date=filters.get("to"),
                 entity_id=filters.get("entity_id"),
+                compare_entity_id=filters.get("compare_entity_id"),
                 platform=filters.get("platform"),
                 source_kind=filters.get("source_kind"),
             )
@@ -1089,6 +1136,7 @@ def build_social_dashboard_snapshot(
     from_date: str | None = None,
     to_date: str | None = None,
     entity_id: str | None = None,
+    compare_entity_id: str | None = None,
     platform: str | None = None,
     source_kind: str | None = None,
     use_cache: bool = True,
@@ -1097,6 +1145,7 @@ def build_social_dashboard_snapshot(
         "from": from_date,
         "to": to_date,
         "entity_id": entity_id,
+        "compare_entity_id": compare_entity_id,
         "platform": platform,
         "source_kind": source_kind,
     }
@@ -1106,6 +1155,7 @@ def build_social_dashboard_snapshot(
             from_date=from_date,
             to_date=to_date,
             entity_id=entity_id,
+            compare_entity_id=compare_entity_id,
             platform=platform,
             source_kind=source_kind,
         )

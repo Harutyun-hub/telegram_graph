@@ -276,11 +276,102 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
                 )
         schedule.assert_called_once()
 
+    def test_compare_entity_changes_cache_key(self) -> None:
+        base = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": "entity-1",
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        compared = {**base, "compare_entity_id": "entity-2"}
+
+        self.assertNotEqual(social_dashboard._cache_key(base), social_dashboard._cache_key(compared))
+
+    def test_compare_entity_fetches_both_entities_and_passes_semantic_filter(self) -> None:
+        store = _FakeSocialDashboardStore()
+        store.activities.append(
+            {
+                "id": "activity-post-2",
+                "entity_id": "entity-2",
+                "account_id": "account-fb-page-2",
+                "activity_uid": "facebook:post:post-2",
+                "platform": "facebook",
+                "source_kind": "post",
+                "provider_item_id": "post-2",
+                "source_url": "https://facebook.com/other/posts/2",
+                "text_content": "Supporters praise the campaign message.",
+                "published_at": "2026-04-10T12:00:00+00:00",
+                "author_handle": "customer-3",
+                "cta_type": None,
+                "content_format": "Text",
+                "region_name": "Armenia",
+                "engagement_metrics": {"like_count": 2},
+                "assets": [],
+                "provider_payload": {},
+                "ingest_status": "normalized",
+                "analysis_status": "analyzed",
+                "graph_status": "synced",
+                "last_seen_at": "2026-04-10T12:03:00+00:00",
+                "created_at": "2026-04-10T12:03:00+00:00",
+            }
+        )
+        store.analyses.append(
+            {
+                "activity_id": "activity-post-2",
+                "summary": "Supporters praise campaign message.",
+                "marketing_intent": None,
+                "sentiment": "positive",
+                "sentiment_score": 0.7,
+                "analysis_payload": {
+                    "summary": "Supporters praise campaign message.",
+                    "topics": ["Campaign Messaging"],
+                    "sentiment": "positive",
+                    "sentiment_score": 0.7,
+                },
+                "raw_model_output": {},
+                "analyzed_at": "2026-04-10T12:07:00+00:00",
+            }
+        )
+        store.entities.append(
+            {
+                "id": "entity-2",
+                "name": "Other Entity",
+                "industry": "Public",
+                "website": "https://other.example",
+                "logo_url": None,
+                "is_active": True,
+            }
+        )
+        store.accounts.append(
+            {"id": "account-fb-page-2", "entity_id": "entity-2", "platform": "facebook", "source_kind": "facebook_page"}
+        )
+
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}) as topics, \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}) as trend:
+            payload = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                entity_id="entity-1",
+                compare_entity_id="entity-2",
+                use_cache=False,
+            )
+
+        self.assertEqual(payload["meta"]["usedActivities"], 4)
+        self.assertEqual(payload["meta"]["graphSyncCoverage"]["totalParentActivities"], 2)
+        topics.assert_called_once()
+        trend.assert_called_once()
+        self.assertEqual(topics.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
+        self.assertEqual(trend.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
+
     def test_social_dashboard_stale_cache_returns_without_rebuild(self) -> None:
         filters = {
             "from": "2026-04-01",
             "to": "2026-04-15",
             "entity_id": None,
+            "compare_entity_id": None,
             "platform": None,
             "source_kind": None,
         }
@@ -311,6 +402,7 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
             "from": "2026-04-01",
             "to": "2026-04-15",
             "entity_id": None,
+            "compare_entity_id": None,
             "platform": None,
             "source_kind": None,
         }
@@ -374,6 +466,7 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
                     "from": "2026-04-01",
                     "to": "2026-04-15",
                     "entity_id": None,
+                    "compare_entity_id": None,
                     "platform": None,
                     "source_kind": None,
                 }

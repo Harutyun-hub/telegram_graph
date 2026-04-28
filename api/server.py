@@ -3284,6 +3284,7 @@ async def get_social_dashboard(
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
     entity_id: Optional[str] = Query(default=None),
+    compare_entity_id: Optional[str] = Query(default=None),
     platform: Optional[str] = Query(default=None),
     source_kind: Optional[str] = Query(default=None),
 ):
@@ -3293,6 +3294,7 @@ async def get_social_dashboard(
             from_date=from_date,
             to_date=to_date,
             entity_id=entity_id,
+            compare_entity_id=compare_entity_id,
             platform=platform,
             source_kind=source_kind,
         )
