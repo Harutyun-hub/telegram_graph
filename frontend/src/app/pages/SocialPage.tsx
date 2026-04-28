@@ -388,7 +388,25 @@ interface TopQuestionItem {
 }
 type AdFeedItem = typeof AD_FEED[number];
 type SentimentByEntityItem = typeof SENTIMENT_BY_ENTITY[number];
-type PainPointItem = typeof PAIN_POINTS[number];
+interface PainPointItem {
+  problem?: string;
+  problem_en?: string;
+  problem_ru?: string;
+  title_en?: string;
+  title_ru?: string;
+  text?: string;
+  summary_en?: string;
+  summary_ru?: string;
+  topic?: string;
+  count: number;
+  confidence?: number;
+  sources?: string[];
+  entities?: string[];
+  evidence_quotes?: string[];
+  evidence_count?: number;
+  evidence_ids?: string[];
+  severity?: string;
+}
 type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
 type VisibilityItem = typeof VISIBILITY_DATA[number];
 type VisibilityTrendItem = typeof VISIBILITY_TREND[number];
@@ -1276,7 +1294,7 @@ export function SocialPage() {
   const [selectedPlatforms,setSelectedPlatforms]= useState<string[]>(['All']);
   const [activeTab,        setActiveTab]        = useState<'deep'|'metrics'>('deep');
   const [openTiers, setOpenTiers] = useState<Record<string, boolean>>({
-    topics:true, intent:true, questions:true, ads:true, audience:true,
+    topics:true, intent:true, questions:true, audience:true,
     visibility:true, shifts:true, position:true, scorecard:true,
   });
   const toggleTier = (id: string) => setOpenTiers(p => ({ ...p, [id]: !p[id] }));
@@ -1440,9 +1458,35 @@ export function SocialPage() {
     evidence_count: Number(question.evidence_count ?? question.evidence_ids?.length ?? 0),
     evidence_ids: Array.isArray(question.evidence_ids) ? question.evidence_ids : [],
   })) as TopQuestionItem[];
+  const painPoints = (dashboard?.deepAnalysis?.painPoints ?? []).map((point: any) => ({
+    problem: String(point.problem || point.problem_en || point.title_en || point.text || ''),
+    problem_en: point.problem_en || point.title_en || point.problem || point.text,
+    problem_ru: point.problem_ru || point.title_ru,
+    title_en: point.title_en,
+    title_ru: point.title_ru,
+    text: point.text,
+    summary_en: point.summary_en,
+    summary_ru: point.summary_ru,
+    topic: point.topic || point.main_topic,
+    count: Number(point.count ?? point.signal_count ?? 0),
+    confidence: point.confidence,
+    sources: Array.isArray(point.sources)
+      ? point.sources.map((source: unknown) => String(source || '').trim()).filter(Boolean)
+      : Array.isArray(point.entities)
+        ? point.entities.map((source: unknown) => String(source || '').trim()).filter(Boolean)
+        : [String(point.entity || point.source || 'Audience').trim()].filter(Boolean),
+    entities: Array.isArray(point.entities) ? point.entities : [],
+    evidence_quotes: Array.isArray(point.evidence_quotes)
+      ? point.evidence_quotes.map(readableEvidence).filter(Boolean)
+      : Array.isArray(point.examples)
+        ? point.examples.map(readableEvidence).filter(Boolean)
+        : [],
+    evidence_count: Number(point.evidence_count ?? point.evidence_ids?.length ?? 0),
+    evidence_ids: Array.isArray(point.evidence_ids) ? point.evidence_ids : [],
+    severity: point.severity,
+  })) as PainPointItem[];
   const adItems = dashboard?.adIntelligence?.items ?? [];
   const sentimentByEntity = dashboard?.strictMetrics?.sentimentByEntity ?? [];
-  const painPoints = dashboard?.deepAnalysis?.painPoints ?? [];
   const engagementRadar = dashboard?.strictMetrics?.engagementRadar ?? [];
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
@@ -1493,11 +1537,6 @@ export function SocialPage() {
       id:'questions', icon:HelpCircle, color:'text-amber-700', bgColor:'bg-amber-50', borderColor:'border-amber-200',
       title: ru?'Вопросы аудитории':'Question Intelligence',
       subtitle: ru?'Что спрашивают и пробелы в ответах':'What people ask & answer gaps',
-    },
-    ads: {
-      id:'ads', icon:Megaphone, color:'text-violet-700', bgColor:'bg-violet-50', borderColor:'border-violet-200',
-      title: ru?'Анализ рекламы':'Ad Intelligence',
-      subtitle: ru?'Стратегии и креативы конкурентов':'Competitor strategy & creatives',
     },
     audience: {
       id:'audience', icon:Heart, color:'text-rose-700', bgColor:'bg-rose-50', borderColor:'border-rose-200',
@@ -1893,54 +1932,18 @@ export function SocialPage() {
                 </div>
               )}
 
-              {/* ── TIER 4: AD INTELLIGENCE ── */}
-              <TierHeader tier={TIERS.ads} isOpen={openTiers.ads} onToggle={()=>toggleTier('ads')} ru={ru} />
-              {openTiers.ads && (
-                <div className="space-y-4">
-                  <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                    <div className="divide-y divide-slate-100">
-                      {adItems.map(ad=>(
-                        <div key={ad.id} className="p-5 hover:bg-slate-50/50 transition-colors">
-                          <div className="flex items-start justify-between mb-3">
-                            <div className="flex items-center gap-2.5">
-                              <div className="w-7 h-7 rounded-lg flex items-center justify-center text-xs text-white" style={{ backgroundColor:entityColors[ad.entity] || colorForEntity(ad.entity), fontWeight:700 }}>{ad.entity[0]}</div>
-                              <span className="text-sm text-slate-900" style={{ fontWeight:600 }}>{ad.entity}</span>
-                              <span className="text-[11px] bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full" style={{ fontWeight:500 }}>{ad.platform}</span>
-                            </div>
-                            <span className="text-xs text-slate-400">{ad.date}</span>
-                          </div>
-                          <p className="text-sm text-slate-700 mb-4 leading-relaxed">{ad.copy}</p>
-                          <div className="flex flex-wrap items-center gap-2 mb-3">
-                            <span className="text-[11px] px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-100" style={{ fontWeight:500 }}>CTA: {ad.cta}</span>
-                            <span className="text-[11px] px-2.5 py-1 rounded-lg bg-violet-50 text-violet-700 border border-violet-100" style={{ fontWeight:500 }}>{ad.format}</span>
-                            <span className="text-[11px] px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-100" style={{ fontWeight:500 }}>{ad.intent}</span>
-                            {ad.urgency && (
-                              <span className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-100 flex items-center gap-1" style={{ fontWeight:500 }}>
-                                <Flame className="w-3 h-3" />
-                                {ru?'Высокая срочность':'High Urgency'}
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-4 text-xs text-slate-500 pt-3 border-t border-slate-50">
-                            <span>{ru?'Продукты:':'Products:'} <span style={{ fontWeight:600 }}>{(ad.products || []).join(', ') || '—'}</span></span>
-                            <span>{ru?'Ценность:':'Value props:'} <span className="italic">{ad.valueProps.join(', ')}</span></span>
-                            <span className="ml-auto">{ru?'Вовлечённость:':'Engagement:'} <span style={{ fontWeight:600 }}>{ad.engagement.toLocaleString()}</span></span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ── TIER 5: AUDIENCE RESPONSE ── */}
+              {/* ── TIER 4: AUDIENCE RESPONSE ── */}
               <TierHeader tier={TIERS.audience} isOpen={openTiers.audience} onToggle={()=>toggleTier('audience')} ru={ru} />
               {openTiers.audience && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    {/* Sentiment by entity */}
-                    <WidgetCard title={ru?'Тональность по брендам':'Sentiment by Brand'} subtitle={ru?'Распределение позитива, нейтрала и негатива':'Positive, neutral & negative breakdown'}>
-                      <div className="space-y-5">
+                    {/* Sentiment by source */}
+                    <WidgetCard title={ru?'Тональность по источникам':'Sentiment by Source'} subtitle={ru?'Распределение позитива, нейтрала и негатива по источникам':'Positive, neutral & negative breakdown by source'}>
+                      {sentimentByEntity.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-5 text-sm text-slate-500">
+                          {ru ? 'Пока нет данных тональности по источникам.' : 'No source sentiment data yet.'}
+                        </div>
+                      ) : <div className="space-y-5">
                         {sentimentByEntity.map(item=>(
                           <div key={item.entity}>
                             <div className="flex items-center justify-between mb-2">
@@ -1956,13 +1959,13 @@ export function SocialPage() {
                               <div className="transition-all rounded-r-full" style={{ width:`${item.neg}%`, backgroundColor:C.rose  }} />
                             </div>
                             <div className="flex items-center justify-between mt-1.5">
-                              <span className="text-[10px] text-emerald-600" style={{ fontWeight:600 }}>+{item.pos}%</span>
+                              <span className="text-[10px] text-emerald-600" style={{ fontWeight:600 }}>{item.pos}%</span>
                               <span className="text-[10px] text-slate-400">{item.neu}%</span>
-                              <span className="text-[10px] text-rose-500" style={{ fontWeight:600 }}>-{item.neg}%</span>
+                              <span className="text-[10px] text-rose-500" style={{ fontWeight:600 }}>{item.neg}%</span>
                             </div>
                           </div>
                         ))}
-                      </div>
+                      </div>}
                       <ChartLegend items={[
                         { label:ru?'Позитив':'Positive', color:C.emerald },
                         { label:ru?'Нейтрал':'Neutral',  color:'#cbd5e1' },
@@ -1972,32 +1975,40 @@ export function SocialPage() {
 
                     {/* Pain points */}
                     <WidgetCard title={ru?'Ключевые боли':'Pain Points & Issues'} subtitle={ru?'Наиболее частые негативные темы':'Most frequently raised negative themes'}>
-                      <div className="space-y-3">
+                      {painPoints.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-5 text-sm text-slate-500">
+                          {ru ? 'AI-карточки проблем появятся после следующего обновления social brief.' : 'AI problem cards will appear after the next Social AI brief refresh.'}
+                        </div>
+                      ) : <div className="space-y-3">
                         {painPoints.map((pp,i)=>{
                           const severityColor = pp.severity==='high'?C.rose:C.amber;
+                          const title = ru ? (pp.problem_ru || pp.title_ru || pp.problem || pp.text || '') : (pp.problem_en || pp.title_en || pp.problem || pp.text || '');
+                          const summary = ru ? pp.summary_ru : pp.summary_en;
+                          const source = pp.sources?.[0] || pp.entities?.[0] || (ru ? 'Аудитория' : 'Audience');
+                          const evidence = pp.evidence_quotes?.[0];
                           return (
                             <div key={i} className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-100 hover:border-slate-200 transition-colors bg-slate-50/50">
                               <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center mt-0.5" style={{ backgroundColor:`${severityColor}15` }}>
                                 <span className="text-xs" style={{ fontWeight:800, color:severityColor }}>{i+1}</span>
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm text-slate-800 mb-2" style={{ fontWeight:500 }}>{pp.text}</p>
-                                <div className="flex items-center justify-between flex-wrap gap-2">
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {pp.entities.map(e=>(
-                                      <span key={e} className="text-[10px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[e] || colorForEntity(e)}15`, color:entityColors[e] || colorForEntity(e) }}>{e}</span>
-                                    ))}
-                                  </div>
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-xs text-slate-400">{ru?'Упом.':'Count:'}</span>
-                                    <span className="text-xs text-slate-700" style={{ fontWeight:700 }}>{pp.count}</span>
-                                  </div>
+                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-sm text-slate-800" style={{ fontWeight:600 }}>{title}</p>
+                                  <span className="text-[11px] rounded-full bg-blue-50 px-2 py-0.5 text-blue-700" style={{ fontWeight:600 }}>{confidenceLabel(pp.confidence, ru)}</span>
                                 </div>
+                                {summary && <p className="mb-2 text-xs leading-relaxed text-slate-500">{summary}</p>}
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[source] || colorForEntity(source)}15`, color:entityColors[source] || colorForEntity(source) }}>{translateSocialLabel(source, ru)}</span>
+                                  <span className="text-[10px] rounded-full bg-slate-100 px-2 py-0.5 text-slate-500">{translateSocialLabel(pp.topic || 'Audience Issue', ru)}</span>
+                                  <span className="text-[10px] rounded-full bg-rose-50 px-2 py-0.5 text-rose-600">{pp.count} {ru?'сигн.':'signals'}</span>
+                                  <span className="text-[10px] rounded-full bg-amber-50 px-2 py-0.5 text-amber-700">{pp.evidence_count || pp.evidence_ids?.length || 0} {ru?'доказ.':'evidence'}</span>
+                                </div>
+                                {evidence && <p className="mt-2 text-[11px] italic leading-snug text-slate-400">"{evidence}"</p>}
                               </div>
                             </div>
                           );
                         })}
-                      </div>
+                      </div>}
                     </WidgetCard>
                   </div>
 
