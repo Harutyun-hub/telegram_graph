@@ -13,7 +13,7 @@ import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
 import { apiFetch } from '../services/api';
 import { translateTopicRu } from '../services/topicPresentation';
 import {
-  ResponsiveContainer, LineChart, Line, AreaChart, Area,
+  ResponsiveContainer, LineChart, Line,
   XAxis, YAxis, Tooltip, CartesianGrid,
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   PieChart, Pie, Cell
@@ -546,6 +546,27 @@ function signalTrendLabel(key: string, ru: boolean): string {
   return translateSocialLabel(title, ru);
 }
 
+function signalTrendKey(value: unknown): string {
+  const family = String(value || '').trim().toLowerCase();
+  if (family.includes('trust') || family.includes('distrust')) return 'trust_distrust';
+  if (family.includes('support')) return 'support';
+  if (family.includes('concern')) return 'concern';
+  if (family.includes('question')) return 'questions';
+  if (family.includes('complaint')) return 'complaints';
+  return family.replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'other';
+}
+
+function signalFamilyForTrend(signal: IntentSignalItem): string {
+  const explicit = signal.family || signal.intent;
+  if (explicit) return signalTrendKey(explicit);
+  const text = `${signal.title_en || ''} ${signal.summary_en || ''}`.toLowerCase();
+  if (/\b(ask|question|wonder|how|why|whether)\b/.test(text)) return 'questions';
+  if (/\b(complain|complaint|critic|accountability|problem|issue|road|service)\b/.test(text)) return 'complaints';
+  if (/\b(support|supportive|positive|praise|appreciat)\b/.test(text)) return 'support';
+  if (/\b(trust|distrust|confidence)\b/.test(text)) return 'trust_distrust';
+  return 'concern';
+}
+
 function readableEvidence(value: unknown): string {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -554,6 +575,22 @@ function readableEvidence(value: unknown): string {
   if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(text)) return '';
   if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) return '';
   return text;
+}
+
+function signalTrendFromCurrentSignals(signals: IntentSignalItem[], generatedAt?: string): SignalTrendItem[] {
+  if (!signals.length) return [];
+  const point: SignalTrendItem = {
+    bucket: (generatedAt || new Date().toISOString()).slice(0, 10),
+    generatedAt,
+    total: 0,
+  };
+  for (const signal of signals) {
+    const key = signalFamilyForTrend(signal);
+    const count = Math.max(1, Number(signal.signal_count ?? signal.count ?? 1) || 1);
+    point[key] = Number(point[key] || 0) + count;
+    point.total = Number(point.total || 0) + count;
+  }
+  return [point];
 }
 
 function aiBriefTitle(card: IntentSignalItem, ru: boolean): string {
@@ -927,25 +964,17 @@ function SignalTrendChart({ ru, data }: { ru: boolean; data: SignalTrendItem[] }
   return (
     <>
       <ResponsiveContainer width="100%" height={260}>
-        <AreaChart data={chartData} margin={{ top:10, right:10, left:-20, bottom:0 }}>
-          <defs>
-            {series.map(s => (
-              <linearGradient key={s.key} id={`sg-${s.key}`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor={s.color} stopOpacity={0.18} />
-                <stop offset="95%" stopColor={s.color} stopOpacity={0} />
-              </linearGradient>
-            ))}
-          </defs>
+        <LineChart data={chartData} margin={{ top:10, right:10, left:-20, bottom:0 }}>
           <CartesianGrid {...GRID_COMMON} />
           <XAxis dataKey="label" {...AXIS_COMMON} dy={8} />
           <YAxis {...AXIS_COMMON} allowDecimals={false} />
           <Tooltip {...TOOLTIP_STYLE} />
           {series.map(s => (
-            <Area key={s.key} type="monotone" dataKey={s.key} stroke={s.color} fill={`url(#sg-${s.key})`}
-              strokeWidth={2} dot={false} name={s.label}
+            <Line key={s.key} type="monotone" dataKey={s.key} stroke={s.color}
+              strokeWidth={2.5} dot={{ r: 4, fill: s.color, strokeWidth: 0 }} activeDot={{ r: 5 }} name={s.label}
             />
           ))}
-        </AreaChart>
+        </LineChart>
       </ResponsiveContainer>
       <ChartLegend items={series.map(s => ({ label:s.label, color:s.color }))} />
     </>
@@ -1391,7 +1420,11 @@ export function SocialPage() {
       examples: examples.length ? examples : evidenceQuotes,
     };
   }) as IntentSignalItem[];
-  const signalTrend = dashboard?.deepAnalysis?.signalTrend ?? [];
+  const rawSignalTrend = dashboard?.deepAnalysis?.signalTrend ?? [];
+  const signalTrend = rawSignalTrend.length
+    ? rawSignalTrend
+    : signalTrendFromCurrentSignals(topSignals, dashboard?.meta?.generatedAt);
+  const signalTrendIsCurrentSnapshot = rawSignalTrend.length === 0 && signalTrend.length > 0;
   const topQuestions = (dashboard?.deepAnalysis?.topQuestions ?? []).map((question: any) => ({
     question: String(question.question || question.question_en || ''),
     question_en: question.question_en,
@@ -1782,7 +1815,14 @@ export function SocialPage() {
                       </div>
                     </WidgetCard>
 
-                    <WidgetCard title={ru?'Динамика сигналов':'Signal Trend Over Time'} subtitle={ru?'История сохранённых AI-сигналов по типам':'Saved AI signal history by family'}>
+                    <WidgetCard
+                      title={ru?'Динамика сигналов':'Signal Trend Over Time'}
+                      subtitle={
+                        signalTrendIsCurrentSnapshot
+                          ? (ru ? 'Текущий AI-срез; история появится после следующих обновлений' : 'Current AI snapshot; history builds after future refreshes')
+                          : (ru ? 'История сохранённых AI-сигналов по типам' : 'Saved AI signal history by family')
+                      }
+                    >
                       <SignalTrendChart ru={ru} data={signalTrend} />
                     </WidgetCard>
                   </div>
