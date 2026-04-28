@@ -74,8 +74,11 @@ const SOCIAL_LABEL_RU: Record<string, string> = {
   'Positive Sentiment': 'Позитивная тональность',
   'Questions Asked': 'Заданные вопросы',
   'Ads Running': 'Активная реклама',
+  Support: 'Поддержка',
+  Concern: 'Опасения',
   Questions: 'Вопросы',
   Complaints: 'Жалобы',
+  'Trust / Distrust': 'Доверие / недоверие',
   Praise: 'Похвала',
   'Purchase Intent': 'Намерение покупки',
   Comparison: 'Сравнение',
@@ -344,9 +347,41 @@ type SentimentTrendItem = typeof SENTIMENT_TREND[number] & {
   urgent?: number;
   sarcastic?: number;
 };
-type IntentSignalItem = typeof INTENT_SIGNALS[number];
+interface IntentSignalItem {
+  intent: string;
+  family?: string;
+  title_en?: string;
+  title_ru?: string;
+  summary_en?: string;
+  summary_ru?: string;
+  main_topic?: string;
+  sentiment?: string;
+  signal_count?: number;
+  count: number;
+  pct?: number;
+  trend_pct?: number;
+  delta?: number;
+  confidence?: number;
+  evidence_ids?: string[];
+  evidence_quotes?: string[];
+  examples?: string[];
+  icon?: React.ElementType;
+  color?: string;
+}
 type SignalTrendItem = typeof SIGNAL_TREND[number];
-type TopQuestionItem = typeof TOP_QUESTIONS[number];
+interface TopQuestionItem {
+  question: string;
+  question_en?: string;
+  question_ru?: string;
+  topic?: string;
+  count: number;
+  trend: 'up' | 'down' | 'stable' | string;
+  entity: string;
+  category: string;
+  answered: boolean;
+  confidence?: number;
+  evidence_ids?: string[];
+}
 type AdFeedItem = typeof AD_FEED[number];
 type SentimentByEntityItem = typeof SENTIMENT_BY_ENTITY[number];
 type PainPointItem = typeof PAIN_POINTS[number];
@@ -485,11 +520,26 @@ function colorForIntent(intent: string, fallback?: string): string {
   if (fallback) return fallback;
   const normalized = intent.toLowerCase();
   if (normalized.includes('complaint') || normalized.includes('churn')) return C.rose;
+  if (normalized.includes('concern') || normalized.includes('distrust')) return C.amber;
   if (normalized.includes('praise')) return C.emerald;
+  if (normalized.includes('support') || normalized.includes('trust')) return C.emerald;
   if (normalized.includes('purchase')) return C.violet;
   if (normalized.includes('comparison')) return C.amber;
   if (normalized.includes('feature')) return C.cyan;
   return C.blue;
+}
+
+function aiBriefTitle(card: IntentSignalItem, ru: boolean): string {
+  return (ru ? card.title_ru : card.title_en) || card.intent || card.family || '';
+}
+
+function aiBriefSummary(card: IntentSignalItem, ru: boolean): string {
+  return (ru ? card.summary_ru : card.summary_en) || card.examples?.[0] || '';
+}
+
+function confidenceLabel(value: number | undefined, ru: boolean): string {
+  const confidence = Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100);
+  return ru ? `${confidence}% увер.` : `${confidence}% conf.`;
 }
 
 function buildSocialDashboardPath(params: {
@@ -1256,14 +1306,41 @@ export function SocialPage() {
     return map;
   }, [topicMomentum]);
   const sentimentTrend = dashboard?.deepAnalysis?.sentimentTrend ?? [];
-  const intentSignals = (dashboard?.deepAnalysis?.intentSignals ?? []).map((signal: any) => ({
-    ...signal,
-    icon: iconForIntent(signal.intent || ''),
-    color: colorForIntent(signal.intent || '', signal.color),
-    examples: Array.isArray(signal.examples) ? signal.examples : [],
-  })) as IntentSignalItem[];
+  const rawIntentSignals = dashboard?.deepAnalysis?.intentSignals ?? [];
+  const intentSignalTotal = Math.max(
+    1,
+    rawIntentSignals.reduce((sum: number, signal: any) => sum + Number(signal.signal_count ?? signal.count ?? 0), 0),
+  );
+  const intentSignals = rawIntentSignals.map((signal: any) => {
+    const intent = signal.intent || signal.family || signal.title_en || '';
+    const count = Number(signal.signal_count ?? signal.count ?? 0);
+    const quotes = Array.isArray(signal.evidence_quotes) ? signal.evidence_quotes : [];
+    const examples = Array.isArray(signal.examples) && signal.examples.length ? signal.examples : quotes;
+    return {
+      ...signal,
+      intent,
+      count,
+      pct: Number(signal.pct ?? ((count / intentSignalTotal) * 100).toFixed(1)),
+      delta: Number(signal.delta ?? signal.trend_pct ?? 0),
+      icon: iconForIntent(intent),
+      color: colorForIntent(intent, signal.color),
+      examples,
+    };
+  }) as IntentSignalItem[];
   const signalTrend = dashboard?.deepAnalysis?.signalTrend ?? [];
-  const topQuestions = dashboard?.deepAnalysis?.topQuestions ?? [];
+  const topQuestions = (dashboard?.deepAnalysis?.topQuestions ?? []).map((question: any) => ({
+    question: String(question.question || question.question_en || ''),
+    question_en: question.question_en,
+    question_ru: question.question_ru,
+    topic: question.topic,
+    count: Number(question.count ?? question.signal_count ?? 0),
+    trend: question.trend || 'stable',
+    entity: String(question.entity || question.source || 'Audience'),
+    category: String(question.category || question.topic || 'Question'),
+    answered: Boolean(question.answered ?? false),
+    confidence: question.confidence,
+    evidence_ids: Array.isArray(question.evidence_ids) ? question.evidence_ids : [],
+  })) as TopQuestionItem[];
   const adItems = dashboard?.adIntelligence?.items ?? [];
   const sentimentByEntity = dashboard?.strictMetrics?.sentimentByEntity ?? [];
   const painPoints = dashboard?.deepAnalysis?.painPoints ?? [];
@@ -1538,42 +1615,84 @@ export function SocialPage() {
               <TierHeader tier={TIERS.intent} isOpen={openTiers.intent} onToggle={()=>toggleTier('intent')} ru={ru} />
               {openTiers.intent && (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-                    {intentSignals.map(sig => {
-                      const Icon = sig.icon;
-                      return (
-                        <div key={sig.intent} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md hover:border-slate-300 transition-all">
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ backgroundColor:`${sig.color}15` }}>
-                              <Icon className="w-3.5 h-3.5" style={{ color:sig.color }} />
+                  {intentSignals.length === 0 ? (
+                    <WidgetCard title={ru ? 'AI-обзоры подготавливаются' : 'AI briefs are warming'} subtitle={ru ? 'Карточки появятся после достаточного объёма новых обработанных постов.' : 'Cards will appear after enough new processed parent posts are available.'}>
+                      <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-6 text-sm text-slate-500">
+                        {ru
+                          ? 'Социальный worker создаёт эти карточки отдельно от загрузки дашборда. Это экономит AI-токены и не замедляет страницу.'
+                          : 'The Social worker creates these cards outside dashboard loading. This keeps AI cost low and keeps the page fast.'}
+                      </div>
+                    </WidgetCard>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {intentSignals.map(sig => {
+                        const Icon = sig.icon || HelpCircle;
+                        const title = aiBriefTitle(sig, ru);
+                        const summary = aiBriefSummary(sig, ru);
+                        const topic = translateSocialLabel(sig.main_topic || '', ru);
+                        const sentiment = String(sig.sentiment || 'neutral').toLowerCase();
+                        return (
+                          <div key={`${sig.intent}-${title}`} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md hover:border-slate-300 transition-all">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="w-8 h-8 rounded-xl flex flex-shrink-0 items-center justify-center" style={{ backgroundColor:`${sig.color}15` }}>
+                                  <Icon className="w-3.5 h-3.5" style={{ color:sig.color }} />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="truncate text-[11px] uppercase tracking-wide text-slate-400" style={{ fontWeight:700 }}>{translateSocialLabel(sig.family || sig.intent, ru)}</p>
+                                  <p className="truncate text-sm text-slate-900" style={{ fontWeight:700 }}>{title}</p>
+                                </div>
+                              </div>
+                              <DeltaBadge value={sig.delta} suffix="%" />
                             </div>
-                            <DeltaBadge value={sig.delta} suffix="%" />
+                            <p className="min-h-[54px] text-xs leading-relaxed text-slate-600">{summary}</p>
+                            <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                              {topic && (
+                                <span className="max-w-full truncate rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600" style={{ fontWeight:600 }}>
+                                  {topic}
+                                </span>
+                              )}
+                              <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] text-slate-500" style={{ fontWeight:600 }}>
+                                {sentimentLabel(sentiment, ru)}
+                              </span>
+                              <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700" style={{ fontWeight:700 }}>
+                                {confidenceLabel(sig.confidence, ru)}
+                              </span>
+                            </div>
+                            <div className="mt-3 flex items-end justify-between gap-3">
+                              <div>
+                                <p className="text-xl text-slate-900" style={{ fontWeight:700 }}>{sig.count}</p>
+                                <p className="text-[10px] text-slate-400">{ru ? 'сигналов' : 'signals'}</p>
+                              </div>
+                              <div className="h-1.5 min-w-[96px] flex-1 overflow-hidden rounded-full bg-slate-100">
+                                <div className="h-full rounded-full" style={{ width:`${Math.min(100, Math.max(4, Number(sig.pct) || 0))}%`, backgroundColor:sig.color }} />
+                              </div>
+                            </div>
                           </div>
-                          <p className="text-[11px] text-slate-500 leading-tight mb-1">{translateSocialLabel(sig.intent, ru)}</p>
-                          <p className="text-xl text-slate-900" style={{ fontWeight:700 }}>{sig.count}</p>
-                          <div className="mt-2.5 h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width:`${sig.pct}%`, backgroundColor:sig.color }} />
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-1">{sig.pct}%</p>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <WidgetCard title={ru?'Примеры сигналов':'Signal Examples'} subtitle={ru?'Реальные высказывания по категориям':'Real verbatims by intent category'}>
                       <div className="space-y-3 max-h-[310px] overflow-y-auto pr-1">
-                        {intentSignals.slice(0,5).map(sig => {
-                          const Icon = sig.icon;
+                        {intentSignals.length === 0 ? (
+                          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-4 text-xs text-slate-500">
+                            {ru ? 'Пока нет сохранённых AI-сигналов.' : 'No saved AI signal evidence yet.'}
+                          </div>
+                        ) : intentSignals.slice(0,5).map(sig => {
+                          const Icon = sig.icon || HelpCircle;
+                          const title = aiBriefTitle(sig, ru);
                           return (
-                            <div key={sig.intent} className="rounded-xl border border-slate-100 overflow-hidden">
+                            <div key={`${sig.intent}-${title}`} className="rounded-xl border border-slate-100 overflow-hidden">
                               <div className="flex items-center gap-2.5 px-3.5 py-2.5" style={{ backgroundColor:`${sig.color}0d` }}>
                                 <Icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color:sig.color }} />
-                                <span className="text-xs text-slate-800" style={{ fontWeight:600 }}>{translateSocialLabel(sig.intent, ru)}</span>
+                                <span className="text-xs text-slate-800" style={{ fontWeight:600 }}>{title}</span>
                                 <span className="ml-auto text-[10px] text-slate-400" style={{ fontWeight:500 }}>{sig.count} {ru?'сигн.':'signals'}</span>
                               </div>
                               <div className="px-3.5 py-2 space-y-1.5 bg-white">
-                                {sig.examples.map((ex,i)=>(
+                                {(sig.examples || []).slice(0,3).map((ex,i)=>(
                                   <div key={i} className="flex items-start gap-2">
                                     <MessageSquare className="w-3 h-3 text-slate-300 mt-0.5 flex-shrink-0" />
                                     <span className="text-[11px] text-slate-500 italic">"{ex}"</span>
@@ -1617,10 +1736,12 @@ export function SocialPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
-                          {topQuestions.map((q,i)=>(
-                            <tr key={i} className="hover:bg-slate-50/50 transition-colors">
+                          {topQuestions.map((q,i)=>{
+                            const questionText = ru ? (q.question_ru || q.question) : (q.question_en || q.question);
+                            return (
+                            <tr key={`${q.question}-${i}`} className="hover:bg-slate-50/50 transition-colors">
                               <td className="py-3 text-xs text-slate-400 pr-4">{i+1}</td>
-                              <td className="py-3 text-sm text-slate-800 pr-4 max-w-[240px]" style={{ fontWeight:500 }}>{q.question}</td>
+                              <td className="py-3 text-sm text-slate-800 pr-4 max-w-[240px]" style={{ fontWeight:500 }}>{questionText}</td>
                               <td className="py-3 pr-4">
                                 <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[q.entity] || colorForEntity(q.entity)}15`, color:entityColors[q.entity] || colorForEntity(q.entity) }}>{q.entity}</span>
                               </td>
@@ -1637,7 +1758,8 @@ export function SocialPage() {
                                 </span>
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
