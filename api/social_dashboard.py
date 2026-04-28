@@ -699,12 +699,14 @@ def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | 
     payload = deepcopy(snapshot)
     meta = payload.setdefault("meta", {})
     age_seconds = round(time.time() - cached_at, 2) if cached_at else 0.0
+    expired = bool(cached_at and age_seconds > SNAPSHOT_STALE_SECONDS)
     meta["cacheStatus"] = status
     meta["cache"] = {
         "status": status,
         "ageSeconds": age_seconds,
         "ttlSeconds": SNAPSHOT_TTL_SECONDS,
         "staleSeconds": SNAPSHOT_STALE_SECONDS,
+        "expired": expired,
         "servedAt": datetime.now(timezone.utc).isoformat(),
     }
     if cached_at:
@@ -786,6 +788,33 @@ def _topic_metric_enrichment_from_rows(
             if len(record["evidence"]) < max(0, min(int(evidence_per_topic or 3), 10)):
                 record["evidence"].append(evidence_item)
     return enrichment
+
+
+def _empty_graph_sync_coverage() -> dict[str, Any]:
+    return {
+        "totalParentActivities": 0,
+        "analyzedParentActivities": 0,
+        "graphSyncedParentActivities": 0,
+        "graphPendingParentActivities": 0,
+        "failedParentActivities": 0,
+        "semanticCoveragePct": 0.0,
+        "rowCap": ACTIVITY_SCAN_LIMIT,
+        "rowCapReached": False,
+        "unavailable": True,
+    }
+
+
+def _fetch_graph_sync_coverage(store: Any, filters: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    started = time.perf_counter()
+    coverage = store.get_graph_sync_coverage(
+        from_date=filters.get("from"),
+        to_date=filters.get("to"),
+        entity_id=filters.get("entity_id"),
+        platform=filters.get("platform"),
+        source_kind="post",
+    )
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    return coverage, elapsed_ms
 
 
 def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -919,13 +948,7 @@ def _build_social_dashboard_snapshot_uncached(
         organic = [row for row in enriched if _is_organic(row)]
         ads = [row for row in enriched if _is_ad(row)]
         degraded_sections: list[str] = []
-        graph_sync_coverage = store.get_graph_sync_coverage(
-            from_date=from_date,
-            to_date=to_date,
-            entity_id=entity_id,
-            platform=platform,
-            source_kind="post",
-        )
+        coverage_future = _SECTION_EXECUTOR.submit(_fetch_graph_sync_coverage, store, filters)
         topic_future = _SECTION_EXECUTOR.submit(_semantic_topic_widgets, organic, filters, timings, degraded_sections)
         trend_future = _SECTION_EXECUTOR.submit(_semantic_sentiment_trend, filters, timings, degraded_sections)
         semantic_started = time.perf_counter()
@@ -942,6 +965,20 @@ def _build_social_dashboard_snapshot_uncached(
             logger.warning("Social semantic sentiment trend timed out after {}s", SECTION_TIMEOUT_SECONDS)
             degraded_sections.append("semanticSentimentTrend")
             sentiment_trend = []
+        try:
+            remaining_timeout = max(0.1, SECTION_TIMEOUT_SECONDS - (time.perf_counter() - semantic_started))
+            graph_sync_coverage, coverage_ms = coverage_future.result(timeout=remaining_timeout)
+            timings["graphCoverageFetchMs"] = coverage_ms
+        except TimeoutError:
+            logger.warning("Social graph coverage timed out after {}s", SECTION_TIMEOUT_SECONDS)
+            degraded_sections.append("graphSyncCoverage")
+            timings["graphCoverageFetchMs"] = round((time.perf_counter() - semantic_started) * 1000, 2)
+            graph_sync_coverage = _empty_graph_sync_coverage()
+        except Exception as exc:
+            logger.warning("Social graph coverage degraded: {}", exc)
+            degraded_sections.append("graphSyncCoverage")
+            timings["graphCoverageFetchMs"] = round((time.perf_counter() - semantic_started) * 1000, 2)
+            graph_sync_coverage = _empty_graph_sync_coverage()
         section_started = time.perf_counter()
         deep = {
             "topicBubbles": topic_bubbles,
@@ -1089,7 +1126,10 @@ def build_social_dashboard_snapshot(
         _schedule_refresh(store, filters, key, reason="stale")
         payload = _cache_payload(cached, status="stale", cached_at=cached_at)
         payload["meta"]["cache"]["refreshing"] = True
-        payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + ["staleCache"]))
+        stale_sections = ["staleCache"]
+        if payload["meta"]["cache"].get("expired"):
+            stale_sections.append("expiredStaleCache")
+        payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + stale_sections))
         return payload
 
     scheduled = _schedule_refresh(store, filters, key, reason="miss")

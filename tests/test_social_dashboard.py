@@ -306,6 +306,58 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["cache"]["status"], "stale")
         self.assertGreater(payload["meta"]["usedActivities"], 0)
 
+    def test_social_dashboard_expired_stale_cache_is_marked(self) -> None:
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        key = social_dashboard._cache_key(filters)
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        social_dashboard._CACHE[key] = (
+            social_dashboard.time.time() - social_dashboard.SNAPSHOT_STALE_SECONDS - 10,
+            snapshot,
+        )
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True):
+            payload = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(empty=True),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        self.assertTrue(payload["meta"]["cache"]["expired"])
+        self.assertIn("expiredStaleCache", payload["meta"]["degradedSections"])
+
+    def test_graph_coverage_failure_degrades_only_coverage_metadata(self) -> None:
+        store = _FakeSocialDashboardStore()
+
+        def _fail_coverage(**_kwargs):
+            raise RuntimeError("coverage unavailable")
+
+        store.get_graph_sync_coverage = _fail_coverage
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            payload = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        self.assertIn("graphSyncCoverage", payload["meta"]["degradedSections"])
+        self.assertTrue(payload["meta"]["graphSyncCoverage"]["unavailable"])
+        self.assertIn("topicBubbles", payload["deepAnalysis"])
+
     def test_social_dashboard_endpoint_uses_new_snapshot_path(self) -> None:
         startup_handlers = list(server.app.router.on_startup)
         shutdown_handlers = list(server.app.router.on_shutdown)

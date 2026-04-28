@@ -7,12 +7,13 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any
 
 from loguru import logger
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, Query
 
 import config
 
 
 _CACHE_TTL_SECONDS = 300.0
+_QUERY_TIMEOUT_SECONDS = 6.0
 _ORGANIC_SOURCE_KINDS = ("post",)
 _NOISE_TOPIC_NAMES = {"", "null", "unknown", "none", "n/a", "na"}
 
@@ -38,8 +39,8 @@ def _get_driver():
             _driver = GraphDatabase.driver(
                 _social_neo4j_uri(),
                 auth=(config.SOCIAL_NEO4J_USERNAME, config.SOCIAL_NEO4J_PASSWORD),
-                connection_timeout=10.0,
-                connection_acquisition_timeout=10.0,
+                connection_timeout=5.0,
+                connection_acquisition_timeout=5.0,
                 max_connection_pool_size=4,
                 max_transaction_retry_time=5.0,
             )
@@ -129,7 +130,7 @@ def _platform_filter(platform: str | None) -> str | None:
 def _query_rows(cypher: str, params: dict[str, Any], *, op_name: str) -> list[dict[str, Any]]:
     started = time.perf_counter()
     with _get_driver().session(database=config.SOCIAL_NEO4J_DATABASE) as session:
-        rows = [dict(record) for record in session.run(cypher, params)]
+        rows = [dict(record) for record in session.run(Query(cypher, timeout=_QUERY_TIMEOUT_SECONDS), params)]
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     logger.debug("Social Neo4j read complete | op={} rows={} elapsed_ms={}", op_name, len(rows), elapsed_ms)
     return rows
