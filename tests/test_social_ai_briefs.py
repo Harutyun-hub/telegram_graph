@@ -147,7 +147,22 @@ class SocialAiBriefTests(unittest.TestCase):
                     "evidence_ids": ["facebook:post:0"],
                 },
             ],
-            "topSignals": [],
+            "topSignals": [
+                {
+                    "family": "Questions",
+                    "title_en": "Service quality questions",
+                    "title_ru": "Вопросы о качестве услуг",
+                    "summary_en": "People ask why public service quality remains slow.",
+                    "summary_ru": "Люди спрашивают, почему качество услуг остается низким.",
+                    "main_topic": "Service Quality",
+                    "sentiment": "negative",
+                    "signal_count": 1,
+                    "trend_pct": 0,
+                    "confidence": 0.82,
+                    "evidence_ids": ["facebook:post:0"],
+                    "evidence_quotes": ["Question about public service quality number 0?"],
+                }
+            ],
             "topQuestions": [],
         }
 
@@ -163,6 +178,9 @@ class SocialAiBriefTests(unittest.TestCase):
         self.assertIsNotNone(store.saved)
         self.assertEqual(len(store.saved["intentCards"]), 1)
         self.assertEqual(store.saved["intentCards"][0]["family"], "Questions")
+        self.assertEqual(len(store.saved["topSignals"]), 1)
+        self.assertEqual(store.saved["topSignals"][0]["examples"], ["Question about public service quality number 0?"])
+        self.assertEqual(store.settings[social_ai_briefs.SIGNAL_HISTORY_SETTING_KEY][0]["questions"], 1)
         self.assertEqual(store.saved["metadata"]["diagnostics"]["rejected"]["low_confidence"], 1)
 
     def test_validator_rejects_cards_without_real_evidence(self) -> None:
@@ -185,6 +203,45 @@ class SocialAiBriefTests(unittest.TestCase):
 
         self.assertEqual(result["intentCards"], [])
         self.assertEqual(result["diagnostics"]["rejected"]["missing_evidence"], 1)
+
+    def test_validator_rejects_top_signals_without_real_evidence(self) -> None:
+        result = social_ai_briefs.validate_social_ai_brief_output(
+            {
+                "topSignals": [
+                    {
+                        "family": "Support",
+                        "title_en": "Support signal",
+                        "title_ru": "Сигнал поддержки",
+                        "summary_en": "Supported.",
+                        "summary_ru": "Поддержано.",
+                        "confidence": 0.9,
+                        "evidence_ids": ["missing"],
+                    }
+                ]
+            },
+            evidence_by_uid={"facebook:post:1": {"quote": "real quote"}},
+        )
+
+        self.assertEqual(result["topSignals"], [])
+
+    def test_signal_history_is_bounded(self) -> None:
+        store = _FakeBriefStore(activity_count=1)
+        store.settings[social_ai_briefs.SIGNAL_HISTORY_SETTING_KEY] = [
+            {"bucket": f"2026-03-{day:02d}", "support": day, "total": day}
+            for day in range(1, 35)
+        ]
+
+        history = social_ai_briefs._append_signal_history(
+            store,
+            {
+                "generatedAt": "2026-04-25T00:00:00+00:00",
+                "topSignals": [{"family": "Support", "signal_count": 2}],
+            },
+        )
+
+        self.assertEqual(len(history), social_ai_briefs.SIGNAL_HISTORY_LIMIT)
+        self.assertEqual(history[-1]["bucket"], "2026-04-25")
+        self.assertEqual(history[-1]["support"], 2)
 
 
 if __name__ == "__main__":

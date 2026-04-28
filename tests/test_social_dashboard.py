@@ -180,13 +180,32 @@ class _FakeSocialDashboardStore:
                         "examples": ["Why are card fees so high?"],
                     }
                 ],
-                "topSignals": [],
+                "topSignals": [
+                    {
+                        "family": "Questions",
+                        "title_en": "Card fee questions",
+                        "title_ru": "Вопросы о комиссиях по картам",
+                        "summary_en": "People ask why card fees remain high.",
+                        "summary_ru": "Люди спрашивают, почему комиссии по картам остаются высокими.",
+                        "main_topic": "Card Fees",
+                        "sentiment": "negative",
+                        "signal_count": 1,
+                        "count": 1,
+                        "confidence": 0.82,
+                        "evidence_ids": ["facebook:post:post-1"],
+                        "evidence_quotes": ["Why are card fees so high?"],
+                        "examples": ["Why are card fees so high?"],
+                    }
+                ],
                 "topQuestions": [],
                 "metadata": {
                     "window": {"from": "2026-04-01T00:00:00+00:00", "to": "2026-04-15T00:00:00+00:00"},
                     "promptVersion": "social-ai-briefs-v1",
                 },
-            }
+            },
+            "ai_brief_signal_history": [
+                {"bucket": "2026-04-12", "questions": 1, "total": 1}
+            ],
         }
 
     def _select_rows(self, table: str, *, filters=(), limit=None, **_kwargs):
@@ -286,6 +305,8 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         topic_names = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertIn("Card Fees", topic_names)
         self.assertEqual(payload["deepAnalysis"]["sentimentTrend"][0]["negative"], 1)
+        self.assertEqual(payload["deepAnalysis"]["topSignals"][0]["family"], "Questions")
+        self.assertEqual(payload["deepAnalysis"]["signalTrend"][0]["questions"], 1)
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)

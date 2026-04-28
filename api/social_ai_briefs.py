@@ -16,6 +16,7 @@ from utils.ai_usage import log_openai_usage
 
 
 SNAPSHOT_SETTING_KEY = "ai_brief_snapshot"
+SIGNAL_HISTORY_SETTING_KEY = "ai_brief_signal_history"
 PROMPT_VERSION = "social-ai-briefs-v1"
 WINDOW_DAYS = 15
 REFRESH_MIN_HOURS = 24
@@ -24,6 +25,7 @@ MAX_CANDIDATE_CLUSTERS = 24
 MAX_EVIDENCE_PER_CLUSTER = 4
 MAX_COMPLETION_TOKENS = 7000
 MIN_CONFIDENCE = 0.60
+SIGNAL_HISTORY_LIMIT = 30
 ALLOWED_FAMILIES = {
     "support": "Support",
     "concern": "Concern",
@@ -82,13 +84,18 @@ Return shape:
   ],
   "topSignals": [
     {
+      "family": "Support|Concern|Questions|Complaints|Trust / Distrust",
       "title_en": "...",
       "title_ru": "...",
       "summary_en": "...",
       "summary_ru": "...",
+      "main_topic": "...",
+      "sentiment": "positive|neutral|negative|mixed|urgent|sarcastic",
       "signal_count": 3,
+      "trend_pct": 0,
       "confidence": 0.75,
-      "evidence_ids": ["activity_uid"]
+      "evidence_ids": ["activity_uid"],
+      "evidence_quotes": ["original short quote"]
     }
   ],
   "topQuestions": [
@@ -218,6 +225,51 @@ def get_social_ai_brief_snapshot(store: Any) -> dict[str, Any]:
 def _save_snapshot(store: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     store.save_runtime_setting(SNAPSHOT_SETTING_KEY, snapshot)
     return snapshot
+
+
+def get_social_ai_brief_signal_trend(store: Any) -> list[dict[str, Any]]:
+    """Request-time read path for the Social dashboard. Never calls AI."""
+    history = store.get_runtime_setting(SIGNAL_HISTORY_SETTING_KEY, [])
+    return history if isinstance(history, list) else []
+
+
+def _signal_family_key(family: str) -> str:
+    return family.lower().replace(" / ", "_").replace("/", "_").replace(" ", "_")
+
+
+def _signal_history_point(snapshot: dict[str, Any]) -> dict[str, Any]:
+    cards = _as_list(snapshot.get("topSignals")) or _as_list(snapshot.get("intentCards"))
+    counts: Counter[str] = Counter()
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        family = _normalize_family(card.get("family") or card.get("intent"))
+        if not family:
+            continue
+        try:
+            count = max(1, int(card.get("signal_count") or card.get("count") or 1))
+        except Exception:
+            count = 1
+        counts[family] += count
+    generated_at = _trimmed(snapshot.get("generatedAt")) or _trimmed(_as_dict(snapshot.get("metadata")).get("generatedAt"))
+    bucket = generated_at[:10] if generated_at else _utc_now().date().isoformat()
+    point = {"bucket": bucket, "generatedAt": generated_at, "total": sum(counts.values())}
+    for family, count in counts.items():
+        point[_signal_family_key(family)] = count
+    return point
+
+
+def _append_signal_history(store: Any, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    point = _signal_history_point(snapshot)
+    history = get_social_ai_brief_signal_trend(store)
+    next_history = [
+        item for item in history
+        if isinstance(item, dict) and item.get("bucket") != point.get("bucket")
+    ]
+    next_history.append(point)
+    next_history = next_history[-SIGNAL_HISTORY_LIMIT:]
+    store.save_runtime_setting(SIGNAL_HISTORY_SETTING_KEY, next_history)
+    return next_history
 
 
 def _activity_filters(start_iso: str, end_iso: str) -> list[tuple[str, str, Any]]:
@@ -501,6 +553,16 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
             }
         )
 
+    def _quotes_for_item(item: dict[str, Any], ids: list[str]) -> list[str]:
+        quotes = [_trimmed(value) for value in _as_list(item.get("evidence_quotes")) if _trimmed(value)]
+        if not quotes:
+            quotes = [
+                _trimmed(evidence_by_uid[uid].get("quote"))
+                for uid in ids[:3]
+                if _trimmed(evidence_by_uid[uid].get("quote"))
+            ]
+        return quotes[:3]
+
     def _validate_light(items: Any, *, question: bool = False) -> list[dict[str, Any]]:
         output = []
         seen: set[str] = set()
@@ -532,15 +594,34 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
                     }
                 )
             else:
+                family = _normalize_family(item.get("family") or item.get("intent"))
+                if not family:
+                    continue
+                quotes = _quotes_for_item(item, ids)
+                if not quotes:
+                    continue
+                try:
+                    signal_count = max(1, int(item.get("signal_count") or len(ids)))
+                except Exception:
+                    signal_count = len(ids)
                 output.append(
                     {
+                        "family": family,
+                        "intent": family,
                         "title_en": title_en,
                         "title_ru": title_ru,
                         "summary_en": _trimmed(item.get("summary_en")),
                         "summary_ru": _trimmed(item.get("summary_ru")),
-                        "signal_count": max(1, int(item.get("signal_count") or len(ids))),
+                        "main_topic": _trimmed(item.get("main_topic")) or "General Discussion",
+                        "sentiment": _normalize_sentiment(item.get("sentiment")),
+                        "signal_count": signal_count,
+                        "count": signal_count,
+                        "trend_pct": float(item.get("trend_pct") or 0),
+                        "delta": float(item.get("trend_pct") or 0),
                         "confidence": confidence,
                         "evidence_ids": ids,
+                        "evidence_quotes": quotes,
+                        "examples": quotes,
                     }
                 )
         return output
@@ -586,5 +667,8 @@ def refresh_social_ai_briefs(store: Any, *, force: bool = False, now: datetime |
             },
         },
     }
+    _save_snapshot(store, snapshot)
+    signal_history = _append_signal_history(store, snapshot)
+    snapshot["metadata"]["signalHistoryPoints"] = len(signal_history)
     _save_snapshot(store, snapshot)
     return {"status": "refreshed", "snapshot": snapshot}

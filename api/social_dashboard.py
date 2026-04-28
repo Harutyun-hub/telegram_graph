@@ -1034,6 +1034,7 @@ def _build_social_dashboard_snapshot_uncached(
             graph_sync_coverage = _empty_graph_sync_coverage()
         section_started = time.perf_counter()
         ai_brief_snapshot = social_ai_briefs.get_social_ai_brief_snapshot(store)
+        ai_signal_trend = social_ai_briefs.get_social_ai_brief_signal_trend(store)
         timings["aiBriefSnapshotReadMs"] = round((time.perf_counter() - section_started) * 1000, 2)
 
         section_started = time.perf_counter()
@@ -1044,6 +1045,7 @@ def _build_social_dashboard_snapshot_uncached(
             "sentimentTrend": sentiment_trend,
             "intentSignals": ai_brief_snapshot.get("intentCards") or [],
             "topSignals": ai_brief_snapshot.get("topSignals") or [],
+            "signalTrend": ai_signal_trend,
             "topQuestions": ai_brief_snapshot.get("topQuestions") or [],
             "painPoints": _pain_points(organic),
             "evidence": [_evidence(row) for row in organic[:EVIDENCE_LIMIT]],
@@ -1093,6 +1095,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "intentCards": len(ai_brief_snapshot.get("intentCards") or []),
                     "topSignals": len(ai_brief_snapshot.get("topSignals") or []),
                     "topQuestions": len(ai_brief_snapshot.get("topQuestions") or []),
+                    "signalTrendPoints": len(ai_signal_trend),
                     "promptVersion": _as_dict(ai_brief_snapshot.get("metadata")).get("promptVersion"),
                 },
                 "dataSources": {
@@ -1101,6 +1104,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "deepAnalysis.topicRanking": "neo4j+supabase",
                     "deepAnalysis.intentSignals": "social_ai_brief_snapshot",
                     "deepAnalysis.topSignals": "social_ai_brief_snapshot",
+                    "deepAnalysis.signalTrend": "social_ai_brief_signal_history",
                     "deepAnalysis.topQuestions": "social_ai_brief_snapshot",
                     "strictMetrics": "supabase",
                     "adIntelligence": "supabase",
