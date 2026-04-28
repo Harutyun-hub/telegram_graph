@@ -115,6 +115,15 @@ const SOCIAL_LABEL_RU: Record<string, string> = {
   'App Interface': 'Интерфейс приложения',
   Sustainability: 'Устойчивость',
   Refunds: 'Возвраты',
+  'Community Interests': 'Интересы сообщества',
+  'Government & Leadership': 'Государство и лидерство',
+  'Security & Defense': 'Безопасность и оборона',
+  'Infrastructure & Services': 'Инфраструктура и услуги',
+  'Economy & Jobs': 'Экономика и занятость',
+  'Community Life': 'Жизнь сообщества',
+  'Media & Campaigns': 'Медиа и кампании',
+  'Rights & Trust': 'Права и доверие',
+  'Technology & Development': 'Технологии и развитие',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -409,6 +418,12 @@ interface PainPointItem {
   evidence_ids?: string[];
   severity?: string;
 }
+interface CommunityInterestItem {
+  interest: string;
+  score: number;
+  mentions?: number;
+  interestLabel?: string;
+}
 type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
 type VisibilityItem = typeof VISIBILITY_DATA[number];
 type VisibilityTrendItem = typeof VISIBILITY_TREND[number];
@@ -452,6 +467,7 @@ interface SocialDashboardSnapshot {
     signalTrend?: SignalTrendItem[];
     topQuestions?: TopQuestionItem[];
     painPoints?: PainPointItem[];
+    communityInterests?: CommunityInterestItem[];
     evidence?: any[];
   };
   adIntelligence?: {
@@ -528,6 +544,45 @@ function wrapBubbleLabel(label: string, radius: number): string[] {
     }
   }
   return lines.slice(0, maxLines);
+}
+
+function wrapRadarAxisLabel(label: string): string[] {
+  const words = label.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  for (const word of words) {
+    const last = lines[lines.length - 1] || '';
+    if (!last) {
+      lines.push(word);
+    } else if (`${last} ${word}`.length <= 18) {
+      lines[lines.length - 1] = `${last} ${word}`;
+    } else {
+      lines.push(word);
+    }
+  }
+  return lines.slice(0, 3);
+}
+
+function CommunityInterestAxisTick({
+  x,
+  y,
+  textAnchor,
+  payload,
+}: {
+  x?: number;
+  y?: number;
+  textAnchor?: 'start' | 'middle' | 'end';
+  payload?: { value?: string };
+}) {
+  const lines = wrapRadarAxisLabel(String(payload?.value || ''));
+  return (
+    <text x={x} y={y} textAnchor={textAnchor || 'middle'} fill="#64748b" fontSize={11} fontWeight={600}>
+      {lines.map((line, index) => (
+        <tspan key={`${line}-${index}`} x={x} dy={index === 0 ? 0 : 13}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  );
 }
 
 function iconForIntent(intent: string): React.ElementType {
@@ -1494,7 +1549,26 @@ export function SocialPage() {
   }) as PainPointItem[];
   const adItems = dashboard?.adIntelligence?.items ?? [];
   const sentimentByEntity = dashboard?.strictMetrics?.sentimentByEntity ?? [];
-  const engagementRadar = dashboard?.strictMetrics?.engagementRadar ?? [];
+  const communityInterests = (dashboard?.deepAnalysis?.communityInterests ?? [])
+    .map((item) => ({
+      ...item,
+      interest: String(item.interest || '').trim(),
+      interestLabel: translateSocialLabel(item.interest, ru),
+      score: Number(item.score ?? 0),
+      mentions: Number(item.mentions ?? 0),
+    }))
+    .filter((item) => item.interest && item.score > 0)
+    .sort((a, b) => b.score - a.score) as CommunityInterestItem[];
+  const communityInterestPeak = Math.max(0, ...communityInterests.map((item) => Number(item.score) || 0));
+  const communityInterestScale = Math.min(100, Math.max(20, Math.ceil((communityInterestPeak + 10) / 10) * 10));
+  const communityInterestTicks = Array.from(new Set([
+    0,
+    Math.round(communityInterestScale / 4),
+    Math.round(communityInterestScale / 2),
+    Math.round((communityInterestScale * 3) / 4),
+    communityInterestScale,
+  ]));
+  const topCommunityInterests = communityInterests.slice(0, 4);
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
   const positiveImpact = dashboard?.strictMetrics?.positiveImpact ?? [];
@@ -1521,7 +1595,6 @@ export function SocialPage() {
     label: item.entity,
     color: entityColors[item.entity] || colorForEntity(item.entity, index),
   }));
-  const radarSeries = chartSeries.slice(0, 3);
   const openSocialTopic = (topic: string) => {
     const clean = topic.trim();
     if (!clean) return;
@@ -2036,30 +2109,76 @@ export function SocialPage() {
                     </WidgetCard>
                   </div>
 
-                  {/* Engagement Radar */}
-                  <WidgetCard title={ru?'Профиль вовлечённости':'Engagement Profile Radar'} subtitle={ru?'Сравнение типов взаимодействия по брендам':'Engagement type comparison across brands'}>
-                    <div className="h-[300px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <RadarChart data={engagementRadar}>
-                          <PolarGrid stroke={C.grid} />
-                          <PolarAngleAxis dataKey="subject" tick={{ fontSize:12, fill:'#64748b' }} />
-                          <PolarRadiusAxis angle={30} domain={[0,100]} tick={{ fontSize:9, fill:C.muted }} />
-                          {radarSeries.map((series, index) => (
-                            <Radar
-                              key={series.key}
-                              name={series.label}
-                              dataKey={series.key}
-                              stroke={series.color}
-                              fill={series.color}
-                              fillOpacity={index === 0 ? 0.15 : 0.1}
-                              strokeWidth={2}
-                            />
+                  {/* Community Interests */}
+                  <WidgetCard
+                    title={ru ? 'Интересы сообщества' : 'Community Interests'}
+                    subtitle={ru ? 'Доля social-упоминаний по тематическим интересам за выбранный период' : 'Share of social topic mentions by interest area in the selected window'}
+                  >
+                    {communityInterests.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-5 text-sm text-slate-500">
+                        {ru ? 'Интересы сообщества появятся после синхронизации тем в Neo4j.' : 'Community interests will appear after semantic topics are synced to Neo4j.'}
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="rounded-2xl border border-slate-100 bg-slate-50/70 px-3 py-4">
+                          <div className="h-[360px]">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <RadarChart data={communityInterests} outerRadius="74%">
+                                <PolarGrid stroke="#dbe3ee" radialLines />
+                                <PolarAngleAxis dataKey="interestLabel" tick={<CommunityInterestAxisTick />} />
+                                <PolarRadiusAxis
+                                  angle={18}
+                                  domain={[0, communityInterestScale]}
+                                  ticks={communityInterestTicks}
+                                  tick={{ fontSize: 10, fill: C.muted }}
+                                  tickFormatter={(value) => `${value}%`}
+                                />
+                                <Radar
+                                  name={ru ? 'Интересы сообщества' : 'Community Interests'}
+                                  dataKey="score"
+                                  stroke="#0f766e"
+                                  fill="#14b8a6"
+                                  fillOpacity={0.24}
+                                  strokeWidth={3}
+                                  dot={{ r: 3, fill: '#0f766e', strokeWidth: 0 }}
+                                />
+                                <Tooltip
+                                  {...TOOLTIP_STYLE}
+                                  formatter={(value: unknown, _name: string, item: any) => [
+                                    `${Number(value || 0).toFixed(1)}%`,
+                                    item?.payload?.mentions
+                                      ? `${item.payload.mentions} ${ru ? 'упоминаний' : 'mentions'}`
+                                      : (ru ? 'Доля' : 'Share'),
+                                  ]}
+                                />
+                              </RadarChart>
+                            </ResponsiveContainer>
+                          </div>
+                          <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+                            <span>{ru ? 'Шкала отображения' : 'Display scale'}: 0-{communityInterestScale}%</span>
+                            <span>{ru ? 'Пик периода' : 'Window peak'}: {communityInterestPeak.toFixed(1)}%</span>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                          {topCommunityInterests.map((item) => (
+                            <div key={item.interest} className="flex items-center justify-between gap-3 text-sm">
+                              <span className="flex min-w-0 items-center gap-2 text-slate-700">
+                                <span className="h-2 w-2 flex-shrink-0 rounded-full bg-teal-500" />
+                                <span className="truncate">{item.interestLabel}</span>
+                              </span>
+                              <span className="font-semibold text-slate-900">{Number(item.score || 0).toFixed(1)}%</span>
+                            </div>
                           ))}
-                          <Tooltip {...TOOLTIP_STYLE} />
-                        </RadarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <ChartLegend items={radarSeries.map(series => ({ label: series.label, color: series.color }))} />
+                        </div>
+                        {topCommunityInterests.length >= 2 && (
+                          <div className="rounded-xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-900">
+                            <span className="font-semibold">{ru ? 'Приоритетный сигнал' : 'Priority signal'}: </span>
+                            {topCommunityInterests[0].interestLabel} ({Number(topCommunityInterests[0].score || 0).toFixed(1)}%) {ru ? 'и' : 'and'}{' '}
+                            {topCommunityInterests[1].interestLabel} ({Number(topCommunityInterests[1].score || 0).toFixed(1)}%) {ru ? 'ведут обсуждение в выбранном периоде.' : 'lead discussion in the selected window.'}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </WidgetCard>
                 </div>
               )}
