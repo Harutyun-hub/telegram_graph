@@ -387,7 +387,9 @@ interface TopQuestionItem {
   evidence_ids?: string[];
 }
 type AdFeedItem = typeof AD_FEED[number];
-type SentimentByEntityItem = typeof SENTIMENT_BY_ENTITY[number];
+type SentimentByEntityItem = typeof SENTIMENT_BY_ENTITY[number] & {
+  entity_id?: string;
+};
 interface PainPointItem {
   problem?: string;
   problem_en?: string;
@@ -1484,7 +1486,12 @@ export function SocialPage() {
     evidence_count: Number(point.evidence_count ?? point.evidence_ids?.length ?? 0),
     evidence_ids: Array.isArray(point.evidence_ids) ? point.evidence_ids : [],
     severity: point.severity,
-  })) as PainPointItem[];
+  })).filter((point) => {
+    const title = String(point.problem_en || point.title_en || point.problem || point.text || '').trim();
+    const confidence = Number(point.confidence ?? 0);
+    const evidenceCount = Number(point.evidence_count ?? point.evidence_ids?.length ?? 0);
+    return Boolean(title) && confidence >= 0.6 && evidenceCount > 0 && (point.evidence_quotes?.length ?? 0) > 0;
+  }) as PainPointItem[];
   const adItems = dashboard?.adIntelligence?.items ?? [];
   const sentimentByEntity = dashboard?.strictMetrics?.sentimentByEntity ?? [];
   const engagementRadar = dashboard?.strictMetrics?.engagementRadar ?? [];
@@ -1519,6 +1526,17 @@ export function SocialPage() {
     const clean = topic.trim();
     if (!clean) return;
     navigate(`/social/topics?topic=${encodeURIComponent(clean)}&view=evidence`);
+  };
+  const openSocialSourceEvidence = (item: SentimentByEntityItem) => {
+    const entityId = String(item.entity_id || '').trim();
+    if (entityId) {
+      navigate(`/social/topics?entity=${encodeURIComponent(entityId)}&view=evidence`);
+      return;
+    }
+    const entityName = String(item.entity || '').trim();
+    if (entityName) {
+      navigate(`/social/topics?topic=${encodeURIComponent(entityName)}&view=evidence`);
+    }
   };
 
   // ── Tier configs (Tailwind classes — matches DashboardPage palette) ──
@@ -1945,7 +1963,13 @@ export function SocialPage() {
                         </div>
                       ) : <div className="space-y-5">
                         {sentimentByEntity.map(item=>(
-                          <div key={item.entity}>
+                          <button
+                            key={item.entity}
+                            type="button"
+                            onClick={() => openSocialSourceEvidence(item)}
+                            className="block w-full rounded-xl p-2 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            aria-label={ru ? `Открыть доказательства источника ${item.entity}` : `Open evidence for ${item.entity}`}
+                          >
                             <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-2">
                                 <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor:entityColors[item.entity] || colorForEntity(item.entity) }} />
@@ -1963,7 +1987,7 @@ export function SocialPage() {
                               <span className="text-[10px] text-slate-400">{item.neu}%</span>
                               <span className="text-[10px] text-rose-500" style={{ fontWeight:600 }}>{item.neg}%</span>
                             </div>
-                          </div>
+                          </button>
                         ))}
                       </div>}
                       <ChartLegend items={[
