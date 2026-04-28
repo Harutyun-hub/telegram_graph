@@ -508,6 +508,8 @@ function buildSocialDashboardPath(params: {
 }
 
 const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v1:';
+const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v1';
+const SOCIAL_DASHBOARD_CACHE_LIMIT = 10;
 
 function socialDashboardCacheKey(path: string): string {
   return `${SOCIAL_DASHBOARD_CACHE_PREFIX}${path}`;
@@ -526,7 +528,20 @@ function readCachedSocialDashboard(path: string): SocialDashboardSnapshot | null
 function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnapshot): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(socialDashboardCacheKey(path), JSON.stringify(snapshot));
+    const key = socialDashboardCacheKey(path);
+    window.localStorage.setItem(key, JSON.stringify(snapshot));
+    const rawManifest = window.localStorage.getItem(SOCIAL_DASHBOARD_CACHE_MANIFEST);
+    const previousKeys = rawManifest ? JSON.parse(rawManifest) : [];
+    const keys = [key, ...(Array.isArray(previousKeys) ? previousKeys : []).filter((item) => item !== key)];
+    keys.slice(SOCIAL_DASHBOARD_CACHE_LIMIT).forEach((oldKey) => {
+      if (typeof oldKey === 'string' && oldKey.startsWith(SOCIAL_DASHBOARD_CACHE_PREFIX)) {
+        window.localStorage.removeItem(oldKey);
+      }
+    });
+    window.localStorage.setItem(
+      SOCIAL_DASHBOARD_CACHE_MANIFEST,
+      JSON.stringify(keys.slice(0, SOCIAL_DASHBOARD_CACHE_LIMIT)),
+    );
   } catch {
     // Best-effort cache only; never block dashboard rendering on storage quota.
   }
