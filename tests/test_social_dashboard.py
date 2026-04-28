@@ -198,6 +198,23 @@ class _FakeSocialDashboardStore:
                     }
                 ],
                 "topQuestions": [],
+                "topProblems": [
+                    {
+                        "problem": "Customers complain about slow support",
+                        "problem_en": "Customers complain about slow support",
+                        "problem_ru": "Клиенты жалуются на медленную поддержку",
+                        "summary_en": "Evidence-backed complaints focus on slow response times.",
+                        "summary_ru": "Жалобы с доказательствами связаны с медленными ответами.",
+                        "topic": "Customer Service",
+                        "sentiment": "negative",
+                        "count": 1,
+                        "confidence": 0.86,
+                        "sources": ["Example Bank"],
+                        "evidence_quotes": ["Support is too slow on weekends."],
+                        "evidence_count": 1,
+                        "evidence_ids": ["facebook:post:post-1"],
+                    }
+                ],
                 "metadata": {
                     "window": {"from": "2026-04-01T00:00:00+00:00", "to": "2026-04-15T00:00:00+00:00"},
                     "promptVersion": "social-ai-briefs-v1",
@@ -307,6 +324,8 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["deepAnalysis"]["sentimentTrend"][0]["negative"], 1)
         self.assertEqual(payload["deepAnalysis"]["topSignals"][0]["family"], "Questions")
         self.assertEqual(payload["deepAnalysis"]["signalTrend"][0]["questions"], 1)
+        self.assertEqual(payload["deepAnalysis"]["painPoints"][0]["problem_en"], "Customers complain about slow support")
+        self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.painPoints"], "social_ai_brief_snapshot")
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)

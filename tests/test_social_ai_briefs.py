@@ -164,6 +164,20 @@ class SocialAiBriefTests(unittest.TestCase):
                 }
             ],
             "topQuestions": [],
+            "topProblems": [
+                {
+                    "problem_en": "People report slow public services",
+                    "problem_ru": "Люди сообщают о медленных государственных услугах",
+                    "summary_en": "The evidence shows complaints about slow service quality.",
+                    "summary_ru": "Доказательства показывают жалобы на медленное качество услуг.",
+                    "topic": "Service Quality",
+                    "sentiment": "negative",
+                    "count": 1,
+                    "confidence": 0.83,
+                    "evidence_ids": ["facebook:post:0"],
+                    "evidence_quotes": ["Question about public service quality number 0?"],
+                }
+            ],
         }
 
         with patch.object(social_ai_briefs.social_semantic, "get_topic_aggregates", return_value=graph_payload), \
@@ -180,6 +194,8 @@ class SocialAiBriefTests(unittest.TestCase):
         self.assertEqual(store.saved["intentCards"][0]["family"], "Questions")
         self.assertEqual(len(store.saved["topSignals"]), 1)
         self.assertEqual(store.saved["topSignals"][0]["examples"], ["Question about public service quality number 0?"])
+        self.assertEqual(len(store.saved["topProblems"]), 1)
+        self.assertEqual(store.saved["topProblems"][0]["sources"], ["Example Source"])
         self.assertEqual(store.settings[social_ai_briefs.SIGNAL_HISTORY_SETTING_KEY][0]["questions"], 1)
         self.assertEqual(store.saved["metadata"]["diagnostics"]["rejected"]["low_confidence"], 1)
 
@@ -269,6 +285,60 @@ class SocialAiBriefTests(unittest.TestCase):
         )
 
         self.assertEqual(result["topQuestions"], [])
+
+    def test_validator_enriches_top_problems_from_evidence_metadata(self) -> None:
+        result = social_ai_briefs.validate_social_ai_brief_output(
+            {
+                "topProblems": [
+                    {
+                        "problem_en": "Residents report slow service responses",
+                        "problem_ru": "Жители сообщают о медленных ответах сервиса",
+                        "summary_en": "Multiple comments complain that support is slow.",
+                        "summary_ru": "Несколько комментариев жалуются, что поддержка медленная.",
+                        "topic": "Service Quality",
+                        "sentiment": "negative",
+                        "count": 2,
+                        "confidence": 0.88,
+                        "evidence_ids": ["facebook:post:1", "facebook:post:2"],
+                    }
+                ]
+            },
+            evidence_by_uid={
+                "facebook:post:1": {"quote": "Support is too slow.", "entity": "Source A"},
+                "facebook:post:2": {"quote": "Nobody answers our question.", "entity": "Source A"},
+            },
+        )
+
+        self.assertEqual(len(result["topProblems"]), 1)
+        problem = result["topProblems"][0]
+        self.assertEqual(problem["problem_en"], "Residents report slow service responses")
+        self.assertEqual(problem["summary_en"], "Multiple comments complain that support is slow.")
+        self.assertEqual(problem["sources"], ["Source A"])
+        self.assertEqual(problem["evidence_quotes"], ["Support is too slow.", "Nobody answers our question."])
+        self.assertEqual(problem["evidence_count"], 2)
+
+    def test_validator_rejects_low_confidence_or_evidence_free_top_problems(self) -> None:
+        result = social_ai_briefs.validate_social_ai_brief_output(
+            {
+                "topProblems": [
+                    {
+                        "problem_en": "Weak unsupported problem",
+                        "problem_ru": "Слабая неподтвержденная проблема",
+                        "confidence": 0.2,
+                        "evidence_ids": ["facebook:post:1"],
+                    },
+                    {
+                        "problem_en": "Missing evidence problem",
+                        "problem_ru": "Проблема без доказательств",
+                        "confidence": 0.9,
+                        "evidence_ids": ["missing"],
+                    },
+                ]
+            },
+            evidence_by_uid={"facebook:post:1": {"quote": "real quote", "entity": "Source A"}},
+        )
+
+        self.assertEqual(result["topProblems"], [])
 
     def test_signal_history_is_bounded(self) -> None:
         store = _FakeBriefStore(activity_count=1)

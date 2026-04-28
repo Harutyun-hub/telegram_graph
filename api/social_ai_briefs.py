@@ -51,6 +51,7 @@ Create one shared snapshot with:
 - intentCards: evidence-backed overview cards about what people support, question, complain about, worry about, trust, or distrust.
 - topSignals: short reusable signal cards for future widgets.
 - topQuestions: questions or information needs supported by evidence.
+- topProblems: concrete problems, complaints, or risks supported by evidence.
 
 Allowed intent card families:
 Support, Concern, Questions, Complaints, Trust / Distrust
@@ -106,6 +107,20 @@ Return shape:
       "count": 2,
       "confidence": 0.75,
       "evidence_ids": ["activity_uid"]
+    }
+  ],
+  "topProblems": [
+    {
+      "problem_en": "...",
+      "problem_ru": "...",
+      "summary_en": "...",
+      "summary_ru": "...",
+      "topic": "...",
+      "sentiment": "negative|mixed|urgent|neutral",
+      "count": 2,
+      "confidence": 0.75,
+      "evidence_ids": ["activity_uid"],
+      "evidence_quotes": ["original short quote"]
     }
   ]
 }
@@ -217,6 +232,7 @@ def get_social_ai_brief_snapshot(store: Any) -> dict[str, Any]:
             "intentCards": [],
             "topSignals": [],
             "topQuestions": [],
+            "topProblems": [],
             "metadata": {"reason": "No Social AI brief snapshot has been generated yet."},
         }
     return snapshot
@@ -563,7 +579,21 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
             ]
         return quotes[:3]
 
-    def _validate_light(items: Any, *, question: bool = False) -> list[dict[str, Any]]:
+    def _sources_for_ids(ids: list[str]) -> list[str]:
+        sources = []
+        for uid in ids:
+            source = _trimmed(evidence_by_uid[uid].get("entity"))
+            if source and source not in sources:
+                sources.append(source)
+        return sources
+
+    def _count_for_item(item: dict[str, Any], ids: list[str]) -> int:
+        try:
+            return max(1, int(item.get("count") or item.get("signal_count") or len(ids)))
+        except (TypeError, ValueError):
+            return len(ids)
+
+    def _validate_light(items: Any, *, question: bool = False, problem: bool = False) -> list[dict[str, Any]]:
         output = []
         seen: set[str] = set()
         for item in _as_list(items):
@@ -573,8 +603,15 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
             ids = _valid_evidence_ids(item.get("evidence_ids"), evidence_ids)
             if confidence < MIN_CONFIDENCE or not ids:
                 continue
-            title_en = _trimmed(item.get("question_en" if question else "title_en"))
-            title_ru = _trimmed(item.get("question_ru" if question else "title_ru"))
+            if question:
+                title_en = _trimmed(item.get("question_en"))
+                title_ru = _trimmed(item.get("question_ru"))
+            elif problem:
+                title_en = _trimmed(item.get("problem_en") or item.get("title_en"))
+                title_ru = _trimmed(item.get("problem_ru") or item.get("title_ru"))
+            else:
+                title_en = _trimmed(item.get("title_en"))
+                title_ru = _trimmed(item.get("title_ru"))
             if not title_en or not title_ru:
                 continue
             key = title_en.lower()
@@ -585,24 +622,38 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
                 quotes = _quotes_for_item(item, ids)
                 if not quotes:
                     continue
-                sources = []
-                for uid in ids:
-                    source = _trimmed(evidence_by_uid[uid].get("entity"))
-                    if source and source not in sources:
-                        sources.append(source)
-                try:
-                    question_count = max(1, int(item.get("count") or len(ids)))
-                except (TypeError, ValueError):
-                    question_count = len(ids)
                 output.append(
                     {
                         "question": title_en,
                         "question_en": title_en,
                         "question_ru": title_ru,
                         "topic": _trimmed(item.get("topic")),
-                        "count": question_count,
+                        "count": _count_for_item(item, ids),
                         "confidence": confidence,
-                        "sources": sources,
+                        "sources": _sources_for_ids(ids),
+                        "evidence_quotes": quotes,
+                        "evidence_count": len(ids),
+                        "evidence_ids": ids,
+                    }
+                )
+            elif problem:
+                quotes = _quotes_for_item(item, ids)
+                if not quotes:
+                    continue
+                output.append(
+                    {
+                        "problem": title_en,
+                        "problem_en": title_en,
+                        "problem_ru": title_ru,
+                        "title_en": title_en,
+                        "title_ru": title_ru,
+                        "summary_en": _trimmed(item.get("summary_en")),
+                        "summary_ru": _trimmed(item.get("summary_ru")),
+                        "topic": _trimmed(item.get("topic") or item.get("main_topic")) or "General Discussion",
+                        "sentiment": _normalize_sentiment(item.get("sentiment")),
+                        "count": _count_for_item(item, ids),
+                        "confidence": confidence,
+                        "sources": _sources_for_ids(ids),
                         "evidence_quotes": quotes,
                         "evidence_count": len(ids),
                         "evidence_ids": ids,
@@ -645,6 +696,7 @@ def validate_social_ai_brief_output(raw: dict[str, Any], *, evidence_by_uid: dic
         "intentCards": intent_cards,
         "topSignals": _validate_light(raw.get("topSignals")),
         "topQuestions": _validate_light(raw.get("topQuestions"), question=True),
+        "topProblems": _validate_light(raw.get("topProblems"), problem=True),
         "diagnostics": {"rejected": dict(rejected), "publishedIntentCards": len(intent_cards)},
     }
 
@@ -668,6 +720,7 @@ def refresh_social_ai_briefs(store: Any, *, force: bool = False, now: datetime |
         "intentCards": validated["intentCards"],
         "topSignals": validated["topSignals"],
         "topQuestions": validated["topQuestions"],
+        "topProblems": validated["topProblems"],
         "metadata": {
             "generatedAt": _iso(now or _utc_now()),
             "window": candidates["window"],

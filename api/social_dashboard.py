@@ -1047,7 +1047,7 @@ def _build_social_dashboard_snapshot_uncached(
             "topSignals": ai_brief_snapshot.get("topSignals") or [],
             "signalTrend": ai_signal_trend,
             "topQuestions": ai_brief_snapshot.get("topQuestions") or [],
-            "painPoints": _pain_points(organic),
+            "painPoints": ai_brief_snapshot.get("topProblems") or [],
             "evidence": [_evidence(row) for row in organic[:EVIDENCE_LIMIT]],
         }
         timings["deepAnalysisBuildMs"] = round((time.perf_counter() - section_started) * 1000, 2)
@@ -1069,6 +1069,8 @@ def _build_social_dashboard_snapshot_uncached(
             empty_reasons["analysis"] = "Matched activities exist, but none have social AI analysis yet."
         if not ai_brief_snapshot.get("intentCards"):
             empty_reasons["intentSignals"] = "Social AI brief cards are warming or there is not enough new processed Social data yet."
+        if not ai_brief_snapshot.get("topProblems"):
+            empty_reasons["painPoints"] = "Social AI problem cards are warming or there is not enough evidence-backed problem data yet."
 
         entities_filter = sorted(
             [{"id": row["id"], "name": row.get("name") or "Unknown"} for row in entities.values()],
@@ -1095,6 +1097,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "intentCards": len(ai_brief_snapshot.get("intentCards") or []),
                     "topSignals": len(ai_brief_snapshot.get("topSignals") or []),
                     "topQuestions": len(ai_brief_snapshot.get("topQuestions") or []),
+                    "topProblems": len(ai_brief_snapshot.get("topProblems") or []),
                     "signalTrendPoints": len(ai_signal_trend),
                     "promptVersion": _as_dict(ai_brief_snapshot.get("metadata")).get("promptVersion"),
                 },
@@ -1106,6 +1109,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "deepAnalysis.topSignals": "social_ai_brief_snapshot",
                     "deepAnalysis.signalTrend": "social_ai_brief_signal_history",
                     "deepAnalysis.topQuestions": "social_ai_brief_snapshot",
+                    "deepAnalysis.painPoints": "social_ai_brief_snapshot",
                     "strictMetrics": "supabase",
                     "adIntelligence": "supabase",
                 },
