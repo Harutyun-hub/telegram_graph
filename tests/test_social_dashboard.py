@@ -326,9 +326,41 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["deepAnalysis"]["signalTrend"][0]["questions"], 1)
         self.assertEqual(payload["deepAnalysis"]["painPoints"][0]["problem_en"], "Customers complain about slow support")
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.painPoints"], "social_ai_brief_snapshot")
+        self.assertEqual(payload["strictMetrics"]["sentimentByEntity"][0]["entity_id"], "entity-1")
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)
+
+    def test_dashboard_filters_incomplete_ai_problem_cards(self) -> None:
+        store = _FakeSocialDashboardStore()
+        store.runtime_settings["ai_brief_snapshot"]["topProblems"] = [
+            {
+                "problem": "Legacy generated problem",
+                "topic": "Audience Issue",
+                "count": 1,
+            },
+            {
+                "problem": "Evidence-backed issue",
+                "problem_en": "Evidence-backed issue",
+                "confidence": 0.75,
+                "evidence_count": 1,
+                "evidence_ids": ["facebook:post:post-1"],
+                "evidence_quotes": ["This is a real issue."],
+            },
+        ]
+
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            payload = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        self.assertEqual(len(payload["deepAnalysis"]["painPoints"]), 1)
+        self.assertEqual(payload["deepAnalysis"]["painPoints"][0]["problem"], "Evidence-backed issue")
+        self.assertEqual(payload["meta"]["socialAiBriefs"]["topProblems"], 1)
 
     def test_ads_are_separate_from_organic_widgets(self) -> None:
         graph_payload = {"items": [{"topic": "Card Fees", "count": 1, "dominantSentiment": "negative"}]}

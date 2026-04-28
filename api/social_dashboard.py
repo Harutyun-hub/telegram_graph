@@ -578,16 +578,16 @@ def _ad_items(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    by_entity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_entity: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        by_entity[_entity_name(row)].append(row)
+        by_entity[(_entity_id(row), _entity_name(row))].append(row)
     total_mentions = len(rows)
     sentiment_by_entity = []
     visibility_data = []
     scorecard = []
     engagement_subjects = ["likes", "comments", "shares", "views", "clicks"]
     engagement_totals: dict[str, Counter] = defaultdict(Counter)
-    for entity, entity_rows in by_entity.items():
+    for (entity_id, entity), entity_rows in by_entity.items():
         sentiment_counts = Counter(_sentiment(row) for row in entity_rows)
         engagement = sum(_engagement_total(row) for row in entity_rows)
         score_total = sum(_sentiment_score(row) for row in entity_rows)
@@ -600,6 +600,7 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
             for subject in engagement_subjects:
                 engagement_totals[entity][subject] += parts[subject]
         sentiment_by_entity.append({
+            "entity_id": entity_id,
             "entity": entity,
             "pos": _safe_pct(sentiment_counts.get("positive", 0), len(entity_rows)),
             "neu": _safe_pct(sentiment_counts.get("neutral", 0), len(entity_rows)),
@@ -607,6 +608,7 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
             "total": len(entity_rows),
         })
         visibility_data.append({
+            "entity_id": entity_id,
             "entity": entity,
             "visibility": _safe_pct(len(entity_rows), total_mentions),
             "delta": 0,
@@ -618,7 +620,7 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
             "deltaSov": 0,
         })
         scorecard.append({
-            "id": entity.lower().replace(" ", "-"),
+            "id": entity_id or entity.lower().replace(" ", "-"),
             "name": entity,
             "posts": len(entity_rows),
             "ads": ads,
@@ -698,6 +700,34 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
             for item in sorted(visibility_data, key=lambda value: -value["sov"])
         ],
     }
+
+
+def _valid_ai_problem_cards(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Only expose saved AI problem cards that are publishable for dashboard display."""
+    items = snapshot.get("topProblems")
+    if not isinstance(items, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _trimmed(item.get("problem_en") or item.get("problem") or item.get("title_en") or item.get("text"))
+        if not title:
+            continue
+        try:
+            confidence = float(item.get("confidence") or 0)
+        except Exception:
+            confidence = 0.0
+        evidence_ids = item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+        evidence_quotes = item.get("evidence_quotes") if isinstance(item.get("evidence_quotes"), list) else []
+        try:
+            evidence_count = int(item.get("evidence_count") or len(evidence_ids))
+        except Exception:
+            evidence_count = len(evidence_ids)
+        if confidence < 0.60 or evidence_count <= 0 or not evidence_ids or not evidence_quotes:
+            continue
+        output.append(item)
+    return output
 
 
 def _cache_key(filters: dict[str, Any]) -> str:
@@ -1035,6 +1065,7 @@ def _build_social_dashboard_snapshot_uncached(
         section_started = time.perf_counter()
         ai_brief_snapshot = social_ai_briefs.get_social_ai_brief_snapshot(store)
         ai_signal_trend = social_ai_briefs.get_social_ai_brief_signal_trend(store)
+        ai_problem_cards = _valid_ai_problem_cards(ai_brief_snapshot)
         timings["aiBriefSnapshotReadMs"] = round((time.perf_counter() - section_started) * 1000, 2)
 
         section_started = time.perf_counter()
@@ -1047,7 +1078,7 @@ def _build_social_dashboard_snapshot_uncached(
             "topSignals": ai_brief_snapshot.get("topSignals") or [],
             "signalTrend": ai_signal_trend,
             "topQuestions": ai_brief_snapshot.get("topQuestions") or [],
-            "painPoints": ai_brief_snapshot.get("topProblems") or [],
+            "painPoints": ai_problem_cards,
             "evidence": [_evidence(row) for row in organic[:EVIDENCE_LIMIT]],
         }
         timings["deepAnalysisBuildMs"] = round((time.perf_counter() - section_started) * 1000, 2)
@@ -1069,7 +1100,7 @@ def _build_social_dashboard_snapshot_uncached(
             empty_reasons["analysis"] = "Matched activities exist, but none have social AI analysis yet."
         if not ai_brief_snapshot.get("intentCards"):
             empty_reasons["intentSignals"] = "Social AI brief cards are warming or there is not enough new processed Social data yet."
-        if not ai_brief_snapshot.get("topProblems"):
+        if not ai_problem_cards:
             empty_reasons["painPoints"] = "Social AI problem cards are warming or there is not enough evidence-backed problem data yet."
 
         entities_filter = sorted(
@@ -1097,7 +1128,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "intentCards": len(ai_brief_snapshot.get("intentCards") or []),
                     "topSignals": len(ai_brief_snapshot.get("topSignals") or []),
                     "topQuestions": len(ai_brief_snapshot.get("topQuestions") or []),
-                    "topProblems": len(ai_brief_snapshot.get("topProblems") or []),
+                    "topProblems": len(ai_problem_cards),
                     "signalTrendPoints": len(ai_signal_trend),
                     "promptVersion": _as_dict(ai_brief_snapshot.get("metadata")).get("promptVersion"),
                 },
