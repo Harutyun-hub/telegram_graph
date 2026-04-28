@@ -380,11 +380,10 @@ interface TopQuestionItem {
   question_ru?: string;
   topic?: string;
   count: number;
-  trend: 'up' | 'down' | 'stable' | string;
-  entity: string;
-  category: string;
-  answered: boolean;
   confidence?: number;
+  sources?: string[];
+  evidence_quotes?: string[];
+  evidence_count?: number;
   evidence_ids?: string[];
 }
 type AdFeedItem = typeof AD_FEED[number];
@@ -1431,11 +1430,14 @@ export function SocialPage() {
     question_ru: question.question_ru,
     topic: question.topic,
     count: Number(question.count ?? question.signal_count ?? 0),
-    trend: question.trend || 'stable',
-    entity: String(question.entity || question.source || 'Audience'),
-    category: String(question.category || question.topic || 'Question'),
-    answered: Boolean(question.answered ?? false),
     confidence: question.confidence,
+    sources: Array.isArray(question.sources)
+      ? question.sources.map((source: unknown) => String(source || '').trim()).filter(Boolean)
+      : [String(question.entity || question.source || 'Audience').trim()].filter(Boolean),
+    evidence_quotes: Array.isArray(question.evidence_quotes)
+      ? question.evidence_quotes.map(readableEvidence).filter(Boolean)
+      : [],
+    evidence_count: Number(question.evidence_count ?? question.evidence_ids?.length ?? 0),
     evidence_ids: Array.isArray(question.evidence_ids) ? question.evidence_ids : [],
   })) as TopQuestionItem[];
   const adItems = dashboard?.adIntelligence?.items ?? [];
@@ -1838,16 +1840,20 @@ export function SocialPage() {
                     headerRight={
                       <div className="flex items-center gap-2 flex-shrink-0">
                         <span className="text-xs text-slate-500">{topQuestions.reduce((sum, question) => sum + question.count, 0)} {ru?'вопросов':'questions'}</span>
-                        <span className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full" style={{ fontWeight:600 }}>47% {ru?'отвечено':'answered'}</span>
+                        <span className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full" style={{ fontWeight:600 }}>{topQuestions.reduce((sum, question) => sum + Number(question.evidence_count || 0), 0)} {ru?'доказ.':'evidence'}</span>
                         <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{topQuestions.length} {ru?'активных':'active'}</span>
                       </div>
                     }
                   >
-                    <div className="overflow-x-auto">
+                    {topQuestions.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-5 text-sm text-slate-500">
+                        {ru ? 'Пока нет сохранённых AI-вопросов аудитории.' : 'No saved AI audience questions yet.'}
+                      </div>
+                    ) : <div className="overflow-x-auto">
                       <table className="w-full text-left">
                         <thead>
                           <tr className="border-b border-slate-100">
-                            {['#',ru?'Вопрос':'Question',ru?'Бренд':'Brand',ru?'Категория':'Category',ru?'Кол-во':'Count',ru?'Тренд':'Trend',ru?'Ответ':'Answered'].map((h,i)=>(
+                            {['#',ru?'Вопрос':'Question',ru?'Источник':'Source',ru?'Тема':'Topic',ru?'Сигналы':'Signals',ru?'Уверенность':'Confidence',ru?'Доказ.':'Evidence'].map((h,i)=>(
                               <th key={i} className="pb-3 text-[11px] text-slate-500 pr-4 last:pr-0" style={{ fontWeight:600 }}>{h}</th>
                             ))}
                           </tr>
@@ -1855,23 +1861,26 @@ export function SocialPage() {
                         <tbody className="divide-y divide-slate-50">
                           {topQuestions.map((q,i)=>{
                             const questionText = ru ? (q.question_ru || q.question) : (q.question_en || q.question);
+                            const source = q.sources?.[0] || (ru ? 'Аудитория' : 'Audience');
+                            const evidence = q.evidence_quotes?.[0];
                             return (
                             <tr key={`${q.question}-${i}`} className="hover:bg-slate-50/50 transition-colors">
                               <td className="py-3 text-xs text-slate-400 pr-4">{i+1}</td>
-                              <td className="py-3 text-sm text-slate-800 pr-4 max-w-[240px]" style={{ fontWeight:500 }}>{questionText}</td>
-                              <td className="py-3 pr-4">
-                                <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[q.entity] || colorForEntity(q.entity)}15`, color:entityColors[q.entity] || colorForEntity(q.entity) }}>{q.entity}</span>
+                              <td className="py-3 text-sm text-slate-800 pr-4 max-w-[360px]" style={{ fontWeight:500 }}>
+                                <p>{questionText}</p>
+                                {evidence && <p className="mt-1 text-[11px] italic leading-snug text-slate-400">"{evidence}"</p>}
                               </td>
-                              <td className="py-3 pr-4 text-xs text-slate-500">{translateSocialLabel(q.category, ru)}</td>
-                              <td className="py-3 pr-4 text-sm text-slate-700 text-right" style={{ fontWeight:700 }}>{q.count}</td>
                               <td className="py-3 pr-4">
-                                {q.trend==='up'     && <TrendingUp   className="w-4 h-4 text-rose-500" />}
-                                {q.trend==='down'   && <TrendingDown className="w-4 h-4 text-emerald-500" />}
-                                {q.trend==='stable' && <div className="w-4 h-0.5 bg-slate-300 rounded" />}
+                                <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ fontWeight:500, backgroundColor:`${entityColors[source] || colorForEntity(source)}15`, color:entityColors[source] || colorForEntity(source) }}>{translateSocialLabel(source, ru)}</span>
+                              </td>
+                              <td className="py-3 pr-4 text-xs text-slate-500">{translateSocialLabel(q.topic || 'Question', ru)}</td>
+                              <td className="py-3 pr-4 text-sm text-slate-700 text-right" style={{ fontWeight:700 }}>{q.count}</td>
+                              <td className="py-3 pr-4 text-xs text-slate-500">
+                                {confidenceLabel(q.confidence, ru)}
                               </td>
                               <td className="py-3">
-                                <span className={`text-[11px] px-2.5 py-1 rounded-full ${q.answered?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-600'}`} style={{ fontWeight:600 }}>
-                                  {q.answered?(ru?'Да':'Yes'):(ru?'Нет':'No')}
+                                <span className="text-[11px] px-2.5 py-1 rounded-full bg-blue-50 text-blue-700" style={{ fontWeight:600 }}>
+                                  {q.evidence_count || q.evidence_ids?.length || 0}
                                 </span>
                               </td>
                             </tr>
@@ -1879,7 +1888,7 @@ export function SocialPage() {
                           })}
                         </tbody>
                       </table>
-                    </div>
+                    </div>}
                   </WidgetCard>
                 </div>
               )}
