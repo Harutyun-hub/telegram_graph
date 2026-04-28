@@ -12,6 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 import config
+from api import social_ai_briefs
 from api.runtime_coordinator import get_runtime_coordinator
 from social.analysis import SocialActivityAnalyzer
 from social.graph import SocialGraphWriter
@@ -294,6 +295,7 @@ class SocialRuntimeService:
         )
         analysis_result = self._run_analysis_stage_sync()
         graph_result = self._run_graph_stage_sync()
+        ai_brief_result = self._run_ai_brief_stage_sync()
         cleanup_result = self._run_cleanup_stage_sync()
 
         return {
@@ -305,12 +307,14 @@ class SocialRuntimeService:
             "collect_failures": collect_result["collect_failures"],
             "analysis_failures": analysis_result["analysis_failures"],
             "graph_failures": graph_result["graph_failures"],
+            "ai_briefs": ai_brief_result,
             "platform_counts": collect_result["platform_counts"],
             "cleanup": cleanup_result,
             "stages": {
                 "collect": collect_result,
                 "analysis": analysis_result,
                 "graph": graph_result,
+                "ai_briefs": ai_brief_result,
                 "cleanup": cleanup_result,
             },
         }
@@ -523,6 +527,15 @@ class SocialRuntimeService:
             payload_retention_days=config.SOCIAL_PAYLOAD_RETENTION_DAYS,
         )
         return cleanup
+
+    def _run_ai_brief_stage_sync(self) -> dict[str, Any]:
+        if not _is_social_worker_owner():
+            return {"status": "skipped", "reason": "not_social_worker_owner"}
+        try:
+            return social_ai_briefs.refresh_social_ai_briefs(self.store, force=False)
+        except Exception as exc:
+            logger.warning("Social AI brief refresh skipped: {}", exc)
+            return {"status": "failed", "error": str(exc)}
 
     def _retry_failure_sync(self, stage: str, scope_key: str) -> dict[str, Any]:
         normalized_stage = str(stage or "").strip().lower()

@@ -11,7 +11,7 @@ from typing import Any
 
 from loguru import logger
 
-from api import social_semantic
+from api import social_ai_briefs, social_semantic
 
 
 SNAPSHOT_TTL_SECONDS = 300
@@ -232,6 +232,12 @@ def _empty_snapshot(filters: dict[str, Any], request_id: str, started_at: float)
             "missingAnalysis": 0,
             "missingText": 0,
             "missingPublishedDate": 0,
+            "socialAiBriefs": {
+                "status": "missing",
+                "intentCards": 0,
+                "topSignals": 0,
+                "topQuestions": 0,
+            },
             "degradedSections": [],
             "emptyReasons": {"snapshot": "No social activities matched the selected filters."},
             "timingsMs": {"total": round((time.perf_counter() - started_at) * 1000, 2)},
@@ -247,6 +253,7 @@ def _empty_snapshot(filters: dict[str, Any], request_id: str, started_at: float)
             "topicMomentum": [],
             "sentimentTrend": [],
             "intentSignals": [],
+            "topSignals": [],
             "signalTrend": [],
             "topQuestions": [],
             "painPoints": [],
@@ -1026,13 +1033,18 @@ def _build_social_dashboard_snapshot_uncached(
             timings["graphCoverageFetchMs"] = round((time.perf_counter() - semantic_started) * 1000, 2)
             graph_sync_coverage = _empty_graph_sync_coverage()
         section_started = time.perf_counter()
+        ai_brief_snapshot = social_ai_briefs.get_social_ai_brief_snapshot(store)
+        timings["aiBriefSnapshotReadMs"] = round((time.perf_counter() - section_started) * 1000, 2)
+
+        section_started = time.perf_counter()
         deep = {
             "topicBubbles": topic_bubbles,
             "topicRanking": topic_ranking,
             "topicMomentum": _topic_momentum(organic),
             "sentimentTrend": sentiment_trend,
-            "intentSignals": _intent_signals(organic),
-            "topQuestions": _top_questions(organic),
+            "intentSignals": ai_brief_snapshot.get("intentCards") or [],
+            "topSignals": ai_brief_snapshot.get("topSignals") or [],
+            "topQuestions": ai_brief_snapshot.get("topQuestions") or [],
             "painPoints": _pain_points(organic),
             "evidence": [_evidence(row) for row in organic[:EVIDENCE_LIMIT]],
         }
@@ -1053,6 +1065,8 @@ def _build_social_dashboard_snapshot_uncached(
             empty_reasons["adIntelligence"] = "No Meta/Google ad rows matched the selected filters."
         if not any(row.get("analysis") for row in enriched):
             empty_reasons["analysis"] = "Matched activities exist, but none have social AI analysis yet."
+        if not ai_brief_snapshot.get("intentCards"):
+            empty_reasons["intentSignals"] = "Social AI brief cards are warming or there is not enough new processed Social data yet."
 
         entities_filter = sorted(
             [{"id": row["id"], "name": row.get("name") or "Unknown"} for row in entities.values()],
@@ -1072,10 +1086,22 @@ def _build_social_dashboard_snapshot_uncached(
                 "missingText": sum(1 for row in enriched if not _trimmed(row.get("text_content"))),
                 "missingPublishedDate": sum(1 for row in enriched if not row.get("published_at")),
                 "graphSyncCoverage": graph_sync_coverage,
+                "socialAiBriefs": {
+                    "status": ai_brief_snapshot.get("status") or "missing",
+                    "generatedAt": ai_brief_snapshot.get("generatedAt") or _as_dict(ai_brief_snapshot.get("metadata")).get("generatedAt"),
+                    "window": _as_dict(ai_brief_snapshot.get("metadata")).get("window"),
+                    "intentCards": len(ai_brief_snapshot.get("intentCards") or []),
+                    "topSignals": len(ai_brief_snapshot.get("topSignals") or []),
+                    "topQuestions": len(ai_brief_snapshot.get("topQuestions") or []),
+                    "promptVersion": _as_dict(ai_brief_snapshot.get("metadata")).get("promptVersion"),
+                },
                 "dataSources": {
                     "deepAnalysis.topicBubbles": "neo4j",
                     "deepAnalysis.sentimentTrend": "neo4j",
                     "deepAnalysis.topicRanking": "neo4j+supabase",
+                    "deepAnalysis.intentSignals": "social_ai_brief_snapshot",
+                    "deepAnalysis.topSignals": "social_ai_brief_snapshot",
+                    "deepAnalysis.topQuestions": "social_ai_brief_snapshot",
                     "strictMetrics": "supabase",
                     "adIntelligence": "supabase",
                 },

@@ -156,6 +156,38 @@ class _FakeSocialDashboardStore:
             {"id": "account-fb-page", "entity_id": "entity-1", "platform": "facebook", "source_kind": "facebook_page"},
             {"id": "account-meta", "entity_id": "entity-1", "platform": "facebook", "source_kind": "meta_ads"},
         ]
+        self.runtime_settings = {
+            "ai_brief_snapshot": {
+                "status": "ready",
+                "generatedAt": "2026-04-12T00:00:00+00:00",
+                "intentCards": [
+                    {
+                        "family": "Questions",
+                        "intent": "Questions",
+                        "title_en": "Customers ask about card fees",
+                        "title_ru": "Клиенты спрашивают о комиссиях по картам",
+                        "summary_en": "People are asking why card fees remain high.",
+                        "summary_ru": "Люди спрашивают, почему комиссии по картам остаются высокими.",
+                        "main_topic": "Card Fees",
+                        "sentiment": "negative",
+                        "signal_count": 1,
+                        "count": 1,
+                        "trend_pct": 0,
+                        "delta": 0,
+                        "confidence": 0.82,
+                        "evidence_ids": ["facebook:post:post-1"],
+                        "evidence_quotes": ["Why are card fees so high?"],
+                        "examples": ["Why are card fees so high?"],
+                    }
+                ],
+                "topSignals": [],
+                "topQuestions": [],
+                "metadata": {
+                    "window": {"from": "2026-04-01T00:00:00+00:00", "to": "2026-04-15T00:00:00+00:00"},
+                    "promptVersion": "social-ai-briefs-v1",
+                },
+            }
+        }
 
     def _select_rows(self, table: str, *, filters=(), limit=None, **_kwargs):
         rows = {
@@ -203,6 +235,9 @@ class _FakeSocialDashboardStore:
             "rowCap": 10000,
             "rowCapReached": False,
         }
+
+    def get_runtime_setting(self, key: str, default: dict) -> dict:
+        return self.runtime_settings.get(key, default)
 
 
 class SocialDashboardSnapshotTests(unittest.TestCase):
