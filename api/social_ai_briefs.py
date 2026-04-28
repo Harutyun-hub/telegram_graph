@@ -22,6 +22,7 @@ REFRESH_MIN_HOURS = 24
 MIN_NEW_PARENT_THREADS = 50
 MAX_CANDIDATE_CLUSTERS = 24
 MAX_EVIDENCE_PER_CLUSTER = 4
+MAX_COMPLETION_TOKENS = 7000
 MIN_CONFIDENCE = 0.60
 ALLOWED_FAMILIES = {
     "support": "Support",
@@ -59,6 +60,7 @@ Rules:
 4. Prefer clear analyst wording over raw labels.
 5. Keep summaries grounded and specific.
 6. Confidence must be 0.0 to 1.0.
+7. Keep the total JSON compact enough to return completely in one response.
 
 Return shape:
 {
@@ -393,7 +395,7 @@ def _request_ai_synthesis(candidates: dict[str, Any]) -> dict[str, Any]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
-        max_completion_tokens=3500,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
         timeout=config.AI_REQUEST_TIMEOUT_SECONDS,
     )
     log_openai_usage(
