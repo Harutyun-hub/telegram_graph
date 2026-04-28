@@ -252,6 +252,7 @@ def _empty_snapshot(filters: dict[str, Any], request_id: str, started_at: float)
             "topicBubbles": [],
             "topicMomentum": [],
             "sentimentTrend": [],
+            "communityInterests": [],
             "intentSignals": [],
             "topSignals": [],
             "signalTrend": [],
@@ -313,6 +314,163 @@ def _sentiment_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "negative": counts.get("negative", 0),
         }
         for bucket, counts in sorted(buckets.items())[-12:]
+    ]
+
+
+_INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Security & Defense",
+        (
+            "army",
+            "artsakh",
+            "border",
+            "defense",
+            "military",
+            "peace",
+            "police",
+            "security",
+            "troops",
+            "war",
+        ),
+    ),
+    (
+        "Infrastructure & Services",
+        (
+            "arena",
+            "electricity",
+            "housing",
+            "infrastructure",
+            "renovation",
+            "road",
+            "service",
+            "transport",
+            "utilities",
+            "water",
+        ),
+    ),
+    (
+        "Economy & Jobs",
+        (
+            "bank",
+            "business",
+            "cost",
+            "economic",
+            "economy",
+            "finance",
+            "industrial",
+            "industry",
+            "investment",
+            "job",
+            "market",
+            "price",
+        ),
+    ),
+    (
+        "Community Life",
+        (
+            "charitable",
+            "church",
+            "community",
+            "concert",
+            "culture",
+            "education",
+            "event",
+            "family",
+            "health",
+            "sports",
+            "youth",
+        ),
+    ),
+    (
+        "Media & Campaigns",
+        (
+            "announcement",
+            "campaign",
+            "media",
+            "messaging",
+            "news",
+            "promotion",
+            "teaser",
+        ),
+    ),
+    (
+        "Rights & Trust",
+        (
+            "accountability",
+            "allegation",
+            "claim",
+            "corruption",
+            "criticism",
+            "evidence",
+            "justice",
+            "law",
+            "rights",
+            "transparency",
+            "trust",
+        ),
+    ),
+    (
+        "Technology & Development",
+        (
+            "ai",
+            "artificial intelligence",
+            "app",
+            "development",
+            "digital",
+            "innovation",
+            "platform",
+            "technology",
+        ),
+    ),
+    (
+        "Government & Leadership",
+        (
+            "government",
+            "leadership",
+            "mayor",
+            "minister",
+            "national pride",
+            "parliament",
+            "party",
+            "policy",
+            "political",
+            "president",
+            "support",
+        ),
+    ),
+)
+
+
+def _interest_area_for_topic(item: dict[str, Any]) -> str:
+    text_parts = [
+        _trimmed(item.get("topic")),
+        _trimmed(item.get("sampleSummary")),
+        " ".join(_trimmed(value) for value in _as_list(item.get("topEntities"))),
+    ]
+    haystack = " ".join(part for part in text_parts if part).lower()
+    for area, keywords in _INTEREST_AREAS:
+        if any(keyword in haystack for keyword in keywords):
+            return area
+    return "Government & Leadership"
+
+
+def _community_interests(topic_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: Counter[str] = Counter()
+    for item in topic_rows:
+        count = int(item.get("count") or item.get("currentMentions") or 0)
+        if count <= 0:
+            continue
+        grouped[_interest_area_for_topic(item)] += count
+    total = sum(grouped.values())
+    if total <= 0:
+        return []
+    return [
+        {
+            "interest": interest,
+            "score": round((mentions / total) * 100, 1),
+            "mentions": mentions,
+        }
+        for interest, mentions in sorted(grouped.items(), key=lambda value: (-value[1], value[0]))[:8]
     ]
 
 
@@ -1074,6 +1232,7 @@ def _build_social_dashboard_snapshot_uncached(
             "topicRanking": topic_ranking,
             "topicMomentum": _topic_momentum(organic),
             "sentimentTrend": sentiment_trend,
+            "communityInterests": _community_interests(topic_ranking),
             "intentSignals": ai_brief_snapshot.get("intentCards") or [],
             "topSignals": ai_brief_snapshot.get("topSignals") or [],
             "signalTrend": ai_signal_trend,
@@ -1102,6 +1261,8 @@ def _build_social_dashboard_snapshot_uncached(
             empty_reasons["intentSignals"] = "Social AI brief cards are warming or there is not enough new processed Social data yet."
         if not ai_problem_cards:
             empty_reasons["painPoints"] = "Social AI problem cards are warming or there is not enough evidence-backed problem data yet."
+        if not deep["communityInterests"]:
+            empty_reasons["communityInterests"] = "No semantic topic mentions were available to group into community interests."
 
         entities_filter = sorted(
             [{"id": row["id"], "name": row.get("name") or "Unknown"} for row in entities.values()],
@@ -1136,6 +1297,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "deepAnalysis.topicBubbles": "neo4j",
                     "deepAnalysis.sentimentTrend": "neo4j",
                     "deepAnalysis.topicRanking": "neo4j+supabase",
+                    "deepAnalysis.communityInterests": "neo4j_topic_aggregates",
                     "deepAnalysis.intentSignals": "social_ai_brief_snapshot",
                     "deepAnalysis.topSignals": "social_ai_brief_snapshot",
                     "deepAnalysis.signalTrend": "social_ai_brief_signal_history",

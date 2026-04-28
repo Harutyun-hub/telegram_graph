@@ -286,6 +286,7 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
 
         self.assertEqual(payload["meta"]["usedActivities"], 0)
         self.assertEqual(payload["deepAnalysis"]["topicBubbles"], [])
+        self.assertEqual(payload["deepAnalysis"]["communityInterests"], [])
         self.assertIn("snapshot", payload["meta"]["emptyReasons"])
         self.assertIn("total", payload["meta"]["timingsMs"])
 
@@ -321,10 +322,13 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
 
         topic_names = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertIn("Card Fees", topic_names)
+        self.assertEqual(payload["deepAnalysis"]["communityInterests"][0]["interest"], "Economy & Jobs")
+        self.assertEqual(payload["deepAnalysis"]["communityInterests"][0]["score"], 100.0)
         self.assertEqual(payload["deepAnalysis"]["sentimentTrend"][0]["negative"], 1)
         self.assertEqual(payload["deepAnalysis"]["topSignals"][0]["family"], "Questions")
         self.assertEqual(payload["deepAnalysis"]["signalTrend"][0]["questions"], 1)
         self.assertEqual(payload["deepAnalysis"]["painPoints"][0]["problem_en"], "Customers complain about slow support")
+        self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.communityInterests"], "neo4j_topic_aggregates")
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.painPoints"], "social_ai_brief_snapshot")
         self.assertEqual(payload["strictMetrics"]["sentimentByEntity"][0]["entity_id"], "entity-1")
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
