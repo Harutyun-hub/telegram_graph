@@ -116,14 +116,20 @@ const SOCIAL_LABEL_RU: Record<string, string> = {
   Sustainability: 'Устойчивость',
   Refunds: 'Возвраты',
   'Community Interests': 'Интересы сообщества',
+  'Discussion Focus Areas': 'Фокусы обсуждения',
   'Government & Leadership': 'Государство и лидерство',
-  'Security & Defense': 'Безопасность и оборона',
-  'Infrastructure & Services': 'Инфраструктура и услуги',
+  'Security & Border Issues': 'Безопасность и границы',
+  'Infrastructure Projects': 'Инфраструктурные проекты',
   'Economy & Jobs': 'Экономика и занятость',
-  'Community Life': 'Жизнь сообщества',
-  'Media & Campaigns': 'Медиа и кампании',
-  'Rights & Trust': 'Права и доверие',
-  'Technology & Development': 'Технологии и развитие',
+  'Campaign & Public Messaging': 'Кампании и публичные сообщения',
+  'Evidence, Trust & Accountability': 'Доказательства, доверие и ответственность',
+  'Culture & Public Events': 'Культура и публичные события',
+  'Church & Identity Debate': 'Церковь и идентичность',
+  'Education & Community Programs': 'Образование и программы сообщества',
+  'Charity & Social Support': 'Благотворительность и социальная поддержка',
+  'Technology & Modernization': 'Технологии и модернизация',
+  'Public Services': 'Государственные услуги',
+  'Other Civic Discussion': 'Прочие общественные обсуждения',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -422,6 +428,8 @@ interface CommunityInterestItem {
   interest: string;
   score: number;
   mentions?: number;
+  topTopics?: string[];
+  description?: string;
   interestLabel?: string;
 }
 type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
@@ -1556,6 +1564,10 @@ export function SocialPage() {
       interestLabel: translateSocialLabel(item.interest, ru),
       score: Number(item.score ?? 0),
       mentions: Number(item.mentions ?? 0),
+      topTopics: Array.isArray(item.topTopics)
+        ? item.topTopics.map((topic) => String(topic || '').trim()).filter(Boolean).slice(0, 3)
+        : [],
+      description: String(item.description || '').trim(),
     }))
     .filter((item) => item.interest && item.score > 0)
     .sort((a, b) => b.score - a.score) as CommunityInterestItem[];
@@ -1569,6 +1581,11 @@ export function SocialPage() {
     communityInterestScale,
   ]));
   const topCommunityInterests = communityInterests.slice(0, 4);
+  const communityInterestTopics = (item: CommunityInterestItem) =>
+    (item.topTopics ?? [])
+      .map((topic) => translateSocialLabel(topic, ru))
+      .filter(Boolean)
+      .join(', ');
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
   const positiveImpact = dashboard?.strictMetrics?.positiveImpact ?? [];
@@ -2111,12 +2128,12 @@ export function SocialPage() {
 
                   {/* Community Interests */}
                   <WidgetCard
-                    title={ru ? 'Интересы сообщества' : 'Community Interests'}
-                    subtitle={ru ? 'Доля social-упоминаний по тематическим интересам за выбранный период' : 'Share of social topic mentions by interest area in the selected window'}
+                    title={ru ? 'Фокусы обсуждения' : 'Discussion Focus Areas'}
+                    subtitle={ru ? 'Доля social-упоминаний по конкретным направлениям обсуждения' : 'Share of social topic mentions by specific discussion focus'}
                   >
                     {communityInterests.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-5 text-sm text-slate-500">
-                        {ru ? 'Интересы сообщества появятся после синхронизации тем в Neo4j.' : 'Community interests will appear after semantic topics are synced to Neo4j.'}
+                        {ru ? 'Фокусы обсуждения появятся, когда за выбранный период будут найдены semantic-темы.' : 'Discussion focus areas will appear when semantic topics are available for the selected period.'}
                       </div>
                     ) : (
                       <div className="space-y-4">
@@ -2134,7 +2151,7 @@ export function SocialPage() {
                                   tickFormatter={(value) => `${value}%`}
                                 />
                                 <Radar
-                                  name={ru ? 'Интересы сообщества' : 'Community Interests'}
+                                  name={ru ? 'Фокусы обсуждения' : 'Discussion Focus Areas'}
                                   dataKey="score"
                                   stroke="#0f766e"
                                   fill="#14b8a6"
@@ -2161,12 +2178,19 @@ export function SocialPage() {
                         </div>
                         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                           {topCommunityInterests.map((item) => (
-                            <div key={item.interest} className="flex items-center justify-between gap-3 text-sm">
-                              <span className="flex min-w-0 items-center gap-2 text-slate-700">
-                                <span className="h-2 w-2 flex-shrink-0 rounded-full bg-teal-500" />
-                                <span className="truncate">{item.interestLabel}</span>
-                              </span>
-                              <span className="font-semibold text-slate-900">{Number(item.score || 0).toFixed(1)}%</span>
+                            <div key={item.interest} className="rounded-xl border border-slate-100 bg-white px-3 py-2 text-sm shadow-sm">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="flex min-w-0 items-center gap-2 font-medium text-slate-700">
+                                  <span className="h-2 w-2 flex-shrink-0 rounded-full bg-teal-500" />
+                                  <span className="truncate">{item.interestLabel}</span>
+                                </span>
+                                <span className="font-semibold text-slate-900">{Number(item.score || 0).toFixed(1)}%</span>
+                              </div>
+                              {communityInterestTopics(item) && (
+                                <div className="mt-1 truncate pl-4 text-xs text-slate-500">
+                                  {communityInterestTopics(item)}
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -2174,7 +2198,15 @@ export function SocialPage() {
                           <div className="rounded-xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-900">
                             <span className="font-semibold">{ru ? 'Приоритетный сигнал' : 'Priority signal'}: </span>
                             {topCommunityInterests[0].interestLabel} ({Number(topCommunityInterests[0].score || 0).toFixed(1)}%) {ru ? 'и' : 'and'}{' '}
-                            {topCommunityInterests[1].interestLabel} ({Number(topCommunityInterests[1].score || 0).toFixed(1)}%) {ru ? 'ведут обсуждение в выбранном периоде.' : 'lead discussion in the selected window.'}
+                            {topCommunityInterests[1].interestLabel} ({Number(topCommunityInterests[1].score || 0).toFixed(1)}%) {ru ? 'ведут обсуждение' : 'lead discussion'}
+                            {(communityInterestTopics(topCommunityInterests[0]) || communityInterestTopics(topCommunityInterests[1])) && (
+                              <>
+                                {' '}
+                                {ru ? 'через темы: ' : 'through topics: '}
+                                {[communityInterestTopics(topCommunityInterests[0]), communityInterestTopics(topCommunityInterests[1])].filter(Boolean).join(' · ')}
+                              </>
+                            )}
+                            .
                           </div>
                         )}
                       </div>
