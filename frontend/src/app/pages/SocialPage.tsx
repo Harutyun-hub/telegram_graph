@@ -2285,13 +2285,7 @@ export function SocialPage() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     {visibilityData.map(v=>{
                       const color = entityColors[v.entity] || colorForEntity(v.entity);
-                      const hasReach = Boolean(v.hasReach ?? (Number(v.reach) > 0));
-                      const engagementValue = hasReach && v.engagementRate !== null && v.engagementRate !== undefined
-                        ? `${Number(v.engagementRate).toFixed(1)}%`
-                        : formatCompactMetric(v.interactions);
-                      const engagementLabel = hasReach
-                        ? (ru ? 'Вовлеч.' : 'Engage')
-                        : (ru ? 'Реакции' : 'Interactions');
+                      const interactionsValue = formatCompactMetric(v.interactions);
                       return (
                         <div key={v.entity} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 overflow-hidden relative">
                           <div className="absolute top-0 left-0 right-0 h-1 rounded-t-2xl" style={{ backgroundColor:color }} />
@@ -2312,7 +2306,7 @@ export function SocialPage() {
                           <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-100">
                             {[
                               { label:ru?'Охват':'Reach',   val:formatCompactMetric(v.reach),      delta:v.deltaReach  },
-                              { label:engagementLabel,       val:engagementValue,                   delta:v.deltaEngage },
+                              { label:ru?'Реакции':'Interactions', val:interactionsValue,           delta:v.deltaEngage },
                               { label:'SoV',                  val:`${v.sov}%`,                    delta:v.deltaSov    },
                             ].map((m,i)=>(
                               <div key={i}>
