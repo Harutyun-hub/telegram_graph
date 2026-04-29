@@ -433,7 +433,19 @@ interface CommunityInterestItem {
   interestLabel?: string;
 }
 type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
-type VisibilityItem = typeof VISIBILITY_DATA[number];
+type VisibilityItem = typeof VISIBILITY_DATA[number] & {
+  entity_id?: string;
+  reachShare?: number;
+  interactions?: number;
+  engagementRate?: number | null;
+  posts?: number;
+  comments?: number;
+  hasReach?: boolean;
+  delta?: number | null;
+  deltaReach?: number | null;
+  deltaEngage?: number | null;
+  deltaSov?: number | null;
+};
 type VisibilityTrendItem = typeof VISIBILITY_TREND[number];
 type WeeklyShiftItem = typeof WEEKLY_SHIFTS[number];
 type PositiveImpactItem = typeof POSITIVE_IMPACT[number];
@@ -483,6 +495,15 @@ interface SocialDashboardSnapshot {
     summary?: Record<string, unknown>;
   };
   strictMetrics?: {
+    summary?: {
+      trackedSources?: number;
+      posts?: number;
+      comments?: number;
+      ads?: number;
+      avgPositive?: number;
+      organicMentions?: number;
+      rowCapReached?: boolean;
+    };
     sentimentByEntity?: SentimentByEntityItem[];
     engagementRadar?: EngagementRadarItem[];
     visibilityData?: VisibilityItem[];
@@ -822,7 +843,10 @@ function AIInsight({ title, text, color }: { title: string; text: string; color:
   );
 }
 
-function DeltaBadge({ value, suffix = '' }: { value: number; suffix?: string }) {
+function DeltaBadge({ value, suffix = '' }: { value?: number | null; suffix?: string }) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return <span className="inline-flex text-xs text-slate-400" style={{ fontWeight: 600 }}>—</span>;
+  }
   const pos = value > 0;
   return (
     <span className={`inline-flex items-center gap-0.5 text-xs ${pos ? 'text-emerald-600' : 'text-rose-500'}`} style={{ fontWeight: 600 }}>
@@ -830,6 +854,14 @@ function DeltaBadge({ value, suffix = '' }: { value: number; suffix?: string }) 
       {pos ? '+' : ''}{value}{suffix}
     </span>
   );
+}
+
+function formatCompactMetric(value: unknown): string {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—';
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}K`;
+  return String(Math.round(numeric));
 }
 
 function ChartLegend({ items }: { items: { label: string; color: string }[] }) {
@@ -1592,17 +1624,17 @@ export function SocialPage() {
   const negativeImpact = dashboard?.strictMetrics?.negativeImpact ?? [];
   const weeklyShifts = dashboard?.strictMetrics?.weeklyShifts ?? [];
   const scorecard = dashboard?.strictMetrics?.scorecard ?? [];
+  const strictSummary = dashboard?.strictMetrics?.summary ?? {};
   const sovData = dashboard?.strictMetrics?.shareOfVoice ?? visibilityData.map(v => ({
     name: v.entity,
     value: v.sov,
     color: entityColors[v.entity] || colorForEntity(v.entity),
   }));
-  const trackedCount = orgOptions.length > 1 ? String(orgOptions.length - 1) : '0';
-  const postsCount = String(scorecard.reduce((sum, row) => sum + (Number(row.posts) || 0), 0));
-  const adsCount = String(adItems.length || scorecard.reduce((sum, row) => sum + (Number(row.ads) || 0), 0));
-  const avgPositive = sentimentByEntity.length
-    ? `${Math.round(sentimentByEntity.reduce((sum, item) => sum + item.pos, 0) / sentimentByEntity.length)}%`
-    : '0%';
+  const trackedCount = String(Number(strictSummary.trackedSources ?? (orgOptions.length > 1 ? orgOptions.length - 1 : 0)) || 0);
+  const postsCount = String(Number(strictSummary.posts ?? scorecard.reduce((sum, row) => sum + (Number(row.posts) || 0), 0)) || 0);
+  const commentsCount = Number(strictSummary.comments ?? scorecard.reduce((sum, row) => sum + (Number((row as any).comments) || 0), 0)) || 0;
+  const adsCount = String(Number(strictSummary.ads ?? (adItems.length || scorecard.reduce((sum, row) => sum + (Number(row.ads) || 0), 0))) || 0);
+  const avgPositive = `${Math.round(Number(strictSummary.avgPositive ?? 0) || 0)}%`;
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
   const degradedSections = dashboard?.meta?.degradedSections ?? [];
@@ -2225,8 +2257,8 @@ export function SocialPage() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 {[
                   { icon:Users,         color:C.blue,    label:ru?'Отслеживаемых':'Tracked',     val:trackedCount, sub:ru?'источников':'sources'   },
-                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (диапазон)':'Posts (range)', val:postsCount, sub:ru?'собрано':'collected' },
-                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:adsCount, sub:ru?'объявлений':'active ads' },
+                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (диапазон)':'Posts (range)', val:postsCount, sub:commentsCount ? (ru?`${commentsCount} коммент.`:`${commentsCount} comments`) : (ru?'без комментариев':'comments separate') },
+                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:adsCount, sub:ru?'объявлений в диапазоне':'ads in range' },
                   { icon:Heart,         color:C.emerald, label:ru?'Настроение':'Avg Sentiment',  val:avgPositive, sub:ru?'позитив':'positive' },
                   { icon:Hash,          color:C.pink,    label:ru?'Топ тема':'Top Topic',        val:topTopic, sub:ru?'по упоминаниям':'by mentions' },
                 ].map((kpi,i)=>{
@@ -2253,6 +2285,13 @@ export function SocialPage() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     {visibilityData.map(v=>{
                       const color = entityColors[v.entity] || colorForEntity(v.entity);
+                      const hasReach = Boolean(v.hasReach ?? (Number(v.reach) > 0));
+                      const engagementValue = hasReach && v.engagementRate !== null && v.engagementRate !== undefined
+                        ? `${Number(v.engagementRate).toFixed(1)}%`
+                        : formatCompactMetric(v.interactions);
+                      const engagementLabel = hasReach
+                        ? (ru ? 'Вовлеч.' : 'Engage')
+                        : (ru ? 'Реакции' : 'Interactions');
                       return (
                         <div key={v.entity} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 overflow-hidden relative">
                           <div className="absolute top-0 left-0 right-0 h-1 rounded-t-2xl" style={{ backgroundColor:color }} />
@@ -2272,8 +2311,8 @@ export function SocialPage() {
                           </div>
                           <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-100">
                             {[
-                              { label:ru?'Охват':'Reach',   val:`${(v.reach/1000).toFixed(1)}K`, delta:v.deltaReach  },
-                              { label:ru?'Вовлеч.':'Engage', val:`${v.engagement}%`,              delta:v.deltaEngage },
+                              { label:ru?'Охват':'Reach',   val:formatCompactMetric(v.reach),      delta:v.deltaReach  },
+                              { label:engagementLabel,       val:engagementValue,                   delta:v.deltaEngage },
                               { label:'SoV',                  val:`${v.sov}%`,                    delta:v.deltaSov    },
                             ].map((m,i)=>(
                               <div key={i}>
@@ -2290,12 +2329,12 @@ export function SocialPage() {
 
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
                     <div className="lg:col-span-2 flex flex-col">
-                      <WidgetCard title={ru?'Динамика видимости':'Visibility Trend'} subtitle={ru?'Последние 5 периодов наблюдения':'Last 5 observation periods'} className="flex-1">
+                      <WidgetCard title={ru?'Динамика видимости':'Visibility Trend'} subtitle={ru?'Доля упоминаний по дням':'Daily share of organic mentions'} className="flex-1">
                         <ResponsiveContainer width="100%" height={260}>
                           <LineChart data={visibilityTrend} margin={{ top:16, right:16, left:-10, bottom:0 }}>
                             <CartesianGrid {...GRID_COMMON} />
                             <XAxis dataKey="day" {...AXIS_COMMON} dy={8} />
-                            <YAxis {...AXIS_COMMON} domain={[15, 85]} tickCount={6} />
+                            <YAxis {...AXIS_COMMON} domain={[0, 100]} tickCount={6} />
                             <Tooltip {...TOOLTIP_STYLE} formatter={(v: any, name: string) => [`${v}%`, name]} />
                             {chartSeries.map((series, index) => (
                               <Line
