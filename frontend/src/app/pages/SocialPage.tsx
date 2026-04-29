@@ -760,8 +760,8 @@ function buildSocialDashboardPath(params: {
   return `/social/dashboard${suffix ? `?${suffix}` : ''}`;
 }
 
-const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v1:';
-const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v1';
+const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v2:';
+const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v2';
 const SOCIAL_DASHBOARD_CACHE_LIMIT = 10;
 
 function socialDashboardCacheKey(path: string): string {
