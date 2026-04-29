@@ -153,8 +153,8 @@ class _FakeSocialDashboardStore:
             }
         ]
         self.accounts = [] if empty else [
-            {"id": "account-fb-page", "entity_id": "entity-1", "platform": "facebook", "source_kind": "facebook_page"},
-            {"id": "account-meta", "entity_id": "entity-1", "platform": "facebook", "source_kind": "meta_ads"},
+            {"id": "account-fb-page", "entity_id": "entity-1", "platform": "facebook", "source_kind": "facebook_page", "is_active": True},
+            {"id": "account-meta", "entity_id": "entity-1", "platform": "facebook", "source_kind": "meta_ads", "is_active": True},
         ]
         self.runtime_settings = {
             "ai_brief_snapshot": {
@@ -331,6 +331,13 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.communityInterests"], "neo4j_topic_aggregates")
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.painPoints"], "social_ai_brief_snapshot")
         self.assertEqual(payload["strictMetrics"]["sentimentByEntity"][0]["entity_id"], "entity-1")
+        self.assertEqual(payload["strictMetrics"]["summary"]["trackedSources"], 2)
+        self.assertEqual(payload["strictMetrics"]["summary"]["posts"], 1)
+        self.assertEqual(payload["strictMetrics"]["summary"]["comments"], 1)
+        self.assertEqual(payload["strictMetrics"]["summary"]["ads"], 1)
+        self.assertEqual(payload["strictMetrics"]["visibilityData"][0]["reach"], 0)
+        self.assertEqual(payload["strictMetrics"]["visibilityData"][0]["interactions"], 10)
+        self.assertIsNone(payload["strictMetrics"]["visibilityData"][0]["engagementRate"])
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)
@@ -394,6 +401,60 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["adIntelligence"]["summary"]["topMarketingIntent"], "Acquisition")
         organic_topics = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertNotIn("Credit Cards", organic_topics)
+
+    def test_strict_metrics_use_supabase_facts_without_mixing_comments_as_posts(self) -> None:
+        rows = [
+            {
+                "id": "post-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "post",
+                "platform": "facebook",
+                "published_at": "2026-04-10T10:00:00+00:00",
+                "engagement_metrics": {"like_count": 10, "comment_count": 3, "share_count": 2, "view_count": 100},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": {"sentiment": "positive", "sentiment_score": 0.7, "analysis_payload": {"topics": ["Jobs"]}},
+            },
+            {
+                "id": "comment-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "comment",
+                "platform": "facebook",
+                "published_at": "2026-04-10T10:05:00+00:00",
+                "engagement_metrics": {"reactionCount": 5},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": None,
+            },
+            {
+                "id": "ad-a",
+                "entity_id": "entity-a",
+                "account_id": "account-ad",
+                "source_kind": "ad",
+                "platform": "facebook",
+                "published_at": "2026-04-11T10:00:00+00:00",
+                "engagement_metrics": {"impression_count": 500, "click_count": 20},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-ad"},
+                "analysis": None,
+            },
+        ]
+
+        metrics = social_dashboard._strict_metrics(rows, [], source_rows=[{"id": "account-a"}, {"id": "account-ad"}])
+        visibility = metrics["visibilityData"][0]
+
+        self.assertEqual(metrics["summary"]["trackedSources"], 2)
+        self.assertEqual(metrics["summary"]["posts"], 1)
+        self.assertEqual(metrics["summary"]["comments"], 1)
+        self.assertEqual(metrics["summary"]["ads"], 1)
+        self.assertEqual(visibility["reach"], 100)
+        self.assertEqual(visibility["interactions"], 20)
+        self.assertEqual(visibility["engagementRate"], 20.0)
+        self.assertEqual(metrics["scorecard"][0]["posts"], 1)
+        self.assertEqual(metrics["scorecard"][0]["comments"], 1)
+        self.assertEqual(metrics["visibilityTrend"][0]["source_a"], 100.0)
 
     def test_social_dashboard_cache_miss_returns_warming(self) -> None:
         with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
