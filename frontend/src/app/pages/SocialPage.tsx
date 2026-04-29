@@ -237,6 +237,23 @@ interface ScrapedAd {
   clicks: number;
 }
 
+interface OrganicPostItem {
+  id: string;
+  activity_uid?: string;
+  entity_id?: string;
+  entity: string;
+  platform?: string;
+  source_kind?: string;
+  text?: string;
+  media?: { kind?: string; url?: string } | null;
+  source_url?: string;
+  published_at?: string;
+  reach?: number | null;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+}
+
 const AD_SCRAPE: ScrapedAd[] = [
   { id: 's1',  entity: 'Brand X',      source: 'google',    platform: 'Google Search',  copy: 'Experience the next generation of our product. 20% off for new users. Get started today with Pro Suite.',    cta: 'Shop Now',      format: 'Search',   intent: 'Acquisition', valueProps: ['20% Discount', 'Innovation'],   urgency: true,  date: 'Apr 22, 2026', impressions: 45200, engagement: 1820, clicks: 1200 },
   { id: 's2',  entity: 'Brand X',      source: 'google',    platform: 'Google Display', copy: 'Pro Suite 3.0 is here. The smartest platform for modern teams. Try it free for 14 days.',                   cta: 'Start Free Trial',format: 'Display',  intent: 'Acquisition', valueProps: ['Free Trial', 'Modern UX'],      urgency: false, date: 'Apr 20, 2026', impressions: 88000, engagement: 3100, clicks: 2400 },
@@ -513,6 +530,15 @@ interface SocialDashboardSnapshot {
     weeklyShifts?: WeeklyShiftItem[];
     scorecard?: ScorecardItem[];
     shareOfVoice?: { name: string; value: number; color?: string }[];
+    organicPosts?: {
+      items?: OrganicPostItem[];
+      summary?: {
+        total?: number;
+        returned?: number;
+        withMedia?: number;
+        withReach?: number;
+      };
+    };
   };
 }
 
@@ -842,6 +868,18 @@ function formatCompactMetric(value: unknown): string {
   if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
   if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}K`;
   return String(Math.round(numeric));
+}
+
+function formatPostDate(value: unknown, ru: boolean): string {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text;
+  return parsed.toLocaleDateString(ru ? 'ru-RU' : 'en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 function ChartLegend({ items }: { items: { label: string; color: string }[] }) {
@@ -1352,6 +1390,239 @@ function AdScrapeTable({ ru, items }: { ru: boolean; items: ScrapedAd[] }) {
   );
 }
 
+type OrganicPostSource = 'all' | 'facebook' | 'instagram' | 'google';
+
+const ORGANIC_POST_SOURCE_TABS: { key: OrganicPostSource; label: string; icon: string }[] = [
+  { key: 'all',       label: 'All Sources', icon: '🌐' },
+  { key: 'facebook',  label: 'Facebook',    icon: '🔵' },
+  { key: 'instagram', label: 'Instagram',   icon: '📸' },
+  { key: 'google',    label: 'Google',      icon: '🟢' },
+];
+
+function OrganicPostsTable({ ru, items }: { ru: boolean; items: OrganicPostItem[] }) {
+  const [activeSource, setActiveSource] = useState<OrganicPostSource>('all');
+  const [activeBrand, setActiveBrand] = useState<string>('All');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<'date' | 'reach' | 'likes' | 'comments'>('date');
+
+  const brands = ['All', ...Array.from(new Set(items.map(item => item.entity).filter(Boolean)))];
+  const sourceCounts: Record<OrganicPostSource, number> = {
+    all: items.length,
+    facebook: items.filter(item => String(item.platform || '').toLowerCase() === 'facebook').length,
+    instagram: items.filter(item => String(item.platform || '').toLowerCase() === 'instagram').length,
+    google: items.filter(item => String(item.platform || '').toLowerCase() === 'google').length,
+  };
+
+  const filtered = items
+    .filter(item => activeSource === 'all' || String(item.platform || '').toLowerCase() === activeSource)
+    .filter(item => activeBrand === 'All' || item.entity === activeBrand)
+    .sort((a, b) => {
+      if (sortBy === 'reach') return Number(b.reach || 0) - Number(a.reach || 0);
+      if (sortBy === 'likes') return Number(b.likes || 0) - Number(a.likes || 0);
+      if (sortBy === 'comments') return Number(b.comments || 0) - Number(a.comments || 0);
+      return new Date(b.published_at || 0).getTime() - new Date(a.published_at || 0).getTime();
+    });
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="border-b border-slate-100 px-5 pt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm text-slate-900" style={{ fontWeight: 600 }}>
+              {ru ? 'Органические посты' : 'Organic Posts'}
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {ru ? 'Собранные посты из отслеживаемых social-источников' : 'Scraped posts from tracked social sources'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-500">{ru ? 'Сорт.' : 'Sort:'}</span>
+            {(['date', 'reach', 'likes', 'comments'] as const).map(sort => (
+              <button
+                key={sort}
+                onClick={() => setSortBy(sort)}
+                className={`text-[11px] px-2.5 py-1 rounded-lg transition-colors ${
+                  sortBy === sort ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                }`}
+                style={{ fontWeight: sortBy === sort ? 600 : 400 }}
+              >
+                {sort === 'date'
+                  ? (ru ? 'Дата' : 'Date')
+                  : sort === 'reach'
+                    ? (ru ? 'Охват' : 'Reach')
+                    : sort === 'likes'
+                      ? (ru ? 'Лайки' : 'Likes')
+                      : (ru ? 'Коммент.' : 'Comments')}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center gap-0 overflow-x-auto">
+          {ORGANIC_POST_SOURCE_TABS.map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveSource(tab.key)}
+              className={`flex items-center gap-2 px-4 py-2.5 text-xs whitespace-nowrap transition-colors relative border-b-2 ${
+                activeSource === tab.key
+                  ? 'text-slate-900 border-blue-600'
+                  : 'text-slate-500 border-transparent hover:text-slate-700'
+              }`}
+              style={{ fontWeight: activeSource === tab.key ? 600 : 400 }}
+            >
+              <span>{tab.icon}</span>
+              {ru ? translateSocialLabel(tab.label, true) : tab.label}
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                activeSource === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'
+              }`} style={{ fontWeight: 600 }}>
+                {sourceCounts[tab.key]}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-50 overflow-x-auto">
+        <span className="text-[11px] text-slate-400 flex-shrink-0">{ru ? 'Источник:' : 'Source:'}</span>
+        {brands.map((brand, index) => {
+          const color = brand === 'All' ? '#64748b' : colorForEntity(brand, index);
+          return (
+            <button
+              key={brand}
+              onClick={() => setActiveBrand(brand)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] transition-all flex-shrink-0 ${
+                activeBrand === brand ? 'text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+              style={{ fontWeight: 500, backgroundColor: activeBrand === brand ? color : undefined }}
+            >
+              {brand !== 'All' && <div className="w-1.5 h-1.5 rounded-full bg-white/80 flex-shrink-0" />}
+              {brand === 'All' ? (ru ? 'Все' : 'All') : brand}
+            </button>
+          );
+        })}
+        <span className="ml-auto text-[11px] text-slate-400 flex-shrink-0">{filtered.length} {ru ? 'пост.' : 'posts'}</span>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left min-w-[860px]">
+          <thead>
+            <tr className="bg-slate-50/80 border-b border-slate-100">
+              {[
+                ru ? 'Превью' : 'Preview',
+                ru ? 'Источник / Площадка' : 'Source / Platform',
+                ru ? 'Пост' : 'Post',
+                ru ? 'Охват' : 'Reach',
+                ru ? 'Лайки' : 'Likes',
+                ru ? 'Комментарии' : 'Comments',
+                ru ? 'Дата' : 'Date',
+                ru ? 'Действие' : 'Actions',
+              ].map((header, index) => (
+                <th key={index} className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap" style={{ fontWeight: 600 }}>{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {filtered.map((post, index) => {
+              const brandColor = colorForEntity(post.entity, index);
+              const isExpanded = expandedId === post.id;
+              const postText = String(post.text || '').trim() || (ru ? 'Текст поста недоступен' : 'Post text unavailable');
+              const mediaUrl = post.media?.url;
+              return (
+                <tr
+                  key={post.id}
+                  className={`hover:bg-slate-50/60 transition-colors cursor-pointer ${isExpanded ? 'bg-blue-50/20' : ''}`}
+                  onClick={() => setExpandedId(isExpanded ? null : post.id)}
+                >
+                  <td className="px-4 py-3.5">
+                    <div className="relative w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 border border-slate-100 overflow-hidden" style={{ backgroundColor: `${brandColor}12` }}>
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm text-white" style={{ backgroundColor: brandColor, fontWeight: 700 }}>
+                        {(post.entity || '?')[0]}
+                      </div>
+                      {mediaUrl && (
+                        <img
+                          src={mediaUrl}
+                          alt=""
+                          className="absolute inset-0 w-full h-full object-cover"
+                          loading="lazy"
+                          onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                        />
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: brandColor }} />
+                        <span className="text-xs text-slate-800" style={{ fontWeight: 600 }}>{post.entity}</span>
+                      </div>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full self-start bg-blue-50 text-blue-700" style={{ fontWeight: 500 }}>
+                        {post.platform || 'social'}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3.5 max-w-[360px]">
+                    <p className="text-xs text-slate-700 leading-relaxed line-clamp-2" title={postText}>{postText}</p>
+                    {isExpanded && (
+                      <div className="mt-2 pt-2 border-t border-slate-100">
+                        <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">{postText}</p>
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.reach)}</span>
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.likes)}</span>
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.comments)}</span>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <span className="text-xs text-slate-500">{formatPostDate(post.published_at, ru)}</span>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    {post.source_url ? (
+                      <a
+                        href={post.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors"
+                        style={{ fontWeight: 500 }}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {ru ? 'Открыть' : 'Open'} <ArrowUpRight className="w-3 h-3" />
+                      </a>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {filtered.length === 0 && (
+          <div className="py-12 text-center text-slate-400 text-sm">
+            {ru ? 'Нет органических постов по выбранным фильтрам' : 'No organic posts match the current filters'}
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="flex items-center gap-4">
+          {(['facebook', 'instagram', 'google'] as OrganicPostSource[]).map(source => (
+            <div key={source} className="flex items-center gap-1.5">
+              <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: SOURCE_COLORS[source] }} />
+              <span className="text-[11px] text-slate-500">{source.charAt(0).toUpperCase() + source.slice(1)}</span>
+              <span className="text-[11px] text-slate-700" style={{ fontWeight: 600 }}>{sourceCounts[source]}</span>
+            </div>
+          ))}
+        </div>
+        <span className="text-[11px] text-slate-400">{ru ? 'Макс. 50 последних постов' : 'Latest 50 posts max'}</span>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════
@@ -1372,7 +1643,7 @@ export function SocialPage() {
   const [activeTab,        setActiveTab]        = useState<'deep'|'metrics'>('deep');
   const [openTiers, setOpenTiers] = useState<Record<string, boolean>>({
     topics:true, intent:true, questions:true, audience:true,
-    visibility:true, position:true, scorecard:true,
+    visibility:true, content:true, position:true, scorecard:true,
   });
   const toggleTier = (id: string) => setOpenTiers(p => ({ ...p, [id]: !p[id] }));
 
@@ -1601,6 +1872,7 @@ export function SocialPage() {
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
   const scorecard = dashboard?.strictMetrics?.scorecard ?? [];
+  const organicPostItems = dashboard?.strictMetrics?.organicPosts?.items ?? [];
   const strictSummary = dashboard?.strictMetrics?.summary ?? {};
   const sovData = dashboard?.strictMetrics?.shareOfVoice ?? visibilityData.map(v => ({
     name: v.entity,
@@ -1664,6 +1936,11 @@ export function SocialPage() {
       id:'visibility', icon:Globe, color:'text-blue-700', bgColor:'bg-blue-50', borderColor:'border-blue-200',
       title: ru?'Видимость и охват':'Visibility & Reach Tracking',
       subtitle: ru?'Позиции, охват и доля голоса':'Position, reach & share of voice',
+    },
+    content: {
+      id:'content', icon:Layers, color:'text-slate-700', bgColor:'bg-slate-50', borderColor:'border-slate-200',
+      title: ru?'Органические посты':'Organic Posts',
+      subtitle: ru?'Собранные посты из отслеживаемых social-источников':'Scraped posts from tracked social sources',
     },
     position: {
       id:'position', icon:Star, color:'text-violet-700', bgColor:'bg-violet-50', borderColor:'border-violet-200',
@@ -2352,12 +2629,24 @@ export function SocialPage() {
                 </div>
               )}
 
-              {/* ── TIER: COMPETITIVE SCORECARD — AD INTELLIGENCE ── */}
-              <TierHeader tier={TIERS.scorecard} isOpen={openTiers.scorecard} onToggle={()=>toggleTier('scorecard')} ru={ru} />
-              {openTiers.scorecard && (
+              {/* ── TIER: ORGANIC POSTS ── */}
+              <TierHeader tier={TIERS.content} isOpen={openTiers.content} onToggle={()=>toggleTier('content')} ru={ru} />
+              {openTiers.content && (
                 <div className="space-y-4">
-                  <AdScrapeTable ru={ru} items={adItems} />
+                  <OrganicPostsTable ru={ru} items={organicPostItems} />
                 </div>
+              )}
+
+              {/* ── TIER: COMPETITIVE SCORECARD — AD INTELLIGENCE ── */}
+              {adItems.length > 0 && (
+                <>
+                  <TierHeader tier={TIERS.scorecard} isOpen={openTiers.scorecard} onToggle={()=>toggleTier('scorecard')} ru={ru} />
+                  {openTiers.scorecard && (
+                    <div className="space-y-4">
+                      <AdScrapeTable ru={ru} items={adItems} />
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
