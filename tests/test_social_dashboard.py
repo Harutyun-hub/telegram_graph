@@ -649,6 +649,76 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertTrue(payload["meta"]["cache"]["expired"])
         self.assertIn("expiredStaleCache", payload["meta"]["degradedSections"])
 
+    def test_semantic_failure_preserves_previous_good_topic_and_sentiment_widgets(self) -> None:
+        good_topics = {
+            "items": [
+                {
+                    "topic": "Card Fees",
+                    "count": 3,
+                    "previousCount": 1,
+                    "deltaCount": 2,
+                    "growthPct": 200.0,
+                    "growthReliable": True,
+                    "avgSentimentScore": -0.5,
+                    "dominantSentiment": "negative",
+                    "sentimentCounts": {"positive": 0, "neutral": 1, "negative": 2},
+                    "topEntities": ["Example Bank"],
+                    "topPlatforms": ["facebook"],
+                    "activityUids": ["facebook:post:post-1"],
+                }
+            ]
+        }
+        good_trend = {"items": [{"bucket": "2026-04-10", "total": 3, "positive": 0, "neutral": 1, "negative": 2}]}
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value=good_topics), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value=good_trend):
+            previous = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", side_effect=RuntimeError("neo4j timeout")), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", side_effect=RuntimeError("neo4j timeout")):
+            broken = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        self.assertEqual(broken["deepAnalysis"]["topicBubbles"], [])
+        self.assertEqual(broken["deepAnalysis"]["sentimentTrend"], [])
+
+        preserved = social_dashboard._preserve_semantic_sections_from_cache(broken, previous)
+
+        self.assertEqual(preserved["deepAnalysis"]["topicBubbles"], previous["deepAnalysis"]["topicBubbles"])
+        self.assertEqual(preserved["deepAnalysis"]["topicRanking"], previous["deepAnalysis"]["topicRanking"])
+        self.assertEqual(preserved["deepAnalysis"]["sentimentTrend"], previous["deepAnalysis"]["sentimentTrend"])
+        self.assertTrue(preserved["meta"]["semanticStale"])
+        self.assertTrue(preserved["meta"]["semanticPreservedFromCache"])
+        self.assertIn("semanticRefreshFailed", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticTopics", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticSentimentTrend", preserved["meta"]["degradedSections"])
+
+    def test_semantic_failure_without_previous_snapshot_stays_empty_and_degraded(self) -> None:
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", side_effect=RuntimeError("neo4j timeout")), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", side_effect=RuntimeError("neo4j timeout")):
+            broken = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        preserved = social_dashboard._preserve_semantic_sections_from_cache(broken, None)
+
+        self.assertEqual(preserved["deepAnalysis"]["topicBubbles"], [])
+        self.assertEqual(preserved["deepAnalysis"]["sentimentTrend"], [])
+        self.assertIn("semanticTopics", preserved["meta"]["degradedSections"])
+        self.assertIn("semanticSentimentTrend", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticRefreshFailed", preserved["meta"]["degradedSections"])
+
     def test_graph_coverage_failure_degrades_only_coverage_metadata(self) -> None:
         store = _FakeSocialDashboardStore()
 

@@ -1141,6 +1141,51 @@ def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | 
     return payload
 
 
+def _preserve_semantic_sections_from_cache(
+    snapshot: dict[str, Any],
+    previous_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep last good semantic widgets when a Neo4j refresh degrades."""
+    if not previous_snapshot:
+        return snapshot
+
+    payload = deepcopy(snapshot)
+    meta = payload.setdefault("meta", {})
+    degraded = set(meta.get("degradedSections") or [])
+    if not degraded.intersection({"semanticTopics", "semanticSentimentTrend"}):
+        return payload
+
+    deep = payload.setdefault("deepAnalysis", {})
+    previous_deep = _as_dict(previous_snapshot.get("deepAnalysis"))
+    preserved: list[str] = []
+
+    previous_topics_available = bool(previous_deep.get("topicBubbles") or previous_deep.get("topicRanking"))
+    current_topics_empty = not deep.get("topicBubbles") and not deep.get("topicRanking")
+    if "semanticTopics" in degraded and current_topics_empty and previous_topics_available:
+        for key in ("topicBubbles", "topicRanking", "communityInterests"):
+            deep[key] = deepcopy(previous_deep.get(key) or [])
+        preserved.append("semanticTopics")
+        degraded.discard("semanticTopics")
+
+    previous_trend_available = bool(previous_deep.get("sentimentTrend"))
+    current_trend_empty = not deep.get("sentimentTrend")
+    if "semanticSentimentTrend" in degraded and current_trend_empty and previous_trend_available:
+        deep["sentimentTrend"] = deepcopy(previous_deep.get("sentimentTrend") or [])
+        preserved.append("semanticSentimentTrend")
+        degraded.discard("semanticSentimentTrend")
+
+    if preserved:
+        degraded.add("semanticRefreshFailed")
+        meta["semanticStale"] = True
+        meta["semanticPreservedFromCache"] = True
+        meta["semanticPreservedSections"] = preserved
+        meta["degradedSections"] = sorted(degraded)
+        meta.setdefault("emptyReasons", {}).pop("communityInterests", None)
+        logger.warning("Social dashboard preserved semantic cache after Neo4j degradation | preserved={}", preserved)
+
+    return payload
+
+
 def _store_cache_snapshot(key: str, snapshot: dict[str, Any]) -> None:
     with _CACHE_LOCK:
         if len(_CACHE) >= 128 and key not in _CACHE:
@@ -1582,6 +1627,9 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
 
     def _refresh() -> None:
         started = time.perf_counter()
+        with _CACHE_LOCK:
+            previous_entry = _CACHE.get(key)
+            previous_snapshot = deepcopy(previous_entry[1]) if previous_entry else None
         try:
             snapshot = _build_social_dashboard_snapshot_uncached(
                 store,
@@ -1592,6 +1640,7 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
                 platform=filters.get("platform"),
                 source_kind=filters.get("source_kind"),
             )
+            snapshot = _preserve_semantic_sections_from_cache(snapshot, previous_snapshot)
             snapshot.setdefault("meta", {})["refreshReason"] = reason
             snapshot["meta"]["backgroundBuildMs"] = round((time.perf_counter() - started) * 1000, 2)
             _store_cache_snapshot(key, snapshot)

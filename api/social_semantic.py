@@ -19,8 +19,16 @@ _NOISE_TOPIC_NAMES = {"", "null", "unknown", "none", "n/a", "na"}
 
 _driver_lock = threading.Lock()
 _driver: Any | None = None
+_indexes_ensured = False
 _cache_lock = threading.Lock()
 _cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+
+_DASHBOARD_INDEX_CYPHER = (
+    "CREATE INDEX social_activity_published_at IF NOT EXISTS FOR (n:SocialActivity) ON (n.published_at)",
+    "CREATE INDEX social_activity_source_kind IF NOT EXISTS FOR (n:SocialActivity) ON (n.source_kind)",
+    "CREATE INDEX social_activity_platform IF NOT EXISTS FOR (n:SocialActivity) ON (n.platform)",
+    "CREATE INDEX social_tracked_entity_id IF NOT EXISTS FOR (n:TrackedEntity) ON (n.id)",
+)
 
 
 def _social_neo4j_uri() -> str:
@@ -45,7 +53,25 @@ def _get_driver():
                 max_transaction_retry_time=5.0,
             )
             _driver.verify_connectivity()
+            _ensure_dashboard_indexes(_driver)
         return _driver
+
+
+def _ensure_dashboard_indexes(driver: Any) -> None:
+    """Best-effort indexes for bounded dashboard reads."""
+    global _indexes_ensured
+    if _indexes_ensured:
+        return
+    try:
+        with driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
+            for cypher in _DASHBOARD_INDEX_CYPHER:
+                try:
+                    session.run(Query(cypher, timeout=_QUERY_TIMEOUT_SECONDS)).consume()
+                except Exception as exc:
+                    logger.debug("Social Neo4j dashboard index check skipped for query={} error={}", cypher, exc)
+        _indexes_ensured = True
+    except Exception as exc:
+        logger.warning("Social Neo4j dashboard index setup skipped: {}", exc)
 
 
 def _cache_get(key: tuple[Any, ...]):
