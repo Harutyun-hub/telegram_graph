@@ -317,9 +317,9 @@ def _sentiment_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-_INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
+_FOCUS_AREAS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
-        "Security & Defense",
+        "Security & Border Issues",
         (
             "army",
             "artsakh",
@@ -332,57 +332,63 @@ _INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "troops",
             "war",
         ),
+        "Security, defense, border, peace, and conflict-related discussion.",
     ),
     (
-        "Infrastructure & Services",
+        "Church & Identity Debate",
         (
-            "arena",
-            "electricity",
-            "housing",
-            "infrastructure",
-            "renovation",
-            "road",
-            "service",
-            "transport",
-            "utilities",
-            "water",
+            "church",
+            "identity",
+            "religion",
+            "religious",
         ),
+        "Church, identity, and culture-war discussion.",
     ),
     (
-        "Economy & Jobs",
-        (
-            "bank",
-            "business",
-            "cost",
-            "economic",
-            "economy",
-            "finance",
-            "industrial",
-            "industry",
-            "investment",
-            "job",
-            "market",
-            "price",
-        ),
-    ),
-    (
-        "Community Life",
+        "Charity & Social Support",
         (
             "charitable",
-            "church",
-            "community",
-            "concert",
-            "culture",
-            "education",
-            "event",
-            "family",
-            "health",
-            "sports",
-            "youth",
+            "charity",
+            "donation",
+            "foundation",
+            "humanitarian",
+            "social support",
+            "welfare",
         ),
+        "Charity, assistance, foundations, and social-support discussion.",
     ),
     (
-        "Media & Campaigns",
+        "Education & Community Programs",
+        (
+            "community education",
+            "education",
+            "educational",
+            "learning",
+            "school",
+            "student",
+            "training",
+            "youth",
+        ),
+        "Education, youth, and community-program discussion.",
+    ),
+    (
+        "Culture & Public Events",
+        (
+            "arena",
+            "citizen",
+            "concert",
+            "cultural",
+            "culture",
+            "event",
+            "festival",
+            "sport",
+            "sports",
+            "venue",
+        ),
+        "Public events, culture, sports, and civic ceremonies.",
+    ),
+    (
+        "Campaign & Public Messaging",
         (
             "announcement",
             "campaign",
@@ -392,9 +398,10 @@ _INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "promotion",
             "teaser",
         ),
+        "Campaign narratives, announcements, media, and public messaging.",
     ),
     (
-        "Rights & Trust",
+        "Evidence, Trust & Accountability",
         (
             "accountability",
             "allegation",
@@ -408,9 +415,46 @@ _INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "transparency",
             "trust",
         ),
+        "Evidence, credibility, rights, corruption, and accountability concerns.",
     ),
     (
-        "Technology & Development",
+        "Infrastructure Projects",
+        (
+            "construction",
+            "electricity",
+            "housing",
+            "infrastructure",
+            "renovated",
+            "renovation",
+            "road",
+            "transport",
+            "utilities",
+            "water",
+        ),
+        "Infrastructure, construction, renovation, transport, and utilities.",
+    ),
+    (
+        "Economy & Jobs",
+        (
+            "bank",
+            "business",
+            "cost",
+            "economic",
+            "economy",
+            "fee",
+            "fees",
+            "finance",
+            "industrial",
+            "industry",
+            "investment",
+            "job",
+            "market",
+            "price",
+        ),
+        "Jobs, investment, industry, finance, prices, and economic conditions.",
+    ),
+    (
+        "Technology & Modernization",
         (
             "ai",
             "artificial intelligence",
@@ -421,6 +465,21 @@ _INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "platform",
             "technology",
         ),
+        "Technology, AI, digital services, and modernization discussion.",
+    ),
+    (
+        "Public Services",
+        (
+            "health",
+            "hospital",
+            "municipal",
+            "public service",
+            "service",
+            "services",
+            "social service",
+            "support center",
+        ),
+        "Public-service delivery, municipal services, and essential support.",
     ),
     (
         "Government & Leadership",
@@ -434,44 +493,74 @@ _INTEREST_AREAS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "party",
             "policy",
             "political",
+            "political support",
             "president",
-            "support",
+            "support for",
         ),
+        "Government, parties, leaders, policy, and political support.",
     ),
 )
 
 
-def _interest_area_for_topic(item: dict[str, Any]) -> str:
+_FALLBACK_FOCUS_AREA = "Other Civic Discussion"
+_FALLBACK_FOCUS_DESCRIPTION = "Other civic or public discussion that does not fit a specific focus area yet."
+
+
+def _focus_area_for_topic(item: dict[str, Any]) -> tuple[str, str]:
     text_parts = [
         _trimmed(item.get("topic")),
         _trimmed(item.get("sampleSummary")),
         " ".join(_trimmed(value) for value in _as_list(item.get("topEntities"))),
     ]
     haystack = " ".join(part for part in text_parts if part).lower()
-    for area, keywords in _INTEREST_AREAS:
+    for area, keywords, description in _FOCUS_AREAS:
         if any(keyword in haystack for keyword in keywords):
-            return area
-    return "Government & Leadership"
+            return area, description
+    return _FALLBACK_FOCUS_AREA, _FALLBACK_FOCUS_DESCRIPTION
 
 
 def _community_interests(topic_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: Counter[str] = Counter()
+    grouped: dict[str, dict[str, Any]] = {}
     for item in topic_rows:
         count = int(item.get("count") or item.get("currentMentions") or 0)
         if count <= 0:
             continue
-        grouped[_interest_area_for_topic(item)] += count
-    total = sum(grouped.values())
+        topic = _trimmed(item.get("topic"))
+        area, description = _focus_area_for_topic(item)
+        bucket = grouped.setdefault(
+            area,
+            {
+                "mentions": 0,
+                "description": description,
+                "topics": Counter(),
+            },
+        )
+        bucket["mentions"] += count
+        if topic:
+            bucket["topics"][topic] += count
+    total = sum(int(value["mentions"]) for value in grouped.values())
     if total <= 0:
         return []
-    return [
-        {
-            "interest": interest,
-            "score": round((mentions / total) * 100, 1),
-            "mentions": mentions,
-        }
-        for interest, mentions in sorted(grouped.items(), key=lambda value: (-value[1], value[0]))[:8]
-    ]
+    interests: list[dict[str, Any]] = []
+    for interest, value in grouped.items():
+        mentions = int(value["mentions"])
+        top_topics = [
+            topic
+            for topic, _count in sorted(
+                value["topics"].items(),
+                key=lambda topic_count: (-topic_count[1], topic_count[0]),
+            )[:3]
+        ]
+        interests.append(
+            {
+                "interest": interest,
+                "score": round((mentions / total) * 100, 1),
+                "mentions": mentions,
+                "topTopics": top_topics,
+                "description": value["description"],
+            }
+        )
+    return sorted(interests, key=lambda value: (-value["mentions"], value["interest"]))[:8]
 
 
 def _semantic_topic_widgets(
@@ -1262,7 +1351,7 @@ def _build_social_dashboard_snapshot_uncached(
         if not ai_problem_cards:
             empty_reasons["painPoints"] = "Social AI problem cards are warming or there is not enough evidence-backed problem data yet."
         if not deep["communityInterests"]:
-            empty_reasons["communityInterests"] = "No semantic topic mentions were available to group into community interests."
+            empty_reasons["communityInterests"] = "No semantic topic mentions were available to group into discussion focus areas."
 
         entities_filter = sorted(
             [{"id": row["id"], "name": row.get("name") or "Unknown"} for row in entities.values()],

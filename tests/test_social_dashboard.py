@@ -335,6 +335,24 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)
 
+    def test_community_interests_use_specific_discussion_focus_areas(self) -> None:
+        interests = social_dashboard._community_interests([
+            {"topic": "Political Support", "count": 4},
+            {"topic": "Church Evidence Debate", "count": 2},
+            {"topic": "Community Education Event", "count": 2},
+            {"topic": "Concert Programming", "count": 1},
+            {"topic": "Charitable Foundation", "count": 1},
+        ])
+
+        by_interest = {item["interest"]: item for item in interests}
+        self.assertNotIn("Community Life", by_interest)
+        self.assertEqual(by_interest["Government & Leadership"]["score"], 40.0)
+        self.assertEqual(by_interest["Church & Identity Debate"]["mentions"], 2)
+        self.assertEqual(by_interest["Education & Community Programs"]["topTopics"], ["Community Education Event"])
+        self.assertEqual(by_interest["Culture & Public Events"]["topTopics"], ["Concert Programming"])
+        self.assertEqual(by_interest["Charity & Social Support"]["topTopics"], ["Charitable Foundation"])
+        self.assertAlmostEqual(sum(item["score"] for item in interests), 100.0)
+
     def test_dashboard_filters_incomplete_ai_problem_cards(self) -> None:
         store = _FakeSocialDashboardStore()
         store.runtime_settings["ai_brief_snapshot"]["topProblems"] = [
