@@ -846,6 +846,52 @@ def _ad_items(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _first_media_asset(row: dict[str, Any]) -> dict[str, Any] | None:
+    for asset in _as_list(row.get("assets")):
+        if not isinstance(asset, dict):
+            continue
+        url = _trimmed(asset.get("url") or asset.get("src"))
+        if not url:
+            continue
+        return {
+            "kind": _trimmed(asset.get("kind") or asset.get("type")) or "media",
+            "url": url,
+        }
+    return None
+
+
+def _organic_post_items(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda item: _trimmed(item.get("published_at") or item.get("last_seen_at")), reverse=True)[:50]:
+        parts = _engagement_parts(row)
+        reach = _reach_total(row)
+        items.append({
+            "id": row.get("id"),
+            "activity_uid": row.get("activity_uid"),
+            "entity_id": _entity_id(row),
+            "entity": _entity_name(row),
+            "platform": row.get("platform"),
+            "source_kind": row.get("source_kind"),
+            "text": row.get("text_content") or _analysis_text(row, "summary"),
+            "media": _first_media_asset(row),
+            "source_url": row.get("source_url"),
+            "published_at": row.get("published_at") or row.get("last_seen_at") or row.get("created_at"),
+            "reach": reach if reach > 0 else None,
+            "likes": parts["likes"],
+            "comments": parts["comments"],
+            "shares": parts["shares"],
+        })
+    return {
+        "items": items,
+        "summary": {
+            "total": len(rows),
+            "returned": len(items),
+            "withMedia": sum(1 for item in items if item.get("media")),
+            "withReach": sum(1 for item in items if item.get("reach") is not None),
+        },
+    }
+
+
 def _visibility_trend(rows: list[dict[str, Any]], visibility_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
     top_entities = [item["entity"] for item in sorted(visibility_data, key=lambda value: -value["visibility"])[:4]]
     if not top_entities:
@@ -1032,6 +1078,7 @@ def _strict_metrics(
             {"name": item["entity"], "value": item["sov"]}
             for item in sorted(visibility_data, key=lambda value: -value["sov"])
         ],
+        "organicPosts": _organic_post_items(parent_rows),
     }
 
 
@@ -1505,6 +1552,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "deepAnalysis.topQuestions": "social_ai_brief_snapshot",
                     "deepAnalysis.painPoints": "social_ai_brief_snapshot",
                     "strictMetrics": "supabase",
+                    "strictMetrics.organicPosts": "supabase",
                     "adIntelligence": "supabase",
                 },
                 "degradedSections": sorted(set(degraded_sections)),

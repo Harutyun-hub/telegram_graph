@@ -411,6 +411,9 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
                 "source_kind": "post",
                 "platform": "facebook",
                 "published_at": "2026-04-10T10:00:00+00:00",
+                "text_content": "A public post about jobs.",
+                "source_url": "https://www.facebook.com/example/posts/1",
+                "assets": [{"type": "image", "url": "https://cdn.example/post.jpg"}],
                 "engagement_metrics": {"like_count": 10, "comment_count": 3, "share_count": 2, "view_count": 100},
                 "entity": {"id": "entity-a", "name": "Source A"},
                 "account": {"id": "account-a"},
@@ -427,6 +430,19 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
                 "entity": {"id": "entity-a", "name": "Source A"},
                 "account": {"id": "account-a"},
                 "analysis": None,
+            },
+            {
+                "id": "video-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "video",
+                "platform": "facebook",
+                "published_at": "2026-04-10T11:00:00+00:00",
+                "text_content": "A short organic video update.",
+                "engagement_metrics": {"like_count": 1},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": {"sentiment": "neutral", "sentiment_score": 0, "analysis_payload": {"topics": ["Updates"]}},
             },
             {
                 "id": "ad-a",
@@ -446,15 +462,28 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         visibility = metrics["visibilityData"][0]
 
         self.assertEqual(metrics["summary"]["trackedSources"], 2)
-        self.assertEqual(metrics["summary"]["posts"], 1)
+        self.assertEqual(metrics["summary"]["posts"], 2)
         self.assertEqual(metrics["summary"]["comments"], 1)
         self.assertEqual(metrics["summary"]["ads"], 1)
         self.assertEqual(visibility["reach"], 100)
-        self.assertEqual(visibility["interactions"], 20)
-        self.assertEqual(visibility["engagementRate"], 20.0)
-        self.assertEqual(metrics["scorecard"][0]["posts"], 1)
+        self.assertEqual(visibility["interactions"], 21)
+        self.assertEqual(visibility["engagementRate"], 21.0)
+        self.assertEqual(metrics["scorecard"][0]["posts"], 2)
         self.assertEqual(metrics["scorecard"][0]["comments"], 1)
         self.assertEqual(metrics["visibilityTrend"][0]["source_a"], 100.0)
+        organic_posts = metrics["organicPosts"]["items"]
+        self.assertEqual([item["source_kind"] for item in organic_posts], ["video", "post"])
+        post_item = next(item for item in organic_posts if item["source_kind"] == "post")
+        self.assertEqual(post_item["text"], "A public post about jobs.")
+        self.assertEqual(post_item["source_url"], "https://www.facebook.com/example/posts/1")
+        self.assertEqual(post_item["reach"], 100)
+        self.assertEqual(post_item["likes"], 10)
+        self.assertEqual(post_item["comments"], 3)
+        self.assertEqual(post_item["shares"], 2)
+        self.assertEqual(post_item["media"]["url"], "https://cdn.example/post.jpg")
+        video_item = next(item for item in organic_posts if item["source_kind"] == "video")
+        self.assertIsNone(video_item["reach"])
+        self.assertEqual(metrics["organicPosts"]["summary"]["total"], 2)
 
     def test_social_dashboard_cache_miss_returns_warming(self) -> None:
         with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
