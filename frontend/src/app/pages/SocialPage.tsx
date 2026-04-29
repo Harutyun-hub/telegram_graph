@@ -486,6 +486,9 @@ interface SocialDashboardSnapshot {
     cacheStatus?: string;
     generatedAt?: string;
     degradedSections?: string[];
+    semanticStale?: boolean;
+    semanticPreservedFromCache?: boolean;
+    semanticPreservedSections?: string[];
     emptyReasons?: Record<string, string>;
     timingsMs?: Record<string, number>;
   };
@@ -1887,6 +1890,20 @@ export function SocialPage() {
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
   const degradedSections = dashboard?.meta?.degradedSections ?? [];
+  const semanticPreservedFromCache = Boolean(dashboard?.meta?.semanticPreservedFromCache);
+  const onlyCacheDegraded = degradedSections.length > 0
+    && degradedSections.every(section => section === 'staleCache' || section === 'expiredStaleCache');
+  const degradedMessage = semanticPreservedFromCache
+    ? (ru
+      ? 'Темы и тональность обновляются. Показан последний успешный снимок.'
+      : 'Topics and sentiment are refreshing. Showing the last successful snapshot.')
+    : onlyCacheDegraded
+      ? (ru
+        ? 'Данные обновляются в фоне. Показан последний доступный снимок.'
+        : 'Data is refreshing in the background. Showing the last available snapshot.')
+      : (ru
+        ? 'Часть данных обновляется в фоне. Показан последний доступный снимок.'
+        : 'Some data is refreshing in the background. Showing the last available snapshot.');
   const dashboardWarming = Boolean(dashboardError && /warming|503/i.test(dashboardError));
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
@@ -2004,7 +2021,7 @@ export function SocialPage() {
                 : (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`))
               : dashboardLoading
                 ? (ru ? 'Загрузка реальных социальных данных...' : 'Loading real social data...')
-                : (ru ? `Часть секций загружена с ограничениями: ${degradedSections.join(', ')}` : `Some sections are degraded: ${degradedSections.join(', ')}`)}
+                : degradedMessage}
           </div>
         )}
 
