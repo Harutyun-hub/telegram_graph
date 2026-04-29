@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router';
 import {
   Users, MessageCircle, Megaphone, Heart, Hash,
   Target, BarChart3, ChevronDown, ChevronUp,
-  Sparkles, TrendingUp, TrendingDown,
+  TrendingUp, TrendingDown,
   Eye, HelpCircle, ArrowUpRight, ArrowDownRight,
   ThumbsUp, ThumbsDown, MessageSquare, Lightbulb, ShieldAlert,
-  Compass, Flame, Zap, Globe, Star, Layers
+  Compass, Flame, Globe, Star, Layers
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
@@ -823,26 +823,6 @@ function TierHeader({ tier, isOpen, onToggle, ru }: { tier: TierDef; isOpen: boo
   );
 }
 
-function AIInsight({ title, text, color }: { title: string; text: string; color: string }) {
-  return (
-    <div className="relative rounded-2xl border border-slate-200 bg-white overflow-hidden">
-      <div className="absolute top-0 left-0 w-1 h-full rounded-l-full" style={{ backgroundColor: color }} />
-      <div className="flex items-start gap-4 p-5 pl-6">
-        <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center mt-0.5" style={{ backgroundColor: `${color}15` }}>
-          <Sparkles className="w-4 h-4" style={{ color }} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
-            <h3 className="text-sm text-slate-900" style={{ fontWeight: 600 }}>{title}</h3>
-            <span className="text-[10px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full uppercase tracking-wider" style={{ fontWeight: 500 }}>AI Insight</span>
-          </div>
-          <p className="text-sm text-slate-600 leading-relaxed">{text}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function DeltaBadge({ value, suffix = '' }: { value?: number | null; suffix?: string }) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return <span className="inline-flex text-xs text-slate-400" style={{ fontWeight: 600 }}>—</span>;
@@ -1392,7 +1372,7 @@ export function SocialPage() {
   const [activeTab,        setActiveTab]        = useState<'deep'|'metrics'>('deep');
   const [openTiers, setOpenTiers] = useState<Record<string, boolean>>({
     topics:true, intent:true, questions:true, audience:true,
-    visibility:true, shifts:true, position:true, scorecard:true,
+    visibility:true, position:true, scorecard:true,
   });
   const toggleTier = (id: string) => setOpenTiers(p => ({ ...p, [id]: !p[id] }));
 
@@ -1620,9 +1600,6 @@ export function SocialPage() {
       .join(', ');
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
-  const positiveImpact = dashboard?.strictMetrics?.positiveImpact ?? [];
-  const negativeImpact = dashboard?.strictMetrics?.negativeImpact ?? [];
-  const weeklyShifts = dashboard?.strictMetrics?.weeklyShifts ?? [];
   const scorecard = dashboard?.strictMetrics?.scorecard ?? [];
   const strictSummary = dashboard?.strictMetrics?.summary ?? {};
   const sovData = dashboard?.strictMetrics?.shareOfVoice ?? visibilityData.map(v => ({
@@ -1687,11 +1664,6 @@ export function SocialPage() {
       id:'visibility', icon:Globe, color:'text-blue-700', bgColor:'bg-blue-50', borderColor:'border-blue-200',
       title: ru?'Видимость и охват':'Visibility & Reach Tracking',
       subtitle: ru?'Позиции, охват и доля голоса':'Position, reach & share of voice',
-    },
-    shifts: {
-      id:'shifts', icon:Zap, color:'text-amber-700', bgColor:'bg-amber-50', borderColor:'border-amber-200',
-      title: ru?'Еженедельные изменения':'Weekly Shifts & Impact',
-      subtitle: ru?'Дельты метрик и влияние тем':'Metric deltas & topic impact analysis',
     },
     position: {
       id:'position', icon:Star, color:'text-violet-700', bgColor:'bg-violet-50', borderColor:'border-violet-200',
@@ -2377,92 +2349,6 @@ export function SocialPage() {
                     </div>
                   </div>
 
-                  <AIInsight
-                    title={ru?'AI-анализ видимости':'AI Visibility Analysis'}
-                    color={C.blue}
-                    text={ru
-                      ?'Brand X лидирует по видимости (73.04%, +8.17%) и занимает 35.5% доли голоса. Brand Z теряет позиции (-3.12%) несмотря на высокий охват. Competitor A демонстрирует стабильный рост вовлечённости (+1.5%) при наименьшем объёме — признак качественной контентной стратегии.'
-                      :'Brand X leads visibility at 73.04% (+8.17%) and commands 35.5% share of voice. Brand Z is declining (-3.12%) despite its high reach. Competitor A shows steady engagement growth (+1.5%) with the smallest volume — a quality content strategy signal.'}
-                  />
-                </div>
-              )}
-
-              {/* ── TIER: WEEKLY SHIFTS ── */}
-              <TierHeader tier={TIERS.shifts} isOpen={openTiers.shifts} onToggle={()=>toggleTier('shifts')} ru={ru} />
-              {openTiers.shifts && (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    {weeklyShifts.map(s=>{
-                      const delta = s.current - s.previous;
-                      const deltaPct = s.previous ? ((delta/s.previous)*100).toFixed(1) : (delta > 0 ? '100.0' : '0.0');
-                      const isGood = s.goodIfUp ? delta>0 : delta<0;
-                      return (
-                        <div key={s.metric} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md transition-shadow">
-                          <p className="text-[11px] text-slate-500 mb-2 leading-tight" style={{ fontWeight:500 }}>{translateSocialLabel(s.metric, ru)}</p>
-                          <p className="text-xl text-slate-900" style={{ fontWeight:800 }}>{s.current}{s.unit}</p>
-                          <div className="flex items-center gap-1.5 mt-1.5">
-                            <span className={`text-xs ${isGood?'text-emerald-600':'text-rose-500'}`} style={{ fontWeight:700 }}>
-                              {Number(deltaPct)>0?'+':''}{deltaPct}%
-                            </span>
-                            <span className="text-[10px] text-slate-400">{ru ? 'против' : 'vs'} {s.previous}{s.unit}</span>
-                          </div>
-                          <div className="mt-2 h-1 bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width:`${Math.min(100,Math.abs(Number(deltaPct))*5)}%`, backgroundColor:isGood?C.emerald:C.rose }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <WidgetCard title={ru?'Позитивное влияние тем':'Positive Topic Impact'} headerRight={<span className="text-sm text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>+43.44%</span>}>
-                      <div className="space-y-1">
-                        {positiveImpact.map((t,i)=>(
-                          <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
-                            <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
-                            <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-                              <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-emerald-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...positiveImpact.map(item => item.mentions)))*100}%` }} />
-                              </div>
-                            </div>
-                            <span className="text-sm text-emerald-600" style={{ fontWeight:700 }}>{t.gain}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <button className="mt-3 w-full text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 py-2 rounded-xl hover:bg-emerald-100 transition-colors" style={{ fontWeight:500 }}>
-                        {ru?'Все 8 улучшенных тем':'View all 8 improved topics'}
-                      </button>
-                    </WidgetCard>
-
-                    <WidgetCard title={ru?'Негативное влияние тем':'Negative Topic Impact'} headerRight={<span className="text-sm text-rose-500 bg-rose-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>-22.60%</span>}>
-                      <div className="space-y-1">
-                        {negativeImpact.map((t,i)=>(
-                          <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
-                            <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
-                            <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-                              <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-rose-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...negativeImpact.map(item => item.mentions)))*100}%` }} />
-                              </div>
-                            </div>
-                            <span className="text-sm text-rose-500" style={{ fontWeight:700 }}>{t.loss}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <button className="mt-3 w-full text-xs text-rose-600 bg-rose-50 border border-rose-200 py-2 rounded-xl hover:bg-rose-100 transition-colors" style={{ fontWeight:500 }}>
-                        {ru?'Все 4 ухудшенных темы':'View all 4 declined topics'}
-                      </button>
-                    </WidgetCard>
-                  </div>
-
-                  <AIInsight
-                    title={ru?'AI-анализ изменений':'AI Weekly Shift Analysis'}
-                    color={C.amber}
-                    text={ru
-                      ?'Purchase Intent вырос на 39.3% — лучшая динамика недели. Customer Service продолжает наносить наибольший ущерб видимости (-18.48% потери). Жалобы снизились на 11% — позитивный сигнал. Рост позитивного настроения (+12%) совпадает с запуском новой функции доставки.'
-                      :'Purchase Intent surged +39.3% — best weekly performance. Customer Service continues to cause the most visibility damage (-18.48%). Complaints dropped 11% — a positive signal. The rise in positive sentiment (+12%) correlates with the new delivery feature launch.'}
-                  />
                 </div>
               )}
 
@@ -2471,13 +2357,6 @@ export function SocialPage() {
               {openTiers.scorecard && (
                 <div className="space-y-4">
                   <AdScrapeTable ru={ru} items={adItems} />
-                  <AIInsight
-                    title={ru?'AI-анализ рекламы конкурентов':'AI Ad Intelligence Analysis'}
-                    color="#6366f1"
-                    text={ru
-                      ?'Brand Z доминирует в Instagram по объёму (145K показов, 8.3K вовлечения) с акцентом на срочность и скидки. Brand X использует диверсифицированную мультиплатформенную стратегию. Competitor A получает максимальный ROI с минимальным бюджетом, фокусируясь на органических лидах через LinkedIn и Google Search.'
-                      :'Brand Z dominates Instagram by volume (145K impressions, 8.3K engagement) leveraging urgency and discounts. Brand X deploys a diversified cross-platform strategy. Competitor A achieves maximum ROI with minimal budget by focusing on organic leads through LinkedIn and Google Search.'}
-                  />
                 </div>
               )}
             </>
