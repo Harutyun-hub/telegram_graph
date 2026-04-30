@@ -614,6 +614,39 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", sentiment_cypher)
         self.assertEqual(sentiment_params["entity_ids"], ["entity-1", "entity-2"])
 
+    def test_all_source_semantic_queries_are_bounded_by_recent_activities(self) -> None:
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_topic_aggregates(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        topic_cypher = query_rows.call_args.args[0]
+        topic_params = query_rows.call_args.args[1]
+        self.assertIn("RETURN collect(a) AS scopedActivities", topic_cypher)
+        self.assertIn("LIMIT $activity_limit", topic_cypher)
+        self.assertIn("UNWIND scopedActivities AS a", topic_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", topic_cypher)
+        self.assertGreater(topic_params["activity_limit"], 0)
+        self.assertEqual(topic_params["entity_ids"], [])
+
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_sentiment_trend(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        sentiment_cypher = query_rows.call_args.args[0]
+        sentiment_params = query_rows.call_args.args[1]
+        self.assertIn("RETURN collect(a) AS scopedActivities", sentiment_cypher)
+        self.assertIn("LIMIT $activity_limit", sentiment_cypher)
+        self.assertIn("UNWIND scopedActivities AS a", sentiment_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", sentiment_cypher)
+        self.assertGreater(sentiment_params["activity_limit"], 0)
+        self.assertEqual(sentiment_params["entity_ids"], [])
+
     def test_social_dashboard_stale_cache_returns_without_rebuild(self) -> None:
         filters = {
             "from": "2026-04-01",

@@ -14,6 +14,7 @@ import config
 
 _CACHE_TTL_SECONDS = 300.0
 _QUERY_TIMEOUT_SECONDS = 6.0
+_ALL_SOURCE_ACTIVITY_LIMIT = 2500
 _ORGANIC_SOURCE_KINDS = ("post",)
 _NOISE_TOPIC_NAMES = {"", "null", "unknown", "none", "n/a", "na"}
 
@@ -197,6 +198,7 @@ def get_topic_aggregates(
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
         "noise": list(_NOISE_TOPIC_NAMES),
         "limit": topic_limit,
+        "activity_limit": _ALL_SOURCE_ACTIVITY_LIMIT,
     }
     cache_key = ("topic_aggregates_v1", _cacheable_params(params))
     cached = _cache_get(cache_key)
@@ -267,17 +269,21 @@ def get_topic_aggregates(
     """
     else:
         cypher = """
-    MATCH (a:SocialActivity)-[:COVERS]->(t:Topic)
-    WHERE a.published_at >= datetime($start)
-      AND a.published_at < datetime($end)
-      AND coalesce(a.source_kind, '') IN $source_kinds
-      AND ($platform IS NULL OR a.platform = $platform)
-      AND coalesce(t.proposed, false) = false
+    CALL {
+      MATCH (a:SocialActivity)
+      WHERE a.published_at >= datetime($start)
+        AND a.published_at < datetime($end)
+        AND coalesce(a.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR a.platform = $platform)
+      WITH a
+      ORDER BY a.published_at DESC
+      LIMIT $activity_limit
+      RETURN collect(a) AS scopedActivities
+    }
+    UNWIND scopedActivities AS a
+    MATCH (a)-[:COVERS]->(t:Topic)
+    WHERE coalesce(t.proposed, false) = false
       AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-      AND (
-        size($entity_ids) = 0
-        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
-      )
     OPTIONAL MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
     WITH t, a, head(collect(DISTINCT toLower(coalesce(s.name, 'neutral')))) AS sentiment
     WITH
@@ -286,6 +292,7 @@ def get_topic_aggregates(
       avg(coalesce(a.sentiment_score, 0.0)) AS avgSentimentScore,
       collect(DISTINCT a.uid)[..30] AS activityUids,
       collect(DISTINCT a.platform)[..4] AS topPlatforms,
+      collect(DISTINCT a)[..200] AS topicActivities,
       sum(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) AS positive,
       sum(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) AS negative,
       sum(CASE WHEN sentiment = 'mixed' THEN 1 ELSE 0 END) AS mixed,
@@ -300,19 +307,11 @@ def get_topic_aggregates(
         AND pa.published_at < datetime($previous_end)
         AND coalesce(pa.source_kind, '') IN $source_kinds
         AND ($platform IS NULL OR pa.platform = $platform)
-        AND (
-          size($entity_ids) = 0
-          OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(pa) WHERE matchedEntity.id IN $entity_ids }
-        )
       RETURN count(DISTINCT pa) AS previousMentions
     }
-    CALL (t) {
-      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea:SocialActivity)-[:COVERS]->(t)
-      WHERE ea.published_at >= datetime($start)
-        AND ea.published_at < datetime($end)
-        AND coalesce(ea.source_kind, '') IN $source_kinds
-        AND ($platform IS NULL OR ea.platform = $platform)
-        AND (size($entity_ids) = 0 OR entity.id IN $entity_ids)
+    CALL (topicActivities) {
+      UNWIND topicActivities AS ea
+      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea)
       WITH entity.name AS name, count(DISTINCT ea) AS hits
       ORDER BY hits DESC, name ASC
       RETURN collect(name)[..5] AS topEntities
@@ -400,6 +399,7 @@ def get_sentiment_trend(
         "entity_ids": _entity_filter_values(entity_id, entity_ids),
         "platform": _platform_filter(platform),
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
+        "activity_limit": _ALL_SOURCE_ACTIVITY_LIMIT,
     }
     cache_key = ("sentiment_trend_v2_day", _cacheable_params(params))
     cached = _cache_get(cache_key)
@@ -423,15 +423,19 @@ def get_sentiment_trend(
     """
     else:
         cypher = """
-    MATCH (a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)
-    WHERE a.published_at >= datetime($start)
-      AND a.published_at < datetime($end)
-      AND coalesce(a.source_kind, '') IN $source_kinds
-      AND ($platform IS NULL OR a.platform = $platform)
-      AND (
-        size($entity_ids) = 0
-        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
-      )
+    CALL {
+      MATCH (a:SocialActivity)
+      WHERE a.published_at >= datetime($start)
+        AND a.published_at < datetime($end)
+        AND coalesce(a.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR a.platform = $platform)
+      WITH a
+      ORDER BY a.published_at DESC
+      LIMIT $activity_limit
+      RETURN collect(a) AS scopedActivities
+    }
+    UNWIND scopedActivities AS a
+    MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
     WITH
       toString(date(a.published_at)) AS bucket,
       toLower(coalesce(s.name, 'neutral')) AS sentiment,
