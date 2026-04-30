@@ -19,6 +19,7 @@ SNAPSHOT_STALE_SECONDS = 3600
 SECTION_TIMEOUT_SECONDS = 8.0
 ACTIVITY_SCAN_LIMIT = 2500
 EVIDENCE_LIMIT = 24
+DEFAULT_SNAPSHOT_SETTING_KEY = "social_dashboard_default_snapshot"
 
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -1122,6 +1123,51 @@ def _cache_key(filters: dict[str, Any]) -> str:
     return "|".join(parts)
 
 
+def _is_default_snapshot_filters(filters: dict[str, Any]) -> bool:
+    """Default Social dashboard view: all sources, all platforms, selected date range."""
+    return not any(
+        _trimmed(filters.get(key))
+        for key in ("entity_id", "compare_entity_id", "platform", "source_kind")
+    )
+
+
+def _persist_default_snapshot(store: Any, filters: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    if not _is_default_snapshot_filters(filters) or not hasattr(store, "save_runtime_setting"):
+        return
+    try:
+        store.save_runtime_setting(
+            DEFAULT_SNAPSHOT_SETTING_KEY,
+            {
+                "filters": dict(filters),
+                "snapshot": deepcopy(snapshot),
+                "savedAt": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist Social dashboard default snapshot | error={}", exc)
+
+
+def _load_persisted_default_snapshot(store: Any, filters: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    if not _is_default_snapshot_filters(filters) or not hasattr(store, "get_runtime_setting"):
+        return None, None
+    try:
+        payload = store.get_runtime_setting(DEFAULT_SNAPSHOT_SETTING_KEY, {})
+    except Exception as exc:
+        logger.warning("Failed to load persisted Social dashboard default snapshot | error={}", exc)
+        return None, "read_error"
+    if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), dict):
+        return None, "miss"
+    persisted_filters = payload.get("filters")
+    if not isinstance(persisted_filters, dict):
+        return None, "invalid_filters"
+    if _cache_key(persisted_filters) != _cache_key(filters):
+        return None, "filter_mismatch"
+    snapshot = deepcopy(payload["snapshot"])
+    snapshot.setdefault("meta", {})["persistedDefaultSnapshot"] = True
+    snapshot["meta"]["persistedDefaultSavedAt"] = payload.get("savedAt")
+    return snapshot, "hit"
+
+
 def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | None = None) -> dict[str, Any]:
     payload = deepcopy(snapshot)
     meta = payload.setdefault("meta", {})
@@ -1644,6 +1690,7 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
             snapshot.setdefault("meta", {})["refreshReason"] = reason
             snapshot["meta"]["backgroundBuildMs"] = round((time.perf_counter() - started) * 1000, 2)
             _store_cache_snapshot(key, snapshot)
+            _persist_default_snapshot(store, filters, snapshot)
             logger.info("Social dashboard snapshot refreshed | key={} reason={} elapsed_ms={}", key, reason, snapshot["meta"]["backgroundBuildMs"])
         except Exception as exc:
             logger.warning("Social dashboard background refresh failed | key={} reason={} error={}", key, reason, exc)
@@ -1705,6 +1752,15 @@ def build_social_dashboard_snapshot(
         if payload["meta"]["cache"].get("expired"):
             stale_sections.append("expiredStaleCache")
         payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + stale_sections))
+        return payload
+
+    persisted_snapshot, persisted_status = _load_persisted_default_snapshot(store, filters)
+    if persisted_snapshot is not None:
+        _store_cache_snapshot(key, persisted_snapshot)
+        _schedule_refresh(store, filters, key, reason="persisted_default")
+        payload = _cache_payload(persisted_snapshot, status="persisted")
+        payload["meta"]["cache"]["refreshing"] = True
+        payload["meta"]["persistedDefaultReadStatus"] = persisted_status
         return payload
 
     scheduled = _schedule_refresh(store, filters, key, reason="miss")

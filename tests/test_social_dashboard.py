@@ -275,6 +275,10 @@ class _FakeSocialDashboardStore:
     def get_runtime_setting(self, key: str, default: dict) -> dict:
         return self.runtime_settings.get(key, default)
 
+    def save_runtime_setting(self, key: str, value: dict) -> dict:
+        self.runtime_settings[key] = value
+        return value
+
 
 class SocialDashboardSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -710,6 +714,102 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
 
         self.assertTrue(payload["meta"]["cache"]["expired"])
         self.assertIn("expiredStaleCache", payload["meta"]["degradedSections"])
+
+    def test_default_snapshot_persists_for_restart_fallback(self) -> None:
+        store = _FakeSocialDashboardStore()
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        social_dashboard._persist_default_snapshot(store, filters, snapshot)
+        persisted = store.runtime_settings[social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY]
+
+        self.assertEqual(persisted["filters"], filters)
+        self.assertEqual(persisted["snapshot"]["meta"]["usedActivities"], snapshot["meta"]["usedActivities"])
+        self.assertIn("savedAt", persisted)
+
+    def test_cache_miss_uses_persisted_default_snapshot_when_available(self) -> None:
+        store = _FakeSocialDashboardStore()
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        store.save_runtime_setting(
+            social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY,
+            {"filters": filters, "snapshot": snapshot, "savedAt": "2026-04-15T00:00:00+00:00"},
+        )
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            payload = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        schedule.assert_called_once()
+        self.assertEqual(payload["meta"]["cache"]["status"], "persisted")
+        self.assertTrue(payload["meta"]["persistedDefaultSnapshot"])
+        self.assertEqual(payload["meta"]["persistedDefaultReadStatus"], "hit")
+        self.assertEqual(payload["meta"]["usedActivities"], snapshot["meta"]["usedActivities"])
+
+    def test_persisted_default_snapshot_does_not_apply_to_specific_filters(self) -> None:
+        store = _FakeSocialDashboardStore()
+        default_filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        store.save_runtime_setting(
+            social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY,
+            {"filters": default_filters, "snapshot": snapshot, "savedAt": "2026-04-15T00:00:00+00:00"},
+        )
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            with self.assertRaises(social_dashboard.SocialDashboardWarmingError):
+                build_social_dashboard_snapshot(
+                    store,
+                    from_date="2026-04-01",
+                    to_date="2026-04-15",
+                    entity_id="entity-1",
+                )
+
+        schedule.assert_called_once()
 
     def test_semantic_failure_preserves_previous_good_topic_and_sentiment_widgets(self) -> None:
         good_topics = {
