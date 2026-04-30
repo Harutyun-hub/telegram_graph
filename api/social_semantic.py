@@ -203,7 +203,70 @@ def get_topic_aggregates(
     if cached is not None:
         return cached
 
-    cypher = """
+    if params["entity_ids"]:
+        cypher = """
+    MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:COVERS]->(t:Topic)
+    WHERE entity.id IN $entity_ids
+      AND a.published_at >= datetime($start)
+      AND a.published_at < datetime($end)
+      AND coalesce(a.source_kind, '') IN $source_kinds
+      AND ($platform IS NULL OR a.platform = $platform)
+      AND coalesce(t.proposed, false) = false
+      AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+    OPTIONAL MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
+    WITH t, a, head(collect(DISTINCT toLower(coalesce(s.name, 'neutral')))) AS sentiment
+    WITH
+      t,
+      count(DISTINCT a) AS currentMentions,
+      avg(coalesce(a.sentiment_score, 0.0)) AS avgSentimentScore,
+      collect(DISTINCT a.uid)[..30] AS activityUids,
+      collect(DISTINCT a.platform)[..4] AS topPlatforms,
+      sum(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) AS positive,
+      sum(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) AS negative,
+      sum(CASE WHEN sentiment = 'mixed' THEN 1 ELSE 0 END) AS mixed,
+      sum(CASE WHEN sentiment = 'urgent' THEN 1 ELSE 0 END) AS urgent,
+      sum(CASE WHEN sentiment = 'sarcastic' THEN 1 ELSE 0 END) AS sarcastic,
+      sum(CASE WHEN sentiment = 'neutral' OR sentiment = '' THEN 1 ELSE 0 END) AS neutral
+    ORDER BY currentMentions DESC, t.name ASC
+    LIMIT $limit
+    CALL (t) {
+      MATCH (previousEntity:TrackedEntity)-[:HAS_ACTIVITY]->(pa:SocialActivity)-[:COVERS]->(t)
+      WHERE previousEntity.id IN $entity_ids
+        AND pa.published_at >= datetime($previous_start)
+        AND pa.published_at < datetime($previous_end)
+        AND coalesce(pa.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR pa.platform = $platform)
+      RETURN count(DISTINCT pa) AS previousMentions
+    }
+    CALL (t) {
+      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea:SocialActivity)-[:COVERS]->(t)
+      WHERE entity.id IN $entity_ids
+        AND ea.published_at >= datetime($start)
+        AND ea.published_at < datetime($end)
+        AND coalesce(ea.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR ea.platform = $platform)
+      WITH entity.name AS name, count(DISTINCT ea) AS hits
+      ORDER BY hits DESC, name ASC
+      RETURN collect(name)[..5] AS topEntities
+    }
+    RETURN
+      t.name AS topic,
+      currentMentions,
+      previousMentions,
+      avgSentimentScore,
+      positive,
+      neutral,
+      negative,
+      mixed,
+      urgent,
+      sarcastic,
+      topEntities,
+      topPlatforms,
+      activityUids
+    ORDER BY currentMentions DESC, topic ASC
+    """
+    else:
+        cypher = """
     MATCH (a:SocialActivity)-[:COVERS]->(t:Topic)
     WHERE a.published_at >= datetime($start)
       AND a.published_at < datetime($end)
@@ -343,7 +406,23 @@ def get_sentiment_trend(
     if cached is not None:
         return cached
 
-    cypher = """
+    if params["entity_ids"]:
+        cypher = """
+    MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)
+    WHERE entity.id IN $entity_ids
+      AND a.published_at >= datetime($start)
+      AND a.published_at < datetime($end)
+      AND coalesce(a.source_kind, '') IN $source_kinds
+      AND ($platform IS NULL OR a.platform = $platform)
+    WITH
+      toString(date(a.published_at)) AS bucket,
+      toLower(coalesce(s.name, 'neutral')) AS sentiment,
+      count(DISTINCT a) AS hits
+    RETURN bucket, sentiment, hits
+    ORDER BY bucket ASC
+    """
+    else:
+        cypher = """
     MATCH (a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)
     WHERE a.published_at >= datetime($start)
       AND a.published_at < datetime($end)

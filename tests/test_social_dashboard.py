@@ -280,6 +280,7 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         social_dashboard._CACHE.clear()
         social_dashboard._REFRESHING.clear()
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
 
     def test_empty_store_returns_valid_snapshot_with_diagnostics(self) -> None:
         payload = build_social_dashboard_snapshot(_FakeSocialDashboardStore(empty=True), use_cache=False)
@@ -584,6 +585,34 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         trend.assert_called_once()
         self.assertEqual(topics.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
         self.assertEqual(trend.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
+
+    def test_selected_entity_semantic_queries_start_from_tracked_entity(self) -> None:
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_topic_aggregates(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                entity_ids=["entity-1", "entity-2"],
+            )
+
+        topic_cypher = query_rows.call_args.args[0]
+        topic_params = query_rows.call_args.args[1]
+        self.assertIn("MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:COVERS]->(t:Topic)", topic_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", topic_cypher)
+        self.assertEqual(topic_params["entity_ids"], ["entity-1", "entity-2"])
+
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_sentiment_trend(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                entity_ids=["entity-1", "entity-2"],
+            )
+
+        sentiment_cypher = query_rows.call_args.args[0]
+        sentiment_params = query_rows.call_args.args[1]
+        self.assertIn("MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)", sentiment_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", sentiment_cypher)
+        self.assertEqual(sentiment_params["entity_ids"], ["entity-1", "entity-2"])
 
     def test_social_dashboard_stale_cache_returns_without_rebuild(self) -> None:
         filters = {
