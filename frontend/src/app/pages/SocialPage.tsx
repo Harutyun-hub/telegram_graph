@@ -766,6 +766,7 @@ function buildSocialDashboardPath(params: {
 const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v2:';
 const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v2';
 const SOCIAL_DASHBOARD_CACHE_LIMIT = 10;
+const SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS = [1500, 2500, 3500, 5000];
 
 function socialDashboardCacheKey(path: string): string {
   return `${SOCIAL_DASHBOARD_CACHE_PREFIX}${path}`;
@@ -801,6 +802,11 @@ function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnaps
   } catch {
     // Best-effort cache only; never block dashboard rendering on storage quota.
   }
+}
+
+function isSocialDashboardWarmingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /warming|503/i.test(message);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1658,6 +1664,7 @@ export function SocialPage() {
   useEffect(() => {
     if (!dateRangeReady) return;
     let cancelled = false;
+    const retryTimers: Array<ReturnType<typeof window.setTimeout>> = [];
     const path = buildSocialDashboardPath({
       from: range.from,
       to: range.to,
@@ -1674,21 +1681,45 @@ export function SocialPage() {
     }
 
     setDashboardError(null);
-    apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 15_000 })
-      .then((snapshot) => {
-        if (cancelled) return;
-        setDashboard(snapshot);
-        writeCachedSocialDashboard(path, snapshot);
-      })
-      .catch((error: Error) => {
-        if (cancelled) return;
-        setDashboardError(error.message || String(error));
-      })
-      .finally(() => {
-        if (!cancelled) setDashboardLoading(false);
-      });
+    const fetchSnapshot = (attempt = 0) => {
+      apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 15_000 })
+        .then((snapshot) => {
+          if (cancelled) return;
+          setDashboard(snapshot);
+          writeCachedSocialDashboard(path, snapshot);
+          setDashboardError(null);
+          setDashboardLoading(false);
+        })
+        .catch((error: Error) => {
+          if (cancelled) return;
+          if (isSocialDashboardWarmingError(error)) {
+            setDashboardError(null);
+            if (attempt < SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS.length) {
+              setDashboardLoading(!cachedSnapshot);
+              const timer = window.setTimeout(
+                () => fetchSnapshot(attempt + 1),
+                SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS[attempt],
+              );
+              retryTimers.push(timer);
+              return;
+            }
+            if (!cachedSnapshot) {
+              setDashboard(null);
+            }
+            setDashboardLoading(false);
+            return;
+          }
+          setDashboardError(error.message || String(error));
+          setDashboardLoading(false);
+        });
+    };
 
-    return () => { cancelled = true; };
+    fetchSnapshot();
+
+    return () => {
+      cancelled = true;
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, [dateRangeReady, platformFilter, primarySource.id, range.from, range.to, secondarySource?.id]);
 
   useEffect(() => {
@@ -1889,9 +1920,8 @@ export function SocialPage() {
   const avgPositive = `${Math.round(Number(strictSummary.avgPositive ?? 0) || 0)}%`;
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
-  const dashboardWarming = Boolean(dashboardError && /warming|503/i.test(dashboardError));
-  const showDashboardLoading = dashboardLoading || dashboardWarming;
-  const showDashboardError = Boolean(dashboardError && !dashboardWarming);
+  const showDashboardLoading = dashboardLoading;
+  const showDashboardError = Boolean(dashboardError);
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
     label: item.entity,
