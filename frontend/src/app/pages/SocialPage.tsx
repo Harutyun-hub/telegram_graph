@@ -782,6 +782,26 @@ function readCachedSocialDashboard(path: string): SocialDashboardSnapshot | null
   }
 }
 
+function readLatestCachedSocialDashboard(excludePath?: string): SocialDashboardSnapshot | null {
+  if (typeof window === 'undefined') return null;
+  const excludedKey = excludePath ? socialDashboardCacheKey(excludePath) : null;
+  try {
+    const rawManifest = window.localStorage.getItem(SOCIAL_DASHBOARD_CACHE_MANIFEST);
+    const keys = rawManifest ? JSON.parse(rawManifest) : [];
+    if (!Array.isArray(keys)) return null;
+    for (const key of keys) {
+      if (typeof key !== 'string' || !key.startsWith(SOCIAL_DASHBOARD_CACHE_PREFIX)) continue;
+      if (excludedKey && key === excludedKey) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      return JSON.parse(raw) as SocialDashboardSnapshot;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnapshot): void {
   if (typeof window === 'undefined') return;
   try {
@@ -1673,9 +1693,10 @@ export function SocialPage() {
       platform: platformFilter,
     });
     const cachedSnapshot = readCachedSocialDashboard(path);
-    if (cachedSnapshot) {
-      setDashboard(cachedSnapshot);
-      setDashboardLoading(false);
+    const fallbackSnapshot = cachedSnapshot ?? readLatestCachedSocialDashboard(path);
+    if (fallbackSnapshot) {
+      setDashboard(fallbackSnapshot);
+      setDashboardLoading(!cachedSnapshot);
     } else {
       setDashboardLoading(true);
     }
@@ -1703,7 +1724,7 @@ export function SocialPage() {
               retryTimers.push(timer);
               return;
             }
-            if (!cachedSnapshot) {
+            if (!fallbackSnapshot) {
               setDashboard(null);
             }
             setDashboardLoading(false);
