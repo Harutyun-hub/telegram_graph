@@ -336,6 +336,7 @@ export function SocialTopicsPage() {
   const {
     topics,
     loading: topicsLoading,
+    hasLiveData: topicsHasLiveData,
     error: topicsError,
     accessDenied: listAccessDenied,
     refresh: refreshTopics,
@@ -412,7 +413,7 @@ export function SocialTopicsPage() {
 
   const accessDenied = listAccessDenied || detailAccessDenied;
   const totalMentions = topicViewModels.reduce((sum, topic) => sum + topic.mentions, 0);
-  const requestedTopicMissing = Boolean(requestedTopic && !topicsLoading && !selectedTopic);
+  const requestedTopicMissing = Boolean(requestedTopic && !topicsLoading && topicsHasLiveData && !topicsError && !selectedTopic);
 
   const filtered = topicViewModels
     .filter((topic) => {
