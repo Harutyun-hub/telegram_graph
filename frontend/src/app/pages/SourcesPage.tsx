@@ -605,7 +605,7 @@ export function SourcesPage() {
   const loadFreshnessStatus = async (quiet = false) => {
     if (!quiet) setFreshnessLoading(true);
     try {
-      const response = await requestJson<PipelineFreshnessSnapshot>('/api/freshness');
+      const response = await requestJson<PipelineFreshnessSnapshot>('/api/freshness?force=true');
       setFreshness(response);
       setFreshnessError(null);
     } catch (err: any) {
@@ -688,14 +688,11 @@ export function SourcesPage() {
     setSchedulerError(null);
     try {
       const response = await requestJson<ScraperSchedulerStatus>('/api/scraper/scheduler/run-once', { method: 'POST' });
-      setScheduler({
-        ...response,
-        running_now: true,
-      });
+      setScheduler(response);
       setTimeout(() => {
         void loadSchedulerStatus(true);
         void loadFreshnessStatus(true);
-      }, 500);
+      }, 1200);
     } catch (err: any) {
       setSchedulerError(String(err?.message || 'Failed to run scraper now'));
     } finally {
@@ -878,7 +875,7 @@ export function SourcesPage() {
                   }`}
                   style={{ fontWeight: 500 }}
                 >
-                  {value === 'telegram' ? 'Telegram' : 'Social'}
+                  {value === 'telegram' ? 'Telegram' : (ru ? 'Social' : 'Social')}
                 </button>
               ))}
             </div>
@@ -890,7 +887,7 @@ export function SourcesPage() {
               <Plus className="w-4 h-4" />
               {mode === 'telegram'
                 ? (ru ? 'Добавить источник' : 'Add Source')
-                : (ru ? 'Добавить Facebook' : 'Add Facebook')}
+                : (ru ? 'Добавить источник' : 'Add Source')}
             </button>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { mockAppData } from '../data/mockData';
 import { CATEGORY_RU, translateCategory, translateTopicRu } from './topicPresentation';
+import { differenceInDaysInclusive } from '../utils/dashboardDateRange';
 import type { AppData } from '../types/data';
 
 const TOPIC_COLORS = ['#ef4444', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899', '#10b981', '#06b6d4', '#6b7280'];
@@ -244,6 +245,35 @@ function unwrapPayload(payload: any): any {
   return payload;
 }
 
+function minutesSinceIso(value: any): number | null {
+  const text = asStr(value, '').trim();
+  if (!text) return null;
+  const parsed = new Date(text);
+  const millis = parsed.getTime();
+  if (!Number.isFinite(millis)) return null;
+  return Math.max(0, Math.round((Date.now() - millis) / 60000));
+}
+
+function resolveSelectedRangeDays(payload: any, raw: any): number {
+  const metaDays = asNum(payload?.meta?.days, Number.NaN);
+  if (Number.isFinite(metaDays) && metaDays > 0) {
+    return Math.max(1, Math.round(metaDays));
+  }
+
+  const requestedFrom = asStr(payload?.meta?.requestedFrom, '').trim();
+  const requestedTo = asStr(payload?.meta?.requestedTo, '').trim();
+  if (requestedFrom && requestedTo) {
+    return differenceInDaysInclusive(requestedFrom, requestedTo);
+  }
+
+  const briefWindowDays = asNum(raw?.communityBrief?.windowDays, Number.NaN);
+  if (Number.isFinite(briefWindowDays) && briefWindowDays > 0) {
+    return Math.max(1, Math.round(briefWindowDays));
+  }
+
+  return 1;
+}
+
 function stageStyle(stageRaw: string) {
   const stage = stageRaw.toLowerCase();
   if (stage.includes('grow') || stage.includes('emerg') || stage.includes('ris')) {
@@ -254,7 +284,7 @@ function stageStyle(stageRaw: string) {
 
 export function adaptDashboardPayload(payload: any): AppData {
   const raw = unwrapPayload(payload) || {};
-  const selectedRangeDays = Math.max(1, asNum(payload?.meta?.days, 1));
+  const selectedRangeDays = resolveSelectedRangeDays(payload, raw);
   const app = createEmptyAppData();
 
   const rawTrending = asArray(raw.trendingTopics);
@@ -392,23 +422,51 @@ export function adaptDashboardPayload(payload: any): AppData {
   }
 
   try {
-    const posts24h = asNum(raw?.communityBrief?.postsAnalyzed24h, asNum(raw?.communityBrief?.postsLast24h, 0));
-    const commentScopes24h = asNum(raw?.communityBrief?.commentScopesAnalyzed24h, asNum(raw?.communityBrief?.commentsLast24h, 0));
-    const positiveIntentPct = clamp(asNum(raw?.communityBrief?.positiveIntentPct24h, 0), 0, 100);
-    const negativeIntentPct = clamp(asNum(raw?.communityBrief?.negativeIntentPct24h, 0), 0, 100);
+    const posts24h = asNum(
+      raw?.communityBrief?.postsAnalyzedInWindow,
+      asNum(raw?.communityBrief?.postsAnalyzed24h, asNum(raw?.communityBrief?.postsLast24h, 0)),
+    );
+    const commentScopes24h = asNum(
+      raw?.communityBrief?.commentScopesAnalyzedInWindow,
+      asNum(raw?.communityBrief?.commentScopesAnalyzed24h, asNum(raw?.communityBrief?.commentsLast24h, 0)),
+    );
+    const positiveIntentPct = clamp(
+      asNum(raw?.communityBrief?.positiveIntentPctInWindow, asNum(raw?.communityBrief?.positiveIntentPct24h, 0)),
+      0,
+      100,
+    );
+    const negativeIntentPct = clamp(
+      asNum(raw?.communityBrief?.negativeIntentPctInWindow, asNum(raw?.communityBrief?.negativeIntentPct24h, 0)),
+      0,
+      100,
+    );
     const neutralIntentPct = clamp(100 - positiveIntentPct - negativeIntentPct, 0, 100);
-    const topTopics = asArray<string>(raw?.communityBrief?.topTopics).slice(0, 5);
-    const topTopicsRu = topTopics.map((t) => translateTopicRu(t));
-    const totalAnalyses = asNum(raw?.communityBrief?.totalAnalyses24h, posts24h + commentScopes24h);
+    const topTopics = asArray<string>(raw?.communityBrief?.topTopics)
+      .map((topic) => normalizeTopicLabel(topic))
+      .filter(Boolean)
+      .slice(0, 5);
+    const topTopicRows = asArray(raw?.communityBrief?.topTopicRows)
+      .map((row: any) => normalizeTopicLabel(row?.name || row?.sourceTopic || row?.topic))
+      .filter(Boolean);
+    const selectedTopTopics = topTopics.length > 0 ? topTopics : topTopicRows.slice(0, 5);
+    const selectedTopTopicsRu = selectedTopTopics.map((t) => translateTopicRu(t));
+    const totalAnalyses = asNum(
+      raw?.communityBrief?.totalAnalysesInWindow,
+      asNum(raw?.communityBrief?.totalAnalyses24h, posts24h + commentScopes24h),
+    );
+    const snapshotBuiltMinutesAgo = minutesSinceIso(payload?.meta?.snapshotBuiltAt);
+    const refreshedMinutesAgo = asNum(raw?.communityBrief?.refreshedMinutesAgo, Number.NaN);
     app.communityBrief.messagesAnalyzed = totalAnalyses;
-    app.communityBrief.updatedMinutesAgo = asNum(raw?.communityBrief?.refreshedMinutesAgo, 5);
+    app.communityBrief.updatedMinutesAgo = Number.isFinite(snapshotBuiltMinutesAgo)
+      ? snapshotBuiltMinutesAgo
+      : (Number.isFinite(refreshedMinutesAgo) ? refreshedMinutesAgo : 0);
     app.communityBrief.postsAnalyzed24h = posts24h;
     app.communityBrief.commentScopesAnalyzed24h = commentScopes24h;
     app.communityBrief.positiveIntentPct24h = positiveIntentPct;
     app.communityBrief.negativeIntentPct24h = negativeIntentPct;
 
-    app.communityBrief.mainBrief.en = `Selected window snapshot (${selectedRangeDays}d): ${posts24h} posts and ${commentScopes24h} analyzed comment scopes. People talk mostly about ${topTopics.join(', ') || 'core community topics'}.`;
-    app.communityBrief.mainBrief.ru = `Снимок выбранного окна (${selectedRangeDays} дн.): ${posts24h} постов и ${commentScopes24h} контекстных групп комментариев. Чаще всего обсуждают: ${topTopicsRu.join(', ') || 'ключевые темы сообщества'}.`;
+    app.communityBrief.mainBrief.en = `Selected window snapshot (${selectedRangeDays}d): ${posts24h} posts and ${commentScopes24h} analyzed comment scopes. People talk mostly about ${selectedTopTopics.join(', ') || 'core community topics'}.`;
+    app.communityBrief.mainBrief.ru = `Снимок выбранного окна (${selectedRangeDays} дн.): ${posts24h} постов и ${commentScopes24h} контекстных групп комментариев. Чаще всего обсуждают: ${selectedTopTopicsRu.join(', ') || 'ключевые темы сообщества'}.`;
     app.communityBrief.expandedBrief.en = [
       `Intent split: ${positiveIntentPct}% positive, ${negativeIntentPct}% negative, ${neutralIntentPct}% neutral.`,
       'Every top topic can be opened with real post/comment evidence snippets.',
@@ -671,8 +729,8 @@ export function adaptDashboardPayload(payload: any): AppData {
         evidence: r.evidence,
       }));
 
-      app.questionBriefs.en = en.slice(0, 8);
-      app.questionBriefs.ru = ruRows.slice(0, 8);
+      app.questionBriefs.en = en;
+      app.questionBriefs.ru = ruRows;
     }
   } catch {
     // Keep mock defaults.
@@ -750,6 +808,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         lowEvidence: !!q.lowEvidence,
       })));
       app.qaGap = { en: enGap, ru: ruGap };
+
     }
   } catch {
     // Keep mock defaults.
@@ -900,8 +959,8 @@ export function adaptDashboardPayload(payload: any): AppData {
         evidence: r.evidence,
       }));
 
-      app.problemBriefs.en = en.slice(0, 8);
-      app.problemBriefs.ru = ruRows.slice(0, 8);
+      app.problemBriefs.en = en;
+      app.problemBriefs.ru = ruRows;
     }
   } catch {
     // Keep mock defaults.
@@ -1004,6 +1063,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         const topic = normalizeTopicLabel(r.topic);
         if (!topic) return;
         if (NOISY_TOPIC_KEYS.has(topic.toLowerCase())) return;
+        const key = topicKey(topic);
         const weeklyCurrent = asNum(r.affectedThisWeek, 0);
         const weeklyPrevious = asNum(r.affectedPrevWeek, 0);
         const computedTrend = boundedTrend(weeklyCurrent, weeklyPrevious);
@@ -1050,6 +1110,7 @@ export function adaptDashboardPayload(payload: any): AppData {
         })),
       }));
       app.problems = { en, ru };
+
     }
   } catch {
     // Keep mock defaults.

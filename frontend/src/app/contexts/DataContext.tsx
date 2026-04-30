@@ -25,11 +25,9 @@ import type { AppData } from '../types/data';
 import { adaptDashboardPayload, createEmptyAppData } from '../services/dashboardAdapter';
 import { apiFetch } from '../services/api';
 import { useDashboardDateRange } from './DashboardDateRangeContext';
-
-interface DashboardRangeRef {
-  from: string;
-  to: string;
-}
+import { resolveDisplayedDashboardRange, sameDashboardRange, type DashboardRangeRef } from '../utils/dashboardDisplayRange';
+import { isPlaceholderDashboardSnapshot } from '../utils/dashboardSnapshotValidity';
+import type { DashboardDateRange } from '../utils/dashboardDateRange';
 
 interface DashboardMeta {
   trustedEndDate?: string;
@@ -59,6 +57,7 @@ interface DataContextValue {
   isStaleForSelection: boolean;
   error: string | null;
   dashboardMeta: DashboardMeta | null;
+  displayRange: DashboardDateRange | null;
   selectedRange: DashboardRangeRef | null;
   visibleRange: DashboardRangeRef | null;
   lastSuccessfulRange: DashboardRangeRef | null;
@@ -76,18 +75,28 @@ const DataContext = createContext<DataContextValue>({
   isStaleForSelection: false,
   error: null,
   dashboardMeta: null,
+  displayRange: null,
   selectedRange: null,
   visibleRange: null,
   lastSuccessfulRange: null,
   refresh: () => {},
 });
 
-function snapshotKeyForRange(from: string, to: string): string {
-  return `radar.dashboard.snapshot.v5:${from}:${to}`;
+export function snapshotKeyForRange(from: string, to: string): string {
+  return `radar.dashboard.snapshot.v6:${from}:${to}`;
 }
 
-function sameRange(a: DashboardRangeRef | null, b: DashboardRangeRef | null): boolean {
-  return Boolean(a && b && a.from === b.from && a.to === b.to);
+export function isSnapshotMetaForRequestedRange(
+  meta: DashboardMeta | null | undefined,
+  from: string,
+  to: string,
+): boolean {
+  const requestedFrom = String(meta?.requestedFrom ?? '').trim();
+  const requestedTo = String(meta?.requestedTo ?? '').trim();
+  if (!requestedFrom || !requestedTo) {
+    return true;
+  }
+  return requestedFrom === from && requestedTo === to;
 }
 
 function loadSnapshot(from: string, to: string): { data: AppData; meta: DashboardMeta | null } | null {
@@ -104,7 +113,9 @@ function loadSnapshot(from: string, to: string): { data: AppData; meta: Dashboar
     const hasJobDataWithoutEvidence = Array.isArray(jobItems)
       && jobItems.length > 0
       && !jobItems.some((item: any) => Array.isArray(item?.evidence) && item.evidence.length > 0);
-    return hasJobDataWithoutEvidence ? null : snapshot;
+    if (hasJobDataWithoutEvidence) return null;
+    if (!isSnapshotMetaForRequestedRange(snapshot.meta, from, to)) return null;
+    return isPlaceholderDashboardSnapshot(snapshot.data, snapshot.meta) ? null : snapshot;
   } catch {
     return null;
   }
@@ -112,6 +123,7 @@ function loadSnapshot(from: string, to: string): { data: AppData; meta: Dashboar
 
 function saveSnapshot(from: string, to: string, data: AppData, meta: DashboardMeta | null): void {
   if (typeof window === 'undefined') return;
+  if (isPlaceholderDashboardSnapshot(data, meta)) return;
   try {
     window.sessionStorage.setItem(snapshotKeyForRange(from, to), JSON.stringify({ data, meta }));
   } catch {
@@ -215,10 +227,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }, [doFetch, ready]);
 
   const selectedRange: DashboardRangeRef = { from: range.from, to: range.to };
+  const displayRange = resolveDisplayedDashboardRange(range, visibleRange);
   const isStaleForSelection = hasLiveData && (
     error !== null
     || Boolean(dashboardMeta?.isStale)
-    || !sameRange(visibleRange, selectedRange)
+    || !sameDashboardRange(visibleRange, selectedRange)
   );
 
   const value: DataContextValue = {
@@ -229,6 +242,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     isStaleForSelection,
     error,
     dashboardMeta,
+    displayRange,
     selectedRange,
     visibleRange,
     lastSuccessfulRange,

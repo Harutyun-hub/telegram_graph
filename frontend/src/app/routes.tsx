@@ -1,4 +1,4 @@
-import { Navigate, Outlet, createBrowserRouter, useLocation } from "react-router";
+import { Navigate, Outlet, createBrowserRouter, useLocation, useRouteError } from "react-router";
 import { AdminLayout } from "./layouts/AdminLayout";
 import { DataProvider } from "./contexts/DataContext";
 import { AdminConfigProvider } from "./contexts/AdminConfigContext";
@@ -81,6 +81,35 @@ function SocialLegacyRedirect() {
   return <Navigate replace to="/social" />;
 }
 
+function DashboardRouteError() {
+  const error = useRouteError();
+  const message = error instanceof Error
+    ? error.message
+    : 'Dashboard rendering failed for the selected range.';
+
+  return (
+    <div className="mx-auto max-w-[1600px] p-4 md:p-6">
+      <div className="rounded-xl border border-red-200 bg-white p-6">
+        <h1 className="text-base font-semibold text-red-700">
+          Dashboard failed to render
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          Не удалось отрисовать дашборд для выбранного диапазона. The current screen can be refreshed safely.
+        </p>
+        <p className="mt-3 text-xs text-slate-500 break-words">
+          {message}
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          className="mt-4 rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-blue-700"
+        >
+          Reload dashboard
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export const router = createBrowserRouter([
   {
     path: "/login",
@@ -104,6 +133,7 @@ export const router = createBrowserRouter([
         children: [
           {
             index: true,
+            errorElement: <DashboardRouteError />,
             lazy: async () => {
               const { DashboardPage } = await import("./pages/DashboardPage");
               return { Component: DashboardPage };

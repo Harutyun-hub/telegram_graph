@@ -59,3 +59,4 @@ backups/
 docs/*
 !docs/
 !docs/staging_runbook.md
+!docs/railway-live-staging-inventory.md

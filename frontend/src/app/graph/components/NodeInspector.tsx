@@ -152,6 +152,12 @@ export function NodeInspector({ node, graphData, filters, onClose, embedded = fa
   const topicActive = node?.type === 'topic';
   const categoryActive = node?.type === 'category';
   const channelActive = node?.type === 'channel';
+  const hasGraphScopedFilters = Boolean(
+    (filters?.channels?.length || 0) > 0
+    || (filters?.sentiments?.length || 0) > 0
+    || (filters?.category || '').trim()
+    || (filters?.signalFocus && filters.signalFocus !== 'all')
+  );
 
   const topicDetail = useTopicDetail(topicActive ? node?.name || null : null, topicActive ? node?.category || null : null);
   const topicEvidence = useTopicEvidenceFeed(
@@ -159,7 +165,7 @@ export function NodeInspector({ node, graphData, filters, onClose, embedded = fa
     topicActive ? node?.category || null : null,
     proofView,
     null,
-    topicActive,
+    topicActive && !hasGraphScopedFilters,
   );
   const channelDetail = useChannelDetail(channelActive ? node?.name || null : null);
   const channelPosts = useChannelPostsFeed(channelActive ? node?.name || null : null, channelActive);
@@ -236,9 +242,11 @@ export function NodeInspector({ node, graphData, filters, onClose, embedded = fa
         ? graphNodeDetails.evidence
         : (topicSummary?.evidence || [])
     );
-  const topicVisibleEvidence = (topicEvidence.data?.items && topicEvidence.data.items.length > 0)
-    ? topicEvidence.data.items
-    : topicFallbackEvidence;
+  const topicVisibleEvidence = hasGraphScopedFilters
+    ? topicFallbackEvidence
+    : (topicEvidence.data?.items && topicEvidence.data.items.length > 0)
+      ? topicEvidence.data.items
+      : topicFallbackEvidence;
   const topicEvidenceHasFallback = topicVisibleEvidence.length > 0;
 
   return (
@@ -395,12 +403,12 @@ export function NodeInspector({ node, graphData, filters, onClose, embedded = fa
                 </div>
               </div>
 
-              {(topicDetail.loading || topicEvidence.loading) && !topicEvidenceHasFallback ? (
+              {(topicDetail.loading || graphNodeDetailsLoading || (topicEvidence.loading && !hasGraphScopedFilters)) && !topicEvidenceHasFallback ? (
                 <div className="rounded-2xl bg-white/5 border border-white/10 px-4 py-4 flex items-center gap-3 text-white/60 text-sm">
                   <Loader2 className="w-4 h-4 animate-spin text-cyan-300" />
                   Loading topic evidence...
                 </div>
-              ) : topicEvidence.error && !topicEvidenceHasFallback ? (
+              ) : topicEvidence.error && !hasGraphScopedFilters && !topicEvidenceHasFallback ? (
                 <div className="rounded-2xl bg-rose-500/10 border border-rose-400/20 px-4 py-4 text-rose-100 text-sm">
                   Failed to load evidence for this topic.
                 </div>
@@ -413,12 +421,12 @@ export function NodeInspector({ node, graphData, filters, onClose, embedded = fa
                   {topicVisibleEvidence.slice(0, topicEvidence.data?.items?.length || 6).map((item) => (
                     <EvidenceCard key={item.id} item={item} />
                   ))}
-                  {topicEvidence.error && topicEvidenceHasFallback && (
+                  {topicEvidence.error && !hasGraphScopedFilters && topicEvidenceHasFallback && (
                     <div className="rounded-2xl bg-amber-500/10 border border-amber-400/20 px-4 py-3 text-amber-100 text-xs">
                       Live evidence refresh failed, so the inspector is showing the latest available grounded topic evidence instead.
                     </div>
                   )}
-                  {topicEvidence.data?.hasMore && (
+                  {!hasGraphScopedFilters && topicEvidence.data?.hasMore && (
                     <button
                       onClick={() => topicEvidence.loadMore()}
                       disabled={topicEvidence.loadingMore}

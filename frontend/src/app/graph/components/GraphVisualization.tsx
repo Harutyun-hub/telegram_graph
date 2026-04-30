@@ -5,6 +5,7 @@ import { EmptyGraphState } from '@/app/graph/components/EmptyGraphState';
 import { getGraphData, type GraphData, type GraphFilters, type GraphNode } from '@/app/graph/services/api';
 import type { GraphFreshnessMeta } from '@/app/graph/services/types';
 import { getNodeColors, getNodeSize, type NodeType } from '@/app/graph/utils/nodeColors';
+import { buildVisibleGraphData } from '@/app/graph/utils/visibility';
 
 interface PreparedNode extends GraphNode {
   size: number;
@@ -34,17 +35,6 @@ interface LayoutInsets {
   right: number;
   top: number;
   bottom: number;
-}
-
-function sourceDetailTopicLinkLimit(sourceDetail?: string): number {
-  switch ((sourceDetail || '').toLowerCase()) {
-    case 'minimal':
-      return 1;
-    case 'expanded':
-      return 3;
-    default:
-      return 2;
-  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -116,6 +106,13 @@ function hashNumber(input: string): number {
   return Math.abs(hash);
 }
 
+function nodeSizeWeight(node: GraphNode): number {
+  if (node.type === 'topic') return Number(node.mentionCount || 0);
+  if (node.type === 'category') return Number(node.mentionCount || 0);
+  if (node.type === 'channel') return Number(node.mentionCount || 0);
+  return Number(node.val || 0);
+}
+
 function buildSeededGraph(
   data: GraphData | null,
   width: number,
@@ -139,7 +136,7 @@ function buildSeededGraph(
 
   const nodes = data.nodes.map((node) => ({
     ...node,
-    size: getNodeSize(node.type as NodeType, Number(node.val || node.mentionCount || node.topicCount || 0)),
+    size: getNodeSize(node.type as NodeType, nodeSizeWeight(node)),
   })) as PreparedNode[];
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -281,13 +278,11 @@ function enrichGraphData(
     const signal = signalTotals.get(node.id) || 0;
     const baseSize = typeof (node as PreparedNode).size === 'number'
       ? Number((node as PreparedNode).size)
-      : getNodeSize(type, Number(node.val || node.mentionCount || node.topicCount || 0));
+      : getNodeSize(type, nodeSizeWeight(node));
 
-    const signalBoost = type === 'channel'
-      ? 0
-      : type === 'topic'
-        ? Math.min(Math.log(signal + 1) * 0.45, 4)
-        : Math.min(Math.log(signal + 1) * 0.22, 1.8);
+    const signalBoost = type === 'category'
+      ? Math.min(Math.log(signal + 1) * 0.22, 1.8)
+      : 0;
 
     return {
       ...node,
@@ -301,67 +296,6 @@ function enrichGraphData(
     nodes,
     links: seededData.links,
     meta: seededData.meta,
-  };
-}
-
-function buildVisibleGraphData(
-  data: GraphData | null,
-  selectedNodeId?: string | null,
-  filters?: GraphFilters,
-): GraphData | null {
-  if (!data) return null;
-
-  const nodeById = new Map(data.nodes.map((node) => [node.id, node]));
-  const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) || null : null;
-  const activeCategory = selectedNode?.type === 'category'
-    ? selectedNode.name
-    : selectedNode?.type === 'topic'
-      ? selectedNode.category || ''
-      : (filters?.category || '').trim();
-
-  const visibleNodes = data.nodes.filter((node) => {
-    if (node.type !== 'topic') return true;
-    return Boolean(activeCategory) && node.category === activeCategory;
-  });
-  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
-
-  const visibleLinks = data.links.filter((link) => {
-    const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-    const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-    if (!visibleNodeIds.has(sourceId) || !visibleNodeIds.has(targetId)) return false;
-    if (link.type === 'category-topic') {
-      return Boolean(activeCategory);
-    }
-    return true;
-  });
-
-  if (activeCategory) {
-    const perTopicLimit = sourceDetailTopicLinkLimit(filters?.sourceDetail);
-    const contextLinks = new Map<string, { source: string; target: string; value: number; type: string }>();
-    const visibleChannelIds = new Set(visibleNodes.filter((node) => node.type === 'channel').map((node) => node.id));
-
-    visibleNodes
-      .filter((node) => node.type === 'topic' && node.category === activeCategory)
-      .forEach((topic) => {
-        (topic.topChannels || []).slice(0, perTopicLimit).forEach((channel) => {
-          if (!visibleChannelIds.has(channel.id)) return;
-          const key = `${channel.id}:${topic.id}`;
-          contextLinks.set(key, {
-            source: channel.id,
-            target: topic.id,
-            value: Math.max(1, Number(channel.mentions || 1)),
-            type: 'channel-topic-context',
-          });
-        });
-      });
-
-    visibleLinks.push(...contextLinks.values());
-  }
-
-  return {
-    nodes: visibleNodes,
-    links: visibleLinks,
-    meta: data.meta,
   };
 }
 
@@ -447,8 +381,8 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
     );
 
     const visibleGraphData = useMemo(
-      () => buildVisibleGraphData(fullPreparedData, selectedNodeId, filters),
-      [filters, fullPreparedData, selectedNodeId],
+      () => buildVisibleGraphData(fullPreparedData),
+      [fullPreparedData],
     );
 
     const typeById = useMemo(
@@ -581,7 +515,7 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
             const hasCategory = sourceType === 'category' || targetType === 'category';
             const linkType = String(link.type || '');
 
-            if (linkType === 'channel-topic-context') return denseView ? 154 : 138;
+            if (linkType === 'channel-topic') return denseView ? 158 : 138;
             if (hasChannel && hasCategory) return denseView ? 210 : 188;
             if (hasCategory && hasTopic) return denseView ? 140 : 125;
             return denseView ? 160 : 140;
@@ -593,8 +527,9 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
             const sourceType = getLinkNodeType(link.source, typeById);
             const targetType = getLinkNodeType(link.target, typeById);
             const linkType = String(link.type || '');
-            if (linkType === 'channel-topic-context') return 0.18;
-            return sourceType === 'channel' || targetType === 'channel' ? 0.28 : 0.22;
+            if (linkType === 'channel-topic') return 0.26;
+            if (linkType === 'channel-category') return 0.08;
+            return sourceType === 'channel' || targetType === 'channel' ? 0.16 : 0.22;
           });
         }
       }
@@ -680,6 +615,22 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
       ? `${headlineType.charAt(0).toUpperCase()}${headlineType.slice(1)}`
       : headlineType;
 
+    const curatedViewLabel = useMemo(() => {
+      const visible = Number(fullPreparedData?.meta?.visibleTopicCount || 0);
+      const total = Number(fullPreparedData?.meta?.totalEligibleTopicCount || visible);
+      const limit = Number(fullPreparedData?.meta?.topicLimit || filters?.max_nodes || visible || 20);
+      const shown = Math.min(visible || limit, limit);
+      if (total > shown) {
+        return `Top ${shown} of ${total} topics in selected window`;
+      }
+      return `${visible} topics in selected window`;
+    }, [
+      filters?.max_nodes,
+      fullPreparedData?.meta?.topicLimit,
+      fullPreparedData?.meta?.totalEligibleTopicCount,
+      fullPreparedData?.meta?.visibleTopicCount,
+    ]);
+
     const freshnessTone = useMemo(() => {
       const status = String(freshness?.status || 'unknown').toLowerCase();
       if (status === 'healthy') return { dot: 'bg-emerald-400', value: 'text-emerald-200' };
@@ -741,6 +692,9 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
                 <div className="mt-0.5 text-[15px] font-semibold leading-tight tracking-[-0.03em] text-white">
                   {headlineLabel}
                 </div>
+                {!selectedNode ? (
+                  <div className="mt-1 text-[11px] font-medium text-white/45">{curatedViewLabel}</div>
+                ) : null}
               </div>
             </div>
 
@@ -753,7 +707,12 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
               </div>
               <div>
                 <div className="text-[10px] uppercase tracking-[0.18em] text-white/35">Topics</div>
-                <div className="mt-0.5 text-[13px] font-medium text-orange-300">{fullPreparedData?.meta?.visibleTopicCount || 0}</div>
+                <div className="mt-0.5 text-[13px] font-medium text-orange-300">
+                  {fullPreparedData?.meta?.visibleTopicCount || 0}
+                  {(fullPreparedData?.meta?.totalEligibleTopicCount || 0) > (fullPreparedData?.meta?.visibleTopicCount || 0) ? (
+                    <span className="text-white/35"> / {fullPreparedData?.meta?.totalEligibleTopicCount}</span>
+                  ) : null}
+                </div>
               </div>
               <div>
                 <div className="text-[10px] uppercase tracking-[0.18em] text-white/35">Channels</div>
@@ -914,17 +873,16 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
             }
 
             if (isSelected) {
-              const pulse = Math.sin(Date.now() / 300);
-              ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+              ctx.strokeStyle = 'rgba(251, 191, 36, 0.72)';
               ctx.lineWidth = 2.5 / globalScale;
               ctx.beginPath();
-              ctx.arc(node.x, node.y, radius * (1.3 + (pulse * 0.15)), 0, Math.PI * 2);
+              ctx.arc(node.x, node.y, radius * 1.35, 0, Math.PI * 2);
               ctx.stroke();
 
-              ctx.strokeStyle = 'rgba(251, 191, 36, 0.3)';
+              ctx.strokeStyle = 'rgba(251, 191, 36, 0.28)';
               ctx.lineWidth = 1.5 / globalScale;
               ctx.beginPath();
-              ctx.arc(node.x, node.y, radius * (1.5 + (pulse * 0.2)), 0, Math.PI * 2);
+              ctx.arc(node.x, node.y, radius * 1.58, 0, Math.PI * 2);
               ctx.stroke();
             }
 
@@ -998,7 +956,9 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
           linkCurvature={(link: any) => {
             const sourceType = getLinkNodeType(link.source, typeById);
             const targetType = getLinkNodeType(link.target, typeById);
-            if (String(link.type || '') === 'channel-topic-context') return 0.03;
+            const linkType = String(link.type || '');
+            if (linkType === 'channel-topic') return 0.04;
+            if (linkType === 'channel-category') return 0.08;
             return sourceType === 'channel' || targetType === 'channel' ? 0.05 : 0.14;
           }}
           linkColor={(link: any) => {
@@ -1014,8 +974,12 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
               return 'rgba(0, 212, 255, 0.5)';
             }
 
-            if (linkType === 'channel-topic-context') {
-              return denseView ? 'rgba(120, 220, 255, 0.18)' : 'rgba(120, 220, 255, 0.12)';
+            if (linkType === 'channel-topic') {
+              return denseView ? 'rgba(120, 220, 255, 0.32)' : 'rgba(120, 220, 255, 0.24)';
+            }
+
+            if (linkType === 'channel-category') {
+              return denseView ? 'rgba(100, 150, 200, 0.14)' : 'rgba(100, 150, 200, 0.08)';
             }
 
             return denseView ? 'rgba(120, 170, 220, 0.24)' : 'rgba(100, 150, 200, 0.15)';
@@ -1028,9 +992,11 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
             const hierarchyWidth = denseView
               ? Math.max(1.2, Math.min(6.8, 0.9 + (Math.sqrt(baseWeight) * 0.58)))
               : Math.max(0.7, Math.min(5.6, 0.5 + (Math.sqrt(baseWeight) * 0.42)));
-            const baseWidth = linkType === 'channel-topic-context'
-              ? Math.max(0.8, Math.min(2.8, 0.45 + (Math.sqrt(baseWeight) * 0.18)))
-              : hierarchyWidth;
+            const baseWidth = linkType === 'channel-topic'
+              ? Math.max(0.9, Math.min(3.2, 0.55 + (Math.sqrt(baseWeight) * 0.2)))
+              : linkType === 'channel-category'
+                ? Math.max(0.45, Math.min(1.8, 0.35 + (Math.sqrt(baseWeight) * 0.11)))
+                : hierarchyWidth;
 
             if (selectedNodeId && (sourceId === selectedNodeId || targetId === selectedNodeId)) {
               return baseWidth * 2;
@@ -1045,10 +1011,8 @@ export const GraphVisualization = forwardRef<any, GraphVisualizationProps>(
               : baseWidth;
           }}
           linkDirectionalParticles={(link: any) => {
-            const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-            const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-            if (String(link.type || '') === 'channel-topic-context') return 0;
-            return selectedNodeId && (sourceId === selectedNodeId || targetId === selectedNodeId) ? 3 : 0;
+            void link;
+            return 0;
           }}
           linkDirectionalParticleWidth={2.5}
           linkDirectionalParticleSpeed={0.006}

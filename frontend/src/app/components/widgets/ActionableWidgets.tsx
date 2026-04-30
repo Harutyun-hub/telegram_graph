@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { Home } from 'lucide-react';
 import { useLanguage } from '../../contexts/LanguageContext';
@@ -13,7 +14,9 @@ export function BusinessOpportunityTracker() {
   const { lang } = useLanguage();
   const { data } = useData();
   const ru = lang === 'ru';
+  const [showAll, setShowAll] = useState(false);
   const opportunities = data.businessOpportunityBriefs[lang] ?? [];
+  const visibleOpportunities = showAll ? opportunities : opportunities.slice(0, 4);
 
   if (!opportunities.length) return <EmptyWidget widgetId="business_opportunity_tracker" title={ru ? 'Бизнес-возможности от сообщества' : 'Business Opportunity Signals'} />;
 
@@ -59,7 +62,7 @@ export function BusinessOpportunityTracker() {
       </p>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
-        {opportunities.map((opp) => (
+        {visibleOpportunities.map((opp) => (
           <Link
             key={opp.id}
             to={(() => {
@@ -89,7 +92,13 @@ export function BusinessOpportunityTracker() {
             </div>
 
             <div className="text-[11px] mt-2 text-gray-600">
-              {opp.demandSignals.messages.toLocaleString()} {ru ? 'сигналов ·' : 'signals ·'} {opp.demandSignals.uniqueUsers.toLocaleString()} {ru ? 'людей ·' : 'people ·'} {opp.demandSignals.channels.toLocaleString()} {ru ? 'каналов' : 'channels'}
+              {[
+                `${opp.demandSignals.messages.toLocaleString()} ${ru ? 'сигналов' : 'signals'}`,
+                `${opp.demandSignals.uniqueUsers.toLocaleString()} ${ru ? 'людей' : 'people'}`,
+                opp.demandSignals.channels > 0
+                  ? `${opp.demandSignals.channels.toLocaleString()} ${ru ? 'каналов' : 'channels'}`
+                  : '',
+              ].filter(Boolean).join(' · ')}
             </div>
             <div className="text-[11px] mt-0.5 text-gray-600">
               {ru ? '7д тренд' : '7d trend'}: {opp.demandSignals.trend7dPct > 0 ? '+' : ''}{opp.demandSignals.trend7dPct}%
@@ -97,6 +106,21 @@ export function BusinessOpportunityTracker() {
           </Link>
         ))}
       </div>
+
+      {opportunities.length > 4 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowAll((prev) => !prev)}
+            className="text-xs text-blue-700 hover:text-blue-800"
+            style={{ fontWeight: 600 }}
+          >
+            {showAll
+              ? (ru ? 'Свернуть' : 'Collapse')
+              : (ru ? `Показать все ${opportunities.length}` : `See all ${opportunities.length}`)}
+          </button>
+        </div>
+      )}
 
       <p className="text-xs text-gray-400 mt-3">
         {ru

@@ -50,7 +50,7 @@ export interface GraphLink {
   source: string | GraphNode;
   target: string | GraphNode;
   value: number;
-  type: 'category-topic' | 'channel-category' | string;
+  type: 'category-topic' | 'channel-category' | 'channel-topic' | string;
 }
 
 export interface GraphFreshnessMeta {
@@ -78,6 +78,9 @@ export interface GraphMeta {
   minMentions?: number;
   availableCategories?: string[];
   visibleTopicCount?: number;
+  totalEligibleTopicCount?: number;
+  topicLimit?: number;
+  isCurated?: boolean;
   visibleCategoryCount?: number;
   visibleChannelCount?: number;
   totalMentions?: number;

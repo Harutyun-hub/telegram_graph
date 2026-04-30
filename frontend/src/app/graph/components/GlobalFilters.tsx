@@ -1,9 +1,10 @@
-import { ChevronLeft, Filter, Radio, RotateCcw, Search, SlidersHorizontal } from 'lucide-react';
+import { ChevronLeft, Filter, Radio, RotateCcw, Search, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Checkbox } from '@/app/components/ui/checkbox';
 import { FreshnessBadge } from '@/app/graph/components/FreshnessBadge';
 import { getAllChannels, type TopChannel } from '@/app/graph/services/api';
-import type { GraphFilters, GraphFreshnessMeta, RankingMode, SourceDetail } from '@/app/graph/services/types';
+import type { GraphData, GraphFilters, GraphFreshnessMeta, RankingMode, SignalFocus, SourceDetail } from '@/app/graph/services/types';
+import { buildGraphHighlights } from '@/app/graph/utils/highlights';
 
 const SENTIMENT_OPTIONS = [
   { value: 'Positive', label: 'Positive', accent: 'border-emerald-400/30 bg-emerald-400/15 text-emerald-100' },
@@ -24,6 +25,13 @@ const SORT_OPTIONS: Array<{ value: RankingMode; label: string }> = [
   { value: 'spread', label: 'Spread' },
 ];
 
+const SIGNAL_OPTIONS: Array<{ value: SignalFocus; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'asks', label: 'Asks' },
+  { value: 'needs', label: 'Needs' },
+  { value: 'fear', label: 'Urgent' },
+];
+
 interface GlobalFiltersProps {
   filters: GraphFilters;
   availableCategories?: string[];
@@ -34,6 +42,7 @@ interface GlobalFiltersProps {
   onFiltersChange: (filters: GraphFilters) => void;
   onSearchSelect?: (nodeId: string) => void;
   allNodes?: Array<{ id: string; name: string; type: string }>;
+  graphData?: GraphData | null;
 }
 
 const DEFAULT_FILTERS: GraphFilters = {
@@ -66,10 +75,12 @@ export function GlobalFilters({
   onFiltersChange,
   onSearchSelect,
   allNodes = [],
+  graphData = null,
 }: GlobalFiltersProps) {
   const [selectedChannels, setSelectedChannels] = useState<string[]>(filters.channels || []);
   const [selectedSentiments, setSelectedSentiments] = useState<string[]>(filters.sentiments || []);
   const [selectedCategory, setSelectedCategory] = useState(filters.category || '');
+  const [signalFocus, setSignalFocus] = useState<SignalFocus>(filters.signalFocus || 'all');
   const [sourceDetail, setSourceDetail] = useState<SourceDetail>(filters.sourceDetail || 'standard');
   const [rankingMode, setRankingMode] = useState<RankingMode>(filters.rankingMode || 'volume');
   const [minMentions, setMinMentions] = useState<number>(filters.minMentions || 2);
@@ -82,6 +93,7 @@ export function GlobalFilters({
     setSelectedChannels(filters.channels || []);
     setSelectedSentiments(filters.sentiments || []);
     setSelectedCategory(filters.category || '');
+    setSignalFocus(filters.signalFocus || 'all');
     setSourceDetail(filters.sourceDetail || 'standard');
     setRankingMode(filters.rankingMode || 'volume');
     setMinMentions(filters.minMentions || 2);
@@ -91,6 +103,7 @@ export function GlobalFilters({
     filters.minMentions,
     filters.rankingMode,
     filters.sentiments,
+    filters.signalFocus,
     filters.sourceDetail,
   ]);
 
@@ -132,16 +145,19 @@ export function GlobalFilters({
       : allChannels.filter((channel) => channel.name.toLowerCase().includes(query));
   }, [allChannels, channelQuery]);
 
+  const highlights = useMemo(() => buildGraphHighlights(graphData), [graphData]);
+
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (selectedChannels.length > 0) count += 1;
     if (selectedSentiments.length > 0) count += 1;
     if (selectedCategory) count += 1;
+    if (signalFocus !== 'all') count += 1;
     if (sourceDetail !== 'standard') count += 1;
     if (rankingMode !== 'volume') count += 1;
     if (minMentions > 2) count += 1;
     return count;
-  }, [minMentions, rankingMode, selectedCategory, selectedChannels.length, selectedSentiments.length, sourceDetail]);
+  }, [minMentions, rankingMode, selectedCategory, selectedChannels.length, selectedSentiments.length, signalFocus, sourceDetail]);
 
   const toggleSentiment = (value: string) => {
     setSelectedSentiments((prev) => (
@@ -160,7 +176,7 @@ export function GlobalFilters({
       channels: selectedChannels,
       sentiments: selectedSentiments,
       category: selectedCategory || undefined,
-      signalFocus: filters.signalFocus || 'all',
+      signalFocus,
       sourceDetail,
       rankingMode,
       minMentions,
@@ -172,6 +188,7 @@ export function GlobalFilters({
     setSelectedChannels(DEFAULT_FILTERS.channels || []);
     setSelectedSentiments(DEFAULT_FILTERS.sentiments || []);
     setSelectedCategory(DEFAULT_FILTERS.category || '');
+    setSignalFocus(DEFAULT_FILTERS.signalFocus || 'all');
     setSourceDetail(DEFAULT_FILTERS.sourceDetail || 'standard');
     setRankingMode(DEFAULT_FILTERS.rankingMode || 'volume');
     setMinMentions(DEFAULT_FILTERS.minMentions || 2);
@@ -265,6 +282,27 @@ export function GlobalFilters({
               )}
             </section>
 
+            {highlights.length > 0 && (
+              <section className="border-b border-white/10 pb-5">
+                <SectionTitle icon={<Sparkles className="h-4 w-4 text-cyan-300/80" />} title="Highlights" />
+                <div className="mt-3 space-y-2">
+                  {highlights.map((highlight) => (
+                    <button
+                      key={highlight.kind}
+                      onClick={() => onSearchSelect?.(highlight.nodeId)}
+                      className="w-full rounded-[18px] border border-white/10 bg-white/5 px-3.5 py-3 text-left transition-colors hover:border-cyan-300/25 hover:bg-cyan-500/10"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-white/42">{highlight.title}</span>
+                        <span className="shrink-0 text-[11px] font-semibold text-cyan-200">{highlight.metric}</span>
+                      </div>
+                      <div className="mt-1.5 truncate text-[13px] font-medium text-white/88">{highlight.name}</div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
             <section className="border-b border-white/10 pb-5">
               <SectionTitle icon={<Radio className="h-4 w-4 text-white/55" />} title="Sentiment" />
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -282,6 +320,25 @@ export function GlobalFilters({
                     </button>
                   );
                 })}
+              </div>
+            </section>
+
+            <section className="border-b border-white/10 pb-5">
+              <SectionTitle icon={<SlidersHorizontal className="h-4 w-4 text-white/55" />} title="Signals" />
+              <div className="mt-3 grid grid-cols-4 gap-1.5">
+                {SIGNAL_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => setSignalFocus(option.value)}
+                    className={`rounded-[14px] border px-2 py-2.5 text-[12px] transition-colors ${
+                      signalFocus === option.value
+                        ? 'border-cyan-400/35 bg-cyan-500/14 text-cyan-100'
+                        : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/8'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
             </section>
 
@@ -388,7 +445,7 @@ export function GlobalFilters({
                         <Checkbox checked={active} onCheckedChange={() => toggleChannel(channel.name)} />
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-[14px] text-white/90">{channel.name}</div>
-                          <div className="mt-1 text-[12px] text-white/42">{channel.adCount} posts</div>
+                          <div className="mt-1 text-[12px] text-white/42">{channel.adCount} all-time posts</div>
                         </div>
                       </label>
                     );
