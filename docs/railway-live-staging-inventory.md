@@ -10,15 +10,15 @@ session files, or Redis/Supabase/Neo4j contents to this branch.
 ## Source Assembly
 
 The branch was assembled from the Railway live deployment inventory captured
-from the `soothing-vitality` project, `staging` environment.
+from the `soothing-vitality` project, `staging` environment, on 2026-04-30.
 
 | Area | Railway service | Source used |
 | --- | --- | --- |
-| Backend API | `loyal-presence` | `Harutyun-hub/telegram_graph`, `codex/prod-backend-staging-copy`, commit `22cec183aeef5d52df61c8b2996c48896aa4e344` |
-| Frontend | `romantic-acceptance` | `Harutyun-hub/telegram_graph`, `codex/prod-frontend-staging-copy`, commit `db6f2db2f4a9624d6b3f962db6d20bc73a5885d5`, root `/frontend`, Dockerfile `/frontend/Dockerfile` |
-| Telegram worker | `telegram-worker-staging` | `Harutyun-hub/telegram_graph`, `main`, commit `a38a67886dcece019d2a710f88901c1db1d0c803`, start `python -m api.worker` |
-| Main worker | `loyal-presence-worker` | CLI-deployed service running `python -m api.worker` with `APP_ROLE=worker` |
-| Social worker | `social-worker` | CLI-deployed service running `python -m api.social_worker` with `APP_ROLE=social-worker`; deployment message matched commit `482a20a` in the backend history |
+| Backend API | `loyal-presence` | `Harutyun-hub/telegram_graph`, `codex/prod-backend-staging-copy`, commit `3edc624ca7b96a92731d86dee64ba8ab0c4af2e8`, deployed 2026-04-30 13:26 UTC |
+| Frontend | `romantic-acceptance` | `Harutyun-hub/telegram_graph`, `codex/prod-frontend-staging-copy`, commit `b10cf654adb4097751e6a4728c0e22c2702e50d1`, root `/frontend`, Dockerfile `/frontend/Dockerfile`, deployed 2026-04-30 15:04 UTC |
+| Telegram worker | `telegram-worker-staging` | `Harutyun-hub/telegram_graph`, `main`, commit `a38a67886dcece019d2a710f88901c1db1d0c803`, start `python -m api.worker`, deployed 2026-04-30 13:06 UTC |
+| Main worker | `loyal-presence-worker` | CLI-deployed service running `python -m api.worker` with `APP_ROLE=worker`; current deployment `6e6aea59-30da-47cd-a6cd-397e2b41badb` |
+| Social worker | `social-worker` | CLI-deployed service running `python -m api.social_worker` with `APP_ROLE=social-worker`; current deployment `09b79648-68df-408b-8bc0-a3ba5ef43b5f` |
 | Redis | `Redis` | Railway Redis image `redis:8.2.1` |
 
 This branch uses the live backend API commit as the base because it contains

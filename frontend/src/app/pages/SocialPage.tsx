@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router';
 import {
   Users, MessageCircle, Megaphone, Heart, Hash,
   Target, BarChart3, ChevronDown, ChevronUp,
-  Sparkles, TrendingUp, TrendingDown,
+  TrendingUp, TrendingDown,
   Eye, HelpCircle, ArrowUpRight, ArrowDownRight,
   ThumbsUp, ThumbsDown, MessageSquare, Lightbulb, ShieldAlert,
-  Compass, Flame, Zap, Globe, Star, Layers
+  Compass, Flame, Globe, Star, Layers, Loader2
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
@@ -237,6 +237,23 @@ interface ScrapedAd {
   clicks: number;
 }
 
+interface OrganicPostItem {
+  id: string;
+  activity_uid?: string;
+  entity_id?: string;
+  entity: string;
+  platform?: string;
+  source_kind?: string;
+  text?: string;
+  media?: { kind?: string; url?: string } | null;
+  source_url?: string;
+  published_at?: string;
+  reach?: number | null;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+}
+
 const AD_SCRAPE: ScrapedAd[] = [
   { id: 's1',  entity: 'Brand X',      source: 'google',    platform: 'Google Search',  copy: 'Experience the next generation of our product. 20% off for new users. Get started today with Pro Suite.',    cta: 'Shop Now',      format: 'Search',   intent: 'Acquisition', valueProps: ['20% Discount', 'Innovation'],   urgency: true,  date: 'Apr 22, 2026', impressions: 45200, engagement: 1820, clicks: 1200 },
   { id: 's2',  entity: 'Brand X',      source: 'google',    platform: 'Google Display', copy: 'Pro Suite 3.0 is here. The smartest platform for modern teams. Try it free for 14 days.',                   cta: 'Start Free Trial',format: 'Display',  intent: 'Acquisition', valueProps: ['Free Trial', 'Modern UX'],      urgency: false, date: 'Apr 20, 2026', impressions: 88000, engagement: 3100, clicks: 2400 },
@@ -433,7 +450,19 @@ interface CommunityInterestItem {
   interestLabel?: string;
 }
 type EngagementRadarItem = typeof ENGAGEMENT_RADAR[number];
-type VisibilityItem = typeof VISIBILITY_DATA[number];
+type VisibilityItem = typeof VISIBILITY_DATA[number] & {
+  entity_id?: string;
+  reachShare?: number;
+  interactions?: number;
+  engagementRate?: number | null;
+  posts?: number;
+  comments?: number;
+  hasReach?: boolean;
+  delta?: number | null;
+  deltaReach?: number | null;
+  deltaEngage?: number | null;
+  deltaSov?: number | null;
+};
 type VisibilityTrendItem = typeof VISIBILITY_TREND[number];
 type WeeklyShiftItem = typeof WEEKLY_SHIFTS[number];
 type PositiveImpactItem = typeof POSITIVE_IMPACT[number];
@@ -457,6 +486,9 @@ interface SocialDashboardSnapshot {
     cacheStatus?: string;
     generatedAt?: string;
     degradedSections?: string[];
+    semanticStale?: boolean;
+    semanticPreservedFromCache?: boolean;
+    semanticPreservedSections?: string[];
     emptyReasons?: Record<string, string>;
     timingsMs?: Record<string, number>;
   };
@@ -483,6 +515,15 @@ interface SocialDashboardSnapshot {
     summary?: Record<string, unknown>;
   };
   strictMetrics?: {
+    summary?: {
+      trackedSources?: number;
+      posts?: number;
+      comments?: number;
+      ads?: number;
+      avgPositive?: number;
+      organicMentions?: number;
+      rowCapReached?: boolean;
+    };
     sentimentByEntity?: SentimentByEntityItem[];
     engagementRadar?: EngagementRadarItem[];
     visibilityData?: VisibilityItem[];
@@ -492,6 +533,15 @@ interface SocialDashboardSnapshot {
     weeklyShifts?: WeeklyShiftItem[];
     scorecard?: ScorecardItem[];
     shareOfVoice?: { name: string; value: number; color?: string }[];
+    organicPosts?: {
+      items?: OrganicPostItem[];
+      summary?: {
+        total?: number;
+        returned?: number;
+        withMedia?: number;
+        withReach?: number;
+      };
+    };
   };
 }
 
@@ -713,9 +763,10 @@ function buildSocialDashboardPath(params: {
   return `/social/dashboard${suffix ? `?${suffix}` : ''}`;
 }
 
-const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v1:';
-const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v1';
+const SOCIAL_DASHBOARD_CACHE_PREFIX = 'radar.social.dashboard.snapshot.v2:';
+const SOCIAL_DASHBOARD_CACHE_MANIFEST = 'radar.social.dashboard.snapshot.keys.v2';
 const SOCIAL_DASHBOARD_CACHE_LIMIT = 10;
+const SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS = [1500, 2500, 3500, 5000];
 
 function socialDashboardCacheKey(path: string): string {
   return `${SOCIAL_DASHBOARD_CACHE_PREFIX}${path}`;
@@ -729,6 +780,26 @@ function readCachedSocialDashboard(path: string): SocialDashboardSnapshot | null
   } catch {
     return null;
   }
+}
+
+function readLatestCachedSocialDashboard(excludePath?: string): SocialDashboardSnapshot | null {
+  if (typeof window === 'undefined') return null;
+  const excludedKey = excludePath ? socialDashboardCacheKey(excludePath) : null;
+  try {
+    const rawManifest = window.localStorage.getItem(SOCIAL_DASHBOARD_CACHE_MANIFEST);
+    const keys = rawManifest ? JSON.parse(rawManifest) : [];
+    if (!Array.isArray(keys)) return null;
+    for (const key of keys) {
+      if (typeof key !== 'string' || !key.startsWith(SOCIAL_DASHBOARD_CACHE_PREFIX)) continue;
+      if (excludedKey && key === excludedKey) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      return JSON.parse(raw) as SocialDashboardSnapshot;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnapshot): void {
@@ -751,6 +822,11 @@ function writeCachedSocialDashboard(path: string, snapshot: SocialDashboardSnaps
   } catch {
     // Best-effort cache only; never block dashboard rendering on storage quota.
   }
+}
+
+function isSocialDashboardWarmingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /warming|503/i.test(message);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -802,27 +878,10 @@ function TierHeader({ tier, isOpen, onToggle, ru }: { tier: TierDef; isOpen: boo
   );
 }
 
-function AIInsight({ title, text, color }: { title: string; text: string; color: string }) {
-  return (
-    <div className="relative rounded-2xl border border-slate-200 bg-white overflow-hidden">
-      <div className="absolute top-0 left-0 w-1 h-full rounded-l-full" style={{ backgroundColor: color }} />
-      <div className="flex items-start gap-4 p-5 pl-6">
-        <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center mt-0.5" style={{ backgroundColor: `${color}15` }}>
-          <Sparkles className="w-4 h-4" style={{ color }} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
-            <h3 className="text-sm text-slate-900" style={{ fontWeight: 600 }}>{title}</h3>
-            <span className="text-[10px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full uppercase tracking-wider" style={{ fontWeight: 500 }}>AI Insight</span>
-          </div>
-          <p className="text-sm text-slate-600 leading-relaxed">{text}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeltaBadge({ value, suffix = '' }: { value: number; suffix?: string }) {
+function DeltaBadge({ value, suffix = '' }: { value?: number | null; suffix?: string }) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return <span className="inline-flex text-xs text-slate-400" style={{ fontWeight: 600 }}>—</span>;
+  }
   const pos = value > 0;
   return (
     <span className={`inline-flex items-center gap-0.5 text-xs ${pos ? 'text-emerald-600' : 'text-rose-500'}`} style={{ fontWeight: 600 }}>
@@ -830,6 +889,26 @@ function DeltaBadge({ value, suffix = '' }: { value: number; suffix?: string }) 
       {pos ? '+' : ''}{value}{suffix}
     </span>
   );
+}
+
+function formatCompactMetric(value: unknown): string {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—';
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}K`;
+  return String(Math.round(numeric));
+}
+
+function formatPostDate(value: unknown, ru: boolean): string {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text;
+  return parsed.toLocaleDateString(ru ? 'ru-RU' : 'en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
 
 function ChartLegend({ items }: { items: { label: string; color: string }[] }) {
@@ -1340,6 +1419,239 @@ function AdScrapeTable({ ru, items }: { ru: boolean; items: ScrapedAd[] }) {
   );
 }
 
+type OrganicPostSource = 'all' | 'facebook' | 'instagram' | 'google';
+
+const ORGANIC_POST_SOURCE_TABS: { key: OrganicPostSource; label: string; icon: string }[] = [
+  { key: 'all',       label: 'All Sources', icon: '🌐' },
+  { key: 'facebook',  label: 'Facebook',    icon: '🔵' },
+  { key: 'instagram', label: 'Instagram',   icon: '📸' },
+  { key: 'google',    label: 'Google',      icon: '🟢' },
+];
+
+function OrganicPostsTable({ ru, items }: { ru: boolean; items: OrganicPostItem[] }) {
+  const [activeSource, setActiveSource] = useState<OrganicPostSource>('all');
+  const [activeBrand, setActiveBrand] = useState<string>('All');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<'date' | 'reach' | 'likes' | 'comments'>('date');
+
+  const brands = ['All', ...Array.from(new Set(items.map(item => item.entity).filter(Boolean)))];
+  const sourceCounts: Record<OrganicPostSource, number> = {
+    all: items.length,
+    facebook: items.filter(item => String(item.platform || '').toLowerCase() === 'facebook').length,
+    instagram: items.filter(item => String(item.platform || '').toLowerCase() === 'instagram').length,
+    google: items.filter(item => String(item.platform || '').toLowerCase() === 'google').length,
+  };
+
+  const filtered = items
+    .filter(item => activeSource === 'all' || String(item.platform || '').toLowerCase() === activeSource)
+    .filter(item => activeBrand === 'All' || item.entity === activeBrand)
+    .sort((a, b) => {
+      if (sortBy === 'reach') return Number(b.reach || 0) - Number(a.reach || 0);
+      if (sortBy === 'likes') return Number(b.likes || 0) - Number(a.likes || 0);
+      if (sortBy === 'comments') return Number(b.comments || 0) - Number(a.comments || 0);
+      return new Date(b.published_at || 0).getTime() - new Date(a.published_at || 0).getTime();
+    });
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="border-b border-slate-100 px-5 pt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm text-slate-900" style={{ fontWeight: 600 }}>
+              {ru ? 'Органические посты' : 'Organic Posts'}
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {ru ? 'Собранные посты из отслеживаемых social-источников' : 'Scraped posts from tracked social sources'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-500">{ru ? 'Сорт.' : 'Sort:'}</span>
+            {(['date', 'reach', 'likes', 'comments'] as const).map(sort => (
+              <button
+                key={sort}
+                onClick={() => setSortBy(sort)}
+                className={`text-[11px] px-2.5 py-1 rounded-lg transition-colors ${
+                  sortBy === sort ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                }`}
+                style={{ fontWeight: sortBy === sort ? 600 : 400 }}
+              >
+                {sort === 'date'
+                  ? (ru ? 'Дата' : 'Date')
+                  : sort === 'reach'
+                    ? (ru ? 'Охват' : 'Reach')
+                    : sort === 'likes'
+                      ? (ru ? 'Лайки' : 'Likes')
+                      : (ru ? 'Коммент.' : 'Comments')}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center gap-0 overflow-x-auto">
+          {ORGANIC_POST_SOURCE_TABS.map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveSource(tab.key)}
+              className={`flex items-center gap-2 px-4 py-2.5 text-xs whitespace-nowrap transition-colors relative border-b-2 ${
+                activeSource === tab.key
+                  ? 'text-slate-900 border-blue-600'
+                  : 'text-slate-500 border-transparent hover:text-slate-700'
+              }`}
+              style={{ fontWeight: activeSource === tab.key ? 600 : 400 }}
+            >
+              <span>{tab.icon}</span>
+              {ru ? translateSocialLabel(tab.label, true) : tab.label}
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                activeSource === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'
+              }`} style={{ fontWeight: 600 }}>
+                {sourceCounts[tab.key]}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-50 overflow-x-auto">
+        <span className="text-[11px] text-slate-400 flex-shrink-0">{ru ? 'Источник:' : 'Source:'}</span>
+        {brands.map((brand, index) => {
+          const color = brand === 'All' ? '#64748b' : colorForEntity(brand, index);
+          return (
+            <button
+              key={brand}
+              onClick={() => setActiveBrand(brand)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] transition-all flex-shrink-0 ${
+                activeBrand === brand ? 'text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+              style={{ fontWeight: 500, backgroundColor: activeBrand === brand ? color : undefined }}
+            >
+              {brand !== 'All' && <div className="w-1.5 h-1.5 rounded-full bg-white/80 flex-shrink-0" />}
+              {brand === 'All' ? (ru ? 'Все' : 'All') : brand}
+            </button>
+          );
+        })}
+        <span className="ml-auto text-[11px] text-slate-400 flex-shrink-0">{filtered.length} {ru ? 'пост.' : 'posts'}</span>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left min-w-[860px]">
+          <thead>
+            <tr className="bg-slate-50/80 border-b border-slate-100">
+              {[
+                ru ? 'Превью' : 'Preview',
+                ru ? 'Источник / Площадка' : 'Source / Platform',
+                ru ? 'Пост' : 'Post',
+                ru ? 'Охват' : 'Reach',
+                ru ? 'Лайки' : 'Likes',
+                ru ? 'Комментарии' : 'Comments',
+                ru ? 'Дата' : 'Date',
+                ru ? 'Действие' : 'Actions',
+              ].map((header, index) => (
+                <th key={index} className="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap" style={{ fontWeight: 600 }}>{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50">
+            {filtered.map((post, index) => {
+              const brandColor = colorForEntity(post.entity, index);
+              const isExpanded = expandedId === post.id;
+              const postText = String(post.text || '').trim() || (ru ? 'Текст поста недоступен' : 'Post text unavailable');
+              const mediaUrl = post.media?.url;
+              return (
+                <tr
+                  key={post.id}
+                  className={`hover:bg-slate-50/60 transition-colors cursor-pointer ${isExpanded ? 'bg-blue-50/20' : ''}`}
+                  onClick={() => setExpandedId(isExpanded ? null : post.id)}
+                >
+                  <td className="px-4 py-3.5">
+                    <div className="relative w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 border border-slate-100 overflow-hidden" style={{ backgroundColor: `${brandColor}12` }}>
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm text-white" style={{ backgroundColor: brandColor, fontWeight: 700 }}>
+                        {(post.entity || '?')[0]}
+                      </div>
+                      {mediaUrl && (
+                        <img
+                          src={mediaUrl}
+                          alt=""
+                          className="absolute inset-0 w-full h-full object-cover"
+                          loading="lazy"
+                          onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                        />
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: brandColor }} />
+                        <span className="text-xs text-slate-800" style={{ fontWeight: 600 }}>{post.entity}</span>
+                      </div>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full self-start bg-blue-50 text-blue-700" style={{ fontWeight: 500 }}>
+                        {post.platform || 'social'}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3.5 max-w-[360px]">
+                    <p className="text-xs text-slate-700 leading-relaxed line-clamp-2" title={postText}>{postText}</p>
+                    {isExpanded && (
+                      <div className="mt-2 pt-2 border-t border-slate-100">
+                        <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">{postText}</p>
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.reach)}</span>
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.likes)}</span>
+                  </td>
+                  <td className="px-4 py-3.5 text-right">
+                    <span className="text-xs text-slate-700" style={{ fontWeight: 600 }}>{formatCompactMetric(post.comments)}</span>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <span className="text-xs text-slate-500">{formatPostDate(post.published_at, ru)}</span>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    {post.source_url ? (
+                      <a
+                        href={post.source_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors"
+                        style={{ fontWeight: 500 }}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {ru ? 'Открыть' : 'Open'} <ArrowUpRight className="w-3 h-3" />
+                      </a>
+                    ) : (
+                      <span className="text-xs text-slate-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {filtered.length === 0 && (
+          <div className="py-12 text-center text-slate-400 text-sm">
+            {ru ? 'Нет органических постов по выбранным фильтрам' : 'No organic posts match the current filters'}
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="flex items-center gap-4">
+          {(['facebook', 'instagram', 'google'] as OrganicPostSource[]).map(source => (
+            <div key={source} className="flex items-center gap-1.5">
+              <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: SOURCE_COLORS[source] }} />
+              <span className="text-[11px] text-slate-500">{source.charAt(0).toUpperCase() + source.slice(1)}</span>
+              <span className="text-[11px] text-slate-700" style={{ fontWeight: 600 }}>{sourceCounts[source]}</span>
+            </div>
+          ))}
+        </div>
+        <span className="text-[11px] text-slate-400">{ru ? 'Макс. 50 последних постов' : 'Latest 50 posts max'}</span>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════
@@ -1360,7 +1672,7 @@ export function SocialPage() {
   const [activeTab,        setActiveTab]        = useState<'deep'|'metrics'>('deep');
   const [openTiers, setOpenTiers] = useState<Record<string, boolean>>({
     topics:true, intent:true, questions:true, audience:true,
-    visibility:true, shifts:true, position:true, scorecard:true,
+    visibility:true, content:true, position:true, scorecard:true,
   });
   const toggleTier = (id: string) => setOpenTiers(p => ({ ...p, [id]: !p[id] }));
 
@@ -1372,6 +1684,7 @@ export function SocialPage() {
   useEffect(() => {
     if (!dateRangeReady) return;
     let cancelled = false;
+    const retryTimers: Array<ReturnType<typeof window.setTimeout>> = [];
     const path = buildSocialDashboardPath({
       from: range.from,
       to: range.to,
@@ -1380,29 +1693,54 @@ export function SocialPage() {
       platform: platformFilter,
     });
     const cachedSnapshot = readCachedSocialDashboard(path);
-    if (cachedSnapshot) {
-      setDashboard(cachedSnapshot);
-      setDashboardLoading(false);
+    const fallbackSnapshot = cachedSnapshot ?? readLatestCachedSocialDashboard(path);
+    if (fallbackSnapshot) {
+      setDashboard(fallbackSnapshot);
+      setDashboardLoading(!cachedSnapshot);
     } else {
       setDashboardLoading(true);
     }
 
     setDashboardError(null);
-    apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 15_000 })
-      .then((snapshot) => {
-        if (cancelled) return;
-        setDashboard(snapshot);
-        writeCachedSocialDashboard(path, snapshot);
-      })
-      .catch((error: Error) => {
-        if (cancelled) return;
-        setDashboardError(error.message || String(error));
-      })
-      .finally(() => {
-        if (!cancelled) setDashboardLoading(false);
-      });
+    const fetchSnapshot = (attempt = 0) => {
+      apiFetch<SocialDashboardSnapshot>(path, { includeUserAuth: true, timeoutMs: 15_000 })
+        .then((snapshot) => {
+          if (cancelled) return;
+          setDashboard(snapshot);
+          writeCachedSocialDashboard(path, snapshot);
+          setDashboardError(null);
+          setDashboardLoading(false);
+        })
+        .catch((error: Error) => {
+          if (cancelled) return;
+          if (isSocialDashboardWarmingError(error)) {
+            setDashboardError(null);
+            if (attempt < SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS.length) {
+              setDashboardLoading(!cachedSnapshot);
+              const timer = window.setTimeout(
+                () => fetchSnapshot(attempt + 1),
+                SOCIAL_DASHBOARD_WARMING_RETRY_DELAYS_MS[attempt],
+              );
+              retryTimers.push(timer);
+              return;
+            }
+            if (!fallbackSnapshot) {
+              setDashboard(null);
+            }
+            setDashboardLoading(false);
+            return;
+          }
+          setDashboardError(error.message || String(error));
+          setDashboardLoading(false);
+        });
+    };
 
-    return () => { cancelled = true; };
+    fetchSnapshot();
+
+    return () => {
+      cancelled = true;
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, [dateRangeReady, platformFilter, primarySource.id, range.from, range.to, secondarySource?.id]);
 
   useEffect(() => {
@@ -1588,25 +1926,23 @@ export function SocialPage() {
       .join(', ');
   const visibilityData = dashboard?.strictMetrics?.visibilityData ?? [];
   const visibilityTrend = dashboard?.strictMetrics?.visibilityTrend ?? [];
-  const positiveImpact = dashboard?.strictMetrics?.positiveImpact ?? [];
-  const negativeImpact = dashboard?.strictMetrics?.negativeImpact ?? [];
-  const weeklyShifts = dashboard?.strictMetrics?.weeklyShifts ?? [];
   const scorecard = dashboard?.strictMetrics?.scorecard ?? [];
+  const organicPostItems = dashboard?.strictMetrics?.organicPosts?.items ?? [];
+  const strictSummary = dashboard?.strictMetrics?.summary ?? {};
   const sovData = dashboard?.strictMetrics?.shareOfVoice ?? visibilityData.map(v => ({
     name: v.entity,
     value: v.sov,
     color: entityColors[v.entity] || colorForEntity(v.entity),
   }));
-  const trackedCount = orgOptions.length > 1 ? String(orgOptions.length - 1) : '0';
-  const postsCount = String(scorecard.reduce((sum, row) => sum + (Number(row.posts) || 0), 0));
-  const adsCount = String(adItems.length || scorecard.reduce((sum, row) => sum + (Number(row.ads) || 0), 0));
-  const avgPositive = sentimentByEntity.length
-    ? `${Math.round(sentimentByEntity.reduce((sum, item) => sum + item.pos, 0) / sentimentByEntity.length)}%`
-    : '0%';
+  const trackedCount = String(Number(strictSummary.trackedSources ?? (orgOptions.length > 1 ? orgOptions.length - 1 : 0)) || 0);
+  const postsCount = String(Number(strictSummary.posts ?? scorecard.reduce((sum, row) => sum + (Number(row.posts) || 0), 0)) || 0);
+  const commentsCount = Number(strictSummary.comments ?? scorecard.reduce((sum, row) => sum + (Number((row as any).comments) || 0), 0)) || 0;
+  const adsCount = String(Number(strictSummary.ads ?? (adItems.length || scorecard.reduce((sum, row) => sum + (Number(row.ads) || 0), 0))) || 0);
+  const avgPositive = `${Math.round(Number(strictSummary.avgPositive ?? 0) || 0)}%`;
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
-  const degradedSections = dashboard?.meta?.degradedSections ?? [];
-  const dashboardWarming = Boolean(dashboardError && /warming|503/i.test(dashboardError));
+  const showDashboardLoading = dashboardLoading;
+  const showDashboardError = Boolean(dashboardError);
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
     label: item.entity,
@@ -1656,10 +1992,10 @@ export function SocialPage() {
       title: ru?'Видимость и охват':'Visibility & Reach Tracking',
       subtitle: ru?'Позиции, охват и доля голоса':'Position, reach & share of voice',
     },
-    shifts: {
-      id:'shifts', icon:Zap, color:'text-amber-700', bgColor:'bg-amber-50', borderColor:'border-amber-200',
-      title: ru?'Еженедельные изменения':'Weekly Shifts & Impact',
-      subtitle: ru?'Дельты метрик и влияние тем':'Metric deltas & topic impact analysis',
+    content: {
+      id:'content', icon:Layers, color:'text-slate-700', bgColor:'bg-slate-50', borderColor:'border-slate-200',
+      title: ru?'Органические посты':'Organic Posts',
+      subtitle: ru?'Собранные посты из отслеживаемых social-источников':'Scraped posts from tracked social sources',
     },
     position: {
       id:'position', icon:Star, color:'text-violet-700', bgColor:'bg-violet-50', borderColor:'border-violet-200',
@@ -1709,21 +2045,22 @@ export function SocialPage() {
           </div>
         </div>
 
-        {(dashboardLoading || dashboardError || degradedSections.length > 0) && (
-          <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
-            dashboardError
-              ? (dashboardWarming ? 'border-blue-100 bg-blue-50 text-blue-700' : 'border-rose-200 bg-rose-50 text-rose-700')
-              : degradedSections.length > 0
-                ? 'border-amber-200 bg-amber-50 text-amber-700'
-                : 'border-blue-100 bg-blue-50 text-blue-700'
-          }`}>
-            {dashboardError
-              ? (dashboardWarming
-                ? (ru ? 'Социальные данные обновляются в фоне. Показан последний доступный снимок, если он есть.' : 'Social data is warming in the background. Showing the last available snapshot if one exists.')
-                : (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`))
-              : dashboardLoading
-                ? (ru ? 'Загрузка реальных социальных данных...' : 'Loading real social data...')
-                : (ru ? `Часть секций загружена с ограничениями: ${degradedSections.join(', ')}` : `Some sections are degraded: ${degradedSections.join(', ')}`)}
+        {showDashboardLoading && (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-slate-900" style={{ fontWeight: 600 }}>
+                  {ru ? 'Обновляем данные панели...' : 'Refreshing dashboard data...'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showDashboardError && (
+          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            {ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`}
           </div>
         )}
 
@@ -2225,8 +2562,8 @@ export function SocialPage() {
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 {[
                   { icon:Users,         color:C.blue,    label:ru?'Отслеживаемых':'Tracked',     val:trackedCount, sub:ru?'источников':'sources'   },
-                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (диапазон)':'Posts (range)', val:postsCount, sub:ru?'собрано':'collected' },
-                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:adsCount, sub:ru?'объявлений':'active ads' },
+                  { icon:MessageCircle, color:C.violet,  label:ru?'Постов (диапазон)':'Posts (range)', val:postsCount, sub:commentsCount ? (ru?`${commentsCount} коммент.`:`${commentsCount} comments`) : (ru?'без комментариев':'comments separate') },
+                  { icon:Megaphone,     color:C.amber,   label:ru?'Рекламы':'Ads Found',         val:adsCount, sub:ru?'объявлений в диапазоне':'ads in range' },
                   { icon:Heart,         color:C.emerald, label:ru?'Настроение':'Avg Sentiment',  val:avgPositive, sub:ru?'позитив':'positive' },
                   { icon:Hash,          color:C.pink,    label:ru?'Топ тема':'Top Topic',        val:topTopic, sub:ru?'по упоминаниям':'by mentions' },
                 ].map((kpi,i)=>{
@@ -2253,6 +2590,7 @@ export function SocialPage() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     {visibilityData.map(v=>{
                       const color = entityColors[v.entity] || colorForEntity(v.entity);
+                      const interactionsValue = formatCompactMetric(v.interactions);
                       return (
                         <div key={v.entity} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 overflow-hidden relative">
                           <div className="absolute top-0 left-0 right-0 h-1 rounded-t-2xl" style={{ backgroundColor:color }} />
@@ -2272,8 +2610,8 @@ export function SocialPage() {
                           </div>
                           <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-100">
                             {[
-                              { label:ru?'Охват':'Reach',   val:`${(v.reach/1000).toFixed(1)}K`, delta:v.deltaReach  },
-                              { label:ru?'Вовлеч.':'Engage', val:`${v.engagement}%`,              delta:v.deltaEngage },
+                              { label:ru?'Охват':'Reach',   val:formatCompactMetric(v.reach),      delta:v.deltaReach  },
+                              { label:ru?'Реакции':'Interactions', val:interactionsValue,           delta:v.deltaEngage },
                               { label:'SoV',                  val:`${v.sov}%`,                    delta:v.deltaSov    },
                             ].map((m,i)=>(
                               <div key={i}>
@@ -2290,12 +2628,12 @@ export function SocialPage() {
 
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
                     <div className="lg:col-span-2 flex flex-col">
-                      <WidgetCard title={ru?'Динамика видимости':'Visibility Trend'} subtitle={ru?'Последние 5 периодов наблюдения':'Last 5 observation periods'} className="flex-1">
+                      <WidgetCard title={ru?'Динамика видимости':'Visibility Trend'} subtitle={ru?'Доля упоминаний по дням':'Daily share of organic mentions'} className="flex-1">
                         <ResponsiveContainer width="100%" height={260}>
                           <LineChart data={visibilityTrend} margin={{ top:16, right:16, left:-10, bottom:0 }}>
                             <CartesianGrid {...GRID_COMMON} />
                             <XAxis dataKey="day" {...AXIS_COMMON} dy={8} />
-                            <YAxis {...AXIS_COMMON} domain={[15, 85]} tickCount={6} />
+                            <YAxis {...AXIS_COMMON} domain={[0, 100]} tickCount={6} />
                             <Tooltip {...TOOLTIP_STYLE} formatter={(v: any, name: string) => [`${v}%`, name]} />
                             {chartSeries.map((series, index) => (
                               <Line
@@ -2344,108 +2682,27 @@ export function SocialPage() {
                     </div>
                   </div>
 
-                  <AIInsight
-                    title={ru?'AI-анализ видимости':'AI Visibility Analysis'}
-                    color={C.blue}
-                    text={ru
-                      ?'Brand X лидирует по видимости (73.04%, +8.17%) и занимает 35.5% доли голоса. Brand Z теряет позиции (-3.12%) несмотря на высокий охват. Competitor A демонстрирует стабильный рост вовлечённости (+1.5%) при наименьшем объёме — признак качественной контентной стратегии.'
-                      :'Brand X leads visibility at 73.04% (+8.17%) and commands 35.5% share of voice. Brand Z is declining (-3.12%) despite its high reach. Competitor A shows steady engagement growth (+1.5%) with the smallest volume — a quality content strategy signal.'}
-                  />
                 </div>
               )}
 
-              {/* ── TIER: WEEKLY SHIFTS ── */}
-              <TierHeader tier={TIERS.shifts} isOpen={openTiers.shifts} onToggle={()=>toggleTier('shifts')} ru={ru} />
-              {openTiers.shifts && (
+              {/* ── TIER: ORGANIC POSTS ── */}
+              <TierHeader tier={TIERS.content} isOpen={openTiers.content} onToggle={()=>toggleTier('content')} ru={ru} />
+              {openTiers.content && (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    {weeklyShifts.map(s=>{
-                      const delta = s.current - s.previous;
-                      const deltaPct = s.previous ? ((delta/s.previous)*100).toFixed(1) : (delta > 0 ? '100.0' : '0.0');
-                      const isGood = s.goodIfUp ? delta>0 : delta<0;
-                      return (
-                        <div key={s.metric} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md transition-shadow">
-                          <p className="text-[11px] text-slate-500 mb-2 leading-tight" style={{ fontWeight:500 }}>{translateSocialLabel(s.metric, ru)}</p>
-                          <p className="text-xl text-slate-900" style={{ fontWeight:800 }}>{s.current}{s.unit}</p>
-                          <div className="flex items-center gap-1.5 mt-1.5">
-                            <span className={`text-xs ${isGood?'text-emerald-600':'text-rose-500'}`} style={{ fontWeight:700 }}>
-                              {Number(deltaPct)>0?'+':''}{deltaPct}%
-                            </span>
-                            <span className="text-[10px] text-slate-400">{ru ? 'против' : 'vs'} {s.previous}{s.unit}</span>
-                          </div>
-                          <div className="mt-2 h-1 bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width:`${Math.min(100,Math.abs(Number(deltaPct))*5)}%`, backgroundColor:isGood?C.emerald:C.rose }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <WidgetCard title={ru?'Позитивное влияние тем':'Positive Topic Impact'} headerRight={<span className="text-sm text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>+43.44%</span>}>
-                      <div className="space-y-1">
-                        {positiveImpact.map((t,i)=>(
-                          <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
-                            <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
-                            <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-                              <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-emerald-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...positiveImpact.map(item => item.mentions)))*100}%` }} />
-                              </div>
-                            </div>
-                            <span className="text-sm text-emerald-600" style={{ fontWeight:700 }}>{t.gain}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <button className="mt-3 w-full text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 py-2 rounded-xl hover:bg-emerald-100 transition-colors" style={{ fontWeight:500 }}>
-                        {ru?'Все 8 улучшенных тем':'View all 8 improved topics'}
-                      </button>
-                    </WidgetCard>
-
-                    <WidgetCard title={ru?'Негативное влияние тем':'Negative Topic Impact'} headerRight={<span className="text-sm text-rose-500 bg-rose-50 px-2.5 py-1 rounded-full" style={{ fontWeight:700 }}>-22.60%</span>}>
-                      <div className="space-y-1">
-                        {negativeImpact.map((t,i)=>(
-                          <div key={t.topic} className="flex items-center gap-3 py-2.5 border-b border-slate-50 last:border-0 hover:bg-slate-50/50 -mx-1 px-1 rounded-lg transition-colors">
-                            <span className="text-xs text-slate-400 w-5 text-center">{i+1}</span>
-                            <div className="flex-1">
-                              <span className="text-sm text-blue-600" style={{ fontWeight:500 }}>{translateSocialLabel(t.topic, ru)}</span>
-                              <div className="mt-1 h-1 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-rose-400 rounded-full" style={{ width:`${(t.mentions/Math.max(1, ...negativeImpact.map(item => item.mentions)))*100}%` }} />
-                              </div>
-                            </div>
-                            <span className="text-sm text-rose-500" style={{ fontWeight:700 }}>{t.loss}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <button className="mt-3 w-full text-xs text-rose-600 bg-rose-50 border border-rose-200 py-2 rounded-xl hover:bg-rose-100 transition-colors" style={{ fontWeight:500 }}>
-                        {ru?'Все 4 ухудшенных темы':'View all 4 declined topics'}
-                      </button>
-                    </WidgetCard>
-                  </div>
-
-                  <AIInsight
-                    title={ru?'AI-анализ изменений':'AI Weekly Shift Analysis'}
-                    color={C.amber}
-                    text={ru
-                      ?'Purchase Intent вырос на 39.3% — лучшая динамика недели. Customer Service продолжает наносить наибольший ущерб видимости (-18.48% потери). Жалобы снизились на 11% — позитивный сигнал. Рост позитивного настроения (+12%) совпадает с запуском новой функции доставки.'
-                      :'Purchase Intent surged +39.3% — best weekly performance. Customer Service continues to cause the most visibility damage (-18.48%). Complaints dropped 11% — a positive signal. The rise in positive sentiment (+12%) correlates with the new delivery feature launch.'}
-                  />
+                  <OrganicPostsTable ru={ru} items={organicPostItems} />
                 </div>
               )}
 
               {/* ── TIER: COMPETITIVE SCORECARD — AD INTELLIGENCE ── */}
-              <TierHeader tier={TIERS.scorecard} isOpen={openTiers.scorecard} onToggle={()=>toggleTier('scorecard')} ru={ru} />
-              {openTiers.scorecard && (
-                <div className="space-y-4">
-                  <AdScrapeTable ru={ru} items={adItems} />
-                  <AIInsight
-                    title={ru?'AI-анализ рекламы конкурентов':'AI Ad Intelligence Analysis'}
-                    color="#6366f1"
-                    text={ru
-                      ?'Brand Z доминирует в Instagram по объёму (145K показов, 8.3K вовлечения) с акцентом на срочность и скидки. Brand X использует диверсифицированную мультиплатформенную стратегию. Competitor A получает максимальный ROI с минимальным бюджетом, фокусируясь на органических лидах через LinkedIn и Google Search.'
-                      :'Brand Z dominates Instagram by volume (145K impressions, 8.3K engagement) leveraging urgency and discounts. Brand X deploys a diversified cross-platform strategy. Competitor A achieves maximum ROI with minimal budget by focusing on organic leads through LinkedIn and Google Search.'}
-                  />
-                </div>
+              {adItems.length > 0 && (
+                <>
+                  <TierHeader tier={TIERS.scorecard} isOpen={openTiers.scorecard} onToggle={()=>toggleTier('scorecard')} ru={ru} />
+                  {openTiers.scorecard && (
+                    <div className="space-y-4">
+                      <AdScrapeTable ru={ru} items={adItems} />
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

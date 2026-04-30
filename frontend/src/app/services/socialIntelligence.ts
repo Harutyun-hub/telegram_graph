@@ -80,6 +80,15 @@ export interface SocialTopicItem {
   sampleSummary: string;
 }
 
+export interface SocialTopicsResponse {
+  items: SocialTopicItem[];
+  meta?: {
+    degradedSections?: string[];
+    error?: string | null;
+    [key: string]: unknown;
+  };
+}
+
 export interface SocialAdCard {
   id: string;
   activity_uid: string;
@@ -345,7 +354,7 @@ export async function getSocialTopicTimeline(filters: SocialIntelligenceFilters,
 }
 
 export async function getSocialTopics(filters: SocialIntelligenceFilters, options: { limit?: number } = {}) {
-  return apiFetch<{ items: SocialTopicItem[] }>(
+  return apiFetch<SocialTopicsResponse>(
     `/social/intelligence/topics${withRange(filters, { limit: options.limit })}`,
     { includeUserAuth: true },
   );

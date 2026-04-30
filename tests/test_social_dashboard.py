@@ -153,8 +153,8 @@ class _FakeSocialDashboardStore:
             }
         ]
         self.accounts = [] if empty else [
-            {"id": "account-fb-page", "entity_id": "entity-1", "platform": "facebook", "source_kind": "facebook_page"},
-            {"id": "account-meta", "entity_id": "entity-1", "platform": "facebook", "source_kind": "meta_ads"},
+            {"id": "account-fb-page", "entity_id": "entity-1", "platform": "facebook", "source_kind": "facebook_page", "is_active": True},
+            {"id": "account-meta", "entity_id": "entity-1", "platform": "facebook", "source_kind": "meta_ads", "is_active": True},
         ]
         self.runtime_settings = {
             "ai_brief_snapshot": {
@@ -275,11 +275,16 @@ class _FakeSocialDashboardStore:
     def get_runtime_setting(self, key: str, default: dict) -> dict:
         return self.runtime_settings.get(key, default)
 
+    def save_runtime_setting(self, key: str, value: dict) -> dict:
+        self.runtime_settings[key] = value
+        return value
+
 
 class SocialDashboardSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         social_dashboard._CACHE.clear()
         social_dashboard._REFRESHING.clear()
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
 
     def test_empty_store_returns_valid_snapshot_with_diagnostics(self) -> None:
         payload = build_social_dashboard_snapshot(_FakeSocialDashboardStore(empty=True), use_cache=False)
@@ -331,6 +336,13 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.communityInterests"], "neo4j_topic_aggregates")
         self.assertEqual(payload["meta"]["dataSources"]["deepAnalysis.painPoints"], "social_ai_brief_snapshot")
         self.assertEqual(payload["strictMetrics"]["sentimentByEntity"][0]["entity_id"], "entity-1")
+        self.assertEqual(payload["strictMetrics"]["summary"]["trackedSources"], 2)
+        self.assertEqual(payload["strictMetrics"]["summary"]["posts"], 1)
+        self.assertEqual(payload["strictMetrics"]["summary"]["comments"], 1)
+        self.assertEqual(payload["strictMetrics"]["summary"]["ads"], 1)
+        self.assertEqual(payload["strictMetrics"]["visibilityData"][0]["reach"], 0)
+        self.assertEqual(payload["strictMetrics"]["visibilityData"][0]["interactions"], 10)
+        self.assertIsNone(payload["strictMetrics"]["visibilityData"][0]["engagementRate"])
         self.assertEqual(payload["adIntelligence"]["items"][0]["source_kind"], "meta_ads")
         self.assertTrue(all(item["source_kind"] != "meta_ads" for item in payload["deepAnalysis"]["evidence"]))
         self.assertEqual(payload["meta"]["missingAnalysis"], 0)
@@ -394,6 +406,89 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["adIntelligence"]["summary"]["topMarketingIntent"], "Acquisition")
         organic_topics = {item["topic"] for item in payload["deepAnalysis"]["topicBubbles"]}
         self.assertNotIn("Credit Cards", organic_topics)
+
+    def test_strict_metrics_use_supabase_facts_without_mixing_comments_as_posts(self) -> None:
+        rows = [
+            {
+                "id": "post-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "post",
+                "platform": "facebook",
+                "published_at": "2026-04-10T10:00:00+00:00",
+                "text_content": "A public post about jobs.",
+                "source_url": "https://www.facebook.com/example/posts/1",
+                "assets": [{"type": "image", "url": "https://cdn.example/post.jpg"}],
+                "engagement_metrics": {"like_count": 10, "comment_count": 3, "share_count": 2, "view_count": 100},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": {"sentiment": "positive", "sentiment_score": 0.7, "analysis_payload": {"topics": ["Jobs"]}},
+            },
+            {
+                "id": "comment-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "comment",
+                "platform": "facebook",
+                "published_at": "2026-04-10T10:05:00+00:00",
+                "engagement_metrics": {"reactionCount": 5},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": None,
+            },
+            {
+                "id": "video-a",
+                "entity_id": "entity-a",
+                "account_id": "account-a",
+                "source_kind": "video",
+                "platform": "facebook",
+                "published_at": "2026-04-10T11:00:00+00:00",
+                "text_content": "A short organic video update.",
+                "engagement_metrics": {"like_count": 1},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-a"},
+                "analysis": {"sentiment": "neutral", "sentiment_score": 0, "analysis_payload": {"topics": ["Updates"]}},
+            },
+            {
+                "id": "ad-a",
+                "entity_id": "entity-a",
+                "account_id": "account-ad",
+                "source_kind": "ad",
+                "platform": "facebook",
+                "published_at": "2026-04-11T10:00:00+00:00",
+                "engagement_metrics": {"impression_count": 500, "click_count": 20},
+                "entity": {"id": "entity-a", "name": "Source A"},
+                "account": {"id": "account-ad"},
+                "analysis": None,
+            },
+        ]
+
+        metrics = social_dashboard._strict_metrics(rows, [], source_rows=[{"id": "account-a"}, {"id": "account-ad"}])
+        visibility = metrics["visibilityData"][0]
+
+        self.assertEqual(metrics["summary"]["trackedSources"], 2)
+        self.assertEqual(metrics["summary"]["posts"], 2)
+        self.assertEqual(metrics["summary"]["comments"], 1)
+        self.assertEqual(metrics["summary"]["ads"], 1)
+        self.assertEqual(visibility["reach"], 100)
+        self.assertEqual(visibility["interactions"], 21)
+        self.assertEqual(visibility["engagementRate"], 21.0)
+        self.assertEqual(metrics["scorecard"][0]["posts"], 2)
+        self.assertEqual(metrics["scorecard"][0]["comments"], 1)
+        self.assertEqual(metrics["visibilityTrend"][0]["source_a"], 100.0)
+        organic_posts = metrics["organicPosts"]["items"]
+        self.assertEqual([item["source_kind"] for item in organic_posts], ["video", "post"])
+        post_item = next(item for item in organic_posts if item["source_kind"] == "post")
+        self.assertEqual(post_item["text"], "A public post about jobs.")
+        self.assertEqual(post_item["source_url"], "https://www.facebook.com/example/posts/1")
+        self.assertEqual(post_item["reach"], 100)
+        self.assertEqual(post_item["likes"], 10)
+        self.assertEqual(post_item["comments"], 3)
+        self.assertEqual(post_item["shares"], 2)
+        self.assertEqual(post_item["media"]["url"], "https://cdn.example/post.jpg")
+        video_item = next(item for item in organic_posts if item["source_kind"] == "video")
+        self.assertIsNone(video_item["reach"])
+        self.assertEqual(metrics["organicPosts"]["summary"]["total"], 2)
 
     def test_social_dashboard_cache_miss_returns_warming(self) -> None:
         with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
@@ -495,6 +590,67 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(topics.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
         self.assertEqual(trend.call_args.kwargs["entity_ids"], ["entity-1", "entity-2"])
 
+    def test_selected_entity_semantic_queries_start_from_tracked_entity(self) -> None:
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_topic_aggregates(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                entity_ids=["entity-1", "entity-2"],
+            )
+
+        topic_cypher = query_rows.call_args.args[0]
+        topic_params = query_rows.call_args.args[1]
+        self.assertIn("MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:COVERS]->(t:Topic)", topic_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", topic_cypher)
+        self.assertEqual(topic_params["entity_ids"], ["entity-1", "entity-2"])
+
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_sentiment_trend(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                entity_ids=["entity-1", "entity-2"],
+            )
+
+        sentiment_cypher = query_rows.call_args.args[0]
+        sentiment_params = query_rows.call_args.args[1]
+        self.assertIn("MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)", sentiment_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", sentiment_cypher)
+        self.assertEqual(sentiment_params["entity_ids"], ["entity-1", "entity-2"])
+
+    def test_all_source_semantic_queries_are_bounded_by_recent_activities(self) -> None:
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_topic_aggregates(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        topic_cypher = query_rows.call_args.args[0]
+        topic_params = query_rows.call_args.args[1]
+        self.assertIn("RETURN collect(a) AS scopedActivities", topic_cypher)
+        self.assertIn("LIMIT $activity_limit", topic_cypher)
+        self.assertIn("UNWIND scopedActivities AS a", topic_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", topic_cypher)
+        self.assertGreater(topic_params["activity_limit"], 0)
+        self.assertEqual(topic_params["entity_ids"], [])
+
+        social_dashboard.social_semantic.invalidate_social_semantic_cache()
+        with patch.object(social_dashboard.social_semantic, "_query_rows", return_value=[]) as query_rows:
+            social_dashboard.social_semantic.get_sentiment_trend(
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        sentiment_cypher = query_rows.call_args.args[0]
+        sentiment_params = query_rows.call_args.args[1]
+        self.assertIn("RETURN collect(a) AS scopedActivities", sentiment_cypher)
+        self.assertIn("LIMIT $activity_limit", sentiment_cypher)
+        self.assertIn("UNWIND scopedActivities AS a", sentiment_cypher)
+        self.assertNotIn("EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a)", sentiment_cypher)
+        self.assertGreater(sentiment_params["activity_limit"], 0)
+        self.assertEqual(sentiment_params["entity_ids"], [])
+
     def test_social_dashboard_stale_cache_returns_without_rebuild(self) -> None:
         filters = {
             "from": "2026-04-01",
@@ -558,6 +714,172 @@ class SocialDashboardSnapshotTests(unittest.TestCase):
 
         self.assertTrue(payload["meta"]["cache"]["expired"])
         self.assertIn("expiredStaleCache", payload["meta"]["degradedSections"])
+
+    def test_default_snapshot_persists_for_restart_fallback(self) -> None:
+        store = _FakeSocialDashboardStore()
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        social_dashboard._persist_default_snapshot(store, filters, snapshot)
+        persisted = store.runtime_settings[social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY]
+
+        self.assertEqual(persisted["filters"], filters)
+        self.assertEqual(persisted["snapshot"]["meta"]["usedActivities"], snapshot["meta"]["usedActivities"])
+        self.assertIn("savedAt", persisted)
+
+    def test_cache_miss_uses_persisted_default_snapshot_when_available(self) -> None:
+        store = _FakeSocialDashboardStore()
+        filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        store.save_runtime_setting(
+            social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY,
+            {"filters": filters, "snapshot": snapshot, "savedAt": "2026-04-15T00:00:00+00:00"},
+        )
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            payload = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+            )
+
+        schedule.assert_called_once()
+        self.assertEqual(payload["meta"]["cache"]["status"], "persisted")
+        self.assertTrue(payload["meta"]["persistedDefaultSnapshot"])
+        self.assertEqual(payload["meta"]["persistedDefaultReadStatus"], "hit")
+        self.assertEqual(payload["meta"]["usedActivities"], snapshot["meta"]["usedActivities"])
+
+    def test_persisted_default_snapshot_does_not_apply_to_specific_filters(self) -> None:
+        store = _FakeSocialDashboardStore()
+        default_filters = {
+            "from": "2026-04-01",
+            "to": "2026-04-15",
+            "entity_id": None,
+            "compare_entity_id": None,
+            "platform": None,
+            "source_kind": None,
+        }
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value={"items": []}), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value={"items": []}):
+            snapshot = build_social_dashboard_snapshot(
+                store,
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+        store.save_runtime_setting(
+            social_dashboard.DEFAULT_SNAPSHOT_SETTING_KEY,
+            {"filters": default_filters, "snapshot": snapshot, "savedAt": "2026-04-15T00:00:00+00:00"},
+        )
+
+        with patch.object(social_dashboard, "_schedule_refresh", return_value=True) as schedule:
+            with self.assertRaises(social_dashboard.SocialDashboardWarmingError):
+                build_social_dashboard_snapshot(
+                    store,
+                    from_date="2026-04-01",
+                    to_date="2026-04-15",
+                    entity_id="entity-1",
+                )
+
+        schedule.assert_called_once()
+
+    def test_semantic_failure_preserves_previous_good_topic_and_sentiment_widgets(self) -> None:
+        good_topics = {
+            "items": [
+                {
+                    "topic": "Card Fees",
+                    "count": 3,
+                    "previousCount": 1,
+                    "deltaCount": 2,
+                    "growthPct": 200.0,
+                    "growthReliable": True,
+                    "avgSentimentScore": -0.5,
+                    "dominantSentiment": "negative",
+                    "sentimentCounts": {"positive": 0, "neutral": 1, "negative": 2},
+                    "topEntities": ["Example Bank"],
+                    "topPlatforms": ["facebook"],
+                    "activityUids": ["facebook:post:post-1"],
+                }
+            ]
+        }
+        good_trend = {"items": [{"bucket": "2026-04-10", "total": 3, "positive": 0, "neutral": 1, "negative": 2}]}
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", return_value=good_topics), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", return_value=good_trend):
+            previous = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", side_effect=RuntimeError("neo4j timeout")), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", side_effect=RuntimeError("neo4j timeout")):
+            broken = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        self.assertEqual(broken["deepAnalysis"]["topicBubbles"], [])
+        self.assertEqual(broken["deepAnalysis"]["sentimentTrend"], [])
+
+        preserved = social_dashboard._preserve_semantic_sections_from_cache(broken, previous)
+
+        self.assertEqual(preserved["deepAnalysis"]["topicBubbles"], previous["deepAnalysis"]["topicBubbles"])
+        self.assertEqual(preserved["deepAnalysis"]["topicRanking"], previous["deepAnalysis"]["topicRanking"])
+        self.assertEqual(preserved["deepAnalysis"]["sentimentTrend"], previous["deepAnalysis"]["sentimentTrend"])
+        self.assertTrue(preserved["meta"]["semanticStale"])
+        self.assertTrue(preserved["meta"]["semanticPreservedFromCache"])
+        self.assertIn("semanticRefreshFailed", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticTopics", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticSentimentTrend", preserved["meta"]["degradedSections"])
+
+    def test_semantic_failure_without_previous_snapshot_stays_empty_and_degraded(self) -> None:
+        with patch.object(social_dashboard.social_semantic, "get_topic_aggregates", side_effect=RuntimeError("neo4j timeout")), \
+             patch.object(social_dashboard.social_semantic, "get_sentiment_trend", side_effect=RuntimeError("neo4j timeout")):
+            broken = build_social_dashboard_snapshot(
+                _FakeSocialDashboardStore(),
+                from_date="2026-04-01",
+                to_date="2026-04-15",
+                use_cache=False,
+            )
+
+        preserved = social_dashboard._preserve_semantic_sections_from_cache(broken, None)
+
+        self.assertEqual(preserved["deepAnalysis"]["topicBubbles"], [])
+        self.assertEqual(preserved["deepAnalysis"]["sentimentTrend"], [])
+        self.assertIn("semanticTopics", preserved["meta"]["degradedSections"])
+        self.assertIn("semanticSentimentTrend", preserved["meta"]["degradedSections"])
+        self.assertNotIn("semanticRefreshFailed", preserved["meta"]["degradedSections"])
 
     def test_graph_coverage_failure_degrades_only_coverage_metadata(self) -> None:
         store = _FakeSocialDashboardStore()

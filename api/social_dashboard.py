@@ -19,6 +19,7 @@ SNAPSHOT_STALE_SECONDS = 3600
 SECTION_TIMEOUT_SECONDS = 8.0
 ACTIVITY_SCAN_LIMIT = 2500
 EVIDENCE_LIMIT = 24
+DEFAULT_SNAPSHOT_SETTING_KEY = "social_dashboard_default_snapshot"
 
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -149,6 +150,28 @@ def _engagement_total(row: dict[str, Any]) -> int:
     return sum(_engagement_parts(row).values())
 
 
+def _source_kind(row: dict[str, Any]) -> str:
+    return _trimmed(row.get("source_kind")).lower()
+
+
+def _is_parent_post(row: dict[str, Any]) -> bool:
+    return _source_kind(row) in {"post", "video"}
+
+
+def _is_comment(row: dict[str, Any]) -> bool:
+    return _source_kind(row) == "comment"
+
+
+def _reach_total(row: dict[str, Any]) -> int:
+    # Reach is only actual audience-size metrics, never likes/comments/shares.
+    return _engagement_parts(row)["views"]
+
+
+def _interaction_total(row: dict[str, Any]) -> int:
+    parts = _engagement_parts(row)
+    return parts["likes"] + parts["comments"] + parts["shares"] + parts["clicks"]
+
+
 def _entity_name(row: dict[str, Any]) -> str:
     return _trimmed(_as_dict(row.get("entity")).get("name")) or "Unknown"
 
@@ -167,7 +190,7 @@ def _selected_entity_ids(filters: dict[str, Any]) -> list[str]:
 
 
 def _is_ad(row: dict[str, Any]) -> bool:
-    source_kind = _trimmed(row.get("source_kind")).lower()
+    source_kind = _source_kind(row)
     return source_kind in {"ad", "meta_ads", "google_ads"} or _trimmed(row.get("platform")).lower() == "google"
 
 
@@ -824,54 +847,152 @@ def _ad_items(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    by_entity: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+def _first_media_asset(row: dict[str, Any]) -> dict[str, Any] | None:
+    for asset in _as_list(row.get("assets")):
+        if not isinstance(asset, dict):
+            continue
+        url = _trimmed(asset.get("url") or asset.get("src"))
+        if not url:
+            continue
+        return {
+            "kind": _trimmed(asset.get("kind") or asset.get("type")) or "media",
+            "url": url,
+        }
+    return None
+
+
+def _organic_post_items(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda item: _trimmed(item.get("published_at") or item.get("last_seen_at")), reverse=True)[:50]:
+        parts = _engagement_parts(row)
+        reach = _reach_total(row)
+        items.append({
+            "id": row.get("id"),
+            "activity_uid": row.get("activity_uid"),
+            "entity_id": _entity_id(row),
+            "entity": _entity_name(row),
+            "platform": row.get("platform"),
+            "source_kind": row.get("source_kind"),
+            "text": row.get("text_content") or _analysis_text(row, "summary"),
+            "media": _first_media_asset(row),
+            "source_url": row.get("source_url"),
+            "published_at": row.get("published_at") or row.get("last_seen_at") or row.get("created_at"),
+            "reach": reach if reach > 0 else None,
+            "likes": parts["likes"],
+            "comments": parts["comments"],
+            "shares": parts["shares"],
+        })
+    return {
+        "items": items,
+        "summary": {
+            "total": len(rows),
+            "returned": len(items),
+            "withMedia": sum(1 for item in items if item.get("media")),
+            "withReach": sum(1 for item in items if item.get("reach") is not None),
+        },
+    }
+
+
+def _visibility_trend(rows: list[dict[str, Any]], visibility_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    top_entities = [item["entity"] for item in sorted(visibility_data, key=lambda value: -value["visibility"])[:4]]
+    if not top_entities:
+        return []
+    buckets: dict[str, Counter] = defaultdict(Counter)
     for row in rows:
+        bucket = _date_bucket(row)
+        if bucket == "unknown":
+            continue
+        entity = _entity_name(row)
+        if entity in top_entities:
+            buckets[bucket][entity] += 1
+        buckets[bucket]["__total__"] += 1
+    output: list[dict[str, Any]] = []
+    for bucket, counts in sorted(buckets.items()):
+        total = counts.get("__total__", 0)
+        item: dict[str, Any] = {"day": bucket}
+        for entity in top_entities:
+            item[_series_key(entity)] = _safe_pct(counts.get(entity, 0), total)
+        output.append(item)
+    return output[-30:]
+
+
+def _strict_metrics(
+    rows: list[dict[str, Any]],
+    previous_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    organic_rows = [row for row in rows if _is_organic(row)]
+    parent_rows = [row for row in organic_rows if _is_parent_post(row)]
+    comment_rows = [row for row in organic_rows if _is_comment(row)]
+    ad_rows = [row for row in rows if _is_ad(row)]
+    total_mentions = len(organic_rows)
+    total_reach = sum(_reach_total(row) for row in organic_rows)
+
+    by_entity: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in organic_rows + ad_rows:
         by_entity[(_entity_id(row), _entity_name(row))].append(row)
-    total_mentions = len(rows)
     sentiment_by_entity = []
     visibility_data = []
     scorecard = []
-    engagement_subjects = ["likes", "comments", "shares", "views", "clicks"]
+    engagement_subjects = ["likes", "comments", "shares", "clicks"]
     engagement_totals: dict[str, Counter] = defaultdict(Counter)
     for (entity_id, entity), entity_rows in by_entity.items():
-        sentiment_counts = Counter(_sentiment(row) for row in entity_rows)
-        engagement = sum(_engagement_total(row) for row in entity_rows)
-        score_total = sum(_sentiment_score(row) for row in entity_rows)
-        topics = Counter(topic for row in entity_rows for topic in _analysis_list(row, "topics"))
-        products = Counter(product for row in entity_rows for product in _analysis_list(row, "products"))
-        intents = Counter(_analysis_text(row, "marketing_intent") for row in entity_rows if _analysis_text(row, "marketing_intent"))
+        organic_entity_rows = [row for row in entity_rows if _is_organic(row)]
+        parent_entity_rows = [row for row in organic_entity_rows if _is_parent_post(row)]
+        comment_entity_rows = [row for row in organic_entity_rows if _is_comment(row)]
+        analyzed_parent_rows = [row for row in parent_entity_rows if row.get("analysis")]
+        sentiment_denominator = analyzed_parent_rows or parent_entity_rows or organic_entity_rows
+        sentiment_counts = Counter(_sentiment(row) for row in sentiment_denominator)
+        score_total = sum(_sentiment_score(row) for row in sentiment_denominator)
+        topics = Counter(topic for row in sentiment_denominator for topic in _analysis_list(row, "topics"))
+        products = Counter(product for row in sentiment_denominator for product in _analysis_list(row, "products"))
+        intents = Counter(_analysis_text(row, "marketing_intent") for row in sentiment_denominator if _analysis_text(row, "marketing_intent"))
         ads = sum(1 for row in entity_rows if _is_ad(row))
-        for row in entity_rows:
+        reach = sum(_reach_total(row) for row in organic_entity_rows)
+        interactions = sum(_interaction_total(row) for row in organic_entity_rows)
+        sov = _safe_pct(len(organic_entity_rows), total_mentions)
+        reach_share = _safe_pct(reach, total_reach)
+        visibility_score = round((sov * 0.6) + (reach_share * 0.4), 1) if total_reach else sov
+        engagement_rate = round((interactions / reach) * 100.0, 1) if reach else None
+        for row in organic_entity_rows:
             parts = _engagement_parts(row)
             for subject in engagement_subjects:
                 engagement_totals[entity][subject] += parts[subject]
         sentiment_by_entity.append({
             "entity_id": entity_id,
             "entity": entity,
-            "pos": _safe_pct(sentiment_counts.get("positive", 0), len(entity_rows)),
-            "neu": _safe_pct(sentiment_counts.get("neutral", 0), len(entity_rows)),
-            "neg": _safe_pct(sentiment_counts.get("negative", 0), len(entity_rows)),
-            "total": len(entity_rows),
+            "pos": _safe_pct(sentiment_counts.get("positive", 0), len(sentiment_denominator)),
+            "neu": _safe_pct(sentiment_counts.get("neutral", 0), len(sentiment_denominator)),
+            "neg": _safe_pct(sentiment_counts.get("negative", 0), len(sentiment_denominator)),
+            "total": len(sentiment_denominator),
+            "posts": len(parent_entity_rows),
+            "comments": len(comment_entity_rows),
         })
         visibility_data.append({
             "entity_id": entity_id,
             "entity": entity,
-            "visibility": _safe_pct(len(entity_rows), total_mentions),
-            "delta": 0,
-            "reach": engagement,
-            "deltaReach": 0,
-            "engagement": round(engagement / max(1, len(entity_rows)), 1),
-            "deltaEngage": 0,
-            "sov": _safe_pct(len(entity_rows), total_mentions),
-            "deltaSov": 0,
+            "visibility": visibility_score,
+            "delta": None,
+            "reach": reach,
+            "reachShare": reach_share,
+            "deltaReach": None,
+            "interactions": interactions,
+            "engagement": engagement_rate if engagement_rate is not None else 0,
+            "engagementRate": engagement_rate,
+            "deltaEngage": None,
+            "sov": sov,
+            "deltaSov": None,
+            "posts": len(parent_entity_rows),
+            "comments": len(comment_entity_rows),
+            "hasReach": reach > 0,
         })
         scorecard.append({
             "id": entity_id or entity.lower().replace(" ", "-"),
             "name": entity,
-            "posts": len(entity_rows),
+            "posts": len(parent_entity_rows),
+            "comments": len(comment_entity_rows),
             "ads": ads,
-            "sentiment": round(((score_total / max(1, len(entity_rows))) + 1.0) * 50.0, 1),
+            "sentiment": round(((score_total / max(1, len(sentiment_denominator))) + 1.0) * 50.0, 1),
             "intent": intents.most_common(1)[0][0] if intents else None,
             "topics": [name for name, _ in topics.most_common(3)],
             "products": [name for name, _ in products.most_common(3)],
@@ -891,19 +1012,22 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
         }
         for subject in engagement_subjects
     ]
-    current_counter = Counter(topic for row in rows for topic in _analysis_list(row, "topics"))
+    current_counter = Counter(topic for row in parent_rows for topic in _analysis_list(row, "topics"))
     previous_counter = Counter(topic for row in previous_rows for topic in _analysis_list(row, "topics"))
+    analyzed_parent_rows = [row for row in parent_rows if row.get("analysis")]
+    summary_sentiment_rows = analyzed_parent_rows or parent_rows
+    visibility_trend = _visibility_trend(organic_rows, visibility_data)
     weekly_shifts = [
         {
             "metric": "Total Mentions",
-            "current": len(rows),
+            "current": len(organic_rows),
             "previous": len(previous_rows),
             "unit": "",
             "goodIfUp": True,
         },
         {
             "metric": "Positive Sentiment",
-            "current": _safe_pct(sum(1 for row in rows if _sentiment(row) == "positive"), len(rows)),
+            "current": _safe_pct(sum(1 for row in summary_sentiment_rows if _sentiment(row) == "positive"), len(summary_sentiment_rows)),
             "previous": _safe_pct(sum(1 for row in previous_rows if _sentiment(row) == "positive"), len(previous_rows)),
             "unit": "%",
             "goodIfUp": True,
@@ -917,7 +1041,7 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
         },
         {
             "metric": "Ads Running",
-            "current": sum(1 for row in rows if _is_ad(row)),
+            "current": len(ad_rows),
             "previous": sum(1 for row in previous_rows if _is_ad(row)),
             "unit": "",
             "goodIfUp": True,
@@ -934,10 +1058,19 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
         if count < previous_counter.get(topic, 0)
     ]
     return {
+        "summary": {
+            "trackedSources": len(source_rows or []),
+            "posts": len(parent_rows),
+            "comments": len(comment_rows),
+            "ads": len(ad_rows),
+            "avgPositive": _safe_pct(sum(1 for row in summary_sentiment_rows if _sentiment(row) == "positive"), len(summary_sentiment_rows)),
+            "organicMentions": len(organic_rows),
+            "rowCapReached": len(rows) >= ACTIVITY_SCAN_LIMIT,
+        },
         "sentimentByEntity": sorted(sentiment_by_entity, key=lambda item: -item["total"]),
         "engagementRadar": engagement_radar,
         "visibilityData": sorted(visibility_data, key=lambda item: -item["visibility"]),
-        "visibilityTrend": [],
+        "visibilityTrend": visibility_trend,
         "positiveImpact": positive_impact,
         "negativeImpact": negative_impact,
         "weeklyShifts": weekly_shifts,
@@ -946,6 +1079,7 @@ def _strict_metrics(rows: list[dict[str, Any]], previous_rows: list[dict[str, An
             {"name": item["entity"], "value": item["sov"]}
             for item in sorted(visibility_data, key=lambda value: -value["sov"])
         ],
+        "organicPosts": _organic_post_items(parent_rows),
     }
 
 
@@ -989,6 +1123,51 @@ def _cache_key(filters: dict[str, Any]) -> str:
     return "|".join(parts)
 
 
+def _is_default_snapshot_filters(filters: dict[str, Any]) -> bool:
+    """Default Social dashboard view: all sources, all platforms, selected date range."""
+    return not any(
+        _trimmed(filters.get(key))
+        for key in ("entity_id", "compare_entity_id", "platform", "source_kind")
+    )
+
+
+def _persist_default_snapshot(store: Any, filters: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    if not _is_default_snapshot_filters(filters) or not hasattr(store, "save_runtime_setting"):
+        return
+    try:
+        store.save_runtime_setting(
+            DEFAULT_SNAPSHOT_SETTING_KEY,
+            {
+                "filters": dict(filters),
+                "snapshot": deepcopy(snapshot),
+                "savedAt": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist Social dashboard default snapshot | error={}", exc)
+
+
+def _load_persisted_default_snapshot(store: Any, filters: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    if not _is_default_snapshot_filters(filters) or not hasattr(store, "get_runtime_setting"):
+        return None, None
+    try:
+        payload = store.get_runtime_setting(DEFAULT_SNAPSHOT_SETTING_KEY, {})
+    except Exception as exc:
+        logger.warning("Failed to load persisted Social dashboard default snapshot | error={}", exc)
+        return None, "read_error"
+    if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), dict):
+        return None, "miss"
+    persisted_filters = payload.get("filters")
+    if not isinstance(persisted_filters, dict):
+        return None, "invalid_filters"
+    if _cache_key(persisted_filters) != _cache_key(filters):
+        return None, "filter_mismatch"
+    snapshot = deepcopy(payload["snapshot"])
+    snapshot.setdefault("meta", {})["persistedDefaultSnapshot"] = True
+    snapshot["meta"]["persistedDefaultSavedAt"] = payload.get("savedAt")
+    return snapshot, "hit"
+
+
 def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | None = None) -> dict[str, Any]:
     payload = deepcopy(snapshot)
     meta = payload.setdefault("meta", {})
@@ -1005,6 +1184,51 @@ def _cache_payload(snapshot: dict[str, Any], *, status: str, cached_at: float | 
     }
     if cached_at:
         meta["cachedAt"] = datetime.fromtimestamp(cached_at, tz=timezone.utc).isoformat()
+    return payload
+
+
+def _preserve_semantic_sections_from_cache(
+    snapshot: dict[str, Any],
+    previous_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep last good semantic widgets when a Neo4j refresh degrades."""
+    if not previous_snapshot:
+        return snapshot
+
+    payload = deepcopy(snapshot)
+    meta = payload.setdefault("meta", {})
+    degraded = set(meta.get("degradedSections") or [])
+    if not degraded.intersection({"semanticTopics", "semanticSentimentTrend"}):
+        return payload
+
+    deep = payload.setdefault("deepAnalysis", {})
+    previous_deep = _as_dict(previous_snapshot.get("deepAnalysis"))
+    preserved: list[str] = []
+
+    previous_topics_available = bool(previous_deep.get("topicBubbles") or previous_deep.get("topicRanking"))
+    current_topics_empty = not deep.get("topicBubbles") and not deep.get("topicRanking")
+    if "semanticTopics" in degraded and current_topics_empty and previous_topics_available:
+        for key in ("topicBubbles", "topicRanking", "communityInterests"):
+            deep[key] = deepcopy(previous_deep.get(key) or [])
+        preserved.append("semanticTopics")
+        degraded.discard("semanticTopics")
+
+    previous_trend_available = bool(previous_deep.get("sentimentTrend"))
+    current_trend_empty = not deep.get("sentimentTrend")
+    if "semanticSentimentTrend" in degraded and current_trend_empty and previous_trend_available:
+        deep["sentimentTrend"] = deepcopy(previous_deep.get("sentimentTrend") or [])
+        preserved.append("semanticSentimentTrend")
+        degraded.discard("semanticSentimentTrend")
+
+    if preserved:
+        degraded.add("semanticRefreshFailed")
+        meta["semanticStale"] = True
+        meta["semanticPreservedFromCache"] = True
+        meta["semanticPreservedSections"] = preserved
+        meta["degradedSections"] = sorted(degraded)
+        meta.setdefault("emptyReasons", {}).pop("communityInterests", None)
+        logger.warning("Social dashboard preserved semantic cache after Neo4j degradation | preserved={}", preserved)
+
     return payload
 
 
@@ -1142,7 +1366,11 @@ def _fetch_graph_sync_coverage(store: Any, filters: dict[str, Any]) -> tuple[dic
     return coverage, elapsed_ms
 
 
-def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def _fetch_rows(
+    store: Any,
+    filters: dict[str, Any],
+    timings: dict[str, float],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
     started = time.perf_counter()
     activity_filters: list[tuple[str, str, Any]] = []
     start_bound, end_bound = _range_bounds(filters.get("from"), filters.get("to"))
@@ -1164,7 +1392,7 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
         columns=(
             "id,entity_id,account_id,activity_uid,platform,source_kind,provider_item_id,source_url,"
             "text_content,published_at,author_handle,cta_type,content_format,region_name,"
-            "engagement_metrics,assets,provider_payload,ingest_status,analysis_status,graph_status,"
+            "engagement_metrics,assets,ingest_status,analysis_status,graph_status,"
             "last_seen_at,created_at"
         ),
         filters=activity_filters,
@@ -1192,7 +1420,28 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
     timings["analysisFetchMs"] = round((time.perf_counter() - started) * 1000, 2)
 
     started = time.perf_counter()
-    entity_ids = list({row.get("entity_id") for row in activities if row.get("entity_id")})
+    source_filters: list[tuple[str, str, Any]] = [("eq", "is_active", True)]
+    selected_entity_ids = _selected_entity_ids(filters)
+    if len(selected_entity_ids) == 1:
+        source_filters.append(("eq", "entity_id", selected_entity_ids[0]))
+    elif len(selected_entity_ids) > 1:
+        source_filters.append(("in", "entity_id", selected_entity_ids))
+    if filters.get("platform") and filters.get("platform") != "all":
+        source_filters.append(("eq", "platform", filters["platform"]))
+    if filters.get("source_kind") and filters.get("source_kind") != "all":
+        source_filters.append(("eq", "source_kind", filters["source_kind"]))
+    source_rows = store._select_rows(
+        "social_entity_accounts",
+        columns="id,entity_id,platform,source_kind,account_handle,account_external_id,domain,metadata,is_active,health_status",
+        filters=source_filters,
+        limit=10000,
+    )
+
+    entity_ids = list({
+        row.get("entity_id")
+        for row in [*activities, *source_rows]
+        if row.get("entity_id")
+    })
     entities = {}
     if entity_ids:
         entities = {
@@ -1215,7 +1464,7 @@ def _fetch_rows(store: Any, filters: dict[str, Any], timings: dict[str, float]) 
             )
         }
     timings["dimensionFetchMs"] = round((time.perf_counter() - started) * 1000, 2)
-    return activities, list(analyses.values()), entities, accounts
+    return activities, list(analyses.values()), entities, accounts, source_rows
 
 
 def _build_social_dashboard_snapshot_uncached(
@@ -1239,7 +1488,7 @@ def _build_social_dashboard_snapshot_uncached(
     request_id = uuid.uuid4().hex[:12]
     started_at = time.perf_counter()
     timings: dict[str, float] = {}
-    activities, analyses, entities, accounts = _fetch_rows(store, filters, timings)
+    activities, analyses, entities, accounts, source_rows = _fetch_rows(store, filters, timings)
 
     analysis_by_activity = {row.get("activity_id"): row for row in analyses}
     start_bound, end_bound = _range_bounds(from_date, to_date)
@@ -1274,6 +1523,7 @@ def _build_social_dashboard_snapshot_uncached(
 
     if not enriched:
         snapshot = _empty_snapshot(filters, request_id, started_at)
+        snapshot.setdefault("strictMetrics", {}).setdefault("summary", {})["trackedSources"] = len(source_rows)
     else:
         organic = [row for row in enriched if _is_organic(row)]
         ads = [row for row in enriched if _is_ad(row)]
@@ -1336,7 +1586,7 @@ def _build_social_dashboard_snapshot_uncached(
         timings["adIntelligenceBuildMs"] = round((time.perf_counter() - section_started) * 1000, 2)
 
         section_started = time.perf_counter()
-        strict = _strict_metrics(enriched, previous_rows)
+        strict = _strict_metrics(enriched, previous_rows, source_rows)
         timings["strictMetricsBuildMs"] = round((time.perf_counter() - section_started) * 1000, 2)
 
         empty_reasons = {}
@@ -1393,6 +1643,7 @@ def _build_social_dashboard_snapshot_uncached(
                     "deepAnalysis.topQuestions": "social_ai_brief_snapshot",
                     "deepAnalysis.painPoints": "social_ai_brief_snapshot",
                     "strictMetrics": "supabase",
+                    "strictMetrics.organicPosts": "supabase",
                     "adIntelligence": "supabase",
                 },
                 "degradedSections": sorted(set(degraded_sections)),
@@ -1422,6 +1673,9 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
 
     def _refresh() -> None:
         started = time.perf_counter()
+        with _CACHE_LOCK:
+            previous_entry = _CACHE.get(key)
+            previous_snapshot = deepcopy(previous_entry[1]) if previous_entry else None
         try:
             snapshot = _build_social_dashboard_snapshot_uncached(
                 store,
@@ -1432,9 +1686,11 @@ def _schedule_refresh(store: Any, filters: dict[str, Any], key: str, *, reason: 
                 platform=filters.get("platform"),
                 source_kind=filters.get("source_kind"),
             )
+            snapshot = _preserve_semantic_sections_from_cache(snapshot, previous_snapshot)
             snapshot.setdefault("meta", {})["refreshReason"] = reason
             snapshot["meta"]["backgroundBuildMs"] = round((time.perf_counter() - started) * 1000, 2)
             _store_cache_snapshot(key, snapshot)
+            _persist_default_snapshot(store, filters, snapshot)
             logger.info("Social dashboard snapshot refreshed | key={} reason={} elapsed_ms={}", key, reason, snapshot["meta"]["backgroundBuildMs"])
         except Exception as exc:
             logger.warning("Social dashboard background refresh failed | key={} reason={} error={}", key, reason, exc)
@@ -1496,6 +1752,15 @@ def build_social_dashboard_snapshot(
         if payload["meta"]["cache"].get("expired"):
             stale_sections.append("expiredStaleCache")
         payload["meta"]["degradedSections"] = sorted(set(payload["meta"].get("degradedSections", []) + stale_sections))
+        return payload
+
+    persisted_snapshot, persisted_status = _load_persisted_default_snapshot(store, filters)
+    if persisted_snapshot is not None:
+        _store_cache_snapshot(key, persisted_snapshot)
+        _schedule_refresh(store, filters, key, reason="persisted_default")
+        payload = _cache_payload(persisted_snapshot, status="persisted")
+        payload["meta"]["cache"]["refreshing"] = True
+        payload["meta"]["persistedDefaultReadStatus"] = persisted_status
         return payload
 
     scheduled = _schedule_refresh(store, filters, key, reason="miss")

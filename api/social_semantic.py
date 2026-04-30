@@ -14,13 +14,22 @@ import config
 
 _CACHE_TTL_SECONDS = 300.0
 _QUERY_TIMEOUT_SECONDS = 6.0
+_ALL_SOURCE_ACTIVITY_LIMIT = 2500
 _ORGANIC_SOURCE_KINDS = ("post",)
 _NOISE_TOPIC_NAMES = {"", "null", "unknown", "none", "n/a", "na"}
 
 _driver_lock = threading.Lock()
 _driver: Any | None = None
+_indexes_ensured = False
 _cache_lock = threading.Lock()
 _cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+
+_DASHBOARD_INDEX_CYPHER = (
+    "CREATE INDEX social_activity_published_at IF NOT EXISTS FOR (n:SocialActivity) ON (n.published_at)",
+    "CREATE INDEX social_activity_source_kind IF NOT EXISTS FOR (n:SocialActivity) ON (n.source_kind)",
+    "CREATE INDEX social_activity_platform IF NOT EXISTS FOR (n:SocialActivity) ON (n.platform)",
+    "CREATE INDEX social_tracked_entity_id IF NOT EXISTS FOR (n:TrackedEntity) ON (n.id)",
+)
 
 
 def _social_neo4j_uri() -> str:
@@ -45,7 +54,25 @@ def _get_driver():
                 max_transaction_retry_time=5.0,
             )
             _driver.verify_connectivity()
+            _ensure_dashboard_indexes(_driver)
         return _driver
+
+
+def _ensure_dashboard_indexes(driver: Any) -> None:
+    """Best-effort indexes for bounded dashboard reads."""
+    global _indexes_ensured
+    if _indexes_ensured:
+        return
+    try:
+        with driver.session(database=config.SOCIAL_NEO4J_DATABASE) as session:
+            for cypher in _DASHBOARD_INDEX_CYPHER:
+                try:
+                    session.run(Query(cypher, timeout=_QUERY_TIMEOUT_SECONDS)).consume()
+                except Exception as exc:
+                    logger.debug("Social Neo4j dashboard index check skipped for query={} error={}", cypher, exc)
+        _indexes_ensured = True
+    except Exception as exc:
+        logger.warning("Social Neo4j dashboard index setup skipped: {}", exc)
 
 
 def _cache_get(key: tuple[Any, ...]):
@@ -171,24 +198,23 @@ def get_topic_aggregates(
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
         "noise": list(_NOISE_TOPIC_NAMES),
         "limit": topic_limit,
+        "activity_limit": _ALL_SOURCE_ACTIVITY_LIMIT,
     }
     cache_key = ("topic_aggregates_v1", _cacheable_params(params))
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    cypher = """
-    MATCH (a:SocialActivity)-[:COVERS]->(t:Topic)
-    WHERE a.published_at >= datetime($start)
+    if params["entity_ids"]:
+        cypher = """
+    MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:COVERS]->(t:Topic)
+    WHERE entity.id IN $entity_ids
+      AND a.published_at >= datetime($start)
       AND a.published_at < datetime($end)
       AND coalesce(a.source_kind, '') IN $source_kinds
       AND ($platform IS NULL OR a.platform = $platform)
       AND coalesce(t.proposed, false) = false
       AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-      AND (
-        size($entity_ids) = 0
-        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
-      )
     OPTIONAL MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
     WITH t, a, head(collect(DISTINCT toLower(coalesce(s.name, 'neutral')))) AS sentiment
     WITH
@@ -206,24 +232,86 @@ def get_topic_aggregates(
     ORDER BY currentMentions DESC, t.name ASC
     LIMIT $limit
     CALL (t) {
+      MATCH (previousEntity:TrackedEntity)-[:HAS_ACTIVITY]->(pa:SocialActivity)-[:COVERS]->(t)
+      WHERE previousEntity.id IN $entity_ids
+        AND pa.published_at >= datetime($previous_start)
+        AND pa.published_at < datetime($previous_end)
+        AND coalesce(pa.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR pa.platform = $platform)
+      RETURN count(DISTINCT pa) AS previousMentions
+    }
+    CALL (t) {
+      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea:SocialActivity)-[:COVERS]->(t)
+      WHERE entity.id IN $entity_ids
+        AND ea.published_at >= datetime($start)
+        AND ea.published_at < datetime($end)
+        AND coalesce(ea.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR ea.platform = $platform)
+      WITH entity.name AS name, count(DISTINCT ea) AS hits
+      ORDER BY hits DESC, name ASC
+      RETURN collect(name)[..5] AS topEntities
+    }
+    RETURN
+      t.name AS topic,
+      currentMentions,
+      previousMentions,
+      avgSentimentScore,
+      positive,
+      neutral,
+      negative,
+      mixed,
+      urgent,
+      sarcastic,
+      topEntities,
+      topPlatforms,
+      activityUids
+    ORDER BY currentMentions DESC, topic ASC
+    """
+    else:
+        cypher = """
+    CALL {
+      MATCH (a:SocialActivity)
+      WHERE a.published_at >= datetime($start)
+        AND a.published_at < datetime($end)
+        AND coalesce(a.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR a.platform = $platform)
+      WITH a
+      ORDER BY a.published_at DESC
+      LIMIT $activity_limit
+      RETURN collect(a) AS scopedActivities
+    }
+    UNWIND scopedActivities AS a
+    MATCH (a)-[:COVERS]->(t:Topic)
+    WHERE coalesce(t.proposed, false) = false
+      AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
+    OPTIONAL MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
+    WITH t, a, head(collect(DISTINCT toLower(coalesce(s.name, 'neutral')))) AS sentiment
+    WITH
+      t,
+      count(DISTINCT a) AS currentMentions,
+      avg(coalesce(a.sentiment_score, 0.0)) AS avgSentimentScore,
+      collect(DISTINCT a.uid)[..30] AS activityUids,
+      collect(DISTINCT a.platform)[..4] AS topPlatforms,
+      collect(DISTINCT a)[..200] AS topicActivities,
+      sum(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) AS positive,
+      sum(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) AS negative,
+      sum(CASE WHEN sentiment = 'mixed' THEN 1 ELSE 0 END) AS mixed,
+      sum(CASE WHEN sentiment = 'urgent' THEN 1 ELSE 0 END) AS urgent,
+      sum(CASE WHEN sentiment = 'sarcastic' THEN 1 ELSE 0 END) AS sarcastic,
+      sum(CASE WHEN sentiment = 'neutral' OR sentiment = '' THEN 1 ELSE 0 END) AS neutral
+    ORDER BY currentMentions DESC, t.name ASC
+    LIMIT $limit
+    CALL (t) {
       MATCH (pa:SocialActivity)-[:COVERS]->(t)
       WHERE pa.published_at >= datetime($previous_start)
         AND pa.published_at < datetime($previous_end)
         AND coalesce(pa.source_kind, '') IN $source_kinds
         AND ($platform IS NULL OR pa.platform = $platform)
-        AND (
-          size($entity_ids) = 0
-          OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(pa) WHERE matchedEntity.id IN $entity_ids }
-        )
       RETURN count(DISTINCT pa) AS previousMentions
     }
-    CALL (t) {
-      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea:SocialActivity)-[:COVERS]->(t)
-      WHERE ea.published_at >= datetime($start)
-        AND ea.published_at < datetime($end)
-        AND coalesce(ea.source_kind, '') IN $source_kinds
-        AND ($platform IS NULL OR ea.platform = $platform)
-        AND (size($entity_ids) = 0 OR entity.id IN $entity_ids)
+    CALL (topicActivities) {
+      UNWIND topicActivities AS ea
+      MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(ea)
       WITH entity.name AS name, count(DISTINCT ea) AS hits
       ORDER BY hits DESC, name ASC
       RETURN collect(name)[..5] AS topEntities
@@ -311,22 +399,43 @@ def get_sentiment_trend(
         "entity_ids": _entity_filter_values(entity_id, entity_ids),
         "platform": _platform_filter(platform),
         "source_kinds": list(_ORGANIC_SOURCE_KINDS),
+        "activity_limit": _ALL_SOURCE_ACTIVITY_LIMIT,
     }
     cache_key = ("sentiment_trend_v2_day", _cacheable_params(params))
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    cypher = """
-    MATCH (a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)
-    WHERE a.published_at >= datetime($start)
+    if params["entity_ids"]:
+        cypher = """
+    MATCH (entity:TrackedEntity)-[:HAS_ACTIVITY]->(a:SocialActivity)-[:HAS_SENTIMENT]->(s:Sentiment)
+    WHERE entity.id IN $entity_ids
+      AND a.published_at >= datetime($start)
       AND a.published_at < datetime($end)
       AND coalesce(a.source_kind, '') IN $source_kinds
       AND ($platform IS NULL OR a.platform = $platform)
-      AND (
-        size($entity_ids) = 0
-        OR EXISTS { MATCH (matchedEntity:TrackedEntity)-[:HAS_ACTIVITY]->(a) WHERE matchedEntity.id IN $entity_ids }
-      )
+    WITH
+      toString(date(a.published_at)) AS bucket,
+      toLower(coalesce(s.name, 'neutral')) AS sentiment,
+      count(DISTINCT a) AS hits
+    RETURN bucket, sentiment, hits
+    ORDER BY bucket ASC
+    """
+    else:
+        cypher = """
+    CALL {
+      MATCH (a:SocialActivity)
+      WHERE a.published_at >= datetime($start)
+        AND a.published_at < datetime($end)
+        AND coalesce(a.source_kind, '') IN $source_kinds
+        AND ($platform IS NULL OR a.platform = $platform)
+      WITH a
+      ORDER BY a.published_at DESC
+      LIMIT $activity_limit
+      RETURN collect(a) AS scopedActivities
+    }
+    UNWIND scopedActivities AS a
+    MATCH (a)-[:HAS_SENTIMENT]->(s:Sentiment)
     WITH
       toString(date(a.published_at)) AS bucket,
       toLower(coalesce(s.name, 'neutral')) AS sentiment,
