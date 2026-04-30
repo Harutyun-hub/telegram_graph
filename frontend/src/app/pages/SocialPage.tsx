@@ -6,7 +6,7 @@ import {
   TrendingUp, TrendingDown,
   Eye, HelpCircle, ArrowUpRight, ArrowDownRight,
   ThumbsUp, ThumbsDown, MessageSquare, Lightbulb, ShieldAlert,
-  Compass, Flame, Globe, Star, Layers
+  Compass, Flame, Globe, Star, Layers, Loader2
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSocialDateRange } from '../contexts/SocialDateRangeContext';
@@ -1889,22 +1889,9 @@ export function SocialPage() {
   const avgPositive = `${Math.round(Number(strictSummary.avgPositive ?? 0) || 0)}%`;
   const topTopicRaw = [...topicBubbles].sort((a, b) => b.count - a.count)[0]?.topic || '';
   const topTopic = topTopicRaw ? translateSocialLabel(topTopicRaw, ru) : (ru ? 'Нет данных' : 'No data');
-  const degradedSections = dashboard?.meta?.degradedSections ?? [];
-  const semanticPreservedFromCache = Boolean(dashboard?.meta?.semanticPreservedFromCache);
-  const onlyCacheDegraded = degradedSections.length > 0
-    && degradedSections.every(section => section === 'staleCache' || section === 'expiredStaleCache');
-  const degradedMessage = semanticPreservedFromCache
-    ? (ru
-      ? 'Темы и тональность обновляются. Показан последний успешный снимок.'
-      : 'Topics and sentiment are refreshing. Showing the last successful snapshot.')
-    : onlyCacheDegraded
-      ? (ru
-        ? 'Данные обновляются в фоне. Показан последний доступный снимок.'
-        : 'Data is refreshing in the background. Showing the last available snapshot.')
-      : (ru
-        ? 'Часть данных обновляется в фоне. Показан последний доступный снимок.'
-        : 'Some data is refreshing in the background. Showing the last available snapshot.');
   const dashboardWarming = Boolean(dashboardError && /warming|503/i.test(dashboardError));
+  const showDashboardLoading = dashboardLoading || dashboardWarming;
+  const showDashboardError = Boolean(dashboardError && !dashboardWarming);
   const chartSeries = visibilityData.slice(0, 4).map((item, index) => ({
     key: seriesKey(item.entity),
     label: item.entity,
@@ -2007,21 +1994,22 @@ export function SocialPage() {
           </div>
         </div>
 
-        {(dashboardLoading || dashboardError || degradedSections.length > 0) && (
-          <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
-            dashboardError
-              ? (dashboardWarming ? 'border-blue-100 bg-blue-50 text-blue-700' : 'border-rose-200 bg-rose-50 text-rose-700')
-              : degradedSections.length > 0
-                ? 'border-amber-200 bg-amber-50 text-amber-700'
-                : 'border-blue-100 bg-blue-50 text-blue-700'
-          }`}>
-            {dashboardError
-              ? (dashboardWarming
-                ? (ru ? 'Социальные данные обновляются в фоне. Показан последний доступный снимок, если он есть.' : 'Social data is warming in the background. Showing the last available snapshot if one exists.')
-                : (ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`))
-              : dashboardLoading
-                ? (ru ? 'Загрузка реальных социальных данных...' : 'Loading real social data...')
-                : degradedMessage}
+        {showDashboardLoading && (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-slate-900" style={{ fontWeight: 600 }}>
+                  {ru ? 'Обновляем данные панели...' : 'Refreshing dashboard data...'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showDashboardError && (
+          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            {ru ? `Не удалось загрузить социальные данные: ${dashboardError}` : `Could not load social data: ${dashboardError}`}
           </div>
         )}
 
