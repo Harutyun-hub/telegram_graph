@@ -163,8 +163,14 @@ TELEGRAM_SESSION_STRING=
 FEATURE_SOURCE_PEER_REF_LOOKUP=
 FEATURE_SOURCE_RESOLUTION_QUEUE=
 FEATURE_SOURCE_RESOLUTION_WORKER=
+FEATURE_BEHAVIORAL_BRIEFS_AI=
+FEATURE_OPPORTUNITY_BRIEFS_AI=
+FEATURE_QUESTION_BRIEFS_AI=
+FEATURE_TOPIC_OVERVIEWS_AI=
 GROUP_MAX_MESSAGES_PER_SOURCE_PER_CYCLE=
 GROUP_MAX_THREAD_ANCHORS_PER_SOURCE_PER_CYCLE=
+NEO4J_MAX_CONNECTION_POOL_SIZE=
+OPENAI_MODEL=
 SCRAPE_MAX_COMMENT_POSTS_PER_SOURCE_PER_CYCLE=
 SCRAPE_MAX_POSTS_PER_SOURCE_PER_CYCLE=
 SCRAPE_SKIP_WHEN_BACKLOG=
@@ -224,3 +230,29 @@ the source code, but use Finance-owned Supabase, Neo4j, Redis, domains, auth
 secrets, scraping credentials, and Telegram/social session credentials.
 
 Never point Finance services at Radar Supabase, Radar Neo4j, or Radar Redis.
+
+## Verification Notes
+
+On 2026-04-30, the non-Railway-generated env variable names in this document
+were checked against the live Railway services:
+
+| Service | Non-Railway env names checked | Missing from this document |
+| --- | ---: | ---: |
+| `loyal-presence` | 80 | 0 |
+| `loyal-presence-worker` | 82 | 0 |
+| `social-worker` | 17 | 0 |
+| `telegram-worker-staging` | 62 | 0 |
+| `romantic-acceptance` | 7 | 0 |
+
+The CLI-deployed worker services do not expose Git commit metadata in Railway.
+They are reproducible from this branch by configuring the same Railway service
+commands and env names:
+
+| Service | Runtime role | Command |
+| --- | --- | --- |
+| `loyal-presence-worker` | `APP_ROLE=worker` | `python -m api.worker` |
+| `social-worker` | `APP_ROLE=social-worker` | `python -m api.social_worker` |
+| `telegram-worker-staging` | `APP_ROLE=worker` | `python -m api.worker` |
+
+The branch contains and compiles both required worker entrypoints:
+`api/worker.py` and `api/social_worker.py`.
