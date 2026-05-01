@@ -25,6 +25,16 @@ This branch uses the live backend API commit as the base because it contains
 the worker and social-worker entrypoints. The live frontend `frontend/`
 directory was overlaid from the live frontend commit.
 
+Important exact-clone caveat: the live `telegram-worker-staging` service is
+not running this production branch. It is running `main` at
+`a38a67886dcece019d2a710f88901c1db1d0c803`. If the goal is a byte-for-byte
+staging clone of the Telegram worker, create that Railway service from `main`
+at that commit/branch, not from `production/radar-live-2026-04-30`.
+
+For the Finance demo, do not create a Telegram worker unless Finance actually
+needs Telegram ingestion. A Forex scraping demo will usually need the API,
+frontend, Redis, and the relevant social/scraping worker instead.
+
 ## Railway Service Commands
 
 The repository `Procfile` defines the runtime roles:
@@ -43,6 +53,7 @@ For Railway:
 | Worker | repository root | `python -m api.worker` |
 | Social worker | repository root | `python -m api.social_worker` |
 | Frontend | `/frontend` | Dockerfile `/frontend/Dockerfile` |
+| Telegram worker exact clone | `main` at `a38a67886dcece019d2a710f88901c1db1d0c803` | `python -m api.worker` |
 | Redis | Railway plugin/image | `redis:8.2.1` |
 
 ## Sanitized Env Names
