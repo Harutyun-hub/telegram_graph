@@ -15,7 +15,9 @@ class _FakeSocialSourceStore:
             {
                 "id": "account-1",
                 "entity_id": "entity-1",
+                "company_id": "company-1",
                 "company_name": "Unibank",
+                "company_website": "https://www.unibank.am",
                 "platform": "facebook",
                 "source_kind": "meta_ads",
                 "display_url": "https://www.facebook.com/unibank",
@@ -27,6 +29,14 @@ class _FakeSocialSourceStore:
                 "metadata": {"source_url": "https://www.facebook.com/unibank"},
             }
         ]
+        self.companies: dict[str, dict] = {
+            "company-1": {
+                "id": "company-1",
+                "name": "Unibank",
+                "website": "https://www.unibank.am",
+                "entity_id": "entity-1",
+            }
+        }
 
     def list_source_rows(self) -> list[dict]:
         return [deepcopy(item) for item in self.items]
@@ -64,11 +74,102 @@ class _FakeSocialSourceStore:
         self.items.append(item)
         return {"action": "created", "item": deepcopy(item)}
 
+    def create_or_update_company_sources(
+        self,
+        *,
+        company_name: str,
+        website: str | None,
+        website_domain: str | None,
+        sources: list[dict],
+        company_id: str | None = None,
+    ) -> dict:
+        company = self.companies.get(company_id or "") if company_id else None
+        if company_id and not company:
+            raise ValueError("Company not found")
+        if company is None:
+            company = next(
+                (
+                    row
+                    for row in self.companies.values()
+                    if row["name"] == company_name or (website and row.get("website") == website)
+                ),
+                None,
+            )
+        action = "updated" if company else "created"
+        if company is None:
+            next_index = len(self.companies) + 1
+            company = {
+                "id": f"company-{next_index}",
+                "name": company_name,
+                "website": website,
+                "entity_id": f"entity-{next_index}",
+            }
+            self.companies[company["id"]] = company
+        else:
+            company["name"] = company_name
+            if website:
+                company["website"] = website
+
+        def _platform(source_type: str) -> str:
+            return "facebook" if source_type in {"facebook_page", "meta_ads"} else "instagram" if source_type == "instagram_profile" else "google"
+
+        for source in sources:
+            source_type = source["source_type"]
+            existing = next(
+                (
+                    item
+                    for item in self.items
+                    if item["entity_id"] == company["entity_id"] and item["source_kind"] == source_type
+                ),
+                None,
+            )
+            item = existing or {
+                "id": f"account-{len(self.items) + 1}",
+                "entity_id": company["entity_id"],
+                "company_id": company["id"],
+                "platform": _platform(source_type),
+                "source_kind": source_type,
+                "is_active": True,
+                "health_status": "unknown",
+                "last_collected_at": None,
+                "last_error": None,
+                "metadata": {},
+            }
+            item.update(
+                {
+                    "company_name": company["name"],
+                    "company_website": company.get("website"),
+                    "display_url": source.get("source_url") or (f"https://{source.get('source_key')}" if source_type == "google_domain" else None),
+                    "account_external_id": source.get("source_key") if source_type == "meta_ads" else None,
+                    "metadata": {
+                        "source_url": source.get("source_url"),
+                        "source_key": source.get("source_key"),
+                    },
+                }
+            )
+            if existing is None:
+                self.items.append(item)
+
+        items = [deepcopy(item) for item in self.items if item["entity_id"] == company["entity_id"]]
+        return {
+            "action": action,
+            "company": {"id": company["id"], "name": company["name"], "website": company.get("website")},
+            "entity": {"id": company["entity_id"], "company_id": company["id"], "name": company["name"]},
+            "items": items,
+        }
+
     def update_source_account(self, account_id: str, *, is_active: bool) -> dict:
         for item in self.items:
             if item["id"] == account_id:
                 item["is_active"] = bool(is_active)
                 return deepcopy(item)
+        raise ValueError("Social source not found")
+
+    def delete_source_account(self, account_id: str) -> dict:
+        for index, item in enumerate(self.items):
+            if item["id"] == account_id:
+                removed = self.items.pop(index)
+                return deepcopy(removed)
         raise ValueError("Social source not found")
 
 
@@ -206,6 +307,84 @@ class SocialSourcesApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_create_facebook_page_source_accepts_numeric_page_id(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"source_type": "facebook_page", "value": "100063669491743"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["item"]["source_kind"], "facebook_page")
+
+    def test_create_social_company_sources_groups_rows_under_one_entity(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social/company",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={
+                    "company_name": "XTB",
+                    "website": "https://www.xtb.com",
+                    "sources": {
+                        "facebook_page": "https://www.facebook.com/xtb",
+                        "instagram_profile": "https://www.instagram.com/xtb_de",
+                        "meta_ads": "138239466852",
+                        "google_domain": "xtb.com",
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["action"], "created")
+        self.assertEqual(payload["company"]["name"], "XTB")
+        self.assertEqual(len(payload["items"]), 4)
+        entity_ids = {item["entity_id"] for item in payload["items"]}
+        self.assertEqual(entity_ids, {payload["entity"]["id"]})
+        self.assertEqual({item["source_kind"] for item in payload["items"]}, {"facebook_page", "instagram_profile", "meta_ads", "google_domain"})
+
+    def test_create_social_company_sources_requires_at_least_one_source(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social/company",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"company_name": "XTB", "website": "https://www.xtb.com", "sources": {}},
+            )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_social_company_sources_adds_missing_source_to_existing_company(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.patch(
+                "/api/sources/social/company/company-1",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={
+                    "company_name": "Unibank",
+                    "website": "https://www.unibank.am",
+                    "sources": {"instagram_profile": "@unibank"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["action"], "updated")
+        self.assertEqual(payload["entity"]["id"], "entity-1")
+        self.assertTrue(any(item["source_kind"] == "instagram_profile" for item in payload["items"]))
+        self.assertEqual(len(fake_store.companies), 1)
 
     def test_agent_social_source_accepts_openclaw_token(self) -> None:
         fake_store = _FakeSocialSourceStore()
@@ -397,6 +576,20 @@ class SocialSourcesApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["item"]["is_active"])
+
+    def test_delete_social_source_removes_account(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.delete(
+                "/api/sources/social/account-1",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertEqual(fake_store.items, [])
 
     def test_social_runtime_controls_are_additive(self) -> None:
         fake_runtime = _FakeSocialRuntimeControl()

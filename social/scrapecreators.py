@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import ssl
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -19,6 +19,11 @@ except Exception:  # pragma: no cover
     certifi = None  # type: ignore[assignment]
 
 BASE_URL = "https://api.scrapecreators.com"
+RECENT_POST_LIMIT = 5
+FACEBOOK_PAGE_MAX_PAGES = 2
+INSTAGRAM_MAX_PAGES = 3
+META_ADS_MAX_PAGES = 20
+GOOGLE_ADS_MAX_PAGES = 10
 
 
 class SocialCollectionError(RuntimeError):
@@ -111,6 +116,9 @@ def _coalesce(*values: Any) -> str | None:
         if text:
             return text
     return None
+
+def _utc_yesterday_date() -> str:
+    return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
 
 def _account_source_kind(account: dict[str, Any]) -> str:
@@ -228,13 +236,21 @@ class ScrapeCreatorsClient:
                 health_status="network_error",
             ) from exc
 
-    def fetch_facebook_ads(self, *, page_id: str, cursor: str | None = None, page_size: int = 50) -> dict[str, Any]:
+    def fetch_facebook_ads(
+        self,
+        *,
+        page_id: str,
+        cursor: str | None = None,
+        page_size: int = 50,
+        status: str = "ACTIVE",
+    ) -> dict[str, Any]:
         return self._get(
-            "/v1/facebook/adlibrary/company/ads",
+            "/v1/facebook/adLibrary/company/ads",
             {
                 "pageId": page_id,
                 "count": page_size,
                 "cursor": cursor,
+                "status": status,
             },
         )
 
@@ -278,7 +294,7 @@ class ScrapeCreatorsClient:
             {
                 "handle": handle,
                 "count": page_size,
-                "cursor": cursor,
+                "next_max_id": cursor,
             },
         )
 
@@ -289,6 +305,8 @@ class ScrapeCreatorsClient:
         cursor: str | None = None,
         page_size: int = 50,
         get_ad_details: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> dict[str, Any]:
         return self._get(
             "/v1/google/company/ads",
@@ -296,6 +314,8 @@ class ScrapeCreatorsClient:
                 "domain": domain,
                 "count": page_size,
                 "cursor": cursor,
+                "start_date": start_date,
+                "end_date": end_date,
                 "get_ad_details": "true" if get_ad_details else "false",
             },
         )
@@ -322,24 +342,32 @@ class ScrapeCreatorsClient:
         source_kind = _account_source_kind(account)
         cursor = None
         pages: list[dict[str, Any]] = []
+        collected_recent_posts = 0
+        google_day = _utc_yesterday_date() if platform == "google" else None
 
-        for page_index in range(max(1, max_pages)):
+        for page_index in range(self._max_pages_for(platform, source_kind, max_pages)):
             if platform == "facebook":
                 if source_kind == "facebook_page":
+                    if collected_recent_posts >= RECENT_POST_LIMIT:
+                        break
                     metadata = account.get("metadata") if isinstance(account.get("metadata"), dict) else {}
                     page_url = _trimmed(metadata.get("page_url") or metadata.get("source_url"))
-                    if not page_url:
-                        raise SocialCollectionError("Missing Facebook page URL", health_status="invalid_identifier")
+                    page_id = _trimmed(account.get("account_external_id") or metadata.get("source_key"))
+                    if not page_url and not page_id:
+                        raise SocialCollectionError("Missing Facebook page URL or page ID", health_status="invalid_identifier")
                     payload = self.fetch_facebook_profile_posts(
-                        page_url=page_url,
+                        page_url=page_url or None,
+                        page_id=page_id or None,
                         cursor=cursor,
                         page_size=min(page_size, 3),
                     )
                     posts = payload.get("posts") or payload.get("items") or payload.get("results") or []
+                    posts = [row for row in posts if isinstance(row, dict)]
+                    selected_posts = posts[: max(0, RECENT_POST_LIMIT - collected_recent_posts)]
+                    self._replace_payload_rows(payload, selected_posts, "posts", "items", "results")
+                    collected_recent_posts += len(selected_posts)
                     comments_by_post: dict[str, list[dict[str, Any]]] = {}
-                    for post in posts[: max(1, min(3, len(posts)) )]:
-                        if not isinstance(post, dict):
-                            continue
+                    for post in selected_posts:
                         post_url = _coalesce(post.get("permalink"), post.get("url"))
                         if not post_url:
                             continue
@@ -362,16 +390,24 @@ class ScrapeCreatorsClient:
                         page_id=page_id,
                         cursor=cursor,
                         page_size=page_size,
+                        status="ACTIVE",
                     )
             elif platform == "instagram":
+                if collected_recent_posts >= RECENT_POST_LIMIT:
+                    break
                 handle = _trimmed(account.get("account_handle"))
                 if not handle:
                     raise SocialCollectionError("Missing Instagram handle", health_status="invalid_identifier")
                 payload = self.fetch_instagram_posts(
                     handle=handle,
                     cursor=cursor,
-                    page_size=page_size,
+                    page_size=min(page_size, RECENT_POST_LIMIT),
                 )
+                posts = payload.get("items") or payload.get("posts") or payload.get("results") or []
+                posts = [row for row in posts if isinstance(row, dict)]
+                selected_posts = posts[: max(0, RECENT_POST_LIMIT - collected_recent_posts)]
+                self._replace_payload_rows(payload, selected_posts, "items", "posts", "results")
+                collected_recent_posts += len(selected_posts)
             elif platform == "google":
                 domain = _trimmed(account.get("domain"))
                 if not domain:
@@ -381,6 +417,8 @@ class ScrapeCreatorsClient:
                     cursor=cursor,
                     page_size=page_size,
                     get_ad_details=False,
+                    start_date=google_day,
+                    end_date=google_day,
                 )
             elif platform == "tiktok":
                 if not include_tiktok:
@@ -398,6 +436,8 @@ class ScrapeCreatorsClient:
                 raise ValueError(f"Unsupported account platform: {platform}")
 
             pages.append(payload)
+            if platform in {"facebook", "instagram"} and source_kind in {"facebook_page", "instagram_profile"} and collected_recent_posts >= RECENT_POST_LIMIT:
+                break
             cursor = self._extract_next_cursor(payload)
             if not cursor:
                 break
@@ -408,8 +448,25 @@ class ScrapeCreatorsClient:
         return pages
 
     @staticmethod
+    def _max_pages_for(platform: str, source_kind: str, requested_max_pages: int) -> int:
+        if platform == "facebook" and source_kind == "meta_ads":
+            return META_ADS_MAX_PAGES
+        if platform == "facebook" and source_kind == "facebook_page":
+            return FACEBOOK_PAGE_MAX_PAGES
+        if platform == "instagram":
+            return INSTAGRAM_MAX_PAGES
+        if platform == "google":
+            return GOOGLE_ADS_MAX_PAGES
+        return max(1, int(requested_max_pages))
+
+    @staticmethod
+    def _replace_payload_rows(payload: dict[str, Any], rows: list[dict[str, Any]], *keys: str) -> None:
+        target_key = next((key for key in keys if isinstance(payload.get(key), list)), keys[0])
+        payload[target_key] = rows
+
+    @staticmethod
     def _extract_next_cursor(payload: dict[str, Any]) -> str | None:
-        for key in ("next_cursor", "nextCursor", "cursor"):
+        for key in ("next_cursor", "nextCursor", "next_max_id", "nextMaxId", "cursor"):
             value = _coalesce(payload.get(key))
             if value:
                 return value
@@ -427,7 +484,7 @@ class ScrapeCreatorsClient:
         page_info = payload.get("page_info")
         if isinstance(page_info, dict) and isinstance(page_info.get("has_next_page"), bool):
             return bool(page_info.get("has_next_page"))
-        return False
+        return True
 
     def normalize_payloads(self, account: dict[str, Any], payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         platform = _trimmed(account.get("platform")).lower()
@@ -512,6 +569,8 @@ class ScrapeCreatorsClient:
         )
         source_url = _coalesce(
             row.get("url"),
+            row.get("adUrl"),
+            row.get("ad_url"),
             row.get("link_url"),
             row.get("ad_link_url"),
             row.get("page_profile_uri"),
@@ -550,8 +609,12 @@ class ScrapeCreatorsClient:
                 row.get("published_at"),
                 row.get("created_at"),
                 row.get("taken_at"),
+                row.get("lastShown"),
+                row.get("last_shown"),
                 row.get("start_date_string"),
                 row.get("start_date"),
+                row.get("firstShown"),
+                row.get("first_shown"),
                 row.get("publishTime"),
             )
         )

@@ -558,6 +558,19 @@ class SocialSourceCreateRequest(BaseModel):
     value: str = Field(..., min_length=1, max_length=2048)
 
 
+class SocialCompanySourceValues(BaseModel):
+    facebook_page: Optional[str] = Field(default=None, max_length=2048)
+    instagram_profile: Optional[str] = Field(default=None, max_length=2048)
+    meta_ads: Optional[str] = Field(default=None, max_length=256)
+    google_domain: Optional[str] = Field(default=None, max_length=2048)
+
+
+class SocialCompanySourcesRequest(BaseModel):
+    company_name: str = Field(..., min_length=1, max_length=256)
+    website: Optional[str] = Field(default=None, max_length=2048)
+    sources: SocialCompanySourceValues = Field(default_factory=SocialCompanySourceValues)
+
+
 class SocialFacebookSourceCreateRequest(BaseModel):
     url: str = Field(..., min_length=1, max_length=2048)
 
@@ -2153,6 +2166,13 @@ def _normalize_facebook_source(raw: str) -> dict[str, str]:
     value = (raw or "").strip()
     if not value:
         return {}
+    compact = re.sub(r"\s+", "", value)
+    if re.match(r"^[0-9]{5,255}$", compact):
+        return {
+            "source_key": compact,
+            "source_url": "",
+            "display_name": f"Facebook {compact}",
+        }
     if not re.match(r"^[a-z]+://", value, flags=re.IGNORECASE):
         value = f"https://{value}"
 
@@ -2252,6 +2272,66 @@ def _normalize_google_source(raw: str) -> dict[str, str]:
         "source_key": host,
         "source_url": f"https://{host}",
         "display_name": _humanize_source_key(host.split(".", 1)[0]),
+    }
+
+
+def _normalize_company_website(raw: str) -> dict[str, str]:
+    normalized = _normalize_google_source(raw)
+    if not normalized:
+        return {}
+    return {
+        "domain": normalized["source_key"],
+        "website": normalized["source_url"],
+    }
+
+
+def _normalize_company_sources_payload(payload: SocialCompanySourcesRequest) -> dict[str, Any]:
+    company_name = re.sub(r"\s+", " ", (payload.company_name or "").strip())
+    if not company_name:
+        raise HTTPException(status_code=400, detail="Company name is required")
+
+    website = None
+    website_domain = None
+    if (payload.website or "").strip():
+        normalized_website = _normalize_company_website(payload.website or "")
+        if not normalized_website:
+            raise HTTPException(status_code=400, detail="Enter a valid company website")
+        website = normalized_website["website"]
+        website_domain = normalized_website["domain"]
+
+    source_inputs = payload.sources.model_dump()
+    normalizers: dict[str, tuple[Any, str]] = {
+        "facebook_page": (_normalize_facebook_source, "Enter a valid Facebook page URL"),
+        "instagram_profile": (_normalize_instagram_source, "Enter a valid Instagram profile URL or handle"),
+        "meta_ads": (_normalize_meta_ads_source, "Enter a numeric Meta Ads page ID"),
+        "google_domain": (_normalize_google_source, "Enter a valid Google Ads domain"),
+    }
+    sources = []
+    for source_type, raw_value in source_inputs.items():
+        value = (raw_value or "").strip()
+        if not value:
+            continue
+        normalizer, error_message = normalizers[source_type]
+        normalized = normalizer(value)
+        if not normalized:
+            raise HTTPException(status_code=400, detail=error_message)
+        sources.append(
+            {
+                "source_type": source_type,
+                "source_key": normalized["source_key"],
+                "source_url": normalized["source_url"],
+                "display_name": normalized["display_name"],
+            }
+        )
+
+    if not sources:
+        raise HTTPException(status_code=400, detail="Add at least one scraping source")
+
+    return {
+        "company_name": company_name,
+        "website": website,
+        "website_domain": website_domain,
+        "sources": sources,
     }
 
 
@@ -3222,6 +3302,34 @@ async def create_social_source(payload: SocialSourceCreateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/sources/social/company", dependencies=[Depends(require_operator_access)])
+async def create_social_company_sources(payload: SocialCompanySourcesRequest):
+    try:
+        normalized = _normalize_company_sources_payload(payload)
+        return get_social_store().create_or_update_company_sources(**normalized)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Create social company sources error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/sources/social/company/{company_id}", dependencies=[Depends(require_operator_access)])
+async def update_social_company_sources(company_id: str, payload: SocialCompanySourcesRequest):
+    try:
+        normalized = _normalize_company_sources_payload(payload)
+        return get_social_store().create_or_update_company_sources(company_id=company_id, **normalized)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Update social company sources error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/agent/sources/social", dependencies=[Depends(require_openclaw_source_write_access)])
 async def create_agent_social_source(payload: SocialSourceCreateRequest):
     try:
@@ -3265,6 +3373,18 @@ async def update_social_source(account_id: str, payload: SocialSourceUpdateReque
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as e:
         logger.error(f"Update social source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/sources/social/{account_id}", dependencies=[Depends(require_operator_access)])
+async def delete_social_source(account_id: str):
+    try:
+        item = get_social_store().delete_source_account(account_id)
+        return {"deleted": True, "item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Delete social source error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

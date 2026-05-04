@@ -186,6 +186,20 @@ def _humanize_slug(value: str) -> str:
     return " ".join(part.capitalize() for part in slug.split() if part) or "Facebook Source"
 
 
+def _stable_company_slug(value: str) -> str:
+    text = _trimmed(value).lower()
+    out: list[str] = []
+    dash = False
+    for char in text:
+        if char.isalnum():
+            out.append(char)
+            dash = False
+        elif not dash:
+            out.append("-")
+            dash = True
+    return "".join(out).strip("-") or "company"
+
+
 class SocialStore:
     """Operational data access layer for the social media activities domain."""
 
@@ -466,7 +480,9 @@ class SocialStore:
         return {
             "id": account.get("id"),
             "entity_id": account.get("entity_id"),
+            "company_id": (entity or {}).get("legacy_company_id"),
             "company_name": _trimmed((entity or {}).get("name")) or "Unknown Company",
+            "company_website": _clean_optional((entity or {}).get("website")),
             "platform": platform,
             "source_kind": source_kind,
             "display_url": display_url,
@@ -676,6 +692,191 @@ class SocialStore:
             raise ValueError("Failed to create company record for social source") from exc
         return company
 
+    def _find_company_for_company_sources(
+        self,
+        *,
+        company_id: str | None,
+        company_key: str,
+        company_name: str,
+        website: str | None,
+        sources: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if company_id:
+            company = self._single_row("companies", filters=(("eq", "id", company_id),))
+            if not company:
+                raise ValueError("Company not found")
+            return company
+
+        if website:
+            company = self._single_row("companies", filters=(("eq", "website", website),))
+            if company:
+                return company
+
+        company = self._single_row("companies", filters=(("eq", "company_key", company_key),))
+        if company:
+            return company
+
+        for source in sources:
+            source_kind = _normalize_source_kind(source.get("source_type"))
+            source_key = _clean_optional(source.get("source_key"))
+            source_url = _clean_optional(source.get("source_url"))
+            if source_kind == "google_domain" and source_key:
+                company = self._single_row("companies", filters=(("eq", "google_ads_domain", source_key),))
+            elif source_kind == "facebook_page" and source_url:
+                company = self._single_row("companies", filters=(("eq", "facebook_url", source_url),))
+            elif source_kind == "instagram_profile" and source_key:
+                company = self._single_row("companies", filters=(("eq", "instagram_username", source_key),))
+            elif source_kind == "meta_ads" and source_key:
+                company = self._single_row("companies", filters=(("eq", "facebook_page_id", source_key),))
+            else:
+                company = None
+            if company:
+                return company
+
+        company = self._single_row("companies", filters=(("eq", "name", company_name),))
+        return company
+
+    def _account_payload_for_company_source(self, source: dict[str, Any]) -> dict[str, Any]:
+        source_kind = _normalize_source_kind(source.get("source_type"))
+        platform = (
+            "facebook"
+            if source_kind in {"facebook_page", "meta_ads"}
+            else "instagram"
+            if source_kind == "instagram_profile"
+            else "google"
+            if source_kind == "google_domain"
+            else "tiktok"
+        )
+        source_key = _clean_optional(source.get("source_key"))
+        source_url = _clean_optional(source.get("source_url"))
+        metadata = {
+            "source_url": source_url,
+            "source_key": source_key,
+            "source_platform": platform,
+            "source_kind": source_kind,
+            "created_from": "company_sources_modal",
+        }
+        if source_kind == "facebook_page" and source_url:
+            metadata["page_url"] = source_url
+        payload: dict[str, Any] = {
+            "platform": platform,
+            "source_kind": source_kind,
+            "import_source": "sources_page",
+            "metadata": metadata,
+            "is_active": True,
+        }
+        if source_kind == "meta_ads":
+            payload["account_external_id"] = source_key
+        elif source_kind == "facebook_page" and source_key and not source_url:
+            payload["account_external_id"] = source_key
+        elif source_kind == "instagram_profile":
+            payload["account_handle"] = source_key
+        elif source_kind == "google_domain":
+            payload["domain"] = source_key
+        return payload
+
+    def create_or_update_company_sources(
+        self,
+        *,
+        company_name: str,
+        website: str | None,
+        website_domain: str | None,
+        sources: list[dict[str, Any]],
+        company_id: str | None = None,
+    ) -> dict[str, Any]:
+        name = _trimmed(company_name)
+        if not name:
+            raise ValueError("Company name is required")
+        if not sources:
+            raise ValueError("Add at least one scraping source")
+
+        company_key_seed = _clean_optional(website_domain) or name
+        company_key = f"company:{_stable_company_slug(company_key_seed)}"
+        company = self._find_company_for_company_sources(
+            company_id=company_id,
+            company_key=company_key,
+            company_name=name,
+            website=website,
+            sources=sources,
+        )
+
+        metadata = {
+            "created_from": "company_sources_modal",
+            "source_count": len(sources),
+            **({"website_domain": website_domain} if website_domain else {}),
+        }
+        for source in sources:
+            source_kind = _normalize_source_kind(source.get("source_type"))
+            source_key = _clean_optional(source.get("source_key"))
+            source_url = _clean_optional(source.get("source_url"))
+            if source_kind == "meta_ads" and source_key:
+                metadata["meta_ads_page_id"] = source_key
+            elif source_kind == "facebook_page" and source_url:
+                metadata["facebook_url"] = source_url
+            elif source_kind == "instagram_profile" and source_key:
+                metadata["instagram_username"] = source_key
+            elif source_kind == "google_domain" and source_key:
+                metadata["google_ads_domain"] = source_key
+
+        company_payload: dict[str, Any] = {
+            "name": name,
+            "company_key": company_key,
+            "metadata": _merge_metadata(company.get("metadata") if company else {}, metadata),
+            "is_active": True,
+        }
+        if website:
+            company_payload["website"] = website
+        for source in sources:
+            source_kind = _normalize_source_kind(source.get("source_type"))
+            source_key = _clean_optional(source.get("source_key"))
+            source_url = _clean_optional(source.get("source_url"))
+            if source_kind == "meta_ads":
+                company_payload["facebook_page_id"] = source_key
+            elif source_kind == "facebook_page":
+                company_payload["facebook_url"] = source_url
+            elif source_kind == "instagram_profile":
+                company_payload["instagram_username"] = source_key
+            elif source_kind == "google_domain":
+                company_payload["google_ads_domain"] = source_key
+
+        if company:
+            self.client.table("companies").update(company_payload).eq("id", company["id"]).execute()
+            action = "updated"
+            company = self._single_row("companies", filters=(("eq", "id", company["id"]),)) or {**company, **company_payload}
+        else:
+            response = self.client.table("companies").insert(company_payload).execute()
+            rows = list(response.data or [])
+            if not rows:
+                company = self._single_row("companies", filters=(("eq", "company_key", company_key),))
+                if not company:
+                    raise ValueError("Failed to create company record for social sources")
+            else:
+                company = dict(rows[0])
+            action = "created"
+
+        entity = self.ensure_entity_from_company(str(company["id"]))
+        account_payloads = [self._account_payload_for_company_source(source) for source in sources]
+        self.upsert_accounts(str(entity["id"]), account_payloads)
+        items = [
+            row
+            for row in self.list_source_rows()
+            if str(row.get("entity_id")) == str(entity["id"])
+        ]
+        return {
+            "action": action,
+            "company": {
+                "id": company.get("id"),
+                "name": _trimmed(company.get("name")) or name,
+                "website": _clean_optional(company.get("website")),
+            },
+            "entity": {
+                "id": entity.get("id"),
+                "company_id": company.get("id"),
+                "name": _trimmed(entity.get("name")) or name,
+            },
+            "items": items,
+        }
+
     def create_or_update_source(
         self,
         *,
@@ -738,7 +939,7 @@ class SocialStore:
         if source_kind == "meta_ads":
             account_payload["account_external_id"] = source_key
         elif source_kind == "facebook_page":
-            account_payload["account_external_id"] = None
+            account_payload["account_external_id"] = source_key if not source_url else None
         elif source_kind == "instagram_profile":
             account_payload["account_handle"] = source_key
         elif source_kind == "google_domain":
@@ -787,6 +988,13 @@ class SocialStore:
         item = self.get_source_row(account_id)
         if not item:
             raise ValueError("Social source not found after update")
+        return item
+
+    def delete_source_account(self, account_id: str) -> dict[str, Any]:
+        item = self.get_source_row(account_id)
+        if not item:
+            raise ValueError("Social source not found")
+        self.client.table("social_entity_accounts").delete().eq("id", account_id).execute()
         return item
 
     def update_entity(
