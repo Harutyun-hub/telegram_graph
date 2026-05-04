@@ -230,7 +230,7 @@ class ScrapeCreatorsClient:
 
     def fetch_facebook_ads(self, *, page_id: str, cursor: str | None = None, page_size: int = 50) -> dict[str, Any]:
         return self._get(
-            "/v1/facebook/adlibrary/company/ads",
+            "/v1/facebook/adLibrary/company/ads",
             {
                 "pageId": page_id,
                 "count": page_size,

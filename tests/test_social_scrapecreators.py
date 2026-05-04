@@ -109,6 +109,19 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.health_status, "invalid_identifier")
 
+    def test_fetch_facebook_ads_uses_documented_ad_library_path(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+
+        with patch.object(client, "_get", return_value={"results": []}) as get_mock:
+            payload = client.fetch_facebook_ads(page_id="138239466852", page_size=25)
+
+        self.assertEqual(payload, {"results": []})
+        get_mock.assert_called_once()
+        path, params = get_mock.call_args.args
+        self.assertEqual(path, "/v1/facebook/adLibrary/company/ads")
+        self.assertEqual(params["pageId"], "138239466852")
+        self.assertEqual(params["count"], 25)
+
 
 if __name__ == "__main__":
     unittest.main()
