@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -290,16 +290,17 @@ class ScraperChannelGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_supergroup_scrape_creates_thread_anchor_and_group_messages(self) -> None:
         writer = _FakeWriter()
+        posted_at = datetime.now(timezone.utc) - timedelta(days=1)
         root = _FakeMessage(
             message_id=101,
             text="Root conversation prompt",
-            posted_at=datetime(2026, 3, 27, 12, 0, tzinfo=timezone.utc),
+            posted_at=posted_at,
             sender_id=11,
         )
         reply = _FakeMessage(
             message_id=102,
             text="A follow-up reply from another member",
-            posted_at=datetime(2026, 3, 27, 12, 5, tzinfo=timezone.utc),
+            posted_at=posted_at + timedelta(minutes=5),
             sender_id=22,
             reply_to=_FakeReplyTo(reply_to_msg_id=101),
         )
