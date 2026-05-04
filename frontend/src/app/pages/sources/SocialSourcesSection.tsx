@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Trash2,
 } from 'lucide-react'
 
 import { apiFetch } from '../../services/api'
@@ -78,6 +79,11 @@ type SocialSourceUpdateResponse = {
   item: SocialSourceRow
 }
 
+type SocialSourceDeleteResponse = {
+  deleted: boolean
+  item: SocialSourceRow
+}
+
 type SocialRuntimeStatus = {
   status: 'active' | 'stopped'
   is_active: boolean
@@ -112,6 +118,23 @@ type SocialRuntimeStatus = {
 
 type SocialSourceStatus = 'active' | 'paused' | 'invalid_identifier' | 'provider_404' | 'rate_limited' | 'auth_error' | 'network_error' | 'error'
 type SocialPlatformFilter = 'all' | 'facebook' | 'instagram' | 'google'
+type CompanySourceColumn = 'facebook_page' | 'instagram_profile' | 'meta_ads' | 'google_domain'
+
+type SocialCompanyRow = {
+  key: string
+  company_id?: string | null
+  entity_id: string
+  company_name: string
+  company_website?: string | null
+  items: SocialSourceRow[]
+}
+
+const companySourceColumns: Array<{ key: CompanySourceColumn; labelEn: string; labelRu: string }> = [
+  { key: 'facebook_page', labelEn: 'Facebook Page', labelRu: 'Facebook Page' },
+  { key: 'instagram_profile', labelEn: 'Instagram', labelRu: 'Instagram' },
+  { key: 'meta_ads', labelEn: 'Meta Ads', labelRu: 'Meta Ads' },
+  { key: 'google_domain', labelEn: 'Google Ads', labelRu: 'Google Ads' },
+]
 
 const socialStatusConfig: Record<SocialSourceStatus, { labelEn: string; labelRu: string; bg: string; text: string; dot: string }> = {
   active: { labelEn: 'Active', labelRu: 'Активен', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
@@ -255,6 +278,27 @@ function SourceBadge({ platform }: { platform: SocialSourceRow['platform'] }) {
       {tone.label}
     </div>
   )
+}
+
+function sourceDisplayValue(item: SocialSourceRow): string {
+  if (item.source_kind === 'google_domain') return stripProtocol(item.display_url) || item.account_external_id || '—'
+  return item.display_url || item.account_external_id || '—'
+}
+
+function companyRowStatus(row: SocialCompanyRow): SocialSourceStatus {
+  const statuses = row.items.map(socialRowStatus)
+  const failing = statuses.find(isFailingStatus)
+  if (failing) return failing
+  if (statuses.includes('active')) return 'active'
+  return 'paused'
+}
+
+function companyLatestCollectedAt(row: SocialCompanyRow): string | null {
+  const timestamps = row.items
+    .map((item) => item.last_collected_at)
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())
+  return timestamps[0] || null
 }
 
 function emptyCompanySources(): CompanySourcesInitialValues {
@@ -531,14 +575,12 @@ function CompanySourcesModal({
 }
 
 function SocialRowActions({
-  item,
+  row,
   ru,
-  onToggleActive,
   onEditCompany,
 }: {
-  item: SocialSourceRow
+  row: SocialCompanyRow
   ru: boolean
-  onToggleActive: (id: string, isActive: boolean) => Promise<void>
   onEditCompany: (item: SocialSourceRow) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -561,7 +603,7 @@ function SocialRowActions({
         <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-gray-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
           <button
             onClick={() => {
-              onEditCompany(item)
+              onEditCompany(row.items[0])
               setOpen(false)
             }}
             className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
@@ -569,25 +611,64 @@ function SocialRowActions({
             <Pencil className="w-3.5 h-3.5 text-blue-500" />
             {ru ? 'Редактировать компанию' : 'Edit company sources'}
           </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CompanySourceCell({
+  item,
+  ru,
+  busy,
+  onToggleActive,
+  onRemove,
+}: {
+  item?: SocialSourceRow
+  ru: boolean
+  busy: boolean
+  onToggleActive: (id: string, isActive: boolean) => Promise<void>
+  onRemove: (item: SocialSourceRow) => Promise<void>
+}) {
+  if (!item) {
+    return <span className="text-xs text-gray-300">—</span>
+  }
+  const status = socialRowStatus(item)
+  return (
+    <div className="min-w-[150px] rounded-lg border border-gray-100 bg-gray-50/60 px-2.5 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-xs text-gray-700" style={{ fontWeight: 500 }}>
+            {sourceDisplayValue(item)}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5">
+            <SocialStatusBadge status={status} ru={ru} />
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
           <button
-            onClick={async () => {
-              await onToggleActive(item.id, !item.is_active)
-              setOpen(false)
-            }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
+            type="button"
+            disabled={busy}
+            onClick={() => onToggleActive(item.id, !item.is_active)}
+            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white hover:text-gray-700 disabled:opacity-40"
+            title={item.is_active ? (ru ? 'Остановить источник' : 'Pause source') : (ru ? 'Активировать источник' : 'Activate source')}
           >
-            {item.is_active ? (
-              <>
-                <Clock className="w-3.5 h-3.5 text-amber-500" />
-                {ru ? 'Остановить источник' : 'Pause source'}
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                {ru ? 'Активировать источник' : 'Activate source'}
-              </>
-            )}
+            {item.is_active ? <Clock className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
           </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onRemove(item)}
+            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+            title={ru ? 'Удалить источник' : 'Remove source'}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      {item.last_error && (
+        <div className="mt-1 truncate text-[11px] text-red-500">
+          {item.last_error}
         </div>
       )}
     </div>
@@ -679,25 +760,49 @@ export function SocialSourcesSection({
     return () => window.clearInterval(timer)
   }, [])
 
+  const companyRows = useMemo<SocialCompanyRow[]>(() => {
+    const map = new Map<string, SocialCompanyRow>()
+    for (const item of items) {
+      const key = item.company_id || item.entity_id || item.company_name
+      const existing = map.get(key)
+      if (existing) {
+        existing.items.push(item)
+      } else {
+        map.set(key, {
+          key,
+          company_id: item.company_id,
+          entity_id: item.entity_id,
+          company_name: item.company_name,
+          company_website: item.company_website,
+          items: [item],
+        })
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.company_name.localeCompare(b.company_name))
+  }, [items])
+
   const filtered = useMemo(() => {
-    return items.filter((item) => {
+    return companyRows.filter((row) => {
       const query = search.trim().toLowerCase()
-      const itemStatus = socialRowStatus(item)
-      const matchesPlatform = platformFilter === 'all' || item.platform === platformFilter
+      const rowStatus = companyRowStatus(row)
+      const matchesPlatform = platformFilter === 'all' || row.items.some((item) => item.platform === platformFilter)
       const matchesSearch =
         !query ||
-        item.company_name.toLowerCase().includes(query) ||
-        (item.display_url || '').toLowerCase().includes(query) ||
-        (item.account_external_id || '').toLowerCase().includes(query)
+        row.company_name.toLowerCase().includes(query) ||
+        (row.company_website || '').toLowerCase().includes(query) ||
+        row.items.some((item) =>
+          (item.display_url || '').toLowerCase().includes(query) ||
+          (item.account_external_id || '').toLowerCase().includes(query),
+        )
       const matchesStatus =
         statusFilter === 'all'
           ? true
           : statusFilter === 'error'
-            ? isFailingStatus(itemStatus)
-            : itemStatus === statusFilter
+            ? isFailingStatus(rowStatus)
+            : rowStatus === statusFilter
       return matchesPlatform && matchesSearch && matchesStatus
     })
-  }, [items, platformFilter, search, statusFilter])
+  }, [companyRows, platformFilter, search, statusFilter])
 
   const activeCount = items.filter((item) => item.is_active).length
   const healthyCount = items.filter((item) => item.health_status === 'healthy').length
@@ -799,6 +904,29 @@ export function SocialSourcesSection({
       await loadSources(true)
     } catch (err: any) {
       setError(String(err?.message || 'Update failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeSource = async (item: SocialSourceRow) => {
+    const label = `${item.company_name} · ${platformLabel(item.platform, ru)} · ${sourceTypeLabel(item.source_kind, ru)}`
+    const confirmed = window.confirm(
+      ru
+        ? `Удалить источник ${label}? Уже собранные данные останутся в аналитике.`
+        : `Remove source ${label}? Already collected data will remain in analytics.`,
+    )
+    if (!confirmed) return
+
+    setBusy(true)
+    setError(null)
+    try {
+      await requestJson<SocialSourceDeleteResponse>(`/api/sources/social/${item.id}`, {
+        method: 'DELETE',
+      })
+      await loadSources(true)
+    } catch (err: any) {
+      setError(String(err?.message || (ru ? 'Не удалось удалить источник' : 'Remove failed')))
     } finally {
       setBusy(false)
     }
@@ -1102,7 +1230,7 @@ export function SocialSourcesSection({
 
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400">
-              {filtered.length} {ru ? 'из' : 'of'} {items.length}
+              {filtered.length} {ru ? 'из' : 'of'} {companyRows.length}
             </span>
           </div>
         </div>
@@ -1111,12 +1239,14 @@ export function SocialSourcesSection({
           <table className="w-full">
             <thead>
               <tr className="border-b border-gray-100">
-                <th className="text-left text-xs text-gray-500 px-3 py-3" style={{ fontWeight: 500 }}>
-                  {ru ? 'Источник' : 'Source'}
+                <th className="text-left text-xs text-gray-500 px-3 py-3 min-w-[220px]" style={{ fontWeight: 500 }}>
+                  {ru ? 'Компания' : 'Company'}
                 </th>
-                <th className="text-left text-xs text-gray-500 px-3 py-3 hidden md:table-cell" style={{ fontWeight: 500 }}>
-                  {ru ? 'Платформа' : 'Platform'}
-                </th>
+                {companySourceColumns.map((column) => (
+                  <th key={column.key} className="text-left text-xs text-gray-500 px-3 py-3 min-w-[190px]" style={{ fontWeight: 500 }}>
+                    {ru ? column.labelRu : column.labelEn}
+                  </th>
+                ))}
                 <th className="text-center text-xs text-gray-500 px-3 py-3" style={{ fontWeight: 500 }}>
                   {ru ? 'Статус' : 'Status'}
                 </th>
@@ -1129,14 +1259,14 @@ export function SocialSourcesSection({
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="text-center py-16">
+                  <td colSpan={8} className="text-center py-16">
                     <RefreshCw className="w-6 h-6 text-gray-300 mx-auto mb-2 animate-spin" />
                     <p className="text-sm text-gray-500">{ru ? 'Загрузка social источников...' : 'Loading social sources...'}</p>
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="text-center py-16">
+                  <td colSpan={8} className="text-center py-16">
                     <Database className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                     <p className="text-sm text-gray-500">
                       {search ? (ru ? 'Ничего не найдено' : 'No sources found') : (ru ? 'Нет добавленных social источников' : 'No social sources added yet')}
@@ -1144,43 +1274,46 @@ export function SocialSourcesSection({
                   </td>
                 </tr>
               ) : (
-                filtered.map((item) => {
-                  const status = socialRowStatus(item)
+                filtered.map((row) => {
+                  const status = companyRowStatus(row)
+                  const latest = companyLatestCollectedAt(row)
                   return (
-                    <tr key={item.id} className="border-b border-gray-50 transition-colors hover:bg-gray-50">
+                    <tr key={row.key} className="border-b border-gray-50 transition-colors hover:bg-gray-50">
                       <td className="px-3 py-3">
-                        <div className="flex items-center gap-3">
-                          <SourceBadge platform={item.platform} />
+                        <div className="flex items-center gap-3 min-w-[220px]">
+                          <div className="flex -space-x-2">
+                            {row.items.slice(0, 3).map((item) => (
+                              <SourceBadge key={item.id} platform={item.platform} />
+                            ))}
+                          </div>
                           <div className="min-w-0">
-                            <span className="text-sm text-gray-900 block truncate" style={{ fontWeight: 500 }}>{item.company_name}</span>
-                            <span className="text-xs text-gray-400 block truncate">{item.display_url || item.account_external_id || '—'}</span>
-                            <div className="mt-1 flex items-center gap-2">
-                              <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">
-                                {sourceTypeLabel(item.source_kind, ru)}
-                              </span>
-                            </div>
-                            {item.last_error && (
-                              <span className="text-xs text-red-500 block truncate max-w-[340px]">{item.last_error}</span>
-                            )}
+                            <span className="text-sm text-gray-900 block truncate" style={{ fontWeight: 600 }}>{row.company_name}</span>
+                            <span className="text-xs text-gray-400 block truncate">{row.company_website || `${row.items.length} ${ru ? 'источников' : 'sources'}`}</span>
                           </div>
                         </div>
                       </td>
-                      <td className="px-3 py-3 hidden md:table-cell">
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-xs text-blue-700" style={{ fontWeight: 500 }}>
-                          {platformLabel(item.platform, ru)}
-                        </span>
-                      </td>
+                      {companySourceColumns.map((column) => (
+                        <td key={column.key} className="px-3 py-3 align-top">
+                          <CompanySourceCell
+                            item={row.items.find((item) => item.source_kind === column.key)}
+                            ru={ru}
+                            busy={busy}
+                            onToggleActive={setSourceActive}
+                            onRemove={removeSource}
+                          />
+                        </td>
+                      ))}
                       <td className="px-3 py-3 text-center">
                         <SocialStatusBadge status={status} ru={ru} />
                       </td>
                       <td className="px-3 py-3 text-right hidden md:table-cell">
                         <div className="flex items-center justify-end gap-1.5 text-xs text-gray-400">
-                          {item.is_active ? <RefreshCw className="w-3 h-3 text-emerald-400" /> : <Clock className="w-3 h-3 text-amber-400" />}
-                          <span>{relativeTime(item.last_collected_at, ru)}</span>
+                          {row.items.some((item) => item.is_active) ? <RefreshCw className="w-3 h-3 text-emerald-400" /> : <Clock className="w-3 h-3 text-amber-400" />}
+                          <span>{relativeTime(latest, ru)}</span>
                         </div>
                       </td>
                       <td className="px-3 py-3">
-                        <SocialRowActions item={item} ru={ru} onToggleActive={setSourceActive} onEditCompany={editCompanySources} />
+                        <SocialRowActions row={row} ru={ru} onEditCompany={editCompanySources} />
                       </td>
                     </tr>
                   )
@@ -1192,7 +1325,7 @@ export function SocialSourcesSection({
 
         <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50/50">
           <span className="text-xs text-gray-400">
-            {ru ? `Показано ${filtered.length} из ${items.length} источников` : `Showing ${filtered.length} of ${items.length} sources`}
+            {ru ? `Показано ${filtered.length} из ${companyRows.length} компаний` : `Showing ${filtered.length} of ${companyRows.length} companies`}
           </span>
           <span className="text-xs text-gray-400 flex items-center gap-1.5">
             <RefreshCw className="w-3 h-3" />

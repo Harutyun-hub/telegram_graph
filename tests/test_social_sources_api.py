@@ -165,6 +165,13 @@ class _FakeSocialSourceStore:
                 return deepcopy(item)
         raise ValueError("Social source not found")
 
+    def delete_source_account(self, account_id: str) -> dict:
+        for index, item in enumerate(self.items):
+            if item["id"] == account_id:
+                removed = self.items.pop(index)
+                return deepcopy(removed)
+        raise ValueError("Social source not found")
+
 
 class _FakeSocialRuntimeControl:
     def __init__(self) -> None:
@@ -569,6 +576,20 @@ class SocialSourcesApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["item"]["is_active"])
+
+    def test_delete_social_source_removes_account(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.delete(
+                "/api/sources/social/account-1",
+                headers={"Authorization": "Bearer admin-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertEqual(fake_store.items, [])
 
     def test_social_runtime_controls_are_additive(self) -> None:
         fake_runtime = _FakeSocialRuntimeControl()

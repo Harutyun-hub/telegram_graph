@@ -990,6 +990,13 @@ class SocialStore:
             raise ValueError("Social source not found after update")
         return item
 
+    def delete_source_account(self, account_id: str) -> dict[str, Any]:
+        item = self.get_source_row(account_id)
+        if not item:
+            raise ValueError("Social source not found")
+        self.client.table("social_entity_accounts").delete().eq("id", account_id).execute()
+        return item
+
     def update_entity(
         self,
         entity_id: str,

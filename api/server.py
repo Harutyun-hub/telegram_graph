@@ -3376,6 +3376,18 @@ async def update_social_source(account_id: str, payload: SocialSourceUpdateReque
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/sources/social/{account_id}", dependencies=[Depends(require_operator_access)])
+async def delete_social_source(account_id: str):
+    try:
+        item = get_social_store().delete_source_account(account_id)
+        return {"deleted": True, "item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as e:
+        logger.error(f"Delete social source error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/social/overview", dependencies=[Depends(require_operator_access)])
 async def get_social_overview():
     try:
