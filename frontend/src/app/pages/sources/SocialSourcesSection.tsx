@@ -218,23 +218,6 @@ function SocialStatusBadge({ status, ru }: { status: SocialSourceStatus; ru: boo
   )
 }
 
-function sourceTypeLabel(sourceKind: SocialSourceRow['source_kind'], ru: boolean): string {
-  switch (sourceKind) {
-    case 'facebook_page':
-      return ru ? 'Страница' : 'Page'
-    case 'meta_ads':
-      return ru ? 'Meta Ads' : 'Meta Ads'
-    case 'instagram_profile':
-      return ru ? 'Профиль' : 'Profile'
-    case 'google_domain':
-      return ru ? 'Домен' : 'Domain'
-    case 'tiktok_profile':
-      return ru ? 'Профиль' : 'Profile'
-    default:
-      return sourceKind
-  }
-}
-
 function platformLabel(platform: SocialSourceRow['platform'] | SocialPlatformFilter, ru: boolean): string {
   if (platform === 'all') {
     return ru ? 'Все сети' : 'All platforms'
@@ -577,14 +560,21 @@ function CompanySourcesModal({
 function SocialRowActions({
   row,
   ru,
+  busy,
   onEditCompany,
+  onToggleActive,
+  onRemove,
 }: {
   row: SocialCompanyRow
   ru: boolean
+  busy: boolean
   onEditCompany: (item: SocialSourceRow) => void
+  onToggleActive: (row: SocialCompanyRow, isActive: boolean) => Promise<void>
+  onRemove: (row: SocialCompanyRow) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const isActive = row.items.some((item) => item.is_active)
 
   useEffect(() => {
     function handle(event: MouseEvent) {
@@ -602,6 +592,26 @@ function SocialRowActions({
       {open && (
         <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-gray-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
           <button
+            disabled={busy}
+            onClick={async () => {
+              await onToggleActive(row, !isActive)
+              setOpen(false)
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-40"
+          >
+            {isActive ? (
+              <>
+                <Clock className="w-3.5 h-3.5 text-amber-500" />
+                {ru ? 'Деактивировать источник' : 'Deactivate source'}
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                {ru ? 'Активировать источник' : 'Activate source'}
+              </>
+            )}
+          </button>
+          <button
             onClick={() => {
               onEditCompany(row.items[0])
               setOpen(false)
@@ -610,6 +620,17 @@ function SocialRowActions({
           >
             <Pencil className="w-3.5 h-3.5 text-blue-500" />
             {ru ? 'Редактировать компанию' : 'Edit company sources'}
+          </button>
+          <button
+            disabled={busy}
+            onClick={async () => {
+              await onRemove(row)
+              setOpen(false)
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-red-500" />
+            {ru ? 'Удалить' : 'Remove'}
           </button>
         </div>
       )}
@@ -620,51 +641,21 @@ function SocialRowActions({
 function CompanySourceCell({
   item,
   ru,
-  busy,
-  onToggleActive,
-  onRemove,
 }: {
   item?: SocialSourceRow
   ru: boolean
-  busy: boolean
-  onToggleActive: (id: string, isActive: boolean) => Promise<void>
-  onRemove: (item: SocialSourceRow) => Promise<void>
 }) {
   if (!item) {
     return <span className="text-xs text-gray-300">—</span>
   }
   const status = socialRowStatus(item)
   return (
-    <div className="min-w-[150px] rounded-lg border border-gray-100 bg-gray-50/60 px-2.5 py-2">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-xs text-gray-700" style={{ fontWeight: 500 }}>
-            {sourceDisplayValue(item)}
-          </div>
-          <div className="mt-1 flex items-center gap-1.5">
-            <SocialStatusBadge status={status} ru={ru} />
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onToggleActive(item.id, !item.is_active)}
-            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-white hover:text-gray-700 disabled:opacity-40"
-            title={item.is_active ? (ru ? 'Остановить источник' : 'Pause source') : (ru ? 'Активировать источник' : 'Activate source')}
-          >
-            {item.is_active ? <Clock className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onRemove(item)}
-            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
-            title={ru ? 'Удалить источник' : 'Remove source'}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
+    <div className="min-w-[150px]">
+      <div className="truncate text-xs text-gray-700" style={{ fontWeight: 500 }}>
+        {sourceDisplayValue(item)}
+      </div>
+      <div className="mt-1">
+        <SocialStatusBadge status={status} ru={ru} />
       </div>
       {item.last_error && (
         <div className="mt-1 truncate text-[11px] text-red-500">
@@ -893,14 +884,18 @@ export function SocialSourcesSection({
     }
   }
 
-  const setSourceActive = async (id: string, isActive: boolean) => {
+  const setCompanySourcesActive = async (row: SocialCompanyRow, isActive: boolean) => {
     setBusy(true)
     setError(null)
     try {
-      await requestJson<SocialSourceUpdateResponse>(`/api/sources/social/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ is_active: isActive }),
-      })
+      await Promise.all(
+        row.items.map((item) =>
+          requestJson<SocialSourceUpdateResponse>(`/api/sources/social/${item.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ is_active: isActive }),
+          }),
+        ),
+      )
       await loadSources(true)
     } catch (err: any) {
       setError(String(err?.message || 'Update failed'))
@@ -909,21 +904,24 @@ export function SocialSourcesSection({
     }
   }
 
-  const removeSource = async (item: SocialSourceRow) => {
-    const label = `${item.company_name} · ${platformLabel(item.platform, ru)} · ${sourceTypeLabel(item.source_kind, ru)}`
+  const removeCompanySources = async (row: SocialCompanyRow) => {
     const confirmed = window.confirm(
       ru
-        ? `Удалить источник ${label}? Уже собранные данные останутся в аналитике.`
-        : `Remove source ${label}? Already collected data will remain in analytics.`,
+        ? `Удалить источники компании ${row.company_name}? Уже собранные данные останутся в аналитике.`
+        : `Remove sources for ${row.company_name}? Already collected data will remain in analytics.`,
     )
     if (!confirmed) return
 
     setBusy(true)
     setError(null)
     try {
-      await requestJson<SocialSourceDeleteResponse>(`/api/sources/social/${item.id}`, {
-        method: 'DELETE',
-      })
+      await Promise.all(
+        row.items.map((item) =>
+          requestJson<SocialSourceDeleteResponse>(`/api/sources/social/${item.id}`, {
+            method: 'DELETE',
+          }),
+        ),
+      )
       await loadSources(true)
     } catch (err: any) {
       setError(String(err?.message || (ru ? 'Не удалось удалить источник' : 'Remove failed')))
@@ -1253,7 +1251,7 @@ export function SocialSourcesSection({
                 <th className="text-right text-xs text-gray-500 px-3 py-3 hidden md:table-cell" style={{ fontWeight: 500 }}>
                   {ru ? 'Обновлено' : 'Updated'}
                 </th>
-                <th className="w-10 px-3 py-3" />
+                <th className="sticky right-0 z-10 w-12 bg-white px-3 py-3 shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.45)]" />
               </tr>
             </thead>
             <tbody>
@@ -1278,7 +1276,7 @@ export function SocialSourcesSection({
                   const status = companyRowStatus(row)
                   const latest = companyLatestCollectedAt(row)
                   return (
-                    <tr key={row.key} className="border-b border-gray-50 transition-colors hover:bg-gray-50">
+                    <tr key={row.key} className="group border-b border-gray-50 transition-colors hover:bg-gray-50">
                       <td className="px-3 py-3">
                         <div className="flex items-center gap-3 min-w-[220px]">
                           <div className="flex -space-x-2">
@@ -1297,9 +1295,6 @@ export function SocialSourcesSection({
                           <CompanySourceCell
                             item={row.items.find((item) => item.source_kind === column.key)}
                             ru={ru}
-                            busy={busy}
-                            onToggleActive={setSourceActive}
-                            onRemove={removeSource}
                           />
                         </td>
                       ))}
@@ -1312,8 +1307,15 @@ export function SocialSourcesSection({
                           <span>{relativeTime(latest, ru)}</span>
                         </div>
                       </td>
-                      <td className="px-3 py-3">
-                        <SocialRowActions row={row} ru={ru} onEditCompany={editCompanySources} />
+                      <td className="sticky right-0 bg-white px-3 py-3 shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.45)] transition-colors group-hover:bg-gray-50">
+                        <SocialRowActions
+                          row={row}
+                          ru={ru}
+                          busy={busy}
+                          onEditCompany={editCompanySources}
+                          onToggleActive={setCompanySourcesActive}
+                          onRemove={removeCompanySources}
+                        />
                       </td>
                     </tr>
                   )
