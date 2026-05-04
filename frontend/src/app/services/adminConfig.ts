@@ -6,6 +6,9 @@ const ADMIN_CONFIG_CACHE_KEY = 'admin-config-cache-v1';
 
 function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): AdminConfig {
   const defaults = createDefaultAdminConfig();
+  const analysisLensCatalog = Array.isArray(payload?.analysisLensCatalog) && payload.analysisLensCatalog.length > 0
+    ? payload.analysisLensCatalog
+    : defaults.analysisLensCatalog;
   return {
     widgets: {
       ...defaults.widgets,
@@ -23,7 +26,7 @@ function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): Adm
       ...defaults.runtime,
       ...(payload?.runtime || {}),
     },
-    analysisLensCatalog: payload?.analysisLensCatalog ?? defaults.analysisLensCatalog,
+    analysisLensCatalog,
     analysisLensSelectionSource: payload?.analysisLensSelectionSource ?? defaults.analysisLensSelectionSource,
   };
 }

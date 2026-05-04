@@ -1,4 +1,4 @@
-import type { AdminConfig, AdminRuntimeConfig } from '../types/admin';
+import type { AdminConfig, AdminRuntimeConfig, AnalysisLensDefinition } from '../types/admin';
 
 export interface AdminTierDefinition {
   id: string;
@@ -227,6 +227,129 @@ export const DEFAULT_ADMIN_RUNTIME: AdminRuntimeConfig = {
   featureTopicOverviewsAi: true,
 };
 
+export const DEFAULT_ANALYSIS_LENS_CATALOG: AnalysisLensDefinition[] = [
+  {
+    id: 'finance_markets',
+    version: 1,
+    name: 'Finance & Markets',
+    analyst_role: 'Market intelligence analyst for financial services, brokers, trading platforms, and investment research teams.',
+    objective: 'Identify market narratives, trading themes, investor education, product positioning, risk messaging, acquisition tactics, or competitor movement in financial markets.',
+    relevance_definition: 'Relevant content explains how a tracked company discusses markets, educates traders, promotes financial products, reacts to macro events, or positions itself against competitors.',
+    priority_signals: [
+      'asset class or instrument focus',
+      'market driver explanation',
+      'volatility or risk narrative',
+      'macro event interpretation',
+      'trading education or webinar funnel',
+      'platform feature or tool promotion',
+    ],
+    topic_quality_rules: {
+      prefer: [
+        'specific market narrative',
+        'specific instrument plus driver',
+        'specific education or acquisition theme',
+        'specific competitor or product positioning',
+      ],
+      avoid_generic: ['finance', 'investing', 'trading', 'stocks', 'geopolitics', 'market analysis', 'technical analysis'],
+      good_examples: [
+        'oil volatility from Middle East risk',
+        'DAX pressure from tariff concerns',
+        'broker webinar acquisition',
+        'platform tools for market research',
+      ],
+    },
+    confidence_threshold: 0.7,
+    few_shot_examples: [
+      {
+        input_excerpt: 'Analysts expect oil to swing as Middle East tensions raise supply risk.',
+        bad_output_example: 'geopolitics',
+        good_output_example: 'oil volatility from Middle East risk',
+        reason: 'Names the instrument and driver instead of a broad world-news category.',
+      },
+    ],
+  },
+  {
+    id: 'competitor_analysis',
+    version: 1,
+    name: 'Competitor Analysis',
+    analyst_role: 'Competitive intelligence analyst tracking how companies position, promote, differentiate, and compete.',
+    objective: 'Identify competitor strategy, messaging, offers, product claims, audience targeting, channel usage, campaign mechanics, or positioning changes.',
+    relevance_definition: 'Relevant content explains what a tracked company is trying to sell, who it is targeting, how it differentiates itself, and what strategic moves it is making.',
+    priority_signals: [
+      'new product or feature promotion',
+      'pricing, discount, or offer message',
+      'brand positioning claim',
+      'audience segment targeted',
+      'CTA or conversion tactic',
+      'trust, credibility, or proof point',
+    ],
+    topic_quality_rules: {
+      prefer: [
+        'specific positioning move',
+        'specific campaign or offer',
+        'specific audience strategy',
+        'specific product claim',
+      ],
+      avoid_generic: ['marketing', 'business', 'campaign', 'brand', 'competition', 'promotion'],
+      good_examples: [
+        'zero-commission acquisition offer',
+        'premium platform positioning',
+        'beginner audience targeting',
+        'trust-led broker messaging',
+      ],
+    },
+    confidence_threshold: 0.7,
+    few_shot_examples: [
+      {
+        input_excerpt: 'Open an account this week and trade US shares with zero commission.',
+        bad_output_example: 'promotion',
+        good_output_example: 'zero-commission acquisition offer',
+        reason: 'Identifies the offer and conversion purpose.',
+      },
+    ],
+  },
+  {
+    id: 'business_analysis',
+    version: 1,
+    name: 'Business Analysis',
+    analyst_role: 'Business analyst focused on customer needs, value propositions, growth signals, operational themes, and market-facing strategy.',
+    objective: 'Identify customer problems, business opportunities, value propositions, demand patterns, product-market fit, growth levers, or operational risks.',
+    relevance_definition: 'Relevant content helps a decision-maker understand what customers care about, what the company emphasizes, what opportunity exists, or what risk may affect performance.',
+    priority_signals: [
+      'customer pain point',
+      'customer motivation',
+      'value proposition',
+      'purchase or adoption trigger',
+      'trust or credibility signal',
+      'customer objection or friction',
+    ],
+    topic_quality_rules: {
+      prefer: [
+        'specific customer need',
+        'specific business opportunity',
+        'specific value proposition',
+        'specific operational or trust signal',
+      ],
+      avoid_generic: ['business', 'customers', 'growth', 'strategy', 'opportunity', 'service'],
+      good_examples: [
+        'trust barrier for new traders',
+        'education need before conversion',
+        'mobile-first customer acquisition',
+        'low-fee value proposition',
+      ],
+    },
+    confidence_threshold: 0.7,
+    few_shot_examples: [
+      {
+        input_excerpt: 'People keep asking whether the broker is safe before they deposit.',
+        bad_output_example: 'customers',
+        good_output_example: 'trust barrier for new traders',
+        reason: 'Names the customer friction and affected segment.',
+      },
+    ],
+  },
+];
+
 export function createDefaultAdminConfig(): AdminConfig {
   const prompts = Object.fromEntries(ADMIN_PROMPT_DEFINITIONS.map((prompt) => [prompt.key, '']));
   return {
@@ -234,6 +357,7 @@ export function createDefaultAdminConfig(): AdminConfig {
     prompts,
     promptDefaults: { ...prompts },
     runtime: { ...DEFAULT_ADMIN_RUNTIME },
+    analysisLensCatalog: DEFAULT_ANALYSIS_LENS_CATALOG,
     analysisLensSelectionSource: 'seeded_default',
   };
 }
