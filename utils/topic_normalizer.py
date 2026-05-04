@@ -354,6 +354,14 @@ def _normalize_importance(value: Any) -> str:
     return "secondary"
 
 
+def _normalize_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except Exception:
+        confidence = 0.0
+    return max(0.0, min(1.0, confidence))
+
+
 def normalize_model_topics(raw_topics: list[Any]) -> list[dict[str, Any]]:
     """Normalize model topic objects to stable extraction contract."""
     if not isinstance(raw_topics, list):
@@ -366,10 +374,12 @@ def normalize_model_topics(raw_topics: list[Any]) -> list[dict[str, Any]]:
         source_name = None
         importance = "secondary"
         evidence = None
+        confidence = 0.0
 
         if isinstance(item, dict):
             source_name = item.get("taxonomy_topic") or item.get("name") or item.get("proposed_topic")
             importance = _normalize_importance(item.get("importance"))
+            confidence = _normalize_confidence(item.get("confidence"))
             raw_evidence = item.get("evidence")
             if isinstance(raw_evidence, str):
                 evidence = raw_evidence.strip()[:300] or None
@@ -389,6 +399,7 @@ def normalize_model_topics(raw_topics: list[Any]) -> list[dict[str, Any]]:
             **classified,
             "importance": importance,
             "evidence": evidence,
+            "confidence": confidence,
         }
         normalized.append(entry)
 

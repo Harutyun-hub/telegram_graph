@@ -1,0 +1,24 @@
+{
+  "ci_policy": "informational_only",
+  "description": "Small V1 smoke fixture for manual lens-quality review. CI verifies shape only; precision gating starts in V1.1.",
+  "items": [
+    {
+      "id": "lens-eval-001",
+      "active_lens_ids": ["finance_markets"],
+      "input_excerpt": "Oil prices jumped as Middle East tensions raised supply risk.",
+      "expected_topics": ["oil volatility from Middle East risk"]
+    },
+    {
+      "id": "lens-eval-002",
+      "active_lens_ids": ["competitor_analysis"],
+      "input_excerpt": "Open a new account and trade US shares with zero commission this month.",
+      "expected_topics": ["zero-commission acquisition offer"]
+    },
+    {
+      "id": "lens-eval-003",
+      "active_lens_ids": ["business_analysis"],
+      "input_excerpt": "New customers keep asking for simple lessons before funding a live account.",
+      "expected_topics": ["education need before conversion"]
+    }
+  ]
+}

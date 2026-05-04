@@ -23,6 +23,8 @@ function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): Adm
       ...defaults.runtime,
       ...(payload?.runtime || {}),
     },
+    analysisLensCatalog: payload?.analysisLensCatalog ?? defaults.analysisLensCatalog,
+    analysisLensSelectionSource: payload?.analysisLensSelectionSource ?? defaults.analysisLensSelectionSource,
   };
 }
 

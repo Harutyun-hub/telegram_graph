@@ -12,6 +12,7 @@ from openai import OpenAI
 
 import config
 from api import social_semantic
+from api.analysis_lenses import active_analysis_lens_payload, build_lens_system_prompt
 from social.text_cleaning import clean_social_activity_row, clean_social_text_content
 from utils.ai_usage import log_openai_usage
 
@@ -454,6 +455,7 @@ def _request_ai_synthesis(candidates: dict[str, Any]) -> dict[str, Any]:
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     payload = {
         "prompt_version": PROMPT_VERSION,
+        **active_analysis_lens_payload(include_lenses=False),
         "window": candidates.get("window"),
         "candidate_clusters": candidates.get("candidateClusters") or [],
     }
@@ -461,7 +463,7 @@ def _request_ai_synthesis(candidates: dict[str, Any]) -> dict[str, Any]:
     response = client.chat.completions.create(
         model=config.SOCIAL_ANALYSIS_MODEL,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_lens_system_prompt(SYSTEM_PROMPT, include_directive=True)},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         max_completion_tokens=MAX_COMPLETION_TOKENS,

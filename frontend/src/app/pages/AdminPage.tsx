@@ -2,7 +2,12 @@ import { useEffect, useState } from 'react';
 import { Brain, LayoutDashboard, Shield, SlidersHorizontal, CheckCircle2, AlertCircle, Loader2, Pencil, RotateCcw, X } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdminConfig } from '../contexts/AdminConfigContext';
-import { ADMIN_PROMPT_DEFINITIONS, ADMIN_PROMPT_GROUPS, ADMIN_TIERS, ADMIN_WIDGET_DEFINITIONS } from '../admin/catalog';
+import {
+  ADMIN_PROMPT_DEFINITIONS,
+  ADMIN_PROMPT_GROUPS,
+  ADMIN_TIERS,
+  ADMIN_WIDGET_DEFINITIONS,
+} from '../admin/catalog';
 import type { AdminRuntimeConfig, AdminWidgetSetting } from '../types/admin';
 
 function ToggleButton({ checked, onClick }: { checked: boolean; onClick: () => void }) {
@@ -34,7 +39,7 @@ function clonePromptDraft(value: Record<string, string>) {
 }
 
 function cloneRuntimeDraft(value: AdminRuntimeConfig) {
-  return { ...value };
+  return { ...value, analysisLensIds: [...(value.analysisLensIds || ['finance_markets'])] };
 }
 
 function SaveNotice({
@@ -125,13 +130,40 @@ export function AdminPage() {
     'topicOverviewsPromptVersion',
     'topicOverviewsRefreshMinutes',
     'aiPostPromptStyle',
+    'analysisLensIds',
     'featureQuestionBriefsAi',
     'featureBehavioralBriefsAi',
     'featureOpportunityBriefsAi',
     'featureTopicOverviewsAi',
   ];
 
-  const runtimeDirty = runtimeKeys.some((key) => runtimeDraft[key] !== config.runtime[key]);
+  const runtimeDirty = runtimeKeys.some((key) => {
+    const draftValue = runtimeDraft[key];
+    const savedValue = config.runtime[key];
+    if (Array.isArray(draftValue) || Array.isArray(savedValue)) {
+      return JSON.stringify(draftValue || []) !== JSON.stringify(savedValue || []);
+    }
+    return draftValue !== savedValue;
+  });
+  const lensCatalog = config.analysisLensCatalog || [];
+  const selectedLensIds = runtimeDraft.analysisLensIds || ['finance_markets'];
+  const lensSelectionValid = selectedLensIds.length >= 1 && selectedLensIds.length <= 3;
+  const lensSourceLabel = config.analysisLensSelectionSource === 'operator'
+    ? (ru ? 'Выбрано оператором' : 'Operator-selected')
+    : (ru ? 'Стандарт по умолчанию' : 'Seeded default');
+  const toggleAnalysisLens = (lensId: string) => {
+    setRuntimeDraft((prev) => {
+      const current = prev.analysisLensIds || [];
+      const enabled = current.includes(lensId);
+      if (enabled) {
+        return { ...prev, analysisLensIds: current.filter((id) => id !== lensId) };
+      }
+      if (current.length >= 3) {
+        return prev;
+      }
+      return { ...prev, analysisLensIds: [...current, lensId] };
+    });
+  };
 
   const runtimeFields = [
     {
@@ -478,6 +510,63 @@ export function AdminPage() {
           </div>
 
           <div className="space-y-4">
+            <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
+                      {ru ? 'Global AI Lens' : 'Global AI Lens'}
+                    </h3>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-xs text-emerald-700 ring-1 ring-emerald-200">
+                      {lensSourceLabel}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-600">
+                    {ru
+                      ? 'Выберите 1-3 линзы анализа. Изменения применяются только к новым AI-анализам.'
+                      : 'Select 1-3 analysis lenses. Lens changes apply to new analyses only.'}
+                  </p>
+                </div>
+                <span className="text-xs text-gray-500">
+                  {selectedLensIds.length}/3
+                </span>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
+                {lensCatalog.map((lens) => {
+                  const checked = selectedLensIds.includes(lens.id);
+                  const disabled = !checked && selectedLensIds.length >= 3;
+                  return (
+                    <button
+                      key={lens.id}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => toggleAnalysisLens(lens.id)}
+                      className={`rounded-lg border bg-white p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+                        checked ? 'border-emerald-400 shadow-sm' : 'border-gray-200 hover:border-emerald-200'
+                      } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
+                          {lens.name}
+                        </span>
+                        <span className={`h-4 w-4 rounded-full border ${checked ? 'border-emerald-500 bg-emerald-500' : 'border-gray-300'}`} />
+                      </div>
+                      <p className="mt-2 line-clamp-3 text-xs text-gray-500">
+                        {lens.objective}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {!lensSelectionValid && (
+                <p className="mt-3 text-xs text-red-600">
+                  {ru ? 'Нужно выбрать хотя бы одну линзу.' : 'Select at least one lens.'}
+                </p>
+              )}
+            </div>
+
             {runtimeFields.map((field) => (
               <div key={field.key}>
                 <label className="block text-sm text-gray-700 mb-2" style={{ fontWeight: 500 }}>
@@ -573,7 +662,7 @@ export function AdminPage() {
             />
             <button
               type="button"
-              disabled={!runtimeDirty || saving || loading}
+              disabled={!runtimeDirty || saving || loading || !lensSelectionValid}
               onClick={() => handleSectionSave('runtime', { runtime: runtimeDraft })}
               className="px-4 py-2 rounded-lg text-sm text-white transition-all disabled:opacity-50"
               style={{ background: 'linear-gradient(135deg, #059669, #047857)' }}

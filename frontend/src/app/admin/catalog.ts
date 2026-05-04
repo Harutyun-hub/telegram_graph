@@ -220,6 +220,7 @@ export const DEFAULT_ADMIN_RUNTIME: AdminRuntimeConfig = {
   topicOverviewsPromptVersion: 'topic-overview-v2',
   topicOverviewsRefreshMinutes: '120',
   aiPostPromptStyle: 'compact',
+  analysisLensIds: ['finance_markets'],
   featureQuestionBriefsAi: true,
   featureBehavioralBriefsAi: true,
   featureOpportunityBriefsAi: true,
@@ -233,5 +234,6 @@ export function createDefaultAdminConfig(): AdminConfig {
     prompts,
     promptDefaults: { ...prompts },
     runtime: { ...DEFAULT_ADMIN_RUNTIME },
+    analysisLensSelectionSource: 'seeded_default',
   };
 }

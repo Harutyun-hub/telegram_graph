@@ -8,6 +8,14 @@ from loguru import logger
 from openai import OpenAI
 
 import config
+from api.analysis_lenses import (
+    SOCIAL_SYSTEM_PROMPT,
+    active_analysis_lens_payload,
+    build_lens_system_prompt,
+    filter_topics_by_confidence,
+    get_active_analysis_lenses,
+    normalize_lens_metadata,
+)
 from utils.ai_usage import log_openai_usage
 
 
@@ -17,33 +25,7 @@ def _trimmed(value: Any) -> str:
     return str(value).strip()
 
 
-SYSTEM_PROMPT = """
-You are a competitive intelligence analyst extracting enterprise-grade signals
-from social media evidence about brands, businesses, competitors, and public figures.
-
-Return structured JSON only. Never include markdown or prose outside JSON.
-
-For each activity, extract:
-- summary
-- marketing_intent
-- products
-- audience_segments
-- pain_points
-- value_propositions
-- competitive_signals
-- customer_intent
-- urgency_indicators
-- topics
-- sentiment
-- sentiment_score
-- marketing_tactic
-
-Quality rules:
-- Ground every insight in the provided evidence.
-- Prefer concrete offers, claims, and positioning over vague abstractions.
-- Keep topics canonical and short.
-- If the signal is missing, return empty arrays or null-like strings instead of inventing facts.
-""".strip()
+SYSTEM_PROMPT = SOCIAL_SYSTEM_PROMPT
 
 
 class SocialActivityAnalyzer:
@@ -97,7 +79,7 @@ class SocialActivityAnalyzer:
                 response = self.client.chat.completions.create(
                     model=config.SOCIAL_ANALYSIS_MODEL,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": build_lens_system_prompt(SYSTEM_PROMPT, include_directive=False)},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
                     max_completion_tokens=max(1200, 800 * max(1, len(payload.get("items") or []))),
@@ -131,6 +113,7 @@ class SocialActivityAnalyzer:
                 "required_length": len(items),
                 "prompt_version": config.SOCIAL_ANALYSIS_PROMPT_VERSION,
             },
+            **active_analysis_lens_payload(include_lenses=True),
             "entity": {
                 "id": entity.get("id"),
                 "name": entity.get("name"),
@@ -186,10 +169,20 @@ class SocialActivityAnalyzer:
             value = result.get(key)
             return value if isinstance(value, list) else []
 
+        active_lenses = get_active_analysis_lenses()
+        lens_metadata = normalize_lens_metadata(result, active_lenses)
+        topics = SocialActivityAnalyzer._normalize_topics(_as_list("topics"))
+        filtered_topics, lens_quality, _stats = filter_topics_by_confidence(
+            topics,
+            matched_lenses=lens_metadata["matched_lenses"],
+            active_lenses=active_lenses,
+            log_label="social_analysis",
+        )
         normalized = {
             "batch_index": result.get("batch_index"),
             "activity_uid": result.get("activity_uid"),
             "summary": _trimmed(result.get("summary")),
+            **lens_metadata,
             "marketing_intent": _trimmed(result.get("marketing_intent")),
             "products": _as_list("products"),
             "audience_segments": _as_list("audience_segments"),
@@ -198,12 +191,45 @@ class SocialActivityAnalyzer:
             "competitive_signals": _as_list("competitive_signals"),
             "customer_intent": _trimmed(result.get("customer_intent")),
             "urgency_indicators": _as_list("urgency_indicators"),
-            "topics": _as_list("topics"),
+            "topics": filtered_topics,
+            "lens_quality": lens_quality or "accepted",
             "sentiment": _trimmed(result.get("sentiment")) or "Neutral",
             "sentiment_score": SocialActivityAnalyzer._clamp_score(result.get("sentiment_score")),
             "marketing_tactic": _trimmed(result.get("marketing_tactic")),
         }
         return normalized
+
+    @staticmethod
+    def _normalize_topics(items: list[Any]) -> list[dict[str, Any]]:
+        topics: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                name = _trimmed(item.get("name") or item.get("topic"))
+                if not name:
+                    continue
+                evidence = _trimmed(item.get("evidence"))
+                try:
+                    confidence = float(item.get("confidence"))
+                except Exception:
+                    confidence = 0.0
+            elif isinstance(item, str):
+                name = _trimmed(item)
+                evidence = ""
+                confidence = 0.0
+            else:
+                continue
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            topics.append(
+                {
+                    "name": name,
+                    "evidence": evidence,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                }
+            )
+        return topics
 
     @staticmethod
     def _clamp_score(value: Any) -> float:

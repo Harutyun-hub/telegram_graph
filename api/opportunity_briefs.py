@@ -15,6 +15,7 @@ from typing import Any
 from loguru import logger
 
 import config
+from api.analysis_lenses import active_analysis_lens_payload, build_lens_system_prompt
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.ai_widget_storage import (
     build_widget_snapshot_paths,
@@ -916,12 +917,15 @@ def _build_clusters(candidates: list[dict], diagnostics: dict | None = None) -> 
 def _chat_json(*, model: str, max_tokens: int, system_prompt: str, user_payload: dict) -> dict:
     if not _client:
         return {}
+    lens_payload = active_analysis_lens_payload(include_lenses=False)
+    rendered_system_prompt = build_lens_system_prompt(system_prompt, include_directive=True)
+    rendered_user_payload = {**lens_payload, **user_payload}
     request_started_at = time.perf_counter()
     response = _client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            {"role": "system", "content": rendered_system_prompt},
+            {"role": "user", "content": json.dumps(rendered_user_payload, ensure_ascii=False)},
         ],
         response_format={"type": "json_object"},
         max_completion_tokens=max_tokens,

@@ -20,13 +20,19 @@ class SocialAnalysisTests(unittest.TestCase):
                 "summary": "Offer",
                 "sentiment": "Positive",
                 "sentiment_score": 9,
-                "topics": ["Credit Cards"],
+                "lens_relevance": "high",
+                "matched_lenses": ["finance_markets"],
+                "lens_signals": ["product positioning"],
+                "topics": [{"name": "Credit Cards", "evidence": "Offer", "confidence": 0.82}],
             }
         )
         self.assertEqual(normalized["summary"], "Offer")
         self.assertEqual(normalized["sentiment"], "Positive")
         self.assertEqual(normalized["sentiment_score"], 1.0)
-        self.assertEqual(normalized["topics"], ["Credit Cards"])
+        self.assertEqual(normalized["topics"][0]["name"], "Credit Cards")
+        self.assertEqual(normalized["topics"][0]["confidence"], 0.82)
+        self.assertEqual(normalized["lens_quality"], "accepted")
+        self.assertEqual(normalized["matched_lenses"], ["finance_markets"])
 
 
 if __name__ == "__main__":

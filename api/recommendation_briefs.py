@@ -14,6 +14,7 @@ from typing import Any
 from loguru import logger
 
 import config
+from api.analysis_lenses import active_analysis_lens_payload, build_lens_system_prompt
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.queries import network
 from buffer.supabase_writer import SupabaseWriter
@@ -301,7 +302,10 @@ def _extract_recommendations_ai(candidates: list[dict]) -> list[dict]:
                 })
         return recommendations
 
-    system_prompt = _runtime_prompt("recommendation_briefs.extraction_prompt", RECOMMENDATION_EXTRACTION_PROMPT)
+    system_prompt = build_lens_system_prompt(
+        _runtime_prompt("recommendation_briefs.extraction_prompt", RECOMMENDATION_EXTRACTION_PROMPT),
+        include_directive=True,
+    )
 
     recommendations = []
 
@@ -309,6 +313,7 @@ def _extract_recommendations_ai(candidates: list[dict]) -> list[dict]:
     for i in range(0, min(50, len(candidates)), 10):
         batch = candidates[i:i+10]
         payload = {
+            **active_analysis_lens_payload(include_lenses=False),
             "messages": [
                 {
                     "id": c["id"],

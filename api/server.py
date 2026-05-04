@@ -81,6 +81,12 @@ from api import opportunity_briefs
 from api import question_briefs
 from api import recommendation_briefs
 from api import topic_overviews
+from api.analysis_lenses import (
+    DEFAULT_ANALYSIS_LENS_IDS,
+    analysis_lens_signature,
+    get_analysis_lens_catalog,
+    normalize_analysis_lens_ids,
+)
 from api.admin_runtime import (
     get_admin_config_runtime_warning,
     load_admin_config_raw,
@@ -712,6 +718,9 @@ ADMIN_RUNTIME_BOOL_KEYS = {
     "featureOpportunityBriefsAi",
     "featureTopicOverviewsAi",
 }
+ADMIN_RUNTIME_LIST_KEYS = {
+    "analysisLensIds",
+}
 
 
 def _admin_prompt_defaults() -> dict[str, str]:
@@ -876,6 +885,7 @@ def _default_admin_config() -> dict[str, Any]:
             "topicOverviewsPromptVersion": config.TOPIC_OVERVIEWS_PROMPT_VERSION,
             "topicOverviewsRefreshMinutes": str(config.TOPIC_OVERVIEWS_REFRESH_MINUTES),
             "aiPostPromptStyle": config.AI_POST_PROMPT_STYLE,
+            "analysisLensIds": list(DEFAULT_ANALYSIS_LENS_IDS),
             "featureQuestionBriefsAi": bool(config.FEATURE_QUESTION_BRIEFS_AI),
             "featureBehavioralBriefsAi": bool(config.FEATURE_BEHAVIORAL_BRIEFS_AI),
             "featureOpportunityBriefsAi": bool(config.FEATURE_OPPORTUNITY_BRIEFS_AI),
@@ -884,7 +894,7 @@ def _default_admin_config() -> dict[str, Any]:
     }
 
 
-def _active_ai_runtime_summary() -> dict[str, str | bool]:
+def _active_ai_runtime_summary() -> dict[str, Any]:
     raw_config = load_admin_config_raw()
     runtime = raw_config.get("runtime") if isinstance(raw_config, dict) and isinstance(raw_config.get("runtime"), dict) else {}
 
@@ -909,6 +919,10 @@ def _active_ai_runtime_summary() -> dict[str, str | bool]:
         "topicOverviewsPromptVersion": str(_runtime_value("topicOverviewsPromptVersion", config.TOPIC_OVERVIEWS_PROMPT_VERSION)),
         "topicOverviewsRefreshMinutes": str(_runtime_value("topicOverviewsRefreshMinutes", config.TOPIC_OVERVIEWS_REFRESH_MINUTES)),
         "aiPostPromptStyle": str(_runtime_value("aiPostPromptStyle", config.AI_POST_PROMPT_STYLE)),
+        "analysisLensIds": normalize_analysis_lens_ids(_runtime_value("analysisLensIds", list(DEFAULT_ANALYSIS_LENS_IDS))),
+        "analysisLensSignature": analysis_lens_signature(
+            normalize_analysis_lens_ids(_runtime_value("analysisLensIds", list(DEFAULT_ANALYSIS_LENS_IDS)))
+        ),
         "featureExtractionV2": bool(config.FEATURE_EXTRACTION_V2),
         "featureTopicOverviewsAi": bool(_runtime_value("featureTopicOverviewsAi", config.FEATURE_TOPIC_OVERVIEWS_AI)),
     }
@@ -960,10 +974,21 @@ def _validate_admin_runtime(raw_runtime: Any) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="runtime must be an object")
 
     validated: dict[str, Any] = {}
-    allowed_keys = ADMIN_RUNTIME_STRING_KEYS.union(ADMIN_RUNTIME_BOOL_KEYS)
+    allowed_keys = ADMIN_RUNTIME_STRING_KEYS.union(ADMIN_RUNTIME_BOOL_KEYS).union(ADMIN_RUNTIME_LIST_KEYS)
     for key, value in raw_runtime.items():
         if key not in allowed_keys:
             raise HTTPException(status_code=400, detail=f"Unknown runtime key: {key}")
+        if key in ADMIN_RUNTIME_LIST_KEYS:
+            if key == "analysisLensIds":
+                if not isinstance(value, list):
+                    raise HTTPException(status_code=400, detail="Runtime field analysisLensIds must be a list")
+                if len(value) < 1:
+                    raise HTTPException(status_code=400, detail="Select at least 1 analysis lens")
+                try:
+                    validated[key] = normalize_analysis_lens_ids(value)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            continue
         if key in ADMIN_RUNTIME_BOOL_KEYS:
             if not isinstance(value, bool):
                 raise HTTPException(status_code=400, detail=f"Runtime field {key} must be boolean")
@@ -1449,7 +1474,18 @@ def _load_admin_config() -> dict[str, Any]:
 
 
 def _admin_config_response() -> dict[str, Any]:
-    payload = _load_admin_config()
+    raw_config = load_admin_config_raw()
+    try:
+        payload = _sanitize_admin_config(raw_config)
+    except HTTPException:
+        logger.warning("Admin config contains invalid values; falling back to defaults")
+        payload = _default_admin_config()
+        raw_config = {}
+    raw_runtime = raw_config.get("runtime") if isinstance(raw_config, dict) and isinstance(raw_config.get("runtime"), dict) else {}
+    payload["analysisLensCatalog"] = get_analysis_lens_catalog()
+    payload["analysisLensSelectionSource"] = (
+        "operator" if isinstance(raw_runtime.get("analysisLensIds"), list) else "seeded_default"
+    )
     warning = get_admin_config_runtime_warning()
     if warning:
         payload["warning"] = warning

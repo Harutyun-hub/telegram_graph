@@ -25,6 +25,12 @@ import json
 import re
 import time
 import config
+from api.analysis_lenses import (
+    build_lens_system_prompt,
+    filter_topics_by_confidence,
+    get_active_analysis_lenses,
+    normalize_lens_metadata,
+)
 from api.admin_runtime import get_admin_prompt, get_admin_runtime_value
 from api.runtime_coordinator import get_runtime_coordinator
 from utils.ai_usage import log_openai_usage
@@ -433,16 +439,19 @@ Output schema:
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<precise emotion label>",
+  "lens_relevance": "high|medium|low",
+  "matched_lenses": ["<selected lens id>"],
+  "lens_signals": ["<grounded signal from selected lens>"],
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
   "topics": [
-    {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>"}
+    {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>", "confidence": 0.0}
   ],
   "message_topics": [
     {
       "message_ref": "MSG 1",
       "comment_id": "<comment UUID if provided in input, otherwise null>",
       "topics": [
-        {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>"}
+        {"name": "<Canonical English Topic>", "importance": "primary|secondary|tertiary", "evidence": "<quote or grounded observation>", "confidence": 0.0}
       ]
     }
   ],
@@ -527,7 +536,8 @@ Required topics object shape:
   "closest_category": "<taxonomy category>",
   "domain": "<taxonomy domain>",
   "importance": "primary|secondary|tertiary",
-  "evidence": "<quote or observation>"
+  "evidence": "<quote or observation>",
+  "confidence": 0.0
 }}
 """
 
@@ -643,8 +653,18 @@ def _chunked(items: list[dict], size: int) -> list[list[dict]]:
 
 def _normalize_payload(parsed: dict) -> dict:
     normalized = dict(parsed)
+    active_lenses = get_active_analysis_lenses()
+    lens_metadata = normalize_lens_metadata(parsed, active_lenses)
+    normalized.update(lens_metadata)
     normalized_topics = normalize_model_topics(parsed.get("topics") or [])
+    normalized_topics, lens_quality, _stats = filter_topics_by_confidence(
+        normalized_topics,
+        matched_lenses=lens_metadata["matched_lenses"],
+        active_lenses=active_lenses,
+        log_label="telegram_analysis",
+    )
     normalized["topics"] = normalized_topics
+    normalized["lens_quality"] = lens_quality or "accepted"
 
     evidence_quotes = []
     for quote in parsed.get("evidence_quotes") or []:
@@ -683,13 +703,24 @@ def _normalize_payload(parsed: dict) -> dict:
         comment_id = str(item.get("comment_id") or "").strip()
         message_ref = str(item.get("message_ref") or "").strip()
         item_topics = normalize_model_topics(item.get("topics") or [])
+        item_topics, item_lens_quality, _item_stats = filter_topics_by_confidence(
+            item_topics,
+            matched_lenses=lens_metadata["matched_lenses"],
+            active_lenses=active_lenses,
+            log_label="telegram_message_analysis",
+        )
         if not comment_id and not message_ref:
             continue
-        message_topics.append({
+        message_topic_payload = {
             "comment_id": comment_id,
             "message_ref": message_ref,
             "topics": item_topics,
-        })
+        }
+        if item_lens_quality:
+            message_topic_payload["lens_quality"] = item_lens_quality
+            if item_lens_quality == "low":
+                normalized["lens_quality"] = "low"
+        message_topics.append(message_topic_payload)
         for topic in item_topics:
             name = str(topic.get("name") or "").strip()
             if name and name not in aggregate_by_name:
@@ -878,9 +909,11 @@ def _analyze_comment_group_payload(payload: dict) -> dict:
     prompt_candidates = [system_prompt]
     if config.FEATURE_EXTRACTION_V2:
         prompt_candidates = [
-            f"{system_prompt}\n\n{strict_taxonomy_prompt}",
-            system_prompt,
+            build_lens_system_prompt(system_prompt, include_directive=True, suffix=strict_taxonomy_prompt),
+            build_lens_system_prompt(system_prompt, include_directive=True),
         ]
+    else:
+        prompt_candidates = [build_lens_system_prompt(system_prompt, include_directive=True)]
 
     parsed = None
     last_error = None
@@ -1270,8 +1303,11 @@ Return ONLY the JSON schema below, no preamble.
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<emotion>",
+  "lens_relevance": "high|medium|low",
+  "matched_lenses": ["<selected lens id>"],
+  "lens_signals": ["<grounded signal from selected lens>"],
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
-  "topics": [{"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<>"}],
+  "topics": [{"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<>", "confidence": 0.0}],
   "entities": [{"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}],
   "social_signals": {
     "geopolitical_alignment": "<>",
@@ -1298,9 +1334,12 @@ Schema:
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<emotion>",
+  "lens_relevance": "high|medium|low",
+  "matched_lenses": ["<selected lens id>"],
+  "lens_signals": ["<grounded signal from selected lens>"],
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
   "topics": [
-    {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>"}
+    {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>", "confidence": 0.0}
   ],
   "entities": [
     {"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}
@@ -1332,9 +1371,12 @@ Schema:
   "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
   "sentiment_score": <-1.0 to 1.0>,
   "emotional_tone": "<dominant thread mood>",
+  "lens_relevance": "high|medium|low",
+  "matched_lenses": ["<selected lens id>"],
+  "lens_signals": ["<grounded signal from selected lens>"],
   "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
   "topics": [
-    {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>"}
+    {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>", "confidence": 0.0}
   ],
   "entities": [
     {"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}
@@ -1369,9 +1411,12 @@ Return STRICT JSON only with this schema:
       "sentiment": "Positive|Negative|Neutral|Mixed|Urgent|Sarcastic",
       "sentiment_score": <-1.0 to 1.0>,
       "emotional_tone": "<emotion>",
+      "lens_relevance": "high|medium|low",
+      "matched_lenses": ["<selected lens id>"],
+      "lens_signals": ["<grounded signal from selected lens>"],
       "social_sentiment_tags": ["Anxious|Frustrated|Angry|Confused|Hopeful|Trusting|Distrustful|Solidarity|Exhausted|Grief"],
       "topics": [
-        {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>"}
+        {"name": "<Canonical English>", "importance": "primary|secondary|tertiary", "evidence": "<short evidence>", "confidence": 0.0}
       ],
       "entities": [
         {"name": "<Canonical English>", "type": "person|group|organization|place|concept|media", "sentiment_toward": "positive|negative|neutral|ambiguous|fearful|admiring|mocking"}
@@ -1518,9 +1563,13 @@ def _analyze_single_post_payload(post: dict, supabase_writer) -> dict:
     last_error = None
 
     for index, candidate_prompt in enumerate(prompt_candidates, start=1):
-        system_prompt = candidate_prompt
+        system_prompt = build_lens_system_prompt(candidate_prompt, include_directive=True)
         if config.FEATURE_EXTRACTION_V2:
-            system_prompt = f"{candidate_prompt}\n\n{strict_taxonomy_prompt}"
+            system_prompt = build_lens_system_prompt(
+                candidate_prompt,
+                include_directive=True,
+                suffix=strict_taxonomy_prompt,
+            )
 
         try:
             parsed = _normalize_payload(
@@ -1602,7 +1651,9 @@ def _analyze_post_batch_payload(posts: list[dict]) -> dict[str, dict]:
     strict_taxonomy_prompt = _runtime_prompt("extraction.strict_taxonomy_prompt", STRICT_TAXONOMY_PROMPT)
     system_prompt = batch_prompt
     if config.FEATURE_EXTRACTION_V2:
-        system_prompt = f"{batch_prompt}\n\n{strict_taxonomy_prompt}"
+        system_prompt = build_lens_system_prompt(batch_prompt, include_directive=True, suffix=strict_taxonomy_prompt)
+    else:
+        system_prompt = build_lens_system_prompt(batch_prompt, include_directive=True)
 
     parsed = _request_json(
         system_prompt=system_prompt,
