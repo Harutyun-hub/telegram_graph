@@ -328,10 +328,12 @@ class ScrapeCreatorsClient:
                 if source_kind == "facebook_page":
                     metadata = account.get("metadata") if isinstance(account.get("metadata"), dict) else {}
                     page_url = _trimmed(metadata.get("page_url") or metadata.get("source_url"))
-                    if not page_url:
-                        raise SocialCollectionError("Missing Facebook page URL", health_status="invalid_identifier")
+                    page_id = _trimmed(account.get("account_external_id") or metadata.get("source_key"))
+                    if not page_url and not page_id:
+                        raise SocialCollectionError("Missing Facebook page URL or page ID", health_status="invalid_identifier")
                     payload = self.fetch_facebook_profile_posts(
-                        page_url=page_url,
+                        page_url=page_url or None,
+                        page_id=page_id or None,
                         cursor=cursor,
                         page_size=min(page_size, 3),
                     )

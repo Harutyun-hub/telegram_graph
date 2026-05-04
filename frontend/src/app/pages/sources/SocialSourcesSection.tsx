@@ -7,6 +7,7 @@ import {
   Database,
   MoreVertical,
   Network,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -17,7 +18,9 @@ import { apiFetch } from '../../services/api'
 type SocialSourceRow = {
   id: string
   entity_id: string
+  company_id?: string | null
   company_name: string
+  company_website?: string | null
   platform: 'facebook' | 'instagram' | 'google' | 'tiktok'
   source_kind: 'facebook_page' | 'meta_ads' | 'instagram_profile' | 'google_domain' | 'tiktok_profile'
   display_url: string | null
@@ -34,14 +37,41 @@ type SocialSourceListResponse = {
   items: SocialSourceRow[]
 }
 
-type SocialSourceCreateResponse = {
-  action: 'created' | 'reactivated' | 'exists'
-  item: SocialSourceRow
+type SocialCompanySourcesPayload = {
+  company_name: string
+  website?: string
+  sources: {
+    facebook_page?: string
+    instagram_profile?: string
+    meta_ads?: string
+    google_domain?: string
+  }
 }
 
-type SocialSourceCreatePayload = {
-  source_type: 'facebook_page' | 'meta_ads' | 'instagram_profile' | 'google_domain'
-  value: string
+type SocialCompanySourcesResponse = {
+  action: 'created' | 'updated'
+  company: {
+    id: string
+    name: string
+    website: string | null
+  }
+  entity: {
+    id: string
+    company_id: string
+    name: string
+  }
+  items: SocialSourceRow[]
+}
+
+type CompanySourcesInitialValues = {
+  companyId?: string | null
+  entityId?: string | null
+  companyName: string
+  website: string
+  facebookPage: string
+  instagramProfile: string
+  metaAds: string
+  googleDomain: string
 }
 
 type SocialSourceUpdateResponse = {
@@ -227,38 +257,125 @@ function SourceBadge({ platform }: { platform: SocialSourceRow['platform'] }) {
   )
 }
 
-function AddSocialSourceModal({
+function emptyCompanySources(): CompanySourcesInitialValues {
+  return {
+    companyId: null,
+    entityId: null,
+    companyName: '',
+    website: '',
+    facebookPage: '',
+    instagramProfile: '',
+    metaAds: '',
+    googleDomain: '',
+  }
+}
+
+function sourceValueCount(values: CompanySourcesInitialValues): number {
+  return [
+    values.facebookPage,
+    values.instagramProfile,
+    values.metaAds,
+    values.googleDomain,
+  ].filter((value) => value.trim()).length
+}
+
+function sourceFieldErrors(values: CompanySourcesInitialValues, ru: boolean): Partial<Record<keyof CompanySourcesInitialValues, string>> {
+  const errors: Partial<Record<keyof CompanySourcesInitialValues, string>> = {}
+  if (!values.companyName.trim()) {
+    errors.companyName = ru ? 'Введите название компании' : 'Enter the company name'
+  }
+  if (!sourceValueCount(values)) {
+    errors.googleDomain = ru ? 'Добавьте хотя бы один источник' : 'Add at least one scraping source'
+  }
+  if (values.website.trim() && !/^[a-z]+:\/\/[^\s.]+\.[^\s]+$/i.test(values.website.trim()) && !/^[^\s.]+\.[^\s]+$/i.test(values.website.trim())) {
+    errors.website = ru ? 'Введите сайт, например https://www.xtb.com' : 'Enter a website like https://www.xtb.com'
+  }
+  if (values.facebookPage.trim()) {
+    const facebook = values.facebookPage.trim()
+    const isPageId = /^[0-9]{5,255}$/.test(facebook.replace(/\s+/g, ''))
+    const isUrl = /(^|\/\/)(www\.|m\.)?(facebook|fb)\.com\//i.test(facebook)
+    if (!isPageId && !isUrl) {
+      errors.facebookPage = ru ? 'Введите публичную Facebook Page URL или page ID' : 'Enter a public Facebook Page URL or page ID'
+    }
+  }
+  if (values.instagramProfile.trim()) {
+    const instagram = values.instagramProfile.trim()
+    const isHandle = /^@?[A-Za-z0-9._]{1,30}$/.test(instagram)
+    const isUrl = /(^|\/\/)(www\.)?instagram\.com\/[A-Za-z0-9._]{1,30}/i.test(instagram)
+    if (!isHandle && !isUrl) {
+      errors.instagramProfile = ru ? 'Введите Instagram URL или @handle' : 'Enter an Instagram URL or @handle'
+    }
+  }
+  if (values.metaAds.trim() && !/^[0-9]{5,255}$/.test(values.metaAds.replace(/\s+/g, ''))) {
+    errors.metaAds = ru ? 'Введите только числовой Meta Ads ID' : 'Enter only the numeric Meta Ads ID'
+  }
+  if (values.googleDomain.trim() && !/^[a-z]+:\/\/[^\s.]+\.[^\s]+$/i.test(values.googleDomain.trim()) && !/^[^\s.]+\.[^\s]+$/i.test(values.googleDomain.trim())) {
+    errors.googleDomain = ru ? 'Введите домен, например xtb.com' : 'Enter a domain like xtb.com'
+  }
+  return errors
+}
+
+function CompanySourcesModal({
   open,
   ru,
   onClose,
   onSubmit,
+  initialValues,
 }: {
   open: boolean
   ru: boolean
   onClose: () => void
-  onSubmit: (payload: SocialSourceCreatePayload) => Promise<void>
+  onSubmit: (payload: SocialCompanySourcesPayload, companyId?: string | null) => Promise<void>
+  initialValues?: CompanySourcesInitialValues | null
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const [sourceType, setSourceType] = useState<SocialSourceCreatePayload['source_type']>('facebook_page')
-  const [value, setValue] = useState('')
+  const [values, setValues] = useState<CompanySourcesInitialValues>(emptyCompanySources)
+  const [errors, setErrors] = useState<Partial<Record<keyof CompanySourcesInitialValues, string>>>({})
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const isEditing = !!initialValues?.companyId
 
   useEffect(() => {
     if (!open) return
-    setSourceType('facebook_page')
-    setValue('')
+    setValues(initialValues || emptyCompanySources())
     setSaving(false)
-    setError('')
+    setErrors({})
     setTimeout(() => inputRef.current?.focus(), 80)
-  }, [open])
+  }, [open, initialValues])
+
+  const setField = (field: keyof CompanySourcesInitialValues, value: string) => {
+    setValues((current) => ({ ...current, [field]: value }))
+    setErrors((current) => ({ ...current, [field]: undefined }))
+  }
+
+  const validate = () => {
+    const nextErrors = sourceFieldErrors(values, ru)
+    setErrors(nextErrors)
+    return Object.values(nextErrors).every((message) => !message)
+  }
+
+  const count = sourceValueCount(values)
+  const preview = values.companyName.trim() && count > 0 && Object.values(errors).every((message) => !message)
+    ? ru
+      ? `Будет сохранено ${count} источников для ${values.companyName.trim()}`
+      : `Will save ${count} sources under ${values.companyName.trim()}`
+    : null
+
+  const fieldClass = (field: keyof CompanySourcesInitialValues) =>
+    `w-full px-3.5 py-2.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all ${
+      errors[field] ? 'border-red-300 bg-red-50/40' : 'border-gray-200'
+    }`
+
+  const FieldError = ({ field }: { field: keyof CompanySourcesInitialValues }) =>
+    errors[field] ? <p className="mt-1 text-xs text-red-600">{errors[field]}</p> : null
+
+  const helperTextClass = 'mt-1 text-[11px] leading-4 text-gray-500'
 
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-3">
             <div
@@ -269,10 +386,12 @@ function AddSocialSourceModal({
             </div>
             <div>
               <h3 className="text-gray-900" style={{ fontSize: '1rem', fontWeight: 600 }}>
-                {ru ? 'Добавить источник' : 'Add source'}
+                {isEditing ? (ru ? 'Редактировать источники компании' : 'Edit company sources') : (ru ? 'Добавить компанию и источники' : 'Add company sources')}
               </h3>
               <p className="text-xs text-gray-500 mt-0.5">
-                {ru ? 'Выберите тип источника и введите одно значение' : 'Choose a source type and enter one value'}
+                {ru
+                  ? 'Одна компания может иметь Facebook, Instagram, Meta Ads и Google источники'
+                  : 'One company can have Facebook, Instagram, Meta Ads, and Google sources'}
               </p>
             </div>
           </div>
@@ -282,69 +401,128 @@ function AddSocialSourceModal({
           </button>
         </div>
 
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-              {ru ? 'Тип источника' : 'Source type'}
-            </label>
-            <select
-              value={sourceType}
-              onChange={(event) => {
-                setSourceType(event.target.value as SocialSourceCreatePayload['source_type'])
-                setValue('')
-                setError('')
-              }}
-              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all bg-white"
-            >
-              <option value="facebook_page">{ru ? 'Facebook Page' : 'Facebook Page'}</option>
-              <option value="meta_ads">{ru ? 'Meta Ads' : 'Meta Ads'}</option>
-              <option value="instagram_profile">{ru ? 'Instagram' : 'Instagram'}</option>
-              <option value="google_domain">{ru ? 'Google' : 'Google'}</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-              {sourceType === 'facebook_page'
-                ? 'Facebook URL'
-                : sourceType === 'meta_ads'
-                  ? (ru ? 'Meta Ads ID' : 'Meta Ads ID')
-                  : sourceType === 'instagram_profile'
-                    ? 'Instagram URL'
-                    : (ru ? 'Website URL' : 'Website URL')}
-            </label>
-            <input
-              ref={inputRef}
-              type="text"
-              value={value}
-              onChange={(event) => {
-                setValue(event.target.value)
-                setError('')
-              }}
-              placeholder={
-                sourceType === 'facebook_page'
-                  ? 'https://www.facebook.com/nikol.pashinyan'
-                  : sourceType === 'meta_ads'
-                    ? '1378368079150250'
-                    : sourceType === 'instagram_profile'
-                      ? 'https://www.instagram.com/company'
-                      : 'https://company.am'
-              }
-              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-            />
-          </div>
-
-          {error && (
-            <div className="flex items-center gap-1.5 text-xs text-red-600">
-              <AlertCircle className="w-3.5 h-3.5" />
-              {error}
+        <div className="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                {ru ? 'Название компании' : 'Company name'}
+              </label>
+              <input
+                ref={inputRef}
+                type="text"
+                value={values.companyName}
+                onChange={(event) => setField('companyName', event.target.value)}
+                onBlur={validate}
+                placeholder="XTB"
+                className={fieldClass('companyName')}
+              />
+              <FieldError field="companyName" />
             </div>
-          )}
 
-          <div className="bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-xs text-gray-500">
-            {ru
-              ? 'Источник сохранится сразу. Social worker заберет его на следующем цикле или по ручному запуску.'
-              : 'The source is saved immediately. The social worker will pick it up on the next cycle or when run manually.'}
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                {ru ? 'Сайт компании' : 'Website'}
+              </label>
+              <input
+                type="text"
+                value={values.website}
+                onChange={(event) => setField('website', event.target.value)}
+                onBlur={validate}
+                placeholder="https://www.xtb.com"
+                className={fieldClass('website')}
+              />
+              <p className={helperTextClass}>
+                {ru ? 'Используется как основная идентичность компании. Нормализуем до xtb.com.' : 'Used as the main company identity. We will normalize it to xtb.com.'}
+              </p>
+              <FieldError field="website" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                Facebook Page URL
+              </label>
+              <input
+                type="text"
+                value={values.facebookPage}
+                onChange={(event) => setField('facebookPage', event.target.value)}
+                onBlur={validate}
+                placeholder="https://www.facebook.com/xtb"
+                className={fieldClass('facebookPage')}
+              />
+              <p className={helperTextClass}>
+                {ru
+                  ? 'Вставьте публичную Facebook page URL. ScrapeCreators принимает URL страницы или page ID.'
+                  : 'Paste the public Facebook page URL. ScrapeCreators accepts a Facebook profile/page URL or page ID.'}
+              </p>
+              <FieldError field="facebookPage" />
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                {ru ? 'Instagram URL или handle' : 'Instagram URL or handle'}
+              </label>
+              <input
+                type="text"
+                value={values.instagramProfile}
+                onChange={(event) => setField('instagramProfile', event.target.value)}
+                onBlur={validate}
+                placeholder="https://www.instagram.com/xtb_de"
+                className={fieldClass('instagramProfile')}
+              />
+              <p className={helperTextClass}>
+                {ru
+                  ? 'Можно вставить URL или @xtb_de. ScrapeCreators использует Instagram handle.'
+                  : 'You can paste a URL or @xtb_de. ScrapeCreators uses the Instagram handle.'}
+              </p>
+              <FieldError field="instagramProfile" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                Meta Ads ID
+              </label>
+              <input
+                type="text"
+                value={values.metaAds}
+                onChange={(event) => setField('metaAds', event.target.value)}
+                onBlur={validate}
+                placeholder="138239466852"
+                className={fieldClass('metaAds')}
+              />
+              <p className={helperTextClass}>
+                {ru ? 'Числовой Meta/Facebook Ad Library page ID. Не вставляйте URL.' : 'Numeric Meta/Facebook Ad Library page ID. Do not paste a URL here.'}
+              </p>
+              <FieldError field="metaAds" />
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
+                {ru ? 'Google Ads домен' : 'Google Ads domain'}
+              </label>
+              <input
+                type="text"
+                value={values.googleDomain}
+                onChange={(event) => setField('googleDomain', event.target.value)}
+                onBlur={validate}
+                placeholder="xtb.com"
+                className={fieldClass('googleDomain')}
+              />
+              <p className={helperTextClass}>
+                {ru ? 'Домен компании для Google Ads Transparency. https:// не нужен.' : 'Company domain used for Google Ads Transparency results. No https:// needed.'}
+              </p>
+              <FieldError field="googleDomain" />
+            </div>
+          </div>
+
+          <div className={`border rounded-xl p-3.5 text-xs ${preview ? 'bg-blue-50 border-blue-100 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-500'}`}>
+            {preview ||
+              (ru
+                ? 'Заполните название компании и хотя бы один источник. Источники будут сохранены под одной компанией.'
+                : 'Enter the company name and at least one source. Sources will be saved under one company.')}
           </div>
         </div>
 
@@ -358,21 +536,25 @@ function AddSocialSourceModal({
           </button>
           <button
             onClick={async () => {
-              if (!value.trim()) {
-                setError(
-                  sourceType === 'meta_ads'
-                    ? (ru ? 'Введите Meta Ads ID' : 'Enter a Meta Ads ID')
-                    : (ru ? 'Введите значение источника' : 'Enter a source value'),
-                )
-                return
-              }
+              if (!validate()) return
               setSaving(true)
-              setError('')
               try {
-                await onSubmit({ source_type: sourceType, value: value.trim() })
+                await onSubmit(
+                  {
+                    company_name: values.companyName.trim(),
+                    website: values.website.trim() || undefined,
+                    sources: {
+                      facebook_page: values.facebookPage.trim() || undefined,
+                      instagram_profile: values.instagramProfile.trim() || undefined,
+                      meta_ads: values.metaAds.trim() || undefined,
+                      google_domain: values.googleDomain.trim() || undefined,
+                    },
+                  },
+                  values.companyId,
+                )
                 onClose()
               } catch (err: any) {
-                setError(String(err?.message || (ru ? 'Ошибка добавления' : 'Failed to add source')))
+                setErrors({ googleDomain: String(err?.message || (ru ? 'Ошибка сохранения' : 'Failed to save sources')) })
               } finally {
                 setSaving(false)
               }
@@ -383,7 +565,7 @@ function AddSocialSourceModal({
           >
             <span className="flex items-center gap-1.5">
               {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              {ru ? 'Добавить источник' : 'Add Source'}
+              {isEditing ? (ru ? 'Сохранить источники' : 'Save sources') : (ru ? 'Добавить компанию' : 'Add company')}
             </span>
           </button>
         </div>
@@ -396,10 +578,12 @@ function SocialRowActions({
   item,
   ru,
   onToggleActive,
+  onEditCompany,
 }: {
   item: SocialSourceRow
   ru: boolean
   onToggleActive: (id: string, isActive: boolean) => Promise<void>
+  onEditCompany: (item: SocialSourceRow) => void
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -418,7 +602,17 @@ function SocialRowActions({
         <MoreVertical className="w-4 h-4 text-gray-400" />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+        <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-gray-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+          <button
+            onClick={() => {
+              onEditCompany(item)
+              setOpen(false)
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            <Pencil className="w-3.5 h-3.5 text-blue-500" />
+            {ru ? 'Редактировать компанию' : 'Edit company sources'}
+          </button>
           <button
             onClick={async () => {
               await onToggleActive(item.id, !item.is_active)
@@ -444,6 +638,31 @@ function SocialRowActions({
   )
 }
 
+function stripProtocol(value: string | null | undefined): string {
+  return String(value || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '')
+}
+
+function companyInitialValuesForItem(seed: SocialSourceRow, rows: SocialSourceRow[]): CompanySourcesInitialValues {
+  const group = rows.filter((item) => item.entity_id === seed.entity_id)
+  const initial = emptyCompanySources()
+  initial.companyId = seed.company_id || null
+  initial.entityId = seed.entity_id
+  initial.companyName = seed.company_name || ''
+  initial.website = seed.company_website || ''
+  for (const item of group) {
+    if (item.source_kind === 'facebook_page') {
+      initial.facebookPage = item.display_url || ''
+    } else if (item.source_kind === 'instagram_profile') {
+      initial.instagramProfile = item.display_url || ''
+    } else if (item.source_kind === 'meta_ads') {
+      initial.metaAds = item.account_external_id || ''
+    } else if (item.source_kind === 'google_domain') {
+      initial.googleDomain = stripProtocol(item.display_url) || item.account_external_id || ''
+    }
+  }
+  return initial
+}
+
 export function SocialSourcesSection({
   ru,
   addModalOpen,
@@ -465,6 +684,7 @@ export function SocialSourcesSection({
   const [runtimeBusy, setRuntimeBusy] = useState(false)
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
   const [intervalInput, setIntervalInput] = useState('360')
+  const [editingCompany, setEditingCompany] = useState<CompanySourcesInitialValues | null>(null)
 
   const loadSources = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -594,15 +814,17 @@ export function SocialSourcesSection({
     }
   }
 
-  const handleAddSource = async (payload: SocialSourceCreatePayload) => {
+  const handleSaveCompanySources = async (payload: SocialCompanySourcesPayload, companyId?: string | null) => {
     setBusy(true)
     setError(null)
     try {
-      await requestJson<SocialSourceCreateResponse>('/api/sources/social', {
-        method: 'POST',
+      const path = companyId ? `/api/sources/social/company/${companyId}` : '/api/sources/social/company'
+      await requestJson<SocialCompanySourcesResponse>(path, {
+        method: companyId ? 'PATCH' : 'POST',
         body: JSON.stringify(payload),
       })
       await loadSources(true)
+      setEditingCompany(null)
     } catch (err) {
       throw err
     } finally {
@@ -624,6 +846,15 @@ export function SocialSourcesSection({
     } finally {
       setBusy(false)
     }
+  }
+
+  const editCompanySources = (item: SocialSourceRow) => {
+    setEditingCompany(companyInitialValuesForItem(item, items))
+  }
+
+  const closeCompanySourcesModal = () => {
+    setEditingCompany(null)
+    onCloseAddModal()
   }
 
   return (
@@ -993,7 +1224,7 @@ export function SocialSourcesSection({
                         </div>
                       </td>
                       <td className="px-3 py-3">
-                        <SocialRowActions item={item} ru={ru} onToggleActive={setSourceActive} />
+                        <SocialRowActions item={item} ru={ru} onToggleActive={setSourceActive} onEditCompany={editCompanySources} />
                       </td>
                     </tr>
                   )
@@ -1014,11 +1245,12 @@ export function SocialSourcesSection({
         </div>
       </div>
 
-      <AddSocialSourceModal
-        open={addModalOpen}
-        onClose={onCloseAddModal}
+      <CompanySourcesModal
+        open={addModalOpen || !!editingCompany}
+        onClose={closeCompanySourcesModal}
         ru={ru}
-        onSubmit={handleAddSource}
+        onSubmit={handleSaveCompanySources}
+        initialValues={editingCompany}
       />
     </>
   )
