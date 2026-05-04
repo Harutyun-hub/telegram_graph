@@ -288,7 +288,7 @@ function sourceFieldErrors(values: CompanySourcesInitialValues, ru: boolean): Pa
     errors.googleDomain = ru ? 'Добавьте хотя бы один источник' : 'Add at least one scraping source'
   }
   if (values.website.trim() && !/^[a-z]+:\/\/[^\s.]+\.[^\s]+$/i.test(values.website.trim()) && !/^[^\s.]+\.[^\s]+$/i.test(values.website.trim())) {
-    errors.website = ru ? 'Введите сайт, например https://www.xtb.com' : 'Enter a website like https://www.xtb.com'
+    errors.website = ru ? 'Введите сайт, например https://www.xyz.com' : 'Enter a website like https://www.xyz.com'
   }
   if (values.facebookPage.trim()) {
     const facebook = values.facebookPage.trim()
@@ -310,7 +310,7 @@ function sourceFieldErrors(values: CompanySourcesInitialValues, ru: boolean): Pa
     errors.metaAds = ru ? 'Введите только числовой Meta Ads ID' : 'Enter only the numeric Meta Ads ID'
   }
   if (values.googleDomain.trim() && !/^[a-z]+:\/\/[^\s.]+\.[^\s]+$/i.test(values.googleDomain.trim()) && !/^[^\s.]+\.[^\s]+$/i.test(values.googleDomain.trim())) {
-    errors.googleDomain = ru ? 'Введите домен, например xtb.com' : 'Enter a domain like xtb.com'
+    errors.googleDomain = ru ? 'Введите домен, например xyz.com' : 'Enter a domain like xyz.com'
   }
   return errors
 }
@@ -370,6 +370,39 @@ function CompanySourcesModal({
 
   const helperTextClass = 'mt-1 text-[11px] leading-4 text-gray-500'
 
+  const FieldRow = ({
+    label,
+    field,
+    placeholder,
+    helper,
+    autoFocus = false,
+  }: {
+    label: string
+    field: keyof CompanySourcesInitialValues
+    placeholder: string
+    helper?: string
+    autoFocus?: boolean
+  }) => (
+    <div className="grid grid-cols-1 gap-2 rounded-xl border border-gray-100 bg-white p-3 md:grid-cols-[180px_minmax(0,1fr)] md:items-start md:gap-4">
+      <label className="pt-0.5 text-xs text-gray-600 md:pt-3" style={{ fontWeight: 500 }}>
+        {label}
+      </label>
+      <div className="min-w-0">
+        <input
+          ref={autoFocus ? inputRef : undefined}
+          type="text"
+          value={values[field]}
+          onChange={(event) => setField(field, event.target.value)}
+          onBlur={validate}
+          placeholder={placeholder}
+          className={fieldClass(field)}
+        />
+        {helper ? <p className={helperTextClass}>{helper}</p> : null}
+        <FieldError field={field} />
+      </div>
+    </div>
+  )
+
   if (!open) return null
 
   return (
@@ -402,120 +435,43 @@ function CompanySourcesModal({
         </div>
 
         <div className="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                {ru ? 'Название компании' : 'Company name'}
-              </label>
-              <input
-                ref={inputRef}
-                type="text"
-                value={values.companyName}
-                onChange={(event) => setField('companyName', event.target.value)}
-                onBlur={validate}
-                placeholder="XTB"
-                className={fieldClass('companyName')}
-              />
-              <FieldError field="companyName" />
-            </div>
-
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                {ru ? 'Сайт компании' : 'Website'}
-              </label>
-              <input
-                type="text"
-                value={values.website}
-                onChange={(event) => setField('website', event.target.value)}
-                onBlur={validate}
-                placeholder="https://www.xtb.com"
-                className={fieldClass('website')}
-              />
-              <p className={helperTextClass}>
-                {ru ? 'Используется как основная идентичность компании. Нормализуем до xtb.com.' : 'Used as the main company identity. We will normalize it to xtb.com.'}
-              </p>
-              <FieldError field="website" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                Facebook Page URL
-              </label>
-              <input
-                type="text"
-                value={values.facebookPage}
-                onChange={(event) => setField('facebookPage', event.target.value)}
-                onBlur={validate}
-                placeholder="https://www.facebook.com/xtb"
-                className={fieldClass('facebookPage')}
-              />
-              <p className={helperTextClass}>
-                {ru
-                  ? 'Вставьте публичную Facebook page URL. ScrapeCreators принимает URL страницы или page ID.'
-                  : 'Paste the public Facebook page URL. ScrapeCreators accepts a Facebook profile/page URL or page ID.'}
-              </p>
-              <FieldError field="facebookPage" />
-            </div>
-
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                {ru ? 'Instagram URL или handle' : 'Instagram URL or handle'}
-              </label>
-              <input
-                type="text"
-                value={values.instagramProfile}
-                onChange={(event) => setField('instagramProfile', event.target.value)}
-                onBlur={validate}
-                placeholder="https://www.instagram.com/xtb_de"
-                className={fieldClass('instagramProfile')}
-              />
-              <p className={helperTextClass}>
-                {ru
-                  ? 'Можно вставить URL или @xtb_de. ScrapeCreators использует Instagram handle.'
-                  : 'You can paste a URL or @xtb_de. ScrapeCreators uses the Instagram handle.'}
-              </p>
-              <FieldError field="instagramProfile" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                Meta Ads ID
-              </label>
-              <input
-                type="text"
-                value={values.metaAds}
-                onChange={(event) => setField('metaAds', event.target.value)}
-                onBlur={validate}
-                placeholder="138239466852"
-                className={fieldClass('metaAds')}
-              />
-              <p className={helperTextClass}>
-                {ru ? 'Числовой Meta/Facebook Ad Library page ID. Не вставляйте URL.' : 'Numeric Meta/Facebook Ad Library page ID. Do not paste a URL here.'}
-              </p>
-              <FieldError field="metaAds" />
-            </div>
-
-            <div>
-              <label className="text-xs text-gray-600 block mb-1.5" style={{ fontWeight: 500 }}>
-                {ru ? 'Google Ads домен' : 'Google Ads domain'}
-              </label>
-              <input
-                type="text"
-                value={values.googleDomain}
-                onChange={(event) => setField('googleDomain', event.target.value)}
-                onBlur={validate}
-                placeholder="xtb.com"
-                className={fieldClass('googleDomain')}
-              />
-              <p className={helperTextClass}>
-                {ru ? 'Домен компании для Google Ads Transparency. https:// не нужен.' : 'Company domain used for Google Ads Transparency results. No https:// needed.'}
-              </p>
-              <FieldError field="googleDomain" />
-            </div>
+          <div className="space-y-3">
+            <FieldRow
+              label={ru ? 'Название компании' : 'Company name'}
+              field="companyName"
+              placeholder="XYZ"
+              autoFocus
+            />
+            <FieldRow
+              label={ru ? 'Сайт компании' : 'Website'}
+              field="website"
+              placeholder="https://www.xyz.com"
+              helper={ru ? 'Используется как основная идентичность компании. Нормализуем до xyz.com.' : 'Used as the main company identity. We will normalize it to xyz.com.'}
+            />
+            <FieldRow
+              label="Facebook Page URL"
+              field="facebookPage"
+              placeholder="https://www.facebook.com/xyz"
+              helper={ru ? 'Вставьте публичную Facebook page URL или page ID.' : 'Paste the public Facebook page URL or page ID.'}
+            />
+            <FieldRow
+              label={ru ? 'Instagram URL или handle' : 'Instagram URL or handle'}
+              field="instagramProfile"
+              placeholder="https://www.instagram.com/xyz_global"
+              helper={ru ? 'Можно вставить URL или @xyz_global. Мы автоматически выделим handle.' : 'You can paste a URL or @xyz_global. We will extract the handle automatically.'}
+            />
+            <FieldRow
+              label="Meta Ads ID"
+              field="metaAds"
+              placeholder="123456789012"
+              helper={ru ? 'Числовой Meta/Facebook Ad Library page ID. Не вставляйте URL.' : 'Numeric Meta/Facebook Ad Library page ID. Do not paste a URL here.'}
+            />
+            <FieldRow
+              label={ru ? 'Google Ads домен' : 'Google Ads domain'}
+              field="googleDomain"
+              placeholder="xyz.com"
+              helper={ru ? 'Домен компании для Google Ads Transparency. https:// не нужен.' : 'Company domain used for Google Ads Transparency results. No https:// needed.'}
+            />
           </div>
 
           <div className={`border rounded-xl p-3.5 text-xs ${preview ? 'bg-blue-50 border-blue-100 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-500'}`}>
