@@ -8,6 +8,7 @@ from loguru import logger
 from supabase import Client, create_client
 
 import config
+from social.text_cleaning import clean_social_activity_row, clean_social_text_content
 
 SUPPORTED_SOCIAL_PLATFORMS = ("facebook", "instagram", "google", "tiktok")
 SUPPORTED_SOCIAL_SOURCE_KINDS = (
@@ -1314,8 +1315,11 @@ class SocialStore:
         for activity in activities:
             uid = str(activity["activity_uid"])
             existing = existing_by_uid.get(uid)
-            text_content = _clean_optional(activity.get("text_content"))
-            old_text = _clean_optional(existing.get("text_content")) if existing else None
+            text_content = clean_social_text_content(
+                activity.get("text_content"),
+                provider_payload=activity.get("provider_payload"),
+            )
+            old_text = clean_social_text_content(existing.get("text_content")) if existing else None
             text_changed = existing is None or old_text != text_content
             ingest_status = _trimmed(activity.get("ingest_status")).lower() or "normalized"
             if ingest_status not in {"collected", "normalized", "failed", "dead_letter"}:
@@ -1396,7 +1400,10 @@ class SocialStore:
             row["id"]: row
             for row in self._select_rows("social_entities", filters=(("in", "id", list(entity_ids)),))
         } if entity_ids else {}
-        return [{**row, "entity": entities.get(row["entity_id"])} for row in eligible]
+        return [
+            clean_social_activity_row({**row, "entity": entities.get(row["entity_id"])})
+            for row in eligible
+        ]
 
     def save_analysis(
         self,
@@ -1559,11 +1566,11 @@ class SocialStore:
             )
         }
         return [
-            {
+            clean_social_activity_row({
                 **row,
                 "entity": entities.get(row["entity_id"]),
                 "analysis": analyses.get(row["id"]),
-            }
+            })
             for row in activities
         ]
 
@@ -1627,11 +1634,11 @@ class SocialStore:
             )
         }
         enriched = [
-            {
+            clean_social_activity_row({
                 **row,
                 "entity": entities.get(row["entity_id"]),
                 "analysis": analyses.get(row["id"]),
-            }
+            })
             for row in activities
         ]
 
@@ -2252,7 +2259,7 @@ class SocialStore:
             )
             if analysis:
                 row["analysis"] = analysis
-        return row
+        return clean_social_activity_row(row)
 
     def prepare_activity_replay(self, activity_uids: list[str], *, stage: str) -> list[dict[str, Any]]:
         if not activity_uids:

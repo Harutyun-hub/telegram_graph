@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from loguru import logger
 
 import config
+from social.text_cleaning import extract_readable_social_text
 
 try:
     import certifi
@@ -41,42 +42,7 @@ def _trimmed(value: Any) -> str:
 
 
 def _clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return ""
-        if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")):
-            try:
-                return _clean_text(json.loads(text))
-            except Exception:
-                return text
-        return text
-    if isinstance(value, dict):
-        for key in (
-            "text",
-            "body",
-            "caption",
-            "description",
-            "title",
-            "message",
-            "ad_text",
-            "link_description",
-            "snapshot",
-            "snapshot_data",
-        ):
-            text = _clean_text(value.get(key))
-            if text:
-                return text
-        return ""
-    if isinstance(value, list):
-        for item in value[:4]:
-            text = _clean_text(item)
-            if text:
-                return text
-        return ""
-    return str(value).strip()
+    return extract_readable_social_text(value)
 
 
 def _to_iso_datetime(value: Any) -> str | None:
@@ -110,6 +76,17 @@ def _coalesce(*values: Any) -> str | None:
         text = _trimmed(value)
         if text:
             return text
+    return None
+
+
+def _coalesce_raw(*values: Any) -> Any | None:
+    for value in values:
+        if isinstance(value, str):
+            if value.strip():
+                return value
+            continue
+        if value:
+            return value
     return None
 
 
@@ -527,13 +504,16 @@ class ScrapeCreatorsClient:
 
         snapshot = row.get("snapshot")
         text_content = _clean_text(
-            _coalesce(
+            _coalesce_raw(
                 row.get("text"),
                 row.get("ad_text"),
                 row.get("caption"),
+                row.get("message"),
                 row.get("description"),
+                row.get("body"),
+                row.get("title"),
+                row.get("link_description"),
                 snapshot,
-                row,
             )
         )
         source_kind = {

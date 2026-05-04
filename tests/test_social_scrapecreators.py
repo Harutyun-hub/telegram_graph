@@ -122,6 +122,96 @@ class SocialScrapeCreatorsTests(unittest.TestCase):
         self.assertEqual(params["pageId"], "138239466852")
         self.assertEqual(params["count"], 25)
 
+    def test_normalize_meta_ads_extracts_snapshot_body_text(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+        account = {
+            "id": "acc-meta-ads",
+            "platform": "facebook",
+            "source_kind": "meta_ads",
+            "account_external_id": "138239466852",
+            "entity": {"id": "entity-1"},
+        }
+
+        normalized = client.normalize_payloads(
+            account,
+            [
+                {
+                    "results": [
+                        {
+                            "adArchiveId": "ad-1",
+                            "url": "https://www.facebook.com/ads/library/?id=ad-1",
+                            "snapshot": {
+                                "body": {"text": "Trade market volatility with XTB."},
+                                "title": "Fallback title",
+                            },
+                        }
+                    ]
+                }
+            ],
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["source_kind"], "ad")
+        self.assertEqual(normalized[0]["text_content"], "Trade market volatility with XTB.")
+
+    def test_normalize_google_ads_extracts_ad_text(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+        account = {
+            "id": "acc-google",
+            "platform": "google",
+            "source_kind": "google_domain",
+            "domain": "xtb.com",
+            "entity": {"id": "entity-1"},
+        }
+
+        normalized = client.normalize_payloads(
+            account,
+            [
+                {
+                    "results": [
+                        {
+                            "creativeId": "creative-1",
+                            "url": "https://adstransparency.google.com/advertiser/creative-1",
+                            "ad_text": "Explore trading education and market analysis.",
+                        }
+                    ]
+                }
+            ],
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["source_kind"], "ad")
+        self.assertEqual(normalized[0]["text_content"], "Explore trading education and market analysis.")
+
+    def test_normalize_without_readable_text_does_not_store_raw_payload(self) -> None:
+        client = ScrapeCreatorsClient(api_key="test-key")
+        account = {
+            "id": "acc-instagram",
+            "platform": "instagram",
+            "source_kind": "instagram_profile",
+            "account_handle": "xtb_de",
+            "entity": {"id": "entity-1"},
+        }
+
+        normalized = client.normalize_payloads(
+            account,
+            [
+                {
+                    "items": [
+                        {
+                            "id": "post-1",
+                            "url": "https://www.instagram.com/p/post-1/",
+                            "pk": "raw-only",
+                            "bit_flags": 0,
+                        }
+                    ]
+                }
+            ],
+        )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertIsNone(normalized[0]["text_content"])
+
 
 if __name__ == "__main__":
     unittest.main()

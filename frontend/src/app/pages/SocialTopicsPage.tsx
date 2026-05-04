@@ -23,7 +23,7 @@ import { TOPICS_PAGE_GROUPS_EN, translateCategory, translateTopicsPageGroup } fr
 import {
   formatSocialBucket,
   formatSocialDateLabel,
-  socialActivitySummary,
+  socialEvidenceText,
   socialPlatformLabel,
 } from '@/app/services/socialFormatting';
 import type { SocialEvidenceItem, SocialIntelligenceFilters, SocialPlatform } from '@/app/services/socialIntelligence';
@@ -234,7 +234,7 @@ function evidenceChannel(item: SocialEvidenceItem, lang: 'en' | 'ru') {
 }
 
 function evidenceText(item: SocialEvidenceItem) {
-  return item.text_content?.trim() || socialActivitySummary(item);
+  return socialEvidenceText(item);
 }
 
 function isQuestionEvidence(item: SocialEvidenceItem) {

@@ -106,6 +106,10 @@ export function socialActivitySummary(item: SocialEvidenceItem | SocialAdCard) {
   return (typeof payload?.summary === 'string' && payload.summary) || item.analysis?.summary || item.text_content || '';
 }
 
+export function socialEvidenceText(item: SocialEvidenceItem | SocialAdCard) {
+  return item.text_content?.trim() || socialActivitySummary(item);
+}
+
 export function socialPayloadList(payload: Record<string, unknown> | null | undefined, key: string): string[] {
   const value = payload?.[key];
   if (!Array.isArray(value)) return [];

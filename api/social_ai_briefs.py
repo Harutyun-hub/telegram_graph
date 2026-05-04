@@ -12,6 +12,7 @@ from openai import OpenAI
 
 import config
 from api import social_semantic
+from social.text_cleaning import clean_social_activity_row, clean_social_text_content
 from utils.ai_usage import log_openai_usage
 
 
@@ -337,7 +338,7 @@ def _load_parent_threads(store: Any, *, start_iso: str, end_iso: str, limit: int
         analysis = analyses.get(row.get("id"))
         if not analysis:
             continue
-        enriched.append({**row, "analysis": analysis, "entity": entities.get(row.get("entity_id"))})
+        enriched.append(clean_social_activity_row({**row, "analysis": analysis, "entity": entities.get(row.get("entity_id"))}))
     return enriched
 
 
@@ -393,7 +394,7 @@ def _evidence_by_uid(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "platform": row.get("platform"),
             "published_at": row.get("published_at"),
             "source_url": row.get("source_url"),
-            "quote": _text_preview(row.get("text_content"), 240),
+            "quote": _text_preview(clean_social_text_content(row.get("text_content"), analysis=analysis), 240),
             "summary": _text_preview(payload.get("summary") or analysis.get("summary"), 220),
             "topics": _payload_topics(payload)[:6],
             "sentiment": _sentiment(payload, analysis),

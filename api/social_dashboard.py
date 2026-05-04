@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from api import social_ai_briefs, social_semantic
+from social.text_cleaning import clean_social_activity_row
 
 
 SNAPSHOT_TTL_SECONDS = 300
@@ -1499,24 +1500,24 @@ def _build_social_dashboard_snapshot_uncached(
             continue
         if end_bound and effective and effective > end_bound:
             continue
-        enriched.append({
+        enriched.append(clean_social_activity_row({
             **row,
             "entity": entities.get(row.get("entity_id")),
             "account": accounts.get(row.get("account_id")),
             "analysis": analysis_by_activity.get(row.get("id")),
-        })
+        }))
 
     previous_rows: list[dict[str, Any]] = []
     # Keep v1 simple: previous-window comparisons use the scanned rows outside the
     # selected window when available. This avoids a second expensive query.
     if start_bound:
         previous_rows = [
-            {
+            clean_social_activity_row({
                 **row,
                 "entity": entities.get(row.get("entity_id")),
                 "account": accounts.get(row.get("account_id")),
                 "analysis": analysis_by_activity.get(row.get("id")),
-            }
+            })
             for row in activities
             if (_effective_dt(row) and _effective_dt(row) < start_bound)
         ]
