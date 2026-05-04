@@ -7,7 +7,6 @@ Provides: weeklyShifts, sentimentByTopic, topPosts, contentTypePerformance,
 from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-import os
 import threading
 import time
 from typing import Any, Iterable
