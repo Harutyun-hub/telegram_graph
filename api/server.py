@@ -798,6 +798,7 @@ def get_current_social_runtime_status() -> dict[str, Any]:
             "run_history": [],
             "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
             "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
+            "website_monitor_enabled": bool(config.SOCIAL_WEBSITE_MONITOR_ENABLED),
             "postgres_worker_enabled": bool(config.SOCIAL_DATABASE_URL),
             "worker_id": None,
         }
@@ -2378,8 +2379,8 @@ def _normalize_company_sources_payload(payload: SocialCompanySourcesRequest) -> 
             }
         )
 
-    if not sources:
-        raise HTTPException(status_code=400, detail="Add at least one scraping source")
+    if not sources and not website:
+        raise HTTPException(status_code=400, detail="Add a company website or at least one scraping source")
 
     return {
         "company_name": company_name,

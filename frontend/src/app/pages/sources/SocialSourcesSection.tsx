@@ -22,8 +22,8 @@ type SocialSourceRow = {
   company_id?: string | null
   company_name: string
   company_website?: string | null
-  platform: 'facebook' | 'instagram' | 'google' | 'tiktok'
-  source_kind: 'facebook_page' | 'meta_ads' | 'instagram_profile' | 'google_domain' | 'tiktok_profile'
+  platform: 'facebook' | 'instagram' | 'google' | 'tiktok' | 'website'
+  source_kind: 'facebook_page' | 'meta_ads' | 'instagram_profile' | 'google_domain' | 'tiktok_profile' | 'website_monitor'
   display_url: string | null
   account_external_id: string | null
   is_active: boolean
@@ -103,7 +103,9 @@ type SocialRuntimeStatus = {
     collect_failures?: number
     analysis_failures?: number
     graph_failures?: number
+    website_research_failures?: number
   } | null
+  website_monitor_enabled?: boolean
   run_history?: Array<{
     finished_at: string | null
     accounts_processed: number
@@ -113,12 +115,13 @@ type SocialRuntimeStatus = {
     collect_failures: number
     analysis_failures: number
     graph_failures: number
+    website_research_failures?: number
   }>
 }
 
 type SocialSourceStatus = 'active' | 'paused' | 'invalid_identifier' | 'provider_404' | 'rate_limited' | 'auth_error' | 'network_error' | 'error'
-type SocialPlatformFilter = 'all' | 'facebook' | 'instagram' | 'google'
-type CompanySourceColumn = 'facebook_page' | 'instagram_profile' | 'meta_ads' | 'google_domain'
+type SocialPlatformFilter = 'all' | 'facebook' | 'instagram' | 'google' | 'website'
+type CompanySourceColumn = 'website_monitor' | 'facebook_page' | 'instagram_profile' | 'meta_ads' | 'google_domain'
 
 type SocialCompanyRow = {
   key: string
@@ -130,6 +133,7 @@ type SocialCompanyRow = {
 }
 
 const companySourceColumns: Array<{ key: CompanySourceColumn; labelEn: string; labelRu: string }> = [
+  { key: 'website_monitor', labelEn: 'Website', labelRu: 'Сайт' },
   { key: 'facebook_page', labelEn: 'Facebook Page', labelRu: 'Facebook Page' },
   { key: 'instagram_profile', labelEn: 'Instagram', labelRu: 'Instagram' },
   { key: 'meta_ads', labelEn: 'Meta Ads', labelRu: 'Meta Ads' },
@@ -190,9 +194,13 @@ function lastResultLabel(lastResult: SocialRuntimeStatus['last_result'], runtime
     const collected = lastResult.activities_collected ?? 0
     const analyzed = lastResult.activities_analyzed ?? 0
     const synced = lastResult.activities_graph_synced ?? 0
+    const websiteFailures = lastResult.website_research_failures ?? 0
+    const failureText = websiteFailures > 0
+      ? (ru ? ` · ${websiteFailures} сайт ошибок` : ` · ${websiteFailures} website errors`)
+      : ''
     return ru
-      ? `${collected} собрано · ${analyzed} AI · ${synced} Neo4j`
-      : `${collected} collected · ${analyzed} AI · ${synced} Neo4j`
+      ? `${collected} собрано · ${analyzed} AI · ${synced} Neo4j${failureText}`
+      : `${collected} collected · ${analyzed} AI · ${synced} Neo4j${failureText}`
   }
   if (runtime?.last_run_started_at || runtime?.is_active) {
     return ru ? 'Ожидаем завершённый цикл' : 'Awaiting completed cycle'
@@ -231,6 +239,8 @@ function platformLabel(platform: SocialSourceRow['platform'] | SocialPlatformFil
       return 'Google'
     case 'tiktok':
       return 'TikTok'
+    case 'website':
+      return ru ? 'Сайт' : 'Website'
     default:
       return ru ? 'Соцсеть' : 'Social'
   }
@@ -246,6 +256,8 @@ function platformBadgeTone(platform: SocialSourceRow['platform']) {
       return { bg: 'from-slate-700 to-slate-900', label: 'G' }
     case 'tiktok':
       return { bg: 'from-slate-800 to-black', label: 'T' }
+    case 'website':
+      return { bg: 'from-cyan-600 to-blue-700', label: 'W' }
     default:
       return { bg: 'from-slate-500 to-slate-700', label: 'S' }
   }
@@ -264,8 +276,13 @@ function SourceBadge({ platform }: { platform: SocialSourceRow['platform'] }) {
 }
 
 function sourceDisplayValue(item: SocialSourceRow): string {
+  if (item.source_kind === 'website_monitor') return stripProtocol(item.display_url) || '—'
   if (item.source_kind === 'google_domain') return stripProtocol(item.display_url) || item.account_external_id || '—'
   return item.display_url || item.account_external_id || '—'
+}
+
+function isVirtualWebsiteSource(item: SocialSourceRow): boolean {
+  return item.source_kind === 'website_monitor' || item.id.startsWith('website:')
 }
 
 function companyRowStatus(row: SocialCompanyRow): SocialSourceStatus {
@@ -299,6 +316,7 @@ function emptyCompanySources(): CompanySourcesInitialValues {
 
 function sourceValueCount(values: CompanySourcesInitialValues): number {
   return [
+    values.website,
     values.facebookPage,
     values.instagramProfile,
     values.metaAds,
@@ -312,7 +330,7 @@ function sourceFieldErrors(values: CompanySourcesInitialValues, ru: boolean): Pa
     errors.companyName = ru ? 'Введите название компании' : 'Enter the company name'
   }
   if (!sourceValueCount(values)) {
-    errors.googleDomain = ru ? 'Добавьте хотя бы один источник' : 'Add at least one scraping source'
+    errors.website = ru ? 'Добавьте сайт или хотя бы один источник' : 'Add a website or at least one scraping source'
   }
   if (values.website.trim() && !/^[a-z]+:\/\/[^\s.]+\.[^\s]+$/i.test(values.website.trim()) && !/^[^\s.]+\.[^\s]+$/i.test(values.website.trim())) {
     errors.website = ru ? 'Введите сайт, например https://www.xyz.com' : 'Enter a website like https://www.xyz.com'
@@ -889,7 +907,7 @@ export function SocialSourcesSection({
     setError(null)
     try {
       await Promise.all(
-        row.items.map((item) =>
+        row.items.filter((item) => !isVirtualWebsiteSource(item)).map((item) =>
           requestJson<SocialSourceUpdateResponse>(`/api/sources/social/${item.id}`, {
             method: 'PATCH',
             body: JSON.stringify({ is_active: isActive }),
@@ -916,7 +934,7 @@ export function SocialSourcesSection({
     setError(null)
     try {
       await Promise.all(
-        row.items.map((item) =>
+        row.items.filter((item) => !isVirtualWebsiteSource(item)).map((item) =>
           requestJson<SocialSourceDeleteResponse>(`/api/sources/social/${item.id}`, {
             method: 'DELETE',
           }),
@@ -1183,7 +1201,7 @@ export function SocialSourcesSection({
           </div>
 
           <div className="flex items-center gap-1 flex-wrap">
-            {(['all', 'facebook', 'instagram', 'google'] as const).map((platform) => (
+            {(['all', 'website', 'facebook', 'instagram', 'google'] as const).map((platform) => (
               <button
                 key={platform}
                 onClick={() => setPlatformFilter(platform)}
@@ -1257,14 +1275,14 @@ export function SocialSourcesSection({
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-16">
+                  <td colSpan={9} className="text-center py-16">
                     <RefreshCw className="w-6 h-6 text-gray-300 mx-auto mb-2 animate-spin" />
                     <p className="text-sm text-gray-500">{ru ? 'Загрузка social источников...' : 'Loading social sources...'}</p>
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-16">
+                  <td colSpan={9} className="text-center py-16">
                     <Database className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                     <p className="text-sm text-gray-500">
                       {search ? (ru ? 'Ничего не найдено' : 'No sources found') : (ru ? 'Нет добавленных social источников' : 'No social sources added yet')}
