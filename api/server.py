@@ -84,6 +84,7 @@ from api import topic_overviews
 from api.analysis_lenses import (
     DEFAULT_ANALYSIS_LENS_IDS,
     analysis_lens_signature,
+    build_lens_prompt_template,
     get_analysis_lens_catalog,
     normalize_analysis_lens_ids,
 )
@@ -735,6 +736,22 @@ def _admin_prompt_defaults() -> dict[str, str]:
     ):
         defaults.update(provider())
     return defaults
+
+
+def _admin_effective_prompt_templates(prompts: dict[str, str]) -> dict[str, str]:
+    strict_taxonomy_prompt = str(prompts.get("extraction.strict_taxonomy_prompt") or "")
+    include_taxonomy = bool(config.FEATURE_EXTRACTION_V2)
+    effective: dict[str, str] = {}
+
+    for key, value in prompts.items():
+        prompt = str(value or "")
+        if key == "extraction.strict_taxonomy_prompt":
+            effective[key] = prompt
+            continue
+        suffix = strict_taxonomy_prompt if include_taxonomy and key.startswith("extraction.") else None
+        effective[key] = build_lens_prompt_template(prompt, include_directive=True, suffix=suffix)
+
+    return effective
 
 
 def get_supabase_writer() -> SupabaseWriter:
@@ -1486,6 +1503,7 @@ def _admin_config_response() -> dict[str, Any]:
     payload["analysisLensSelectionSource"] = (
         "operator" if isinstance(raw_runtime.get("analysisLensIds"), list) else "seeded_default"
     )
+    payload["effectivePrompts"] = _admin_effective_prompt_templates(payload["prompts"])
     warning = get_admin_config_runtime_warning()
     if warning:
         payload["warning"] = warning

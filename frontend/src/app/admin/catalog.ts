@@ -356,6 +356,7 @@ export function createDefaultAdminConfig(): AdminConfig {
     widgets: Object.fromEntries(ADMIN_WIDGET_DEFINITIONS.map((widget) => [widget.id, { enabled: true }])),
     prompts,
     promptDefaults: { ...prompts },
+    effectivePrompts: { ...prompts },
     runtime: { ...DEFAULT_ADMIN_RUNTIME },
     analysisLensCatalog: DEFAULT_ANALYSIS_LENS_CATALOG,
     analysisLensSelectionSource: 'seeded_default',

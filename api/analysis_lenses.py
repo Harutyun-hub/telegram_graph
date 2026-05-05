@@ -410,6 +410,16 @@ def build_lens_system_prompt(base_prompt: str, *, include_directive: bool = True
     return "\n\n".join(part for part in parts if part)
 
 
+def build_lens_prompt_template(base_prompt: str, *, include_directive: bool = True, suffix: str | None = None) -> str:
+    """Render the stable prompt template shown in Admin without active lens JSON."""
+    parts = [str(base_prompt or "").strip()]
+    if include_directive:
+        parts.append(LENS_DIRECTIVE)
+    if suffix:
+        parts.append(str(suffix).strip())
+    return "\n\n".join(part for part in parts if part)
+
+
 def active_analysis_lens_payload(*, include_lenses: bool = True) -> dict[str, Any]:
     lenses = get_active_analysis_lenses()
     payload: dict[str, Any] = {

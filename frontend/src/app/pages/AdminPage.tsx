@@ -473,7 +473,7 @@ export function AdminPage() {
                 {ru ? 'AI-промпты' : 'AI Prompts'}
               </h2>
               <p className="text-sm text-gray-500">
-                {ru ? 'Редактируйте текущие промпты для логики и AI-виджетов' : 'Edit the current prompts used by AI logic and widgets'}
+                {ru ? 'Просматривайте реальные промпты, используемые AI-логикой и виджетами' : 'View the real prompts used by AI logic and widgets'}
               </p>
             </div>
           </div>
@@ -493,7 +493,13 @@ export function AdminPage() {
                   onToggle={() => toggleSection(sectionKey)}
                 >
                   <div className="space-y-4">
-                    {prompts.map((prompt) => (
+                    {prompts.map((prompt) => {
+                      const isEditable = Boolean(editablePrompts[prompt.key]);
+                      const effectiveValue = config.effectivePrompts?.[prompt.key];
+                      const promptValue = isEditable
+                        ? (promptDraft[prompt.key] ?? '')
+                        : (effectiveValue && effectiveValue.trim() ? effectiveValue : promptDraft[prompt.key] ?? '');
+                      return (
                       <div key={prompt.key}>
                         <div className="flex items-start justify-between gap-3 mb-2">
                           <div>
@@ -546,9 +552,9 @@ export function AdminPage() {
                           {ru ? prompt.descriptionRu : prompt.descriptionEn}
                         </p>
                         <textarea
-                          value={promptDraft[prompt.key] ?? ''}
+                          value={promptValue}
                           onChange={(event) => {
-                            if (!editablePrompts[prompt.key]) {
+                            if (!isEditable) {
                               return;
                             }
                             setPromptStatus('idle');
@@ -556,19 +562,22 @@ export function AdminPage() {
                             const nextValue = event.target.value;
                             setPromptDraft((prev) => ({ ...prev, [prompt.key]: nextValue }));
                           }}
-                          rows={6}
-                          readOnly={!editablePrompts[prompt.key]}
-                          className={`w-full px-4 py-3 border rounded-lg text-sm resize-y ${editablePrompts[prompt.key]
+                          rows={8}
+                          readOnly={!isEditable}
+                          className={`w-full px-4 py-3 border rounded-lg text-sm resize-y ${isEditable
                             ? 'border-gray-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500'
                             : 'border-gray-200 bg-gray-50 text-gray-700 focus:outline-none'}`}
                         />
-                        {!editablePrompts[prompt.key] && (
+                        {!isEditable && (
                           <p className="text-[11px] text-gray-400 mt-2">
-                            {ru ? 'Нажмите «Редактировать», чтобы изменить этот промпт.' : 'Click Edit before changing this prompt.'}
+                            {ru
+                              ? 'Показан реальный промпт-шаблон. JSON выбранной линзы добавляется отдельно во время AI-вызова.'
+                              : 'Showing the real prompt template. Selected lens JSON is injected separately during the AI call.'}
                           </p>
                         )}
                       </div>
-                    ))}
+                    );
+                    })}
                   </div>
                 </CollapsibleSection>
               );

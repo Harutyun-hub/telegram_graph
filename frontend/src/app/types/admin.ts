@@ -49,6 +49,7 @@ export interface AdminConfig {
   widgets: Record<string, AdminWidgetSetting>;
   prompts: Record<string, string>;
   promptDefaults?: Record<string, string>;
+  effectivePrompts?: Record<string, string>;
   runtime: AdminRuntimeConfig;
   analysisLensCatalog?: AnalysisLensDefinition[];
   analysisLensSelectionSource?: 'seeded_default' | 'operator';

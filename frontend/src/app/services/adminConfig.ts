@@ -22,6 +22,10 @@ function mergeAdminConfig(payload: Partial<AdminConfig> | null | undefined): Adm
       ...(defaults.promptDefaults || {}),
       ...(payload?.promptDefaults || {}),
     },
+    effectivePrompts: {
+      ...(defaults.effectivePrompts || {}),
+      ...(payload?.effectivePrompts || {}),
+    },
     runtime: {
       ...defaults.runtime,
       ...(payload?.runtime || {}),

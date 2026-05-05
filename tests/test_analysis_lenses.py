@@ -8,6 +8,7 @@ from api.analysis_lenses import (
     DEFAULT_ANALYSIS_LENS_IDS,
     SOCIAL_SYSTEM_PROMPT,
     analysis_lens_signature,
+    build_lens_prompt_template,
     build_lens_system_prompt,
     filter_topics_by_confidence,
     get_analysis_lens_catalog,
@@ -51,6 +52,13 @@ class AnalysisLensTests(unittest.TestCase):
         self.assertIn("```json", render_active_lenses_block(resolve_analysis_lenses(["finance_markets"])))
         self.assertIn("topics: objects with name, evidence, confidence", SOCIAL_SYSTEM_PROMPT)
         self.assertIn('"confidence": 0.0', intent_extractor.SYSTEM_PROMPT)
+
+    def test_admin_prompt_template_shows_directive_without_lens_json(self) -> None:
+        prompt = build_lens_prompt_template("BASE PROMPT", include_directive=True, suffix="FIXED SCHEMA")
+        self.assertIn("BASE PROMPT", prompt)
+        self.assertIn("LENS DIRECTIVE", prompt)
+        self.assertIn("FIXED SCHEMA", prompt)
+        self.assertNotIn("ACTIVE_ANALYSIS_LENSES\n```json", prompt)
 
     def test_matched_lenses_are_intersected_with_active_selection(self) -> None:
         active = resolve_analysis_lenses(["finance_markets"])
