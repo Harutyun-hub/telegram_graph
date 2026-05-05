@@ -20,6 +20,7 @@ jobs:
       NEO4J_URI: "bolt://localhost:7687"
       NEO4J_PASSWORD: "test-neo4j-password"
       OPENAI_API_KEY: "test-openai-key"
+      SCRAPECREATORS_API_KEY: "test-scrape-key"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

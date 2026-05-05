@@ -7,7 +7,6 @@ Provides: weeklyShifts, sentimentByTopic, topPosts, contentTypePerformance,
 from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-import os
 import threading
 import time
 from typing import Any, Iterable
@@ -1217,7 +1216,8 @@ def get_topic_overview_candidates(
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL (t) {
+        CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1401,7 +1401,8 @@ def get_topic_detail_v1(topic_name: str, category: str | None = None, ctx: Dashb
               AND c.posted_at < datetime($previous_end)
             RETURN count(c) AS commentsPrev
         }
-        CALL (t) {
+        CALL {
+            WITH t
             CALL {
                 WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
@@ -1835,8 +1836,10 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
@@ -1859,6 +1862,7 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
                     isQuestion: p.text IS NOT NULL AND trim(p.text) <> '' AND p.text CONTAINS '?'
                 } AS event
                 UNION ALL
+                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($start)
                   AND c.posted_at < datetime($end)
@@ -1886,13 +1890,16 @@ def get_topic_detail_v2(topic_name: str, category: str | None = None, ctx: Dashb
             ORDER BY event.occurredAt DESC, event.id DESC
             RETURN collect(event) AS currentRows
         }
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($previous_start)
                   AND p.posted_at < datetime($previous_end)
                 RETURN 1 AS hit
                 UNION ALL
+                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($previous_start)
                   AND c.posted_at < datetime($previous_end)
@@ -2032,8 +2039,10 @@ def get_topic_evidence_page_v2(
           AND t.name = $topic_name
           AND ($category = '' OR cat.name = $category)
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
-        CALL (t) {
-            CALL (t) {
+        CALL {
+            WITH t
+            CALL {
+                WITH t
                 MATCH (p:Post)-[:TAGGED]->(t)
                 WHERE p.posted_at >= datetime($start)
                   AND p.posted_at < datetime($end)
@@ -2051,6 +2060,7 @@ def get_topic_evidence_page_v2(
                     isQuestion: p.text IS NOT NULL AND trim(p.text) <> '' AND p.text CONTAINS '?'
                 } AS event
                 UNION ALL
+                WITH t
                 MATCH (c:Comment)-[:TAGGED]->(t)
                 WHERE c.posted_at >= datetime($start)
                   AND c.posted_at < datetime($end)

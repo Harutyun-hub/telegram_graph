@@ -342,7 +342,8 @@ def get_problem_brief_candidates(
         WHERE coalesce(t.proposed, false) = false
           AND NOT toLower(trim(coalesce(t.name, ''))) IN $noise
 
-        CALL (t) {
+        CALL {
+            WITH t
             MATCH (p:Post)-[:TAGGED]->(t)
             MATCH (p)-[:HAS_SENTIMENT]->(s:Sentiment)
             WHERE p.posted_at >= datetime($start)
