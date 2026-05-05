@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 
 from social.website_promotions import WebsitePromotionResearcher
@@ -31,6 +32,12 @@ class WebsitePromotionResearcherTests(unittest.TestCase):
                   "company": "Example Bank",
                   "website": "https://example.am",
                   "checked_at": "2026-05-05T10:00:00+00:00",
+                  "prompt_version": "website-promotion-v2",
+                  "research_budget": {"max_pages": 8, "external_searches": 0},
+                  "visited_urls": [
+                    "https://example.am",
+                    "https://example.am/promotions/cards"
+                  ],
                   "promotions": [
                     {
                       "title": "5% cashback",
@@ -70,6 +77,13 @@ class WebsitePromotionResearcherTests(unittest.TestCase):
                 {
                   "company": "Example Bank",
                   "website": "https://example.am",
+                  "prompt_version": "website-promotion-v2",
+                  "research_budget": {"max_pages": 8, "external_searches": 0},
+                  "visited_urls": [
+                    "https://example.am",
+                    "https://example.am/offers",
+                    "https://other.example/promo"
+                  ],
                   "promotions": [
                     {
                       "title": "External rumor",
@@ -102,6 +116,41 @@ class WebsitePromotionResearcherTests(unittest.TestCase):
 
         self.assertEqual(len(result.promotions), 1)
         self.assertEqual(result.promotions[0]["title"], "Valid fee discount")
+        self.assertEqual(result.visited_urls, ["https://example.am", "https://example.am/offers"])
+
+    def test_research_caps_visited_urls_and_prompt_budget(self) -> None:
+        visited_urls = [f"https://example.am/page-{idx}" for idx in range(1, 10)] + ["https://other.example/promo"]
+        provider = _Provider(
+            [
+                """
+                {
+                  "company": "Example Bank",
+                  "website": "https://example.am",
+                  "prompt_version": "website-promotion-v2",
+                  "research_budget": {"max_pages": 8, "external_searches": 0},
+                  "visited_urls": %s,
+                  "promotions": []
+                }
+                """ % json.dumps(visited_urls),
+            ]
+        )
+        researcher = WebsitePromotionResearcher(provider=provider)
+
+        result = asyncio.run(
+            researcher.research(
+                {
+                    "id": "entity-1",
+                    "name": "Example Bank",
+                    "website": "https://example.am",
+                }
+            )
+        )
+
+        self.assertIn("Visit at most 8 total same-domain pages", provider.calls[0])
+        self.assertIn("External search budget is 0", provider.calls[0])
+        self.assertEqual(result.max_pages, 8)
+        self.assertEqual(len(result.visited_urls), 8)
+        self.assertTrue(all(url.startswith("https://example.am") for url in result.visited_urls))
 
 
 if __name__ == "__main__":

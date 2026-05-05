@@ -29,6 +29,11 @@ export interface SocialRuntimeStatus {
     graph_failures?: number;
   } | null;
   website_monitor_enabled?: boolean;
+  website_cron_enabled?: boolean;
+  website_cron_timezone?: string;
+  website_cron_hour?: number;
+  website_cron_minute?: number;
+  website_next_run_at?: string | null;
   postgres_worker_enabled?: boolean;
 }
 
@@ -230,6 +235,29 @@ export interface SocialActivity {
     name: string;
   } | null;
   analysis?: SocialActivityAnalysis | null;
+  provider_payload?: {
+    provider?: string;
+    promotion?: {
+      title?: string | null;
+      source_url?: string | null;
+      evidence_text?: string | null;
+      valid_from?: string | null;
+      valid_until?: string | null;
+      conditions?: string | string[] | null;
+      detected_offer_type?: string | null;
+      confidence?: number | null;
+    } | null;
+    website_monitor?: {
+      status?: string | null;
+      prompt_version?: string | null;
+      max_pages?: number | null;
+      visited_urls?: string[] | null;
+      pages_visited_count?: number | null;
+      external_searches?: number | null;
+      checked_at?: string | null;
+    } | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface SocialRuntimeFailure {

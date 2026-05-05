@@ -507,6 +507,10 @@ class SocialStore:
         status: str,
         checked_at: str,
         promotion_count: int | None = None,
+        pages_visited_count: int | None = None,
+        visited_urls: list[str] | None = None,
+        max_pages: int | None = None,
+        prompt_version: str | None = None,
         error: str | None = None,
     ) -> None:
         entity = self._single_row("social_entities", filters=(("eq", "id", entity_id),))
@@ -524,17 +528,39 @@ class SocialStore:
         )
         if promotion_count is not None:
             monitor["last_promotion_count"] = int(promotion_count)
+        if pages_visited_count is not None:
+            monitor["last_pages_checked"] = int(pages_visited_count)
+        if visited_urls is not None:
+            monitor["last_visited_urls"] = [str(url) for url in visited_urls[: max_pages or 8]]
+        if max_pages is not None:
+            monitor["max_pages"] = int(max_pages)
+        if prompt_version:
+            monitor["prompt_version"] = str(prompt_version)
         if not error and _trimmed(status).lower() == "healthy":
             monitor["last_success_at"] = checked_at
         metadata["website_monitor"] = monitor
         self.client.table("social_entities").update({"metadata": metadata}).eq("id", entity_id).execute()
 
-    def mark_entity_website_scan_success(self, entity_id: str, *, checked_at: str, promotion_count: int) -> None:
+    def mark_entity_website_scan_success(
+        self,
+        entity_id: str,
+        *,
+        checked_at: str,
+        promotion_count: int,
+        pages_visited_count: int | None = None,
+        visited_urls: list[str] | None = None,
+        max_pages: int | None = None,
+        prompt_version: str | None = None,
+    ) -> None:
         self.update_entity_website_monitor_status(
             entity_id,
             status="healthy",
             checked_at=checked_at,
             promotion_count=promotion_count,
+            pages_visited_count=pages_visited_count,
+            visited_urls=visited_urls,
+            max_pages=max_pages,
+            prompt_version=prompt_version,
             error=None,
         )
         self.clear_failure(stage="website_research", scope_key=f"website:{entity_id}")

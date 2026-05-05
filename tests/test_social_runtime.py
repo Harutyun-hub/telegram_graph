@@ -116,8 +116,26 @@ class _StoreStub:
             result[status] += 1
         return result
 
-    def mark_entity_website_scan_success(self, entity_id: str, *, checked_at: str, promotion_count: int):
-        self.website_successes.append({"entity_id": entity_id, "checked_at": checked_at, "promotion_count": promotion_count})
+    def mark_entity_website_scan_success(
+        self,
+        entity_id: str,
+        *,
+        checked_at: str,
+        promotion_count: int,
+        pages_visited_count: int | None = None,
+        visited_urls: list[str] | None = None,
+        max_pages: int | None = None,
+        prompt_version: str | None = None,
+    ):
+        self.website_successes.append({
+            "entity_id": entity_id,
+            "checked_at": checked_at,
+            "promotion_count": promotion_count,
+            "pages_visited_count": pages_visited_count,
+            "visited_urls": visited_urls,
+            "max_pages": max_pages,
+            "prompt_version": prompt_version,
+        })
 
     def mark_entity_website_scan_failure(self, entity_id: str, *, checked_at: str, error: str):
         self.website_failures.append({"entity_id": entity_id, "checked_at": checked_at, "error": error})
@@ -151,8 +169,11 @@ def _research_result(*, evidence: str = "0% fee until June 30, 2026", promotions
                 "confidence": 0.92,
             }
         ],
+        prompt_version="website-promotion-v2",
+        max_pages=8,
+        visited_urls=["https://example.am", "https://example.am/promotions/cards"],
         raw_text="{}",
-        raw_payload={"promotions": promotions or []},
+        raw_payload={"visited_urls": ["https://example.am", "https://example.am/promotions/cards"], "promotions": promotions or []},
     )
 
 
@@ -180,6 +201,27 @@ class SocialRuntimeTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_startup_schedules_website_cron_for_social_worker(self) -> None:
+        async def scenario() -> None:
+            service = SocialRuntimeService(_StoreStub())
+            with patch("social.runtime._is_social_worker_owner", return_value=True), \
+                patch("social.runtime._ensure_non_issue_topics_hidden", return_value=0), \
+                patch("social.runtime.config.SOCIAL_WEBSITE_MONITOR_CRON_ENABLED", True), \
+                patch("social.runtime.config.SOCIAL_WEBSITE_MONITOR_ENABLED", True), \
+                patch("social.runtime.config.SOCIAL_WEBSITE_MONITOR_CRON_TIMEZONE", "Asia/Yerevan"), \
+                patch("social.runtime.config.SOCIAL_WEBSITE_MONITOR_CRON_HOUR", 2), \
+                patch("social.runtime.config.SOCIAL_WEBSITE_MONITOR_CRON_MINUTE", 0):
+                await service.startup()
+                status = service.status()
+                self.assertTrue(status["website_cron_enabled"])
+                self.assertEqual(status["website_cron_timezone"], "Asia/Yerevan")
+                self.assertEqual(status["website_cron_hour"], 2)
+                self.assertEqual(status["website_cron_minute"], 0)
+                self.assertIsNotNone(status["website_next_run_at"])
+                await service.shutdown()
+
+        asyncio.run(scenario())
+
     def test_website_research_stage_creates_promotion_activity(self) -> None:
         async def scenario() -> None:
             store = _StoreStub()
@@ -194,7 +236,13 @@ class SocialRuntimeTests(unittest.TestCase):
             self.assertEqual(saved["source_kind"], "ad")
             self.assertEqual(saved["content_format"], "website_promotion")
             self.assertEqual(saved["provider_payload"]["website_monitor"]["status"], "new")
+            self.assertEqual(saved["provider_payload"]["website_monitor"]["prompt_version"], "website-promotion-v2")
+            self.assertEqual(saved["provider_payload"]["website_monitor"]["max_pages"], 8)
+            self.assertEqual(saved["provider_payload"]["website_monitor"]["pages_visited_count"], 2)
+            self.assertEqual(saved["provider_payload"]["website_monitor"]["visited_urls"], ["https://example.am", "https://example.am/promotions/cards"])
             self.assertEqual(store.website_successes[0]["promotion_count"], 1)
+            self.assertEqual(store.website_successes[0]["pages_visited_count"], 2)
+            self.assertEqual(result["activity_uids_requiring_analysis"], [saved["activity_uid"]])
 
         asyncio.run(scenario())
 

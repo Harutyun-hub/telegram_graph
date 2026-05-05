@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.util import astimezone
 from loguru import logger
 
 import config
@@ -69,6 +70,7 @@ class SocialRuntimeService:
         self.pg_store = SocialPostgresStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.job_id = "social_runtime_job"
+        self.website_job_id = "social_website_monitor_job"
         self.interval_minutes = 360
         self.desired_active = False
         self.running_now = False
@@ -100,10 +102,12 @@ class SocialRuntimeService:
         self.desired_active = bool(settings.get("is_active", False)) and bool(config.SOCIAL_RUNTIME_ENABLED)
         if self.desired_active:
             self._upsert_interval_job()
+        self._sync_website_cron_job()
         logger.info(
-            "Social runtime ready | active={} interval={}m postgres_worker={} hidden_non_issue_topics={}",
+            "Social runtime ready | active={} interval={}m website_cron={} postgres_worker={} hidden_non_issue_topics={}",
             self.desired_active,
             self.interval_minutes,
+            bool(self.scheduler.get_job(self.website_job_id)),
             self.pg_store.enabled,
             hidden_topics,
         )
@@ -154,6 +158,54 @@ class SocialRuntimeService:
         if not self.desired_active:
             return None
         job = self.scheduler.get_job(self.job_id)
+        return _iso(job.next_run_time) if job else None
+
+    def _website_cron_timezone(self):
+        try:
+            return astimezone(config.SOCIAL_WEBSITE_MONITOR_CRON_TIMEZONE)
+        except Exception:
+            logger.warning(
+                "Invalid SOCIAL_WEBSITE_MONITOR_CRON_TIMEZONE={}, falling back to UTC",
+                config.SOCIAL_WEBSITE_MONITOR_CRON_TIMEZONE,
+            )
+            return astimezone("UTC")
+
+    def _sync_website_cron_job(self) -> None:
+        if (
+            not _is_social_worker_owner()
+            or not config.SOCIAL_RUNTIME_ENABLED
+            or not config.SOCIAL_WEBSITE_MONITOR_ENABLED
+            or not config.SOCIAL_WEBSITE_MONITOR_CRON_ENABLED
+        ):
+            self._remove_website_cron_job()
+            return
+        self._upsert_website_cron_job()
+
+    def _upsert_website_cron_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.website_job_id)
+        except Exception:
+            pass
+        self.scheduler.add_job(
+            self._run_website_monitor_cycle,
+            "cron",
+            hour=config.SOCIAL_WEBSITE_MONITOR_CRON_HOUR,
+            minute=config.SOCIAL_WEBSITE_MONITOR_CRON_MINUTE,
+            timezone=self._website_cron_timezone(),
+            id=self.website_job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=1800,
+        )
+
+    def _remove_website_cron_job(self) -> None:
+        try:
+            self.scheduler.remove_job(self.website_job_id)
+        except Exception:
+            pass
+
+    def _website_next_run_iso(self) -> str | None:
+        job = self.scheduler.get_job(self.website_job_id)
         return _iso(job.next_run_time) if job else None
 
     def _get_connector(self) -> ScrapeCreatorsClient:
@@ -283,6 +335,38 @@ class SocialRuntimeService:
                 self.last_run_finished_at = datetime.now(timezone.utc)
                 self.running_now = False
 
+    async def _run_website_monitor_cycle(self) -> None:
+        if self._run_lock.locked():
+            logger.warning("Website monitor skipped because social runtime is already active")
+            return
+        async with self._run_lock:
+            coordinator = get_runtime_coordinator()
+            lock_token = coordinator.acquire_lock("worker:social-website-monitor", ttl_seconds=7200)
+            if not lock_token:
+                logger.warning("Website monitor skipped because the coordinator lock is already held")
+                return
+            self.running_now = True
+            self.last_error = None
+            self.last_run_started_at = datetime.now(timezone.utc)
+            self.last_run_finished_at = None
+            run = self.store.create_ingest_run(run_kind="website_research", platform="website", status="running", metrics={})
+
+            try:
+                result = await asyncio.to_thread(self._run_website_monitor_cycle_sync)
+                self.last_result = result
+                self.last_success_at = datetime.now(timezone.utc)
+                self.store.finish_ingest_run(run["id"], status="succeeded", metrics=result)
+                self._record_history(result)
+                logger.info("Website monitor completed | {}", result)
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.store.finish_ingest_run(run["id"], status="failed", error=str(exc), metrics={})
+                logger.error("Website monitor failed: {}", exc)
+            finally:
+                coordinator.release_lock("worker:social-website-monitor", lock_token)
+                self.last_run_finished_at = datetime.now(timezone.utc)
+                self.running_now = False
+
     def _run_cycle_sync(self) -> dict[str, Any]:
         page_settings = self.store.get_runtime_setting(
             "scrapecreators",
@@ -334,6 +418,42 @@ class SocialRuntimeService:
                 "graph": graph_result,
                 "ai_briefs": ai_brief_result,
                 "cleanup": cleanup_result,
+            },
+        }
+
+    def _run_website_monitor_cycle_sync(self) -> dict[str, Any]:
+        website_result = self._run_website_research_stage_sync()
+        analysis_items = self.store.prepare_activity_replay(
+            website_result.get("activity_uids_requiring_analysis", []),
+            stage="analysis",
+        )
+        analysis_result = self._run_analysis_stage_sync(items=analysis_items)
+        graph_items = self.store.prepare_activity_replay(
+            [str(item["activity_uid"]) for item in analysis_items if item.get("activity_uid")],
+            stage="graph",
+        )
+        graph_items = [item for item in graph_items if item.get("analysis")]
+        graph_result = self._run_graph_stage_sync(items=graph_items)
+        ai_brief_result = self._run_ai_brief_stage_sync()
+
+        return {
+            "mode": "website_monitor",
+            "accounts_total": 0,
+            "accounts_processed": 0,
+            "activities_collected": int(website_result.get("promotions_collected", 0) or 0),
+            "activities_analyzed": analysis_result["activities_analyzed"],
+            "activities_graph_synced": graph_result["activities_graph_synced"],
+            "collect_failures": 0,
+            "website_research_failures": website_result.get("website_research_failures", 0),
+            "analysis_failures": analysis_result["analysis_failures"],
+            "graph_failures": graph_result["graph_failures"],
+            "ai_briefs": ai_brief_result,
+            "platform_counts": {"website": int(website_result.get("promotions_collected", 0) or 0)},
+            "stages": {
+                "website_research": website_result,
+                "analysis": analysis_result,
+                "graph": graph_result,
+                "ai_briefs": ai_brief_result,
             },
         }
 
@@ -433,6 +553,7 @@ class SocialRuntimeService:
                 "promotions_missing": 0,
                 "promotions_expired": 0,
                 "website_research_failures": 0,
+                "activity_uids_requiring_analysis": [],
             }
 
         claimed_entities = entities
@@ -449,6 +570,7 @@ class SocialRuntimeService:
             "promotions_missing": 0,
             "promotions_expired": 0,
             "website_research_failures": 0,
+            "activity_uids_requiring_analysis": [],
         }
         researcher = self._get_website_researcher()
 
@@ -469,25 +591,38 @@ class SocialRuntimeService:
                 }
                 research = researcher.research_sync(entity)
                 checked_at = research.checked_at
+                research_metadata = {
+                    "prompt_version": research.prompt_version,
+                    "max_pages": research.max_pages,
+                    "visited_urls": research.visited_urls,
+                    "pages_visited_count": len(research.visited_urls),
+                    "external_searches": 0,
+                }
                 activities: list[dict[str, Any]] = []
+                analysis_uids: set[str] = set()
                 for promotion in research.promotions:
+                    lifecycle_status = "new"
                     candidate = build_website_promotion_activity(
                         entity=entity,
                         promotion=promotion,
-                        lifecycle_status="new",
+                        lifecycle_status=lifecycle_status,
                         checked_at=checked_at,
+                        research_metadata=research_metadata,
                     )
                     existing = existing_rows.get(candidate["activity_uid"])
                     if existing:
                         old_text = str(existing.get("text_content") or "").strip()
                         new_text = str(candidate.get("text_content") or "").strip()
-                        status = "updated" if old_text != new_text else "ongoing"
+                        lifecycle_status = "updated" if old_text != new_text else "ongoing"
                         candidate = build_website_promotion_activity(
                             entity=entity,
                             promotion=promotion,
-                            lifecycle_status=status,
+                            lifecycle_status=lifecycle_status,
                             checked_at=checked_at,
+                            research_metadata=research_metadata,
                         )
+                    if lifecycle_status in {"new", "updated"}:
+                        analysis_uids.add(str(candidate["activity_uid"]))
                     activities.append(candidate)
 
                 saved = self.store.upsert_activities(activities)
@@ -501,11 +636,16 @@ class SocialRuntimeService:
                     entity_id,
                     checked_at=checked_at,
                     promotion_count=len(saved),
+                    pages_visited_count=len(research.visited_urls),
+                    visited_urls=research.visited_urls,
+                    max_pages=research.max_pages,
+                    prompt_version=research.prompt_version,
                 )
                 result["entities_processed"] += 1
                 result["promotions_collected"] += len(saved)
                 result["promotions_missing"] += int(missing.get("missing", 0))
                 result["promotions_expired"] += int(missing.get("expired", 0))
+                result["activity_uids_requiring_analysis"].extend(sorted(analysis_uids))
                 self.store.finish_ingest_run(
                     run["id"],
                     status="succeeded",
@@ -513,6 +653,7 @@ class SocialRuntimeService:
                         "promotions": len(saved),
                         "missing": missing.get("missing", 0),
                         "expired": missing.get("expired", 0),
+                        "pages_visited_count": len(research.visited_urls),
                     },
                 )
             except Exception as exc:
@@ -745,6 +886,11 @@ class SocialRuntimeService:
             "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
             "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
             "website_monitor_enabled": bool(config.SOCIAL_WEBSITE_MONITOR_ENABLED),
+            "website_cron_enabled": bool(self.scheduler.get_job(self.website_job_id)),
+            "website_cron_timezone": config.SOCIAL_WEBSITE_MONITOR_CRON_TIMEZONE,
+            "website_cron_hour": config.SOCIAL_WEBSITE_MONITOR_CRON_HOUR,
+            "website_cron_minute": config.SOCIAL_WEBSITE_MONITOR_CRON_MINUTE,
+            "website_next_run_at": self._website_next_run_iso(),
             "postgres_worker_enabled": bool(self.pg_store.enabled),
             "worker_id": self._worker_id,
         }

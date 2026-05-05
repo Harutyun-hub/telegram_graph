@@ -37,6 +37,9 @@ class WebsitePromotionResearchResult:
     website: str
     checked_at: str
     promotions: list[dict[str, Any]]
+    prompt_version: str
+    max_pages: int
+    visited_urls: list[str]
     raw_text: str
     raw_payload: dict[str, Any]
 
@@ -122,6 +125,25 @@ def _as_string_list(value: Any) -> list[str]:
     return out
 
 
+def _normalize_visited_urls(value: Any, *, website: str, max_pages: int) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("OpenClaw response must include a visited_urls array")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        normalized = _normalize_url(item)
+        if not normalized or not _same_domain(normalized, website):
+            continue
+        key = normalized.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(normalized)
+        if len(urls) >= max_pages:
+            break
+    return urls
+
+
 def _clamp_confidence(value: Any) -> float:
     try:
         number = float(value)
@@ -162,6 +184,8 @@ def _normalize_research_payload(payload: dict[str, Any], *, company_name: str, w
     if not isinstance(promotions_raw, list):
         raise ValueError("OpenClaw response must include a promotions array")
     max_items = max(1, int(config.SOCIAL_WEBSITE_PROMOTION_MAX_ITEMS))
+    max_pages = max(1, int(config.SOCIAL_WEBSITE_RESEARCH_MAX_PAGES))
+    visited_urls = _normalize_visited_urls(payload.get("visited_urls"), website=website, max_pages=max_pages)
     promotions: list[dict[str, Any]] = []
     for item in promotions_raw:
         normalized = _normalize_promotion(item, website=website)
@@ -174,6 +198,9 @@ def _normalize_research_payload(payload: dict[str, Any], *, company_name: str, w
         "website": _normalize_url(payload.get("website")) or website,
         "checked_at": _clean_optional(payload.get("checked_at")) or checked_at,
         "promotions": promotions,
+        "prompt_version": config.SOCIAL_WEBSITE_RESEARCH_PROMPT_VERSION,
+        "max_pages": max_pages,
+        "visited_urls": visited_urls,
     }
 
 
@@ -183,6 +210,7 @@ def build_website_promotion_activity(
     promotion: dict[str, Any],
     lifecycle_status: str,
     checked_at: str,
+    research_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     entity_id = _trimmed(entity.get("id"))
     title = _trimmed(promotion.get("title"))
@@ -213,6 +241,22 @@ def build_website_promotion_activity(
         lines.append(f"Valid until: {valid_until}")
     if condition_text:
         lines.append(f"Conditions: {condition_text}")
+    monitor_payload = {
+        "status": lifecycle_status,
+        "fingerprint": fingerprint,
+        "checked_at": checked_at,
+        "missed_scans": 0,
+    }
+    if research_metadata:
+        monitor_payload.update(
+            {
+                "prompt_version": _clean_optional(research_metadata.get("prompt_version")),
+                "max_pages": research_metadata.get("max_pages"),
+                "visited_urls": research_metadata.get("visited_urls") or [],
+                "pages_visited_count": research_metadata.get("pages_visited_count"),
+                "external_searches": 0,
+            }
+        )
     return {
         "entity_id": entity_id,
         "account_id": None,
@@ -232,12 +276,7 @@ def build_website_promotion_activity(
         "provider_payload": {
             "provider": "openclaw",
             "promotion": promotion,
-            "website_monitor": {
-                "status": lifecycle_status,
-                "fingerprint": fingerprint,
-                "checked_at": checked_at,
-                "missed_scans": 0,
-            },
+            "website_monitor": monitor_payload,
         },
         "normalization_version": PROMOTION_ANALYSIS_VERSION,
         "analysis_version": config.SOCIAL_ANALYSIS_PROMPT_VERSION,
@@ -317,6 +356,9 @@ class WebsitePromotionResearcher:
             website=normalized["website"],
             checked_at=normalized["checked_at"],
             promotions=normalized["promotions"],
+            prompt_version=normalized["prompt_version"],
+            max_pages=normalized["max_pages"],
+            visited_urls=normalized["visited_urls"],
             raw_text=raw_text,
             raw_payload=payload,
         )
@@ -338,6 +380,12 @@ Required JSON shape:
   "company": "{company_name}",
   "website": "{website}",
   "checked_at": "{checked_at}",
+  "prompt_version": "{config.SOCIAL_WEBSITE_RESEARCH_PROMPT_VERSION}",
+  "research_budget": {{
+    "max_pages": {config.SOCIAL_WEBSITE_RESEARCH_MAX_PAGES},
+    "external_searches": 0
+  }},
+  "visited_urls": ["{website}"],
   "promotions": [
     {{
       "title": "string",
@@ -354,6 +402,7 @@ Required JSON shape:
 
 Rules:
 - Return JSON only. No markdown.
+- Keep visited_urls as same-domain URLs only, maximum {config.SOCIAL_WEBSITE_RESEARCH_MAX_PAGES}.
 - Keep only promotions that include a same-domain source_url and evidence_text.
 - If there are no valid promotions, return an empty promotions array.
 
@@ -365,8 +414,13 @@ Previous response:
 
     @staticmethod
     def _build_prompt(*, company_name: str, website: str, checked_at: str) -> str:
+        max_pages = max(1, int(config.SOCIAL_WEBSITE_RESEARCH_MAX_PAGES))
+        max_promotions = max(1, int(config.SOCIAL_WEBSITE_PROMOTION_MAX_ITEMS))
+        prompt_version = config.SOCIAL_WEBSITE_RESEARCH_PROMPT_VERSION
         return f"""
 You are doing factual website research for a daily financial promotion monitor.
+
+Prompt version: {prompt_version}
 
 Task:
 Research company "{company_name}" on website {website}.
@@ -374,9 +428,12 @@ Find only current promotions, campaigns, special offers, bonuses, limited-time d
 
 Where to look:
 - Start with the homepage.
-- Then visit only same-domain pages that are relevant to promotions, offers, cards, loans, deposits, tariffs, news, campaigns, landing pages, bonuses, rewards, or special offers.
+- Visit at most {max_pages} total same-domain pages, including the homepage.
+- Visit only pages that are relevant to promotions, offers, cards, loans, deposits, tariffs, news, campaigns, landing pages, bonuses, rewards, or special offers.
+- Do not use search engines.
 - Do not browse competitor domains or unrelated external websites.
-- Keep the crawl small and targeted.
+- External search budget is 0.
+- Return at most {max_promotions} promotions.
 
 Fact rules:
 - Return only facts found on the website.
@@ -391,6 +448,14 @@ Return JSON only, with this exact shape:
   "company": "{company_name}",
   "website": "{website}",
   "checked_at": "{checked_at}",
+  "prompt_version": "{prompt_version}",
+  "research_budget": {{
+    "max_pages": {max_pages},
+    "external_searches": 0
+  }},
+  "visited_urls": [
+    "{website}"
+  ],
   "promotions": [
     {{
       "title": "short factual title",

@@ -106,6 +106,11 @@ type SocialRuntimeStatus = {
     website_research_failures?: number
   } | null
   website_monitor_enabled?: boolean
+  website_cron_enabled?: boolean
+  website_cron_timezone?: string
+  website_cron_hour?: number
+  website_cron_minute?: number
+  website_next_run_at?: string | null
   run_history?: Array<{
     finished_at: string | null
     accounts_processed: number
@@ -283,6 +288,12 @@ function sourceDisplayValue(item: SocialSourceRow): string {
 
 function isVirtualWebsiteSource(item: SocialSourceRow): boolean {
   return item.source_kind === 'website_monitor' || item.id.startsWith('website:')
+}
+
+function websiteMonitorMetadata(item: SocialSourceRow): Record<string, any> {
+  const metadata = item.metadata || {}
+  const monitor = (metadata as any).website_monitor
+  return monitor && typeof monitor === 'object' ? monitor : {}
 }
 
 function companyRowStatus(row: SocialCompanyRow): SocialSourceStatus {
@@ -667,6 +678,11 @@ function CompanySourceCell({
     return <span className="text-xs text-gray-300">—</span>
   }
   const status = socialRowStatus(item)
+  const monitor = isVirtualWebsiteSource(item) ? websiteMonitorMetadata(item) : {}
+  const pagesChecked = Number(monitor.last_pages_checked || 0)
+  const maxPages = Number(monitor.max_pages || 0)
+  const promotionCount = Number(monitor.last_promotion_count || 0)
+  const lastSuccessAt = typeof monitor.last_success_at === 'string' ? monitor.last_success_at : null
   return (
     <div className="min-w-[150px]">
       <div className="truncate text-xs text-gray-700" style={{ fontWeight: 500 }}>
@@ -675,6 +691,22 @@ function CompanySourceCell({
       <div className="mt-1">
         <SocialStatusBadge status={status} ru={ru} />
       </div>
+      {isVirtualWebsiteSource(item) && (
+        <div className="mt-1 text-[11px] leading-4 text-gray-500">
+          {pagesChecked > 0
+            ? ru
+              ? `${pagesChecked}${maxPages ? `/${maxPages}` : ''} страниц, ${promotionCount} промо`
+              : `${pagesChecked}${maxPages ? `/${maxPages}` : ''} pages, ${promotionCount} promos`
+            : ru
+              ? 'Ожидает ночной проверки сайта'
+              : 'Waiting for nightly website check'}
+          {lastSuccessAt ? (
+            <span className="block text-gray-400">
+              {ru ? 'Успешно:' : 'Success:'} {relativeTime(lastSuccessAt, ru)}
+            </span>
+          ) : null}
+        </div>
+      )}
       {item.last_error && (
         <div className="mt-1 truncate text-[11px] text-red-500">
           {item.last_error}

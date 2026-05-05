@@ -40,6 +40,7 @@ function platformLabel(platform: string, ru: boolean) {
   if (platform === 'instagram') return ru ? 'Instagram' : 'Instagram';
   if (platform === 'google') return ru ? 'Google Ads' : 'Google Ads';
   if (platform === 'tiktok') return ru ? 'TikTok' : 'TikTok';
+  if (platform === 'website') return ru ? 'Website' : 'Website';
   return platform;
 }
 
@@ -83,6 +84,20 @@ function activitySummary(activity: SocialActivity) {
     activity.text_content ||
     ''
   );
+}
+
+function websitePromotionPayload(activity: SocialActivity) {
+  if (activity.platform !== 'website') return null;
+  const payload = activity.provider_payload;
+  const promotion = payload?.promotion;
+  return promotion && typeof promotion === 'object' ? promotion : null;
+}
+
+function websiteMonitorPayload(activity: SocialActivity) {
+  if (activity.platform !== 'website') return null;
+  const payload = activity.provider_payload;
+  const monitor = payload?.website_monitor;
+  return monitor && typeof monitor === 'object' ? monitor : null;
 }
 
 function topicNames(activity: SocialActivity): string[] {
@@ -179,6 +194,8 @@ export function SocialActivitiesPage() {
   }, []);
 
   const selectedActivity = activities.find((item) => item.id === selectedActivityId) || activities[0] || null;
+  const selectedWebsitePromotion = selectedActivity ? websitePromotionPayload(selectedActivity) : null;
+  const selectedWebsiteMonitor = selectedActivity ? websiteMonitorPayload(selectedActivity) : null;
 
   async function handleRunOnce() {
     setRunning(true);
@@ -690,8 +707,57 @@ export function SocialActivitiesPage() {
                         <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{ru ? 'Формат' : 'Format'}</div>
                         <div className="mt-1 font-medium text-slate-900">{selectedActivity.content_format || '—'}</div>
                       </div>
+                      {selectedActivity.platform === 'website' ? (
+                        <div>
+                          <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{ru ? 'Источник' : 'Source'}</div>
+                          <div className="mt-1 inline-flex items-center rounded-full bg-cyan-50 px-2.5 py-1 text-xs font-semibold text-cyan-700 ring-1 ring-cyan-100">
+                            {ru ? 'Website scraping' : 'Website scraping'}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
+
+                  {selectedWebsitePromotion ? (
+                    <div className="rounded-2xl border border-cyan-100 bg-cyan-50/60 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-800">
+                          {ru ? 'Website evidence' : 'Website evidence'}
+                        </h3>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-cyan-700 ring-1 ring-cyan-100">
+                          {selectedWebsiteMonitor?.pages_visited_count || 0}/{selectedWebsiteMonitor?.max_pages || 8} {ru ? 'страниц' : 'pages'}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid gap-3 text-sm text-slate-700 md:grid-cols-2">
+                        <div>
+                          <div className="text-xs uppercase tracking-[0.18em] text-cyan-700">{ru ? 'Промо' : 'Promotion'}</div>
+                          <div className="mt-1 font-medium text-slate-900">{selectedWebsitePromotion.title || '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs uppercase tracking-[0.18em] text-cyan-700">{ru ? 'Тип' : 'Offer type'}</div>
+                          <div className="mt-1 font-medium text-slate-900">{selectedWebsitePromotion.detected_offer_type || '—'}</div>
+                        </div>
+                      </div>
+                      <div className="mt-3 rounded-xl bg-white p-3 text-sm leading-6 text-slate-700 ring-1 ring-cyan-100">
+                        {selectedWebsitePromotion.evidence_text || (ru ? 'Evidence excerpt не найден.' : 'Evidence excerpt is not available.')}
+                      </div>
+                      {(selectedWebsiteMonitor?.visited_urls || []).length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(selectedWebsiteMonitor?.visited_urls || []).slice(0, 4).map((url) => (
+                            <a
+                              key={url}
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="max-w-full truncate rounded-full bg-white px-2.5 py-1 text-xs font-medium text-cyan-700 ring-1 ring-cyan-100"
+                            >
+                              {url.replace(/^https?:\/\//i, '').replace(/^www\./i, '')}
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div>
                     <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
