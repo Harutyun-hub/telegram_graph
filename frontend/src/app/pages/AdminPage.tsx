@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Brain, LayoutDashboard, Shield, SlidersHorizontal, CheckCircle2, AlertCircle, Loader2, Pencil, RotateCcw, X } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { Brain, LayoutDashboard, Shield, SlidersHorizontal, CheckCircle2, AlertCircle, Loader2, Pencil, RotateCcw, X, ChevronDown } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdminConfig } from '../contexts/AdminConfigContext';
 import {
@@ -34,8 +35,14 @@ function cloneWidgetDraft(value: Record<string, AdminWidgetSetting>) {
   );
 }
 
-function clonePromptDraft(value: Record<string, string>) {
-  return { ...(value || {}) };
+function clonePromptDraft(value: Record<string, string>, defaults: Record<string, string> = {}) {
+  const draft = { ...(defaults || {}), ...(value || {}) };
+  ADMIN_PROMPT_DEFINITIONS.forEach((prompt) => {
+    if (draft[prompt.key] == null) {
+      draft[prompt.key] = '';
+    }
+  });
+  return draft;
 }
 
 function cloneRuntimeDraft(value: AdminRuntimeConfig) {
@@ -83,18 +90,77 @@ function SaveNotice({
   return null;
 }
 
+function CollapsibleSection({
+  id,
+  title,
+  description,
+  badge,
+  open,
+  onToggle,
+  children,
+}: {
+  id: string;
+  title: string;
+  description?: string;
+  badge?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-gray-100 bg-gray-50/60">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`${id}-content`}
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left focus:outline-none focus:ring-2 focus:ring-blue-500"
+      >
+        <span className="min-w-0">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wider text-gray-500" style={{ fontWeight: 600 }}>
+              {title}
+            </span>
+            {badge && (
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-700">
+                {badge}
+              </span>
+            )}
+          </span>
+          {description && (
+            <span className="mt-1 block text-xs text-gray-500">
+              {description}
+            </span>
+          )}
+        </span>
+        <ChevronDown className={`h-4 w-4 flex-shrink-0 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div id={`${id}-content`} className="border-t border-gray-100 bg-white px-3 py-3">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AdminPage() {
   const { lang } = useLanguage();
   const { config, loading, saving, error, updateConfig } = useAdminConfig();
   const ru = lang === 'ru';
 
   const [widgetDraft, setWidgetDraft] = useState<Record<string, AdminWidgetSetting>>(() => cloneWidgetDraft(config.widgets));
-  const [promptDraft, setPromptDraft] = useState<Record<string, string>>(() => clonePromptDraft(config.prompts));
+  const [promptDraft, setPromptDraft] = useState<Record<string, string>>(() => clonePromptDraft(config.prompts, config.promptDefaults));
   const [runtimeDraft, setRuntimeDraft] = useState<AdminRuntimeConfig>(() => cloneRuntimeDraft(config.runtime));
   const [widgetStatus, setWidgetStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [promptStatus, setPromptStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [runtimeStatus, setRuntimeStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [editablePrompts, setEditablePrompts] = useState<Record<string, boolean>>({});
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    'widgets:pulse': true,
+    'prompts:extraction': true,
+    'runtime:lens': true,
+  });
   const [sectionError, setSectionError] = useState<{ widgets: string | null; prompts: string | null; runtime: string | null }>({
     widgets: null,
     prompts: null,
@@ -103,7 +169,7 @@ export function AdminPage() {
 
   useEffect(() => {
     setWidgetDraft(cloneWidgetDraft(config.widgets));
-    setPromptDraft(clonePromptDraft(config.prompts));
+    setPromptDraft(clonePromptDraft(config.prompts, config.promptDefaults));
     setRuntimeDraft(cloneRuntimeDraft(config.runtime));
     setEditablePrompts({});
   }, [config]);
@@ -115,8 +181,14 @@ export function AdminPage() {
   }, 0);
   const widgetsDirty = widgetChangedCount > 0;
 
-  const promptsDirty = JSON.stringify(promptDraft) !== JSON.stringify(config.prompts);
   const promptDefaults = config.promptDefaults || {};
+  const savedPromptDraft = clonePromptDraft(config.prompts, promptDefaults);
+  const promptsDirty = JSON.stringify(promptDraft) !== JSON.stringify(savedPromptDraft);
+
+  const isSectionOpen = (key: string) => Boolean(openSections[key]);
+  const toggleSection = (key: string) => {
+    setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const runtimeKeys: (keyof AdminRuntimeConfig)[] = [
     'openaiModel',
@@ -238,6 +310,37 @@ export function AdminPage() {
     },
   ];
 
+  const runtimeToggles = [
+    {
+      key: 'featureQuestionBriefsAi' as const,
+      labelEn: 'Enable Question Briefs AI',
+      labelRu: 'Включить AI для карточек вопросов',
+      descriptionEn: 'Controls AI generation for question-card flows.',
+      descriptionRu: 'Управляет AI-генерацией карточек вопросов.',
+    },
+    {
+      key: 'featureBehavioralBriefsAi' as const,
+      labelEn: 'Enable Behavioral Briefs AI',
+      labelRu: 'Включить AI для поведенческих карточек',
+      descriptionEn: 'Controls AI generation for problem and service-gap cards.',
+      descriptionRu: 'Управляет AI-генерацией карточек проблем и сервисных пробелов.',
+    },
+    {
+      key: 'featureOpportunityBriefsAi' as const,
+      labelEn: 'Enable Opportunity Briefs AI',
+      labelRu: 'Включить AI для карточек возможностей',
+      descriptionEn: 'Controls AI generation for business opportunity cards.',
+      descriptionRu: 'Управляет AI-генерацией карточек бизнес-возможностей.',
+    },
+    {
+      key: 'featureTopicOverviewsAi' as const,
+      labelEn: 'Enable Topic Overview AI',
+      labelRu: 'Включить AI для обзоров тем',
+      descriptionEn: 'Controls background AI generation for topic detail overview cards.',
+      descriptionRu: 'Управляет фоновой AI-генерацией карточек обзора на странице темы.',
+    },
+  ];
+
   const setPromptEditable = (key: string, editable: boolean) => {
     setEditablePrompts((prev) => ({ ...prev, [key]: editable }));
   };
@@ -301,11 +404,16 @@ export function AdminPage() {
           <div className="space-y-5">
             {ADMIN_TIERS.map((tier) => {
               const tierWidgets = ADMIN_WIDGET_DEFINITIONS.filter((widget) => widget.tierId === tier.id);
+              const sectionKey = `widgets:${tier.id}`;
               return (
-                <div key={tier.id}>
-                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-3" style={{ fontWeight: 600 }}>
-                    {ru ? tier.labelRu : tier.labelEn}
-                  </p>
+                <CollapsibleSection
+                  key={tier.id}
+                  id={sectionKey}
+                  title={ru ? tier.labelRu : tier.labelEn}
+                  badge={`${tierWidgets.length}`}
+                  open={isSectionOpen(sectionKey)}
+                  onToggle={() => toggleSection(sectionKey)}
+                >
                   <div className="space-y-1">
                     {tierWidgets.map((widget) => (
                       <div key={widget.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50">
@@ -331,7 +439,7 @@ export function AdminPage() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </CollapsibleSection>
               );
             })}
           </div>
@@ -373,25 +481,17 @@ export function AdminPage() {
           <div className="space-y-6">
             {ADMIN_PROMPT_GROUPS.map((group) => {
               const prompts = ADMIN_PROMPT_DEFINITIONS.filter((prompt) => prompt.groupId === group.id);
+              const sectionKey = `prompts:${group.id}`;
               return (
-                <div key={group.id}>
-                  <div className="mb-3 flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs text-gray-500 uppercase tracking-wider" style={{ fontWeight: 600 }}>
-                        {ru ? group.labelRu : group.labelEn}
-                      </p>
-                      {(group.descriptionEn || group.descriptionRu) && (
-                        <p className="mt-1 text-xs text-gray-500">
-                          {ru ? group.descriptionRu : group.descriptionEn}
-                        </p>
-                      )}
-                    </div>
-                    {(group.badgeEn || group.badgeRu) && (
-                      <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] text-blue-700 whitespace-nowrap">
-                        {ru ? group.badgeRu : group.badgeEn}
-                      </span>
-                    )}
-                  </div>
+                <CollapsibleSection
+                  key={group.id}
+                  id={sectionKey}
+                  title={ru ? group.labelRu : group.labelEn}
+                  description={ru ? group.descriptionRu : group.descriptionEn}
+                  badge={ru ? group.badgeRu : group.badgeEn}
+                  open={isSectionOpen(sectionKey)}
+                  onToggle={() => toggleSection(sectionKey)}
+                >
                   <div className="space-y-4">
                     {prompts.map((prompt) => (
                       <div key={prompt.key}>
@@ -417,7 +517,7 @@ export function AdminPage() {
                             <button
                               type="button"
                               onClick={() => {
-                                setPromptDraft((prev) => ({ ...prev, [prompt.key]: config.prompts[prompt.key] ?? '' }));
+                                setPromptDraft((prev) => ({ ...prev, [prompt.key]: savedPromptDraft[prompt.key] ?? '' }));
                                 setPromptEditable(prompt.key, false);
                                 setPromptStatus('idle');
                                 setSectionError((prev) => ({ ...prev, prompts: null }));
@@ -430,7 +530,7 @@ export function AdminPage() {
                             <button
                               type="button"
                               onClick={() => {
-                                setPromptDraft((prev) => ({ ...prev, [prompt.key]: promptDefaults[prompt.key] ?? config.prompts[prompt.key] ?? '' }));
+                                setPromptDraft((prev) => ({ ...prev, [prompt.key]: promptDefaults[prompt.key] ?? savedPromptDraft[prompt.key] ?? '' }));
                                 setPromptEditable(prompt.key, true);
                                 setPromptStatus('idle');
                                 setSectionError((prev) => ({ ...prev, prompts: null }));
@@ -470,7 +570,7 @@ export function AdminPage() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </CollapsibleSection>
               );
             })}
           </div>
@@ -510,29 +610,17 @@ export function AdminPage() {
           </div>
 
           <div className="space-y-4">
-            <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm text-gray-900" style={{ fontWeight: 600 }}>
-                      {ru ? 'Global AI Lens' : 'Global AI Lens'}
-                    </h3>
-                    <span className="rounded-full bg-white px-2 py-0.5 text-xs text-emerald-700 ring-1 ring-emerald-200">
-                      {lensSourceLabel}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-xs text-gray-600">
-                    {ru
-                      ? 'Выберите 1-3 линзы анализа. Изменения применяются только к новым AI-анализам.'
-                      : 'Select 1-3 analysis lenses. Lens changes apply to new analyses only.'}
-                  </p>
-                </div>
-                <span className="text-xs text-gray-500">
-                  {selectedLensIds.length}/3
-                </span>
-              </div>
-
-              <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <CollapsibleSection
+              id="runtime:lens"
+              title={ru ? 'Global AI Lens' : 'Global AI Lens'}
+              description={ru
+                ? 'Выберите 1-3 линзы анализа. Изменения применяются только к новым AI-анализам.'
+                : 'Select 1-3 analysis lenses. Lens changes apply to new analyses only.'}
+              badge={`${lensSourceLabel} · ${selectedLensIds.length}/3`}
+              open={isSectionOpen('runtime:lens')}
+              onToggle={() => toggleSection('runtime:lens')}
+            >
+              <div className="grid gap-3 md:grid-cols-3">
                 {lensCatalog.map((lens) => {
                   const checked = selectedLensIds.includes(lens.id);
                   const disabled = !checked && selectedLensIds.length >= 3;
@@ -565,92 +653,81 @@ export function AdminPage() {
                   {ru ? 'Нужно выбрать хотя бы одну линзу.' : 'Select at least one lens.'}
                 </p>
               )}
-            </div>
+            </CollapsibleSection>
 
-            {runtimeFields.map((field) => (
-              <div key={field.key}>
-                <label className="block text-sm text-gray-700 mb-2" style={{ fontWeight: 500 }}>
-                  {ru ? field.labelRu : field.labelEn}
-                </label>
-                <p className="text-xs text-gray-500 mb-2">
-                  {ru ? field.descriptionRu : field.descriptionEn}
-                </p>
-                <input
-                  type="text"
-                  value={runtimeDraft[field.key]}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setRuntimeDraft((prev) => ({ ...prev, [field.key]: value }));
-                  }}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                />
-              </div>
-            ))}
+            <CollapsibleSection
+              id="runtime:models"
+              title={ru ? 'Модели и версии промптов' : 'Models and prompt versions'}
+              open={isSectionOpen('runtime:models')}
+              onToggle={() => toggleSection('runtime:models')}
+            >
+              <div className="space-y-4">
+                {runtimeFields.map((field) => (
+                  <div key={field.key}>
+                    <label className="block text-sm text-gray-700 mb-2" style={{ fontWeight: 500 }}>
+                      {ru ? field.labelRu : field.labelEn}
+                    </label>
+                    <p className="text-xs text-gray-500 mb-2">
+                      {ru ? field.descriptionRu : field.descriptionEn}
+                    </p>
+                    <input
+                      type="text"
+                      value={runtimeDraft[field.key]}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setRuntimeDraft((prev) => ({ ...prev, [field.key]: value }));
+                      }}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                ))}
 
-            <div>
-              <label className="block text-sm text-gray-700 mb-2" style={{ fontWeight: 500 }}>
-                {ru ? 'Стиль промпта постов' : 'Post prompt style'}
-              </label>
-              <select
-                value={runtimeDraft.aiPostPromptStyle}
-                onChange={(event) => {
-                  const value = event.target.value === 'full' ? 'full' : 'compact';
-                  setRuntimeDraft((prev) => ({ ...prev, aiPostPromptStyle: value }));
-                }}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-              >
-                <option value="compact">{ru ? 'Компактный' : 'Compact'}</option>
-                <option value="full">{ru ? 'Полный' : 'Full'}</option>
-              </select>
-            </div>
-
-            {[
-              {
-                key: 'featureQuestionBriefsAi' as const,
-                labelEn: 'Enable Question Briefs AI',
-                labelRu: 'Включить AI для карточек вопросов',
-                descriptionEn: 'Controls AI generation for question-card flows.',
-                descriptionRu: 'Управляет AI-генерацией карточек вопросов.',
-              },
-              {
-                key: 'featureBehavioralBriefsAi' as const,
-                labelEn: 'Enable Behavioral Briefs AI',
-                labelRu: 'Включить AI для поведенческих карточек',
-                descriptionEn: 'Controls AI generation for problem and service-gap cards.',
-                descriptionRu: 'Управляет AI-генерацией карточек проблем и сервисных пробелов.',
-              },
-              {
-                key: 'featureOpportunityBriefsAi' as const,
-                labelEn: 'Enable Opportunity Briefs AI',
-                labelRu: 'Включить AI для карточек возможностей',
-                descriptionEn: 'Controls AI generation for business opportunity cards.',
-                descriptionRu: 'Управляет AI-генерацией карточек бизнес-возможностей.',
-              },
-              {
-                key: 'featureTopicOverviewsAi' as const,
-                labelEn: 'Enable Topic Overview AI',
-                labelRu: 'Включить AI для обзоров тем',
-                descriptionEn: 'Controls background AI generation for topic detail overview cards.',
-                descriptionRu: 'Управляет фоновой AI-генерацией карточек обзора на странице темы.',
-              },
-            ].map((toggle) => (
-              <div key={toggle.key} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50">
                 <div>
-                  <p className="text-sm text-gray-900" style={{ fontWeight: 500 }}>
-                    {ru ? toggle.labelRu : toggle.labelEn}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    {ru ? toggle.descriptionRu : toggle.descriptionEn}
-                  </p>
+                  <label className="block text-sm text-gray-700 mb-2" style={{ fontWeight: 500 }}>
+                    {ru ? 'Стиль промпта постов' : 'Post prompt style'}
+                  </label>
+                  <select
+                    value={runtimeDraft.aiPostPromptStyle}
+                    onChange={(event) => {
+                      const value = event.target.value === 'full' ? 'full' : 'compact';
+                      setRuntimeDraft((prev) => ({ ...prev, aiPostPromptStyle: value }));
+                    }}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  >
+                    <option value="compact">{ru ? 'Компактный' : 'Compact'}</option>
+                    <option value="full">{ru ? 'Полный' : 'Full'}</option>
+                  </select>
                 </div>
-                <ToggleButton
-                  checked={runtimeDraft[toggle.key]}
-                  onClick={() => {
-                    setRuntimeDraft((prev) => ({ ...prev, [toggle.key]: !prev[toggle.key] }));
-                  }}
-                />
               </div>
-            ))}
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              id="runtime:features"
+              title={ru ? 'AI feature flags' : 'AI feature flags'}
+              open={isSectionOpen('runtime:features')}
+              onToggle={() => toggleSection('runtime:features')}
+            >
+              <div className="space-y-1">
+                {runtimeToggles.map((toggle) => (
+                  <div key={toggle.key} className="flex items-center justify-between p-3 rounded-lg hover:bg-gray-50">
+                    <div>
+                      <p className="text-sm text-gray-900" style={{ fontWeight: 500 }}>
+                        {ru ? toggle.labelRu : toggle.labelEn}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {ru ? toggle.descriptionRu : toggle.descriptionEn}
+                      </p>
+                    </div>
+                    <ToggleButton
+                      checked={runtimeDraft[toggle.key]}
+                      onClick={() => {
+                        setRuntimeDraft((prev) => ({ ...prev, [toggle.key]: !prev[toggle.key] }));
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </CollapsibleSection>
           </div>
 
           <div className="flex items-center justify-between gap-3 mt-6 pt-4 border-t border-gray-100">
