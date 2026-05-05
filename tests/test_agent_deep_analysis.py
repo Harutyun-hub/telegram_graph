@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault("APP_ROLE", "web")
+os.environ.setdefault("APP_ROLE", "all")
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "service-role")
 os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")

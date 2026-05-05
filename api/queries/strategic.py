@@ -279,7 +279,8 @@ def get_question_categories(ctx: DashboardDateContext) -> list[dict]:
              sum(asks_per_form) AS times_asked
         WHERE times_asked > 0
 
-        CALL (topic) {
+        CALL {
+            WITH topic
             MATCH (u:User)-[:INTERESTED_IN]->(:Topic {name: topic})
             OPTIONAL MATCH (u)-[:EXHIBITS]->(intent:Intent {name: 'Information Seeking'})
             WITH topic, u, max(CASE WHEN intent IS NOT NULL THEN 1 ELSE 0 END) AS is_info_seeker
