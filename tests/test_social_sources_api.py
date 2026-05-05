@@ -39,7 +39,29 @@ class _FakeSocialSourceStore:
         }
 
     def list_source_rows(self) -> list[dict]:
-        return [deepcopy(item) for item in self.items]
+        rows = [deepcopy(item) for item in self.items]
+        for company in self.companies.values():
+            if not company.get("website"):
+                continue
+            rows.append(
+                {
+                    "id": f"website:{company['entity_id']}",
+                    "entity_id": company["entity_id"],
+                    "company_id": company["id"],
+                    "company_name": company["name"],
+                    "company_website": company.get("website"),
+                    "platform": "website",
+                    "source_kind": "website_monitor",
+                    "display_url": company.get("website"),
+                    "account_external_id": None,
+                    "is_active": True,
+                    "health_status": "unknown",
+                    "last_collected_at": None,
+                    "last_error": None,
+                    "metadata": {"virtual": True, "website_monitor": {}},
+                }
+            )
+        return rows
 
     def create_or_update_source(self, *, source_type: str, source_key: str | None, source_url: str | None, display_name: str) -> dict:
         for item in self.items:
@@ -150,7 +172,7 @@ class _FakeSocialSourceStore:
             if existing is None:
                 self.items.append(item)
 
-        items = [deepcopy(item) for item in self.items if item["entity_id"] == company["entity_id"]]
+        items = [deepcopy(item) for item in self.list_source_rows() if item["entity_id"] == company["entity_id"]]
         return {
             "action": action,
             "company": {"id": company["id"], "name": company["name"], "website": company.get("website")},
@@ -266,7 +288,7 @@ class SocialSourcesApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["count"], 2)
         self.assertEqual(payload["items"][0]["platform"], "facebook")
         self.assertEqual(payload["items"][0]["source_kind"], "meta_ads")
         self.assertEqual(payload["items"][0]["company_name"], "Unibank")
@@ -346,12 +368,12 @@ class SocialSourcesApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["action"], "created")
         self.assertEqual(payload["company"]["name"], "XTB")
-        self.assertEqual(len(payload["items"]), 4)
+        self.assertEqual(len(payload["items"]), 5)
         entity_ids = {item["entity_id"] for item in payload["items"]}
         self.assertEqual(entity_ids, {payload["entity"]["id"]})
-        self.assertEqual({item["source_kind"] for item in payload["items"]}, {"facebook_page", "instagram_profile", "meta_ads", "google_domain"})
+        self.assertEqual({item["source_kind"] for item in payload["items"]}, {"website_monitor", "facebook_page", "instagram_profile", "meta_ads", "google_domain"})
 
-    def test_create_social_company_sources_requires_at_least_one_source(self) -> None:
+    def test_create_social_company_sources_accepts_website_only_monitor(self) -> None:
         fake_store = _FakeSocialSourceStore()
         with patch.object(server.config, "IS_LOCKED_ENV", True), \
              patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
@@ -360,6 +382,22 @@ class SocialSourcesApiTests(unittest.TestCase):
                 "/api/sources/social/company",
                 headers={"Authorization": "Bearer admin-secret"},
                 json={"company_name": "XTB", "website": "https://www.xtb.com", "sources": {}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["company"]["website"], "https://xtb.com")
+        self.assertEqual({item["source_kind"] for item in payload["items"]}, {"website_monitor"})
+
+    def test_create_social_company_sources_requires_website_or_source(self) -> None:
+        fake_store = _FakeSocialSourceStore()
+        with patch.object(server.config, "IS_LOCKED_ENV", True), \
+             patch.object(server.config, "ADMIN_API_KEY", "admin-secret"), \
+             patch.object(server, "get_social_store", return_value=fake_store):
+            response = self.client.post(
+                "/api/sources/social/company",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"company_name": "XTB", "sources": {}},
             )
 
         self.assertEqual(response.status_code, 400)

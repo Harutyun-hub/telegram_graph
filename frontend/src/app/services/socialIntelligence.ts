@@ -1,6 +1,6 @@
 import { apiFetch } from './api';
 
-export type SocialPlatform = 'all' | 'facebook' | 'instagram' | 'google' | 'tiktok';
+export type SocialPlatform = 'all' | 'facebook' | 'instagram' | 'google' | 'tiktok' | 'website';
 
 export interface SocialEntityOption {
   id: string;
@@ -24,9 +24,11 @@ export interface SocialRuntimeStatus {
     activities_analyzed?: number;
     activities_graph_synced?: number;
     collect_failures?: number;
+    website_research_failures?: number;
     analysis_failures?: number;
     graph_failures?: number;
   } | null;
+  website_monitor_enabled?: boolean;
   postgres_worker_enabled?: boolean;
 }
 
@@ -173,7 +175,7 @@ export interface SocialEvidenceItem {
 
 export interface SocialAccount {
   id?: string;
-  platform: 'facebook' | 'instagram' | 'google' | 'tiktok';
+  platform: 'facebook' | 'instagram' | 'google' | 'tiktok' | 'website';
   account_handle: string | null;
   account_external_id: string | null;
   domain: string | null;
@@ -240,7 +242,7 @@ export interface SocialRuntimeFailure {
 }
 
 export interface SocialEntityAccountUpdateInput {
-  platform: 'facebook' | 'instagram' | 'google';
+  platform: 'facebook' | 'instagram' | 'google' | 'website';
   account_external_id?: string | null;
   account_handle?: string | null;
   domain?: string | null;

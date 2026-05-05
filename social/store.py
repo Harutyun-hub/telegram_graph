@@ -10,19 +10,21 @@ from supabase import Client, create_client
 import config
 from social.text_cleaning import clean_social_activity_row, clean_social_text_content
 
-SUPPORTED_SOCIAL_PLATFORMS = ("facebook", "instagram", "google", "tiktok")
+SUPPORTED_SOCIAL_PLATFORMS = ("facebook", "instagram", "google", "tiktok", "website")
 SUPPORTED_SOCIAL_SOURCE_KINDS = (
     "facebook_page",
     "meta_ads",
     "instagram_profile",
     "google_domain",
     "tiktok_profile",
+    "website_monitor",
 )
 DEFAULT_SOURCE_KIND_BY_PLATFORM = {
     "facebook": "meta_ads",
     "instagram": "instagram_profile",
     "google": "google_domain",
     "tiktok": "tiktok_profile",
+    "website": "website_monitor",
 }
 ACCOUNT_HEALTH_STATUSES = (
     "unknown",
@@ -37,6 +39,19 @@ ACCOUNT_HEALTH_STATUSES = (
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    text = _trimmed(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _trimmed(value: Any) -> str:
@@ -72,6 +87,8 @@ def _normalize_source_kind(value: Any, platform: Any | None = None) -> str:
         raise ValueError(f"Unsupported Google source kind: {source_kind}")
     if normalized_platform == "tiktok" and source_kind != "tiktok_profile":
         raise ValueError(f"Unsupported TikTok source kind: {source_kind}")
+    if normalized_platform == "website" and source_kind != "website_monitor":
+        raise ValueError(f"Unsupported Website source kind: {source_kind}")
     return source_kind
 
 
@@ -451,11 +468,84 @@ class SocialStore:
         entities = self._select_rows("social_entities", order_by="name")
         return self._enrich_entities(entities)
 
+    def list_entities_for_website_monitor(self, *, limit: int, interval_hours: int) -> list[dict[str, Any]]:
+        rows = self._select_rows(
+            "social_entities",
+            columns="id,legacy_company_id,company_key,name,industry,website,logo_url,metadata,is_active",
+            filters=(("eq", "is_active", True), ("neq", "website", "")),
+            order_by="updated_at",
+            desc=False,
+            limit=max(1, int(limit)) * 4,
+        )
+        now = datetime.now(timezone.utc)
+        due: list[dict[str, Any]] = []
+        for row in rows:
+            if not _clean_optional(row.get("website")):
+                continue
+            metadata = _serialize_metadata(row.get("metadata"))
+            monitor = metadata.get("website_monitor") if isinstance(metadata.get("website_monitor"), dict) else {}
+            last_checked = _parse_iso((monitor or {}).get("last_checked_at"))
+            if last_checked is not None:
+                age_hours = (now - last_checked).total_seconds() / 3600.0
+                if age_hours < max(1, int(interval_hours)):
+                    continue
+            due.append(dict(row))
+            if len(due) >= max(1, int(limit)):
+                break
+        return due
+
     def get_entity(self, entity_id: str) -> dict[str, Any] | None:
         entity = self._single_row("social_entities", filters=(("eq", "id", entity_id),))
         if not entity:
             return None
         return self._enrich_entities([entity])[0]
+
+    def update_entity_website_monitor_status(
+        self,
+        entity_id: str,
+        *,
+        status: str,
+        checked_at: str,
+        promotion_count: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        entity = self._single_row("social_entities", filters=(("eq", "id", entity_id),))
+        if not entity:
+            return
+        metadata = _serialize_metadata(entity.get("metadata"))
+        previous = metadata.get("website_monitor") if isinstance(metadata.get("website_monitor"), dict) else {}
+        monitor = dict(previous or {})
+        monitor.update(
+            {
+                "last_status": _trimmed(status).lower() or "unknown",
+                "last_checked_at": checked_at,
+                "last_error": _clean_optional(error),
+            }
+        )
+        if promotion_count is not None:
+            monitor["last_promotion_count"] = int(promotion_count)
+        if not error and _trimmed(status).lower() == "healthy":
+            monitor["last_success_at"] = checked_at
+        metadata["website_monitor"] = monitor
+        self.client.table("social_entities").update({"metadata": metadata}).eq("id", entity_id).execute()
+
+    def mark_entity_website_scan_success(self, entity_id: str, *, checked_at: str, promotion_count: int) -> None:
+        self.update_entity_website_monitor_status(
+            entity_id,
+            status="healthy",
+            checked_at=checked_at,
+            promotion_count=promotion_count,
+            error=None,
+        )
+        self.clear_failure(stage="website_research", scope_key=f"website:{entity_id}")
+
+    def mark_entity_website_scan_failure(self, entity_id: str, *, checked_at: str, error: str) -> None:
+        self.update_entity_website_monitor_status(
+            entity_id,
+            status="error",
+            checked_at=checked_at,
+            error=error,
+        )
 
     def _project_source_row(self, account: dict[str, Any], entity: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata = _serialize_metadata(account.get("metadata"))
@@ -477,6 +567,8 @@ class SocialStore:
                 handle = _clean_optional(account.get("account_handle"))
                 if handle:
                     display_url = f"https://www.tiktok.com/@{handle.lstrip('@')}"
+            elif platform == "website":
+                display_url = _clean_optional((entity or {}).get("website"))
 
         return {
             "id": account.get("id"),
@@ -495,14 +587,39 @@ class SocialStore:
             "metadata": metadata,
         }
 
+    def _project_website_source_row(self, entity: dict[str, Any]) -> dict[str, Any]:
+        metadata = _serialize_metadata(entity.get("metadata"))
+        monitor = metadata.get("website_monitor") if isinstance(metadata.get("website_monitor"), dict) else {}
+        last_error = _clean_optional((monitor or {}).get("last_error"))
+        last_status = _trimmed((monitor or {}).get("last_status")).lower()
+        health_status = "network_error" if last_error or last_status in {"error", "failed"} else "healthy" if last_status == "healthy" else "unknown"
+        entity_id = str(entity.get("id") or "")
+        return {
+            "id": f"website:{entity_id}",
+            "entity_id": entity_id,
+            "company_id": entity.get("legacy_company_id"),
+            "company_name": _trimmed(entity.get("name")) or "Unknown Company",
+            "company_website": _clean_optional(entity.get("website")),
+            "platform": "website",
+            "source_kind": "website_monitor",
+            "display_url": _clean_optional(entity.get("website")),
+            "account_external_id": None,
+            "is_active": bool(entity.get("is_active", True)),
+            "health_status": health_status,
+            "last_collected_at": _clean_optional((monitor or {}).get("last_checked_at")),
+            "last_error": last_error,
+            "metadata": {
+                "virtual": True,
+                "website_monitor": monitor or {},
+            },
+        }
+
     def list_source_rows(self) -> list[dict[str, Any]]:
         accounts = self._select_rows(
             "social_entity_accounts",
             order_by="updated_at",
             desc=True,
         )
-        if not accounts:
-            return []
         entity_ids = [str(row.get("entity_id")) for row in accounts if row.get("entity_id")]
         entities = {
             row["id"]: row
@@ -510,8 +627,21 @@ class SocialStore:
                 "social_entities",
                 filters=(("in", "id", entity_ids),),
             )
-        }
-        return [self._project_source_row(row, entities.get(row.get("entity_id"))) for row in accounts]
+        } if entity_ids else {}
+        rows = [self._project_source_row(row, entities.get(row.get("entity_id"))) for row in accounts]
+        website_entities = self._select_rows(
+            "social_entities",
+            columns="id,legacy_company_id,name,website,metadata,is_active",
+            filters=(("eq", "is_active", True), ("neq", "website", "")),
+            order_by="updated_at",
+            desc=True,
+        )
+        rows.extend(
+            self._project_website_source_row(entity)
+            for entity in website_entities
+            if _clean_optional(entity.get("website"))
+        )
+        return rows
 
     def get_source_row(self, account_id: str) -> dict[str, Any] | None:
         account = self.get_account(account_id)
@@ -788,8 +918,8 @@ class SocialStore:
         name = _trimmed(company_name)
         if not name:
             raise ValueError("Company name is required")
-        if not sources:
-            raise ValueError("Add at least one scraping source")
+        if not sources and not website:
+            raise ValueError("Add a company website or at least one scraping source")
 
         company_key_seed = _clean_optional(website_domain) or name
         company_key = f"company:{_stable_company_slug(company_key_seed)}"
@@ -857,7 +987,8 @@ class SocialStore:
 
         entity = self.ensure_entity_from_company(str(company["id"]))
         account_payloads = [self._account_payload_for_company_source(source) for source in sources]
-        self.upsert_accounts(str(entity["id"]), account_payloads)
+        if account_payloads:
+            self.upsert_accounts(str(entity["id"]), account_payloads)
         items = [
             row
             for row in self.list_source_rows()
@@ -1380,6 +1511,55 @@ class SocialStore:
             "social_activities",
             filters=(("in", "activity_uid", activity_uids),),
         )
+
+    def list_website_promotion_activities(self, entity_id: str) -> list[dict[str, Any]]:
+        return self._select_rows(
+            "social_activities",
+            filters=(
+                ("eq", "entity_id", entity_id),
+                ("eq", "platform", "website"),
+                ("eq", "content_format", "website_promotion"),
+            ),
+            order_by="last_seen_at",
+            desc=True,
+        )
+
+    def mark_missing_website_promotions(
+        self,
+        *,
+        entity_id: str,
+        seen_activity_uids: set[str],
+        checked_at: str,
+        expire_after_misses: int,
+    ) -> dict[str, int]:
+        rows = self.list_website_promotion_activities(entity_id)
+        result = {"missing": 0, "expired": 0}
+        for row in rows:
+            activity_uid = str(row.get("activity_uid") or "")
+            if not activity_uid or activity_uid in seen_activity_uids:
+                continue
+            payload = row.get("provider_payload") if isinstance(row.get("provider_payload"), dict) else {}
+            monitor = payload.get("website_monitor") if isinstance(payload.get("website_monitor"), dict) else {}
+            previous_status = _trimmed((monitor or {}).get("status")).lower()
+            previous_misses = 0
+            try:
+                previous_misses = int((monitor or {}).get("missed_scans") or 0)
+            except Exception:
+                previous_misses = 0
+            missed_scans = previous_misses + 1
+            next_status = "expired" if missed_scans >= max(1, int(expire_after_misses)) else "missing"
+            if previous_status == "expired":
+                next_status = "expired"
+            next_payload = dict(payload)
+            next_payload["website_monitor"] = {
+                **dict(monitor or {}),
+                "status": next_status,
+                "missed_scans": missed_scans,
+                "last_missing_at": checked_at,
+            }
+            self.client.table("social_activities").update({"provider_payload": next_payload}).eq("id", row["id"]).execute()
+            result[next_status] += 1
+        return result
 
     def list_pending_analysis(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self._select_rows(

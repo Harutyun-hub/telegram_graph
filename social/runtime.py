@@ -19,6 +19,10 @@ from social.graph import SocialGraphWriter
 from social.postgres_store import SocialPostgresStore
 from social.scrapecreators import ScrapeCreatorsClient, SocialCollectionError
 from social.store import SocialStore
+from social.website_promotions import (
+    WebsitePromotionResearcher,
+    build_website_promotion_activity,
+)
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -79,6 +83,7 @@ class SocialRuntimeService:
         self._connector: ScrapeCreatorsClient | None = None
         self._analyzer: SocialActivityAnalyzer | None = None
         self._graph: SocialGraphWriter | None = None
+        self._website_researcher: WebsitePromotionResearcher | None = None
         self._worker_id = f"{socket.gethostname()}:{os.getpid()}:social-runtime"
 
     async def startup(self) -> None:
@@ -165,6 +170,11 @@ class SocialRuntimeService:
         if self._graph is None:
             self._graph = SocialGraphWriter()
         return self._graph
+
+    def _get_website_researcher(self) -> WebsitePromotionResearcher:
+        if self._website_researcher is None:
+            self._website_researcher = WebsitePromotionResearcher()
+        return self._website_researcher
 
     async def run_once(self) -> dict[str, Any]:
         if self.running_now:
@@ -293,25 +303,33 @@ class SocialRuntimeService:
             page_size=max(1, int(page_settings.get("page_size", config.SOCIAL_FETCH_PAGE_SIZE))),
             include_tiktok=tiktok_enabled,
         )
+        website_result = self._run_website_research_stage_sync()
         analysis_result = self._run_analysis_stage_sync()
         graph_result = self._run_graph_stage_sync()
         ai_brief_result = self._run_ai_brief_stage_sync()
         cleanup_result = self._run_cleanup_stage_sync()
 
+        total_collected = collect_result["activities_collected"] + website_result.get("promotions_collected", 0)
+        platform_counts = dict(collect_result["platform_counts"])
+        if website_result.get("promotions_collected"):
+            platform_counts["website"] = int(website_result.get("promotions_collected", 0))
+
         return {
             "accounts_total": collect_result["accounts_total"],
             "accounts_processed": collect_result["accounts_processed"],
-            "activities_collected": collect_result["activities_collected"],
+            "activities_collected": total_collected,
             "activities_analyzed": analysis_result["activities_analyzed"],
             "activities_graph_synced": graph_result["activities_graph_synced"],
             "collect_failures": collect_result["collect_failures"],
+            "website_research_failures": website_result.get("website_research_failures", 0),
             "analysis_failures": analysis_result["analysis_failures"],
             "graph_failures": graph_result["graph_failures"],
             "ai_briefs": ai_brief_result,
-            "platform_counts": collect_result["platform_counts"],
+            "platform_counts": platform_counts,
             "cleanup": cleanup_result,
             "stages": {
                 "collect": collect_result,
+                "website_research": website_result,
                 "analysis": analysis_result,
                 "graph": graph_result,
                 "ai_briefs": ai_brief_result,
@@ -402,6 +420,125 @@ class SocialRuntimeService:
                     failure.get("is_dead_letter"),
                 )
 
+        return result
+
+    def _run_website_research_stage_sync(self, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if not config.SOCIAL_WEBSITE_MONITOR_ENABLED:
+            return {
+                "status": "skipped",
+                "reason": "disabled",
+                "entities_total": 0,
+                "entities_processed": 0,
+                "promotions_collected": 0,
+                "promotions_missing": 0,
+                "promotions_expired": 0,
+                "website_research_failures": 0,
+            }
+
+        claimed_entities = entities
+        if claimed_entities is None:
+            claimed_entities = self.store.list_entities_for_website_monitor(
+                limit=config.SOCIAL_WEBSITE_MONITOR_LIMIT,
+                interval_hours=config.SOCIAL_WEBSITE_MONITOR_INTERVAL_HOURS,
+            )
+        result = {
+            "status": "completed",
+            "entities_total": len(claimed_entities),
+            "entities_processed": 0,
+            "promotions_collected": 0,
+            "promotions_missing": 0,
+            "promotions_expired": 0,
+            "website_research_failures": 0,
+        }
+        researcher = self._get_website_researcher()
+
+        for entity in claimed_entities:
+            entity_id = str(entity.get("id") or "")
+            checked_at = datetime.now(timezone.utc).isoformat()
+            run = self.store.create_ingest_run(
+                run_kind="website_research",
+                entity_id=entity_id or None,
+                platform="website",
+                status="running",
+            )
+            try:
+                existing_rows = {
+                    str(row.get("activity_uid")): row
+                    for row in self.store.list_website_promotion_activities(entity_id)
+                    if row.get("activity_uid")
+                }
+                research = researcher.research_sync(entity)
+                checked_at = research.checked_at
+                activities: list[dict[str, Any]] = []
+                for promotion in research.promotions:
+                    candidate = build_website_promotion_activity(
+                        entity=entity,
+                        promotion=promotion,
+                        lifecycle_status="new",
+                        checked_at=checked_at,
+                    )
+                    existing = existing_rows.get(candidate["activity_uid"])
+                    if existing:
+                        old_text = str(existing.get("text_content") or "").strip()
+                        new_text = str(candidate.get("text_content") or "").strip()
+                        status = "updated" if old_text != new_text else "ongoing"
+                        candidate = build_website_promotion_activity(
+                            entity=entity,
+                            promotion=promotion,
+                            lifecycle_status=status,
+                            checked_at=checked_at,
+                        )
+                    activities.append(candidate)
+
+                saved = self.store.upsert_activities(activities)
+                missing = self.store.mark_missing_website_promotions(
+                    entity_id=entity_id,
+                    seen_activity_uids={str(item.get("activity_uid")) for item in activities},
+                    checked_at=checked_at,
+                    expire_after_misses=config.SOCIAL_WEBSITE_PROMOTION_EXPIRE_AFTER_MISSES,
+                )
+                self.store.mark_entity_website_scan_success(
+                    entity_id,
+                    checked_at=checked_at,
+                    promotion_count=len(saved),
+                )
+                result["entities_processed"] += 1
+                result["promotions_collected"] += len(saved)
+                result["promotions_missing"] += int(missing.get("missing", 0))
+                result["promotions_expired"] += int(missing.get("expired", 0))
+                self.store.finish_ingest_run(
+                    run["id"],
+                    status="succeeded",
+                    metrics={
+                        "promotions": len(saved),
+                        "missing": missing.get("missing", 0),
+                        "expired": missing.get("expired", 0),
+                    },
+                )
+            except Exception as exc:
+                result["website_research_failures"] += 1
+                failure = self.store.record_failure(
+                    stage="website_research",
+                    scope_key=f"website:{entity_id}",
+                    error=str(exc),
+                    entity_id=entity_id or None,
+                    platform="website",
+                    metadata={
+                        "website": entity.get("website"),
+                        "company_name": entity.get("name"),
+                    },
+                )
+                self.store.mark_entity_website_scan_failure(
+                    entity_id,
+                    checked_at=checked_at,
+                    error=str(exc),
+                )
+                self.store.finish_ingest_run(run["id"], status="failed", error=str(exc), metrics={})
+                logger.warning(
+                    "Website research failure | entity={} dead_letter={}",
+                    entity_id,
+                    failure.get("is_dead_letter"),
+                )
         return result
 
     def _run_analysis_stage_sync(self, *, items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -539,12 +676,19 @@ class SocialRuntimeService:
 
     def _retry_failure_sync(self, stage: str, scope_key: str) -> dict[str, Any]:
         normalized_stage = str(stage or "").strip().lower()
-        if normalized_stage not in {"ingest", "analysis", "graph"}:
-            raise ValueError("Retry stage must be ingest, analysis, or graph")
+        if normalized_stage not in {"ingest", "analysis", "graph", "website_research"}:
+            raise ValueError("Retry stage must be ingest, website_research, analysis, or graph")
         failure = self.store.get_failure(stage=normalized_stage, scope_key=scope_key)
         if not failure:
             raise ValueError("No active failure found for the requested scope")
         self.store.clear_failure(stage=normalized_stage, scope_key=scope_key)
+        if normalized_stage == "website_research":
+            raw_scope = str(scope_key or "")
+            entity_id = raw_scope[len("website:") :] if raw_scope.startswith("website:") else raw_scope
+            entity = self.store.get_entity(entity_id)
+            if not entity:
+                raise ValueError("Social entity not found for website research retry")
+            return {"stage": "website_research", "retry": self._run_website_research_stage_sync(entities=[entity])}
         if normalized_stage == "ingest":
             account = self.store.get_account_by_scope_key(scope_key)
             if not account:
@@ -600,6 +744,7 @@ class SocialRuntimeService:
             "run_history": list(self._run_history),
             "runtime_enabled": bool(config.SOCIAL_RUNTIME_ENABLED),
             "tiktok_enabled": bool(config.SOCIAL_TIKTOK_ENABLED),
+            "website_monitor_enabled": bool(config.SOCIAL_WEBSITE_MONITOR_ENABLED),
             "postgres_worker_enabled": bool(self.pg_store.enabled),
             "worker_id": self._worker_id,
         }
@@ -615,5 +760,6 @@ class SocialRuntimeService:
                 "collect_failures": int(result.get("collect_failures", 0) or 0),
                 "analysis_failures": int(result.get("analysis_failures", 0) or 0),
                 "graph_failures": int(result.get("graph_failures", 0) or 0),
+                "website_research_failures": int(result.get("website_research_failures", 0) or 0),
             }
         )
